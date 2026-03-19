@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { useApi, apiPost, apiDelete } from '../../hooks/useApi.js'
-import { Brain, Play, Plus, ChevronDown, ChevronRight, ChevronUp, Loader2, BarChart3, Trash2, Bot, Layers, Cpu, Sparkles, MessageSquare, Check, RotateCcw, Send, ArrowUp, ArrowDown, X } from 'lucide-react'
+import { Brain, Play, Plus, ChevronDown, ChevronRight, ChevronUp, Loader2, BarChart3, Trash2, Bot, Layers, Cpu, Sparkles, MessageSquare, Check, RotateCcw, Send, ArrowUp, ArrowDown, X, Copy } from 'lucide-react'
 
 const MODEL_OPTIONS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', provider: 'gemini' },
@@ -174,6 +174,20 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
     } catch { /* ignore */ }
   }
 
+  async function handleRetry() {
+    setExecuting(true)
+    setExecError(null)
+    try {
+      await apiPost(`/experiments/${experiment.id}/retry`)
+      startPolling()
+    } catch (err) {
+      setExecError(err.message)
+      setExecuting(false)
+    }
+  }
+
+  const hasFailedRuns = progress?.failed > 0 && !executing
+
   const stages = detail?.stages_json ? JSON.parse(detail.stages_json) : []
 
   return (
@@ -197,6 +211,11 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
           {executing && (
             <button onClick={handleAbort} className="flex items-center gap-1 text-xs bg-red-900/50 hover:bg-red-800/50 text-red-300 px-2 py-1 rounded transition-colors">
               <X size={12} /> Abort
+            </button>
+          )}
+          {hasFailedRuns && (
+            <button onClick={handleRetry} className="flex items-center gap-1 text-xs bg-amber-900/50 hover:bg-amber-800/50 text-amber-300 px-2 py-1 rounded transition-colors">
+              <RotateCcw size={12} /> Retry Failed ({progress.failed})
             </button>
           )}
           <button onClick={() => handleExecute(1)} disabled={executing}
@@ -276,7 +295,11 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
                               : isDone ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-800/50'
                               : 'bg-zinc-800 text-zinc-600 border border-zinc-700/50'
                             }`}>
-                              {isCurrent ? run.stageName : isDone ? 'Done' : 'Waiting'}
+                              {isCurrent
+                                ? (run.segmentsTotal
+                                    ? `${run.stageName} (${run.segmentsDone || 0}/${run.segmentsTotal})`
+                                    : run.stageName)
+                                : isDone ? 'Done' : 'Waiting'}
                             </div>
                           </div>
                         )
@@ -306,7 +329,11 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
                   )}
 
                   {run.status === 'pending' && <div className="text-[10px] text-zinc-600">Waiting...</div>}
-                  {run.status === 'failed' && <div className="text-[10px] text-red-400">Failed</div>}
+                  {run.status === 'failed' && (
+                    <div className="text-[10px] text-red-400" title={run.errorMessage || ''}>
+                      Failed{run.errorMessage && <span className="text-red-500/70 ml-1">— {run.errorMessage}</span>}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -433,9 +460,10 @@ function StageViewModal({ runId, stageIndex, onClose }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [view, setView] = useState('comparison') // comparison | input_log | output_log
+  const [copied, setCopied] = useState(null)
 
   useEffect(() => {
-    fetch(`/api/experiments/runs/${runId}/stages/${stageIndex}`)
+    fetch(`/api/experiments/runs/${runId}/stages/${stageIndex}?_t=${Date.now()}`)
       .then(r => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
         return r.json()
@@ -517,10 +545,68 @@ function StageViewModal({ runId, stageIndex, onClose }) {
   }
 
   const alignedRows = buildAlignedDiff(data.input, data.output)
+  function clientNormalize(text) {
+    if (!text) return ''
+    const DIGIT_WORDS = ['zero','one','two','three','four','five','six','seven','eight','nine']
+    const TEENS = ['ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen']
+    const TENS = ['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety']
+    function n2w(n) {
+      if (n < 10) return DIGIT_WORDS[n]
+      if (n < 20) return TEENS[n-10]
+      if (n < 100) return TENS[Math.floor(n/10)] + (n%10 ? ' '+DIGIT_WORDS[n%10] : '')
+      if (n < 1000) return DIGIT_WORDS[Math.floor(n/100)]+' hundred'+(n%100 ? ' '+n2w(n%100) : '')
+      if (n < 1e6) return n2w(Math.floor(n/1000))+' thousand'+(n%1000 ? ' '+n2w(n%1000) : '')
+      if (n < 1e9) return n2w(Math.floor(n/1e6))+' million'+(n%1e6 ? ' '+n2w(n%1e6) : '')
+      return n2w(Math.floor(n/1e9))+' billion'+(n%1e9 ? ' '+n2w(n%1e9) : '')
+    }
+    const SYM = {'%':'percent','$':'dollar','&':'and','@':'at','+':'plus'}
+    return text
+      .replace(/\[\d{1,2}:\d{2}(?::\d{2})?\]/g, ' ')
+      .replace(/\[\d+\.?\d*s\]/g, ' ')
+      .replace(/[-—–]/g, ' ')
+      .toLowerCase()
+      .replace(/[.,!?;:'"()…\u201c\u201d\u2018\u2019\xab\xbb\[\]{}\/\\#*_~`^|<>]/g, '')
+      .replace(/\bper\s+cent\b/g, 'percent')
+      .replace(/\s+/g, ' ').trim()
+      .split(' ')
+      .map(w => {
+        if (SYM[w]) return SYM[w]
+        const m = w.match(/^([%$&@+]?)(\d+)([%$&@+]?)$/)
+        if (m) {
+          const num = n2w(parseInt(m[2]))
+          if (m[1]==='$') return num+' dollars'
+          const parts = []
+          if (m[1] && SYM[m[1]]) parts.push(SYM[m[1]])
+          parts.push(num)
+          if (m[3] && SYM[m[3]]) parts.push(SYM[m[3]])
+          return parts.join(' ')
+        }
+        return w
+      })
+      .join(' ')
+  }
+  function copyText(text, label) {
+    let content
+    if (label.endsWith('-norm')) {
+      const raw = label === 'before-norm' ? data.input : label === 'after-norm' ? data.output : data.human
+      content = text || clientNormalize(raw)
+    } else {
+      content = text || ''
+    }
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(label)
+      setTimeout(() => setCopied(null), 1500)
+    })
+  }
   const similarity = data.metrics?.find(m => m.comparison_type === 'human_vs_current')
+
+  const normAfter = data.outputNormalized || clientNormalize(data.output)
+  const normHuman = data.humanNormalized || clientNormalize(data.human)
 
   const tabs = [
     { id: 'comparison', label: 'Comparison' },
+    { id: 'comparison_norm', label: 'Comparison Normalized' },
+    { id: 'final_comparison', label: 'Final Comparison' },
     { id: 'input_log', label: 'Input Log' },
     { id: 'output_log', label: 'Output Log' },
   ]
@@ -558,13 +644,31 @@ function StageViewModal({ runId, stageIndex, onClose }) {
             {/* Before + After aligned columns */}
             <div className="flex flex-col overflow-hidden">
               <div className="grid grid-cols-2 divide-x divide-zinc-800 border-b border-zinc-800 shrink-0">
-                <div className="px-4 py-2 text-xs text-zinc-400 font-medium">
-                  Before Stage (Input)
-                  <span className="text-zinc-600 ml-2">Red = deleted</span>
+                <div className="px-4 py-2 text-xs text-zinc-400 font-medium flex items-center justify-between">
+                  <span>Before Stage (Input) <span className="text-zinc-600 ml-1">Red = deleted</span></span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => copyText(data.inputNormalized, 'before-norm')}
+                      className="text-zinc-600 hover:text-zinc-300 transition-colors text-[10px]">
+                      {copied === 'before-norm' ? <span className="text-green-400">Copied!</span> : 'Copy Normalized'}
+                    </button>
+                    <button onClick={() => copyText(data.input, 'before')}
+                      className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                      {copied === 'before' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                    </button>
+                  </div>
                 </div>
-                <div className="px-4 py-2 text-xs text-zinc-400 font-medium">
-                  After Stage (Output)
-                  <span className="text-zinc-600 ml-2">Green = added</span>
+                <div className="px-4 py-2 text-xs text-zinc-400 font-medium flex items-center justify-between">
+                  <span>After Stage (Output) <span className="text-zinc-600 ml-1">Green = added</span></span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => copyText(data.outputNormalized, 'after-norm')}
+                      className="text-zinc-600 hover:text-zinc-300 transition-colors text-[10px]">
+                      {copied === 'after-norm' ? <span className="text-green-400">Copied!</span> : 'Copy Normalized'}
+                    </button>
+                    <button onClick={() => copyText(data.output, 'after')}
+                      className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                      {copied === 'after' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                    </button>
+                  </div>
                 </div>
               </div>
               <div className="overflow-auto flex-1">
@@ -600,8 +704,79 @@ function StageViewModal({ runId, stageIndex, onClose }) {
             </div>
             {/* Human column */}
             <div className="flex flex-col overflow-hidden">
-              <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium shrink-0">Human Edited</div>
+              <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium shrink-0 flex items-center justify-between">
+                <span>Human Edited</span>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => copyText(data.humanNormalized, 'human-norm')}
+                    className="text-zinc-600 hover:text-zinc-300 transition-colors text-[10px]">
+                    {copied === 'human-norm' ? <span className="text-green-400">Copied!</span> : 'Copy Normalized'}
+                  </button>
+                  <button onClick={() => copyText(data.human, 'human')}
+                    className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                    {copied === 'human' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                  </button>
+                </div>
+              </div>
               <pre className="p-4 text-xs font-mono whitespace-pre-wrap leading-relaxed overflow-auto flex-1 text-zinc-300">{data.human || 'N/A'}</pre>
+            </div>
+          </div>
+        )}
+
+        {/* Comparison Normalized: After vs Human, both normalized */}
+        {view === 'comparison_norm' && (
+          <div className="flex-1 grid grid-cols-2 divide-x divide-zinc-800 overflow-hidden">
+            <div className="flex flex-col overflow-hidden">
+              <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium shrink-0 flex items-center justify-between">
+                <span>After Stage (Normalized)</span>
+                <button onClick={() => { navigator.clipboard.writeText(normAfter); setCopied('norm-after'); setTimeout(() => setCopied(null), 1500) }}
+                  className="text-zinc-600 hover:text-zinc-300 transition-colors flex items-center gap-1">
+                  {copied === 'norm-after' ? <><Check size={12} className="text-green-400" /><span className="text-green-400 text-[10px]">Copied!</span></> : <><Copy size={12} /><span className="text-[10px]">Copy</span></>}
+                </button>
+              </div>
+              <pre className="p-4 text-xs font-mono whitespace-pre-wrap leading-relaxed overflow-auto flex-1 text-zinc-300">{normAfter || 'N/A'}</pre>
+            </div>
+            <div className="flex flex-col overflow-hidden">
+              <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium shrink-0 flex items-center justify-between">
+                <span>Human Edited (Normalized)</span>
+                <button onClick={() => { navigator.clipboard.writeText(normHuman); setCopied('norm-human'); setTimeout(() => setCopied(null), 1500) }}
+                  className="text-zinc-600 hover:text-zinc-300 transition-colors flex items-center gap-1">
+                  {copied === 'norm-human' ? <><Check size={12} className="text-green-400" /><span className="text-green-400 text-[10px]">Copied!</span></> : <><Copy size={12} /><span className="text-[10px]">Copy</span></>}
+                </button>
+              </div>
+              <pre className="p-4 text-xs font-mono whitespace-pre-wrap leading-relaxed overflow-auto flex-1 text-zinc-300">{normHuman || 'N/A'}</pre>
+            </div>
+          </div>
+        )}
+
+        {/* Final Comparison: unified normalized diff — human as reference */}
+        {view === 'final_comparison' && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium shrink-0 flex items-center gap-4">
+              <span>Current vs Human (Normalized)</span>
+              <span className="text-zinc-600">
+                <span className="text-yellow-400">**word**</span> = missed words &nbsp;
+                <span className="text-red-400">[word]</span> = extra words
+              </span>
+              {similarity && (
+                <span className={`font-bold ${simColor(similarity.similarity_percent)}`}>
+                  {similarity.similarity_percent}% match
+                </span>
+              )}
+            </div>
+            <div className="p-4 overflow-auto flex-1">
+              <div className="text-sm font-mono whitespace-pre-wrap leading-relaxed">
+                {(data.normalizedDiff || []).map((part, i) => {
+                  if (part.removed) {
+                    // Words in human but missing from output — missed
+                    return <span key={i} className="text-yellow-400">**{part.value.trim()}** </span>
+                  }
+                  if (part.added) {
+                    // Words in output but not in human — extra
+                    return <span key={i} className="bg-red-950/40 text-red-400">[{part.value.trim()}] </span>
+                  }
+                  return <span key={i} className="text-zinc-300">{part.value}</span>
+                })}
+              </div>
             </div>
           </div>
         )}

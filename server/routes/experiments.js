@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import db from '../db.js'
 import { executeRun, runStageProgress, abortedExperiments } from '../services/llm-runner.js'
-import { computeDiff } from '../services/diff-engine.js'
+import { computeDiff, normalizeForDiff } from '../services/diff-engine.js'
 import { computeStability, computeExperimentStability } from '../services/stability.js'
 import { analyzeExperiment, analyzRunWithLLM, analyzeRunCustom } from '../services/llm-analyzer.js'
 
@@ -221,7 +221,7 @@ router.get('/:id/progress', (req, res) => {
   // Per-run detail with stage progress
   const runs = db.prepare(`
     SELECT er.id AS runId, er.status, er.total_score, er.run_number,
-      v.title AS videoTitle
+      v.title AS videoTitle, er.error_message AS errorMessage
     FROM experiment_runs er
     JOIN videos v ON v.id = er.video_id
     WHERE er.experiment_id = ?
@@ -237,6 +237,10 @@ router.get('/:id/progress', (req, res) => {
         run.totalStages = prog.totalStages
         run.stageName = prog.stageName
         run.stageStatus = prog.status
+        if (prog.segmentsTotal) {
+          run.segmentsDone = prog.segmentsDone || 0
+          run.segmentsTotal = prog.segmentsTotal
+        }
       }
     }
     // For complete runs, attach per-stage similarity from metrics
@@ -276,6 +280,51 @@ router.post('/:id/abort', (req, res) => {
   res.json({ aborted: true })
 })
 
+// Retry failed runs — resumes from where they left off, keeps completed stages
+router.post('/:id/retry', (req, res) => {
+  const expId = parseInt(req.params.id)
+  const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(expId)
+  if (!experiment) return res.status(404).json({ error: 'Experiment not found' })
+
+  const failedRuns = db.prepare("SELECT id FROM experiment_runs WHERE experiment_id = ? AND status = 'failed'").all(expId)
+  if (failedRuns.length === 0) return res.json({ retried: 0 })
+
+  // Reset failed runs to pending (keep their existing stage outputs for resumption)
+  const runIds = failedRuns.map(r => r.id)
+  for (const runId of runIds) {
+    db.prepare("UPDATE experiment_runs SET status = 'pending', total_score = NULL, score_breakdown_json = NULL, total_tokens = NULL, total_cost = NULL, total_runtime_ms = NULL, completed_at = NULL WHERE id = ?").run(runId)
+  }
+
+  const tracker = activeExecutions.get(expId) || { total: 0, completed: 0, failed: 0, running: 0, done: false, runIds: [] }
+  tracker.total += runIds.length
+  tracker.done = false
+  tracker.runIds = [...tracker.runIds, ...runIds]
+  activeExecutions.set(expId, tracker)
+
+  ;(async () => {
+    for (const runId of runIds) {
+      if (abortedExperiments.has(expId)) {
+        db.prepare("UPDATE experiment_runs SET status = 'failed' WHERE id = ? AND status = 'pending'").run(runId)
+        tracker.failed++
+        continue
+      }
+      tracker.running++
+      try {
+        await executeRun(runId)
+        tracker.completed++
+      } catch (err) {
+        tracker.failed++
+        console.error(`[retry] Run ${runId} failed:`, err.message)
+      }
+      tracker.running--
+    }
+    if (tracker.running === 0) tracker.done = true
+    abortedExperiments.delete(expId)
+  })()
+
+  res.json({ retried: runIds.length, experimentId: expId })
+})
+
 // Get a single stage's input/output/human for the View modal
 router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
   const run = db.prepare(`
@@ -305,6 +354,10 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
     input: stage.input_text,
     output: stage.output_text,
     human: human?.content || null,
+    inputNormalized: normalizeForDiff(stage.input_text),
+    outputNormalized: normalizeForDiff(stage.output_text),
+    humanNormalized: normalizeForDiff(human?.content),
+    normalizedDiff: computeDiff(human?.content, stage.output_text),
     promptUsed: stage.prompt_used,
     systemInstruction: stage.system_instruction_used,
     stageName: stage.stage_name,
@@ -352,7 +405,10 @@ router.get('/runs/:runId', (req, res) => {
 
   const scoreBreakdown = run.score_breakdown_json ? JSON.parse(run.score_breakdown_json) : null
 
-  res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content })
+  const rawNormalized = normalizeForDiff(raw?.content)
+  const humanNormalized = normalizeForDiff(human?.content)
+
+  res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content, rawNormalized, humanNormalized })
 })
 
 // Stability analysis for an experiment

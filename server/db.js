@@ -103,6 +103,7 @@ const migrations = [
   ['video_groups', 'assembled_transcript', 'ALTER TABLE video_groups ADD COLUMN assembled_transcript TEXT'],
   ['video_groups', 'assembly_details_json', 'ALTER TABLE video_groups ADD COLUMN assembly_details_json TEXT'],
   ['experiments', 'video_ids_json', 'ALTER TABLE experiments ADD COLUMN video_ids_json TEXT'],
+  ['experiment_runs', 'error_message', 'ALTER TABLE experiment_runs ADD COLUMN error_message TEXT'],
 ]
 
 for (const [table, column, sql] of migrations) {

@@ -1,9 +1,9 @@
 import { diffWords } from 'diff'
 
-// Regex for timecodes [00:01:23] and pause markers [2.3s]
-const TIMECODE_RE = /\[\d{2}:\d{2}:\d{2}\]/g
+// Regex for timecodes [00:01:23] or [01:23] and pause markers [2.3s]
+const TIMECODE_RE = /\[\d{1,2}:\d{2}(?::\d{2})?\]/g
 const PAUSE_RE = /\[\d+\.?\d*s\]/g
-const SPECIAL_TOKEN_RE = /(\[\d{2}:\d{2}:\d{2}\]|\[\d+\.?\d*s\])/g
+const SPECIAL_TOKEN_RE = /(\[\d{1,2}:\d{2}(?::\d{2})?\]|\[\d+\.?\d*s\])/g
 
 /**
  * Normalize text for word-focused comparison:
@@ -12,40 +12,77 @@ const SPECIAL_TOKEN_RE = /(\[\d{2}:\d{2}:\d{2}\]|\[\d+\.?\d*s\])/g
  * - Strip punctuation
  * - Collapse whitespace
  */
-// Number words → digits
-const NUMBER_WORDS = {
-  zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5',
-  six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11',
-  twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15', sixteen: '16',
-  seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20', thirty: '30',
-  forty: '40', fifty: '50', sixty: '60', seventy: '70', eighty: '80', ninety: '90',
-  hundred: '100', thousand: '1000', million: '1000000', billion: '1000000000',
+// Digits → words (all numbers become words for comparison)
+const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']
+const TEENS = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
+
+function numberToWords(n) {
+  if (n < 0) return 'negative ' + numberToWords(-n)
+  if (n < 10) return DIGIT_WORDS[n]
+  if (n < 20) return TEENS[n - 10]
+  if (n < 100) return TENS[Math.floor(n / 10)] + (n % 10 ? ' ' + DIGIT_WORDS[n % 10] : '')
+  if (n < 1000) return DIGIT_WORDS[Math.floor(n / 100)] + ' hundred' + (n % 100 ? ' ' + numberToWords(n % 100) : '')
+  if (n < 1000000) return numberToWords(Math.floor(n / 1000)) + ' thousand' + (n % 1000 ? ' ' + numberToWords(n % 1000) : '')
+  if (n < 1000000000) return numberToWords(Math.floor(n / 1000000)) + ' million' + (n % 1000000 ? ' ' + numberToWords(n % 1000000) : '')
+  return numberToWords(Math.floor(n / 1000000000)) + ' billion' + (n % 1000000000 ? ' ' + numberToWords(n % 1000000000) : '')
 }
 
-// Symbol ↔ word equivalences (normalized to same form)
-const SYMBOL_WORDS = {
-  dollar: '$', dollars: '$', '$': '$',
-  percent: '%', '%': '%',
-  '&': 'and', and: 'and',
-  '@': 'at', at: 'at',
-  plus: '+', '+': '+',
+// Number words that should stay as words (for reverse mapping when source has word form)
+const NUMBER_WORD_SET = new Set([
+  'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+  'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen',
+  'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',
+  'hundred', 'thousand', 'million', 'billion',
+])
+
+// Symbols → words (everything becomes long-form words)
+const SYMBOL_TO_WORD = {
+  '%': 'percent',
+  '$': 'dollar',
+  '&': 'and',
+  '@': 'at',
+  '+': 'plus',
 }
 
-function normalizeForDiff(text) {
+export function normalizeForDiff(text) {
   if (!text) return ''
   return text
+    // Strip timecodes and pause markers entirely
     .replace(TIMECODE_RE, ' ')
     .replace(PAUSE_RE, ' ')
+    // Replace hyphens/dashes with spaces (S-Corporation → S Corporation)
+    .replace(/[-—–]/g, ' ')
     .toLowerCase()
-    .replace(/[.,!?;:'"()\-—…""''«»\[\]{}]/g, '')
+    // Remove all punctuation except % $ & @ + (we convert those to words below)
+    .replace(/[.,!?;:'"()…""''«»\[\]{}\/\\#*_~`^|<>]/g, '')
+    // Normalize common transcription variants
+    .replace(/\bper\s+cent\b/g, 'percent')
+    .replace(/\be[\s-]?mail\b/g, 'email')
+    .replace(/\bco[\s-]?founder\b/g, 'cofounder')
+    .replace(/\bon[\s-]?line\b/g, 'online')
+    .replace(/\bblock[\s-]?chain\b/g, 'blockchain')
     .replace(/\s+/g, ' ')
     .trim()
     .split(' ')
     .map(w => {
-      // Normalize number words to digits
-      if (NUMBER_WORDS[w]) return NUMBER_WORDS[w]
-      // Normalize symbol/word equivalences
-      if (SYMBOL_WORDS[w]) return SYMBOL_WORDS[w]
+      // Convert symbols to words: % → percent, $ → dollar
+      if (SYMBOL_TO_WORD[w]) return SYMBOL_TO_WORD[w]
+      // Convert numbers to words: 99 → ninety nine, 100 → one hundred
+      // Handle numbers with attached symbols: 100% → one hundred percent, $50 → fifty dollar
+      const symbolMatch = w.match(/^([%$&@+]?)(\d+)([%$&@+]?)$/)
+      if (symbolMatch) {
+        const [, pre, num, post] = symbolMatch
+        const numWord = numberToWords(parseInt(num))
+        // $50 → fifty dollars (prefix currency goes after number)
+        if (pre === '$') return numWord + ' dollars'
+        const parts = []
+        if (pre && SYMBOL_TO_WORD[pre]) parts.push(SYMBOL_TO_WORD[pre])
+        parts.push(numWord)
+        if (post && SYMBOL_TO_WORD[post]) parts.push(SYMBOL_TO_WORD[post])
+        return parts.join(' ')
+      }
+      // Keep number words as-is (they're already words)
       return w
     })
     .join(' ')
@@ -117,8 +154,8 @@ function applyFuzzyTolerance(diff) {
       const added = diff[i + 1].value.replace(/\s+/g, '')
       const maxLen = Math.max(removed.length, added.length)
       const dist = editDistance(removed, added)
-      // Tolerate: edit distance <= 2 OR <= 15% of word length (for longer words)
-      if (dist <= 2 || (maxLen > 6 && dist / maxLen <= 0.15)) {
+      // Tolerate: edit distance <= 2 OR <= 20% of length (for longer words like ChatGPT/ChatPT)
+      if (dist <= 2 || (maxLen > 5 && dist / maxLen <= 0.20)) {
         result.push({ value: diff[i + 1].value, added: false, removed: false })
         i += 2
         continue
@@ -130,7 +167,7 @@ function applyFuzzyTolerance(diff) {
       const removed = diff[i + 1].value.replace(/\s+/g, '')
       const maxLen = Math.max(removed.length, added.length)
       const dist = editDistance(removed, added)
-      if (dist <= 2 || (maxLen > 6 && dist / maxLen <= 0.15)) {
+      if (dist <= 2 || (maxLen > 5 && dist / maxLen <= 0.20)) {
         result.push({ value: diff[i].value, added: false, removed: false })
         i += 2
         continue
