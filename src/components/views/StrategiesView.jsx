@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react'
 import { useApi, apiPost, apiPut, apiDelete } from '../../hooks/useApi.js'
-import { Plus, ChevronDown, ChevronRight, Trash2, ArrowUp, ArrowDown, Bot, Layers, Cpu, Pencil, Copy, Loader2, Sparkles, Send, Check, RotateCcw } from 'lucide-react'
+import { previewAugmentedSystem, updateSegmentRulesInSystem, hasSegmentRules, stripSegmentRules } from '../../lib/promptPreview.js'
+import { Plus, ChevronDown, ChevronRight, Trash2, ArrowUp, ArrowDown, Bot, Layers, Cpu, Pencil, Copy, Loader2, Sparkles, Send, Check, RotateCcw, MessageCircleQuestion } from 'lucide-react'
 
 const MODELS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', provider: 'gemini' },
@@ -12,11 +13,18 @@ const MODELS = [
 
 const THINKING_LEVELS = ['OFF', 'LOW', 'MEDIUM', 'HIGH']
 
+const SEGMENT_PRESETS = {
+  short:  { label: 'Short (40–60s)',   minSeconds: 40,  maxSeconds: 60,  contextSeconds: 30 },
+  medium: { label: 'Medium (60–100s)', minSeconds: 60,  maxSeconds: 100, contextSeconds: 30 },
+  long:   { label: 'Long (100–130s)',  minSeconds: 100, maxSeconds: 130, contextSeconds: 30 },
+}
+
 const TEMPLATE_VARS = [
   { tag: '<transcript>', desc: 'Full transcript text' },
   { tag: '{{transcript}}', desc: 'Full transcript (mustache)' },
   { tag: '{{segment_number}}', desc: 'Current segment #' },
   { tag: '{{total_segments}}', desc: 'Total segments' },
+  { tag: '{{llm_answer}}', desc: 'Output from most recent LLM Question stage' },
 ]
 
 export default function StrategiesView() {
@@ -79,6 +87,17 @@ function FlowCard({ strategy, expanded, onToggle, onRefetch }) {
     }
   }
 
+  async function handleDuplicate(e) {
+    e.stopPropagation()
+    try {
+      const newStrategy = await apiPost('/strategies', { name: `${strategy.name} (copy)`, description: strategy.description })
+      await apiPost(`/strategies/${newStrategy.id}/versions`, { stages, notes: 'Duplicated from ' + strategy.name })
+      onRefetch()
+    } catch (err) {
+      alert(err.message)
+    }
+  }
+
   async function handleSummarize(e) {
     e.stopPropagation()
     setSummarizing(true)
@@ -122,6 +141,9 @@ function FlowCard({ strategy, expanded, onToggle, onRefetch }) {
               {summarizing ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             </button>
           )}
+          <button onClick={handleDuplicate} className="text-zinc-600 hover:text-zinc-300 p-1 transition-colors" title="Duplicate flow">
+            <Copy size={14} />
+          </button>
           <button onClick={handleDelete} className="text-zinc-600 hover:text-red-400 p-1 transition-colors" title="Delete flow">
             <Trash2 size={14} />
           </button>
@@ -168,28 +190,46 @@ function StagePipeline({ stages }) {
             {stage.model && stage.model !== 'programmatic' && (
               <span className="text-xs text-zinc-500">{MODELS.find(m => m.id === stage.model)?.label || stage.model}</span>
             )}
-            {(stage.type === 'llm' || stage.type === 'llm_parallel') && (
+            {stage.output_mode && stage.output_mode !== 'passthrough' && (
+              <span className={`text-xs px-1.5 py-0.5 rounded ${
+                stage.output_mode === 'deletion'
+                  ? 'bg-red-900/30 border border-red-800 text-red-300'
+                  : 'bg-emerald-900/30 border border-emerald-800 text-emerald-300'
+              }`}>
+                {stage.output_mode === 'deletion' ? 'Deletion' : 'Keep Only'}
+              </span>
+            )}
+            {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
               <span className="text-xs text-zinc-600 ml-auto">
-                {stage.type === 'llm' ? 'Whole transcript' : 'Per segment'}
+                {stage.type === 'llm' ? 'Whole transcript' : stage.type === 'llm_parallel' ? 'Per segment' : 'Question → {{llm_answer}}'}
               </span>
             )}
           </div>
-          {stage.description && <div className="text-xs text-zinc-400">{stage.description}</div>}
-          {stage.type === 'programmatic' && stage.actionParams && (
+          {stage.type === 'programmatic' && (
+            <div className="text-xs text-zinc-400">{stage.action === 'reassemble' ? 'Reassemble segments' : (stage.description || 'Segment transcript')}</div>
+          )}
+          {stage.type !== 'programmatic' && stage.description && <div className="text-xs text-zinc-400">{stage.description}</div>}
+          {stage.type === 'programmatic' && stage.action === 'segment' && stage.actionParams && (
             <div className="flex flex-wrap gap-2">
-              {Object.entries(stage.actionParams).map(([k, v]) => (
-                <span key={k} className="text-xs bg-zinc-800 border border-zinc-700 px-2 py-0.5 rounded text-zinc-400">
-                  {k}: {v}
+              {stage.actionParams.preset ? (
+                <span className="text-xs bg-zinc-800 border border-zinc-700 px-2 py-0.5 rounded text-zinc-400">
+                  {SEGMENT_PRESETS[stage.actionParams.preset]?.label || stage.actionParams.preset} · {stage.actionParams.contextSeconds}s context
                 </span>
-              ))}
+              ) : (
+                Object.entries(stage.actionParams).map(([k, v]) => (
+                  <span key={k} className="text-xs bg-zinc-800 border border-zinc-700 px-2 py-0.5 rounded text-zinc-400">
+                    {k}: {v}
+                  </span>
+                ))
+              )}
             </div>
           )}
-          {(stage.type === 'llm' || stage.type === 'llm_parallel') && (
+          {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
             <>
-              {stage.system_instruction && (
+              {(stage.system_instruction || stage.output_mode) && (
                 <div>
-                  <div className="text-xs text-zinc-500 mb-1">System Prompt</div>
-                  <pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-32 overflow-auto">{stage.system_instruction}</pre>
+                  <div className="text-xs text-zinc-500 mb-1">System Prompt {stage.type !== 'llm_question' && <span className="text-zinc-600">(with auto-appended output mode rules)</span>}</div>
+                  <pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-32 overflow-auto">{stage.type === 'llm_question' ? stage.system_instruction : previewAugmentedSystem(stage.system_instruction, stage.output_mode, stage.type)}</pre>
                 </div>
               )}
               {stage.prompt && (
@@ -209,7 +249,13 @@ function StagePipeline({ stages }) {
 function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
   const isEditing = !!editingVersion
   const initialStages = isEditing
-    ? JSON.parse(editingVersion.stages_json || '[]')
+    ? JSON.parse(editingVersion.stages_json || '[]').map(s => {
+        // Migrate: inject segment rules into llm_parallel stages that don't have them yet
+        if (s.type === 'llm_parallel' && !hasSegmentRules(s.system_instruction)) {
+          return { ...s, system_instruction: updateSegmentRulesInSystem(s.system_instruction, s.output_mode) }
+        }
+        return s
+      })
     : [{ name: 'Stage 1', type: 'llm', prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: {} }]
 
   const [stages, setStages] = useState(initialStages)
@@ -267,6 +313,10 @@ function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
           <button type="button" onClick={() => addStage('llm')}
             className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors">
             <Plus size={12} /> Add LLM Run
+          </button>
+          <button type="button" onClick={() => addStage('llm_question')}
+            className="flex items-center gap-1 text-xs text-pink-500/70 hover:text-pink-400 transition-colors">
+            <Plus size={12} /> Add Question
           </button>
           <button type="button" onClick={() => addStage('programmatic')}
             className="flex items-center gap-1 text-xs text-amber-500/70 hover:text-amber-400 transition-colors">
@@ -416,6 +466,7 @@ function CreateStrategyForm({ onCreated }) {
                     <span className={`text-xs px-2 py-1 rounded border ${
                       stage.type === 'programmatic' ? 'border-amber-800/50 bg-amber-900/20 text-amber-400' :
                       stage.type === 'llm_parallel' ? 'border-cyan-800/50 bg-cyan-900/20 text-cyan-400' :
+                      stage.type === 'llm_question' ? 'border-pink-800/50 bg-pink-900/20 text-pink-400' :
                       'border-violet-800/50 bg-violet-900/20 text-violet-400'
                     }`}>{stage.name}</span>
                   </div>
@@ -512,6 +563,7 @@ function CreateStrategyForm({ onCreated }) {
 
           <div className="flex gap-2">
             <button type="button" onClick={() => addStage('llm')} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors"><Plus size={12} /> Add LLM Run</button>
+            <button type="button" onClick={() => addStage('llm_question')} className="flex items-center gap-1 text-xs text-pink-500/70 hover:text-pink-400 transition-colors"><Plus size={12} /> Add Question</button>
             <button type="button" onClick={() => addStage('programmatic')} className="flex items-center gap-1 text-xs text-amber-500/70 hover:text-amber-400 transition-colors"><Plus size={12} /> Add Segment Step</button>
           </div>
 
@@ -530,16 +582,21 @@ function makeStageOps(stages, setStages) {
   function addStage(type = 'llm') {
     const base = { name: `Stage ${stages.length + 1}`, type }
     if (type === 'programmatic') {
-      setStages(prev => [...prev, { ...base, action: 'segment', actionParams: { minSeconds: 40, maxSeconds: 80, contextSeconds: 30 }, description: 'Segment transcript' }])
+      setStages(prev => [...prev, { ...base, action: 'segment', actionParams: { preset: 'short', minSeconds: 40, maxSeconds: 60, contextSeconds: 30 }, description: 'Segment transcript' }])
+    } else if (type === 'llm_question') {
+      setStages(prev => [...prev, { ...base, prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: { temperature: 1 } }])
     } else {
       setStages(prev => [...prev, { ...base, prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: { temperature: 1 } }])
     }
   }
   function insertStage(atIndex, type = 'llm') {
     const base = { name: `Stage`, type }
-    const newStage = type === 'programmatic'
-      ? { ...base, action: 'segment', actionParams: { minSeconds: 40, maxSeconds: 80, contextSeconds: 30 }, description: 'Segment transcript' }
-      : { ...base, prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: { temperature: 1 } }
+    let newStage
+    if (type === 'programmatic') {
+      newStage = { ...base, action: 'segment', actionParams: { preset: 'short', minSeconds: 40, maxSeconds: 60, contextSeconds: 30 }, description: 'Segment transcript' }
+    } else {
+      newStage = { ...base, prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: { temperature: 1 } }
+    }
     setStages(prev => { const arr = [...prev]; arr.splice(atIndex, 0, newStage); return arr })
   }
   function removeStage(i) { setStages(prev => prev.filter((_, idx) => idx !== i)) }
@@ -563,9 +620,20 @@ function makeStageOps(stages, setStages) {
       const u = [...prev]
       const s = u[i]
       if (newType === 'programmatic') {
-        u[i] = { name: s.name, type: newType, action: 'segment', actionParams: { minSeconds: 40, maxSeconds: 80, contextSeconds: 30 }, description: 'Segment transcript' }
+        u[i] = { name: s.name, type: newType, action: 'segment', actionParams: { preset: 'short', minSeconds: 40, maxSeconds: 60, contextSeconds: 30 }, description: 'Segment transcript' }
       } else {
-        u[i] = { name: s.name, type: newType, model: s.model || 'claude-sonnet-4-20250514', prompt: s.prompt || '', system_instruction: s.system_instruction || '', params: s.params || { temperature: 1 } }
+        let sysInstr = s.system_instruction || ''
+        if (newType === 'llm_parallel') {
+          sysInstr = updateSegmentRulesInSystem(sysInstr, s.output_mode)
+        } else if (s.type === 'llm_parallel') {
+          sysInstr = stripSegmentRules(sysInstr)
+        }
+        const stage = { name: s.name, type: newType, model: s.model || 'claude-sonnet-4-20250514', prompt: s.prompt || '', system_instruction: sysInstr, params: s.params || { temperature: 1 } }
+        // llm_question doesn't use output_mode; preserve it for other types
+        if (newType !== 'llm_question' && s.output_mode) {
+          stage.output_mode = s.output_mode
+        }
+        u[i] = stage
       }
       return u
     })
@@ -581,7 +649,7 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
     <div>
       {stages.map((stage, i) => {
         const modelOpt = MODELS.find(m => m.id === stage.model)
-        const showThinking = (stage.type === 'llm' || stage.type === 'llm_parallel') && modelOpt?.provider !== 'openai'
+        const showThinking = (stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question')
         return (
           <div key={i}>
             {/* Insert button between stages */}
@@ -626,10 +694,11 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                     className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none">
                     <option value="llm">LLM — Whole Transcript</option>
                     <option value="llm_parallel">LLM — Per Segment</option>
+                    <option value="llm_question">LLM — Question</option>
                     <option value="programmatic">Programmatic</option>
                   </select>
                 </div>
-                {(stage.type === 'llm' || stage.type === 'llm_parallel') && (
+                {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
                   <div>
                     <label className="block text-xs text-zinc-500 mb-1">Model</label>
                     <select value={stage.model} onChange={e => updateStage(i, 'model', e.target.value)}
@@ -640,9 +709,9 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                 )}
               </div>
 
-              {/* Temperature + Thinking row (LLM only) */}
-              {(stage.type === 'llm' || stage.type === 'llm_parallel') && (
-                <div className="grid grid-cols-2 gap-2">
+              {/* Temperature + Thinking + Output Mode row (LLM only) */}
+              {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
+                <div className={`grid ${stage.type === 'llm_question' ? 'grid-cols-2' : 'grid-cols-3'} gap-2`}>
                   <div>
                     <label className="block text-xs text-zinc-500 mb-1">Temperature: {stage.params?.temperature ?? 1}</label>
                     <input type="range" min="0" max="2" step="0.1" value={stage.params?.temperature ?? 1}
@@ -657,6 +726,65 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                         className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none">
                         {THINKING_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
                       </select>
+                    </div>
+                  )}
+                  {stage.type !== 'llm_question' && (
+                    <div>
+                      <label className="block text-xs text-zinc-500 mb-1">Output Mode</label>
+                      <select value={stage.output_mode || ''}
+                        onChange={e => {
+                          const newMode = e.target.value || undefined
+                          updateStage(i, 'output_mode', newMode)
+                          if (stage.type === 'llm_parallel') {
+                            updateStage(i, 'system_instruction', updateSegmentRulesInSystem(stage.system_instruction, newMode))
+                          }
+                        }}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none">
+                        <option value="">None (return cleaned text)</option>
+                        <option value="deletion">Deletion</option>
+                        <option value="keep_only">Keep Only</option>
+                        <option value="identify">Identify (classify problems)</option>
+                      </select>
+                    </div>
+                  )}
+                  {(stage.output_mode === 'deletion' || stage.output_mode === 'keep_only') && (
+                    <div className="col-span-2">
+                      <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer mb-1.5">
+                        <input type="checkbox"
+                          checked={stage.identifyPreselect?.enabled || false}
+                          onChange={e => updateStage(i, 'identifyPreselect', {
+                            ...stage.identifyPreselect,
+                            enabled: e.target.checked,
+                            categories: stage.identifyPreselect?.categories || []
+                          })}
+                          className="rounded" />
+                        Identification Preselect
+                      </label>
+                      {stage.identifyPreselect?.enabled && (
+                        <div className="flex gap-3 ml-5">
+                          {[
+                            { key: 'filler_words', label: 'Fillers', color: 'text-red-300' },
+                            { key: 'false_starts', label: 'False Starts', color: 'text-rose-400' },
+                          ].map(cat => (
+                            <label key={cat.key} className={`flex items-center gap-1.5 text-xs cursor-pointer ${cat.color}`}>
+                              <input type="checkbox"
+                                checked={stage.identifyPreselect?.categories?.includes(cat.key) || false}
+                                onChange={e => {
+                                  const cats = stage.identifyPreselect?.categories || []
+                                  const newCats = e.target.checked
+                                    ? [...cats, cat.key]
+                                    : cats.filter(c => c !== cat.key)
+                                  updateStage(i, 'identifyPreselect', {
+                                    ...stage.identifyPreselect,
+                                    categories: newCats
+                                  })
+                                }}
+                                className="rounded" />
+                              {cat.label}
+                            </label>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -674,15 +802,28 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                     </select>
                   </div>
                   {stage.action === 'segment' && (
-                    <div className="grid grid-cols-3 gap-2">
-                      {['minSeconds','maxSeconds','contextSeconds'].map(k => (
-                        <div key={k}>
-                          <label className="block text-xs text-zinc-500 mb-1">{k.replace('Seconds',' Sec')}</label>
-                          <input type="number" value={stage.actionParams?.[k] || 40}
-                            onChange={e => updateStage(i, 'actionParams', { ...stage.actionParams, [k]: Number(e.target.value) })}
-                            className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none" />
-                        </div>
-                      ))}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-zinc-500 mb-1">Segment Size</label>
+                        <select
+                          value={stage.actionParams?.preset || 'short'}
+                          onChange={e => {
+                            const p = SEGMENT_PRESETS[e.target.value]
+                            updateStage(i, 'actionParams', { ...stage.actionParams, preset: e.target.value, minSeconds: p.minSeconds, maxSeconds: p.maxSeconds })
+                          }}
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none"
+                        >
+                          {Object.entries(SEGMENT_PRESETS).map(([k, v]) => (
+                            <option key={k} value={k}>{v.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-zinc-500 mb-1">Context Sec</label>
+                        <input type="number" value={stage.actionParams?.contextSeconds ?? 30}
+                          onChange={e => updateStage(i, 'actionParams', { ...stage.actionParams, contextSeconds: Number(e.target.value) })}
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none" />
+                      </div>
                     </div>
                   )}
                   <div>
@@ -693,8 +834,15 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                 </>
               )}
 
+              {/* LLM Question info banner */}
+              {stage.type === 'llm_question' && (
+                <div className="text-[10px] text-pink-400/70 bg-pink-900/10 border border-pink-800/20 rounded px-2 py-1.5">
+                  Question stage: LLM answer is stored as <code className="font-mono bg-pink-900/30 px-1 rounded">{'{{llm_answer}}'}</code> for use in later stages. Transcript passes through unchanged.
+                </div>
+              )}
+
               {/* LLM prompts */}
-              {(stage.type === 'llm' || stage.type === 'llm_parallel') && (
+              {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
                 <>
                   <div>
                     <div className="flex items-center justify-between mb-1">
@@ -705,6 +853,12 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                       value={stage.system_instruction} onChange={e => updateStage(i, 'system_instruction', e.target.value)}
                       className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-zinc-600"
                       rows={3} placeholder="You are a transcript editor..." />
+                    {stage.output_mode && (
+                      <details className="mt-1">
+                        <summary className="text-[10px] text-zinc-600 cursor-pointer hover:text-zinc-400">Show full prompt (with auto-appended output mode rules)</summary>
+                        <pre className="mt-1 text-[10px] text-zinc-500 bg-zinc-900/50 border border-zinc-800 rounded p-2 whitespace-pre-wrap max-h-48 overflow-auto">{previewAugmentedSystem(stage.system_instruction, stage.output_mode, stage.type, stage.identifyPreselect)}</pre>
+                      </details>
+                    )}
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
@@ -749,6 +903,9 @@ function StageBadge({ type }) {
   }
   if (type === 'llm_parallel') {
     return <span className="text-xs px-1.5 py-0.5 rounded border border-cyan-800 bg-cyan-900/30 text-cyan-300 flex items-center gap-1"><Layers size={10} /> Per Segment</span>
+  }
+  if (type === 'llm_question') {
+    return <span className="text-xs px-1.5 py-0.5 rounded border border-pink-800 bg-pink-900/30 text-pink-300 flex items-center gap-1"><MessageCircleQuestion size={10} /> Question</span>
   }
   return <span className="text-xs px-1.5 py-0.5 rounded border border-violet-800 bg-violet-900/30 text-violet-300 flex items-center gap-1"><Bot size={10} /> LLM</span>
 }

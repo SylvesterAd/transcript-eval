@@ -148,7 +148,7 @@ function GroupCard({ groupId, group, onRefresh }) {
             {isActive && (
               <span className="text-blue-400 text-xs flex items-center gap-1">
                 <Loader2 size={10} className="animate-spin" />
-                {status === 'transcribing' ? 'Transcribing...' : status === 'syncing' ? 'Syncing...' : status === 'ordering' ? 'Ordering...' : 'Assembling...'}
+                {status === 'transcribing' ? 'Transcribing...' : status === 'classifying' ? 'Classifying...' : status === 'syncing' ? 'Syncing...' : status === 'ordering' ? 'Ordering...' : 'Assembling...'}
               </span>
             )}
             {status === 'failed' && (
@@ -164,7 +164,7 @@ function GroupCard({ groupId, group, onRefresh }) {
 
         {/* View raw video (primary) */}
         {group.videos[0] && (
-          <Link to={`/videos/${(group.videos.find(v => v.video_type === 'raw') || group.videos[0]).id}`} onClick={e => e.stopPropagation()}
+          <Link to={`/admin/videos/${(group.videos.find(v => v.video_type === 'raw') || group.videos[0]).id}`} onClick={e => e.stopPropagation()}
             className="flex items-center gap-1 text-sm text-zinc-400 hover:text-white transition-colors px-3 py-1.5 rounded hover:bg-zinc-800 shrink-0">
             <Eye size={14} /> View
           </Link>
@@ -193,8 +193,8 @@ function GroupCard({ groupId, group, onRefresh }) {
           {isActive && (
             <div className="px-4 py-2 border-b border-zinc-800/50 bg-zinc-800/30">
               <div className="flex items-center gap-3">
-                {['transcribing', 'syncing', 'ordering', 'assembling'].map((step, i) => {
-                  const steps = ['transcribing', 'syncing', 'ordering', 'assembling']
+                {['transcribing', 'classifying', 'syncing', 'ordering', 'assembling'].map((step, i) => {
+                  const steps = ['transcribing', 'classifying', 'syncing', 'ordering', 'assembling']
                   const currentIdx = steps.indexOf(status)
                   const isDone = i < currentIdx
                   const isCurrent = step === status
@@ -208,7 +208,7 @@ function GroupCard({ groupId, group, onRefresh }) {
                         <div className="w-3.5 h-3.5 rounded-full border border-zinc-600" />
                       )}
                       <span className={`text-[10px] ${isCurrent ? 'text-white font-medium' : isDone ? 'text-emerald-400' : 'text-zinc-600'}`}>
-                        {step === 'transcribing' ? 'Transcribe' : step === 'syncing' ? 'Sync' : step === 'ordering' ? 'Order' : 'Assemble'}
+                        {step === 'transcribing' ? 'Transcribe' : step === 'classifying' ? 'Classify' : step === 'syncing' ? 'Sync' : step === 'ordering' ? 'Order' : 'Assemble'}
                       </span>
                     </div>
                   )
@@ -257,7 +257,7 @@ function GroupCard({ groupId, group, onRefresh }) {
                       )}
                     </div>
                     {primary && (
-                      <Link to={`/videos/${primary.id}`} onClick={e => e.stopPropagation()}
+                      <Link to={`/admin/videos/${primary.id}`} onClick={e => e.stopPropagation()}
                         className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white transition-colors px-2 py-1 rounded hover:bg-zinc-800 shrink-0">
                         <Eye size={12} /> View
                       </Link>
@@ -265,6 +265,23 @@ function GroupCard({ groupId, group, onRefresh }) {
                   </div>
                 )
               })}
+            </div>
+          )}
+
+          {/* Related groups from same upload batch */}
+          {detail?.relatedGroups?.length > 0 && (
+            <div className="px-4 py-2 border-b border-zinc-800/50 bg-zinc-900/50">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5">Split from same upload</div>
+              <div className="flex flex-wrap gap-2">
+                {detail.relatedGroups.map(rg => (
+                  <div key={rg.id} className="flex items-center gap-1.5 text-xs bg-zinc-800 rounded px-2 py-1">
+                    <span className="text-zinc-300 truncate max-w-[200px]">{rg.name}</span>
+                    <span className={`text-[10px] ${rg.assembly_status === 'done' ? 'text-emerald-400' : rg.assembly_status === 'failed' ? 'text-red-400' : 'text-blue-400'}`}>
+                      {rg.assembly_status === 'done' ? 'Ready' : rg.assembly_status === 'failed' ? 'Failed' : rg.assembly_status || 'Pending'}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -451,7 +468,7 @@ function VideoRow({ video: v, onRefresh }) {
       )}
 
       <Link
-        to={`/videos/${v.id}`}
+        to={`/admin/videos/${v.id}`}
         className="flex items-center gap-1 text-sm text-zinc-400 hover:text-white transition-colors px-3 py-1.5 rounded hover:bg-zinc-800"
       >
         <Eye size={14} />
@@ -717,7 +734,7 @@ function VideoUploadPanel({ onDone, videos }) {
           } else {
             setTranscriptionStatus(`transcribing ${done}/${total}`)
           }
-        } else if (['syncing', 'ordering', 'assembling'].includes(aStatus)) {
+        } else if (['classifying', 'syncing', 'ordering', 'assembling'].includes(aStatus)) {
           setTranscriptionStatus(aStatus)
         } else if (aStatus === 'done') {
           clearInterval(pollRef.current)
@@ -998,7 +1015,7 @@ function VideoUploadPanel({ onDone, videos }) {
               </button>
             )}
             {uploadResult.videoId && (
-              <Link to={`/videos/${uploadResult.videoId}`}
+              <Link to={`/admin/videos/${uploadResult.videoId}`}
                 className="bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded text-sm transition-colors">View Video</Link>
             )}
             <button onClick={onDone} className="text-zinc-500 hover:text-zinc-300 px-3 py-1.5 rounded text-sm transition-colors">
@@ -1019,7 +1036,7 @@ function VideoUploadPanel({ onDone, videos }) {
           </div>
           <div className="flex gap-2">
             {uploadResult?.videoId && (
-              <Link to={`/videos/${uploadResult.videoId}`}
+              <Link to={`/admin/videos/${uploadResult.videoId}`}
                 className="bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded text-sm transition-colors">View Video Detail</Link>
             )}
             <button onClick={onDone} className="text-zinc-500 hover:text-zinc-300 px-3 py-1.5 rounded text-sm transition-colors">Done</button>
@@ -1077,6 +1094,7 @@ function TranscriptionProgress({ status }) {
 
 const MULTICAM_STAGES = [
   { key: 'transcribing', label: 'Transcribe all' },
+  { key: 'classifying', label: 'Classify context' },
   { key: 'syncing', label: 'Multicam sync' },
   { key: 'ordering', label: 'Order segments' },
   { key: 'assembling', label: 'Assemble' },

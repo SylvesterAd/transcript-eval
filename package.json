@@ -12,7 +12,9 @@
     "seed:strategies": "node server/seed/create-strategies.js"
   },
   "dependencies": {
+    "@dnd-kit/react": "^0.3.2",
     "@google/generative-ai": "^0.24.1",
+    "@waveform-playlist/browser": "^11.2.0",
     "concurrently": "^9.0.0",
     "cors": "^2.8.5",
     "diff": "^7.0.0",
@@ -24,7 +26,10 @@
     "react-dom": "^19.2.4",
     "react-router-dom": "^7.6.0",
     "sql.js": "^1.11.0",
-    "undici": "^7.24.4"
+    "styled-components": "^6.3.12",
+    "tone": "^15.1.22",
+    "undici": "^7.24.4",
+    "waveform-data": "^4.5.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",

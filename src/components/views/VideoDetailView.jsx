@@ -79,7 +79,7 @@ export default function VideoDetailView() {
             {allGroupVideos.map(v => (
               <Link
                 key={v.id}
-                to={`/videos/${v.id}`}
+                to={`/admin/videos/${v.id}`}
                 className={`text-xs px-2 py-1 rounded border transition-colors ${
                   v.id === data.id
                     ? 'border-blue-500 bg-blue-500/10 text-blue-400'
@@ -3002,7 +3002,7 @@ function AddFootagePanel({ currentVideo, canAddRaw, canAddHuman, defaultType, on
           </div>
           <div className="flex gap-2">
             {uploadResult.videoId && (
-              <Link to={`/videos/${uploadResult.videoId}`}
+              <Link to={`/admin/videos/${uploadResult.videoId}`}
                 className="bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded text-sm transition-colors">View New Video</Link>
             )}
             <button onClick={onDone} className="text-zinc-500 hover:text-zinc-300 px-3 py-1.5 rounded text-sm transition-colors">Done</button>

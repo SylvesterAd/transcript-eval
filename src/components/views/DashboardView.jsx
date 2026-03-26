@@ -164,7 +164,7 @@ export default function DashboardView() {
                     <td className="px-4 py-2 text-right text-zinc-400">{d ? `${d.timecodes?.preserved}/${d.timecodes?.total}` : '—'}</td>
                     <td className="px-4 py-2 text-right text-zinc-400">{d ? `${d.pauses?.preserved}/${d.pauses?.total}` : '—'}</td>
                     <td className="px-4 py-2 text-right">
-                      <Link to={`/videos/${v.id}`} className="text-zinc-500 hover:text-white text-xs transition-colors">View →</Link>
+                      <Link to={`/admin/videos/${v.id}`} className="text-zinc-500 hover:text-white text-xs transition-colors">View →</Link>
                     </td>
                   </tr>
                 )

@@ -81,17 +81,26 @@ export function segmentTranscript(text, {
         lastSentenceEnd = i
       }
 
-      if (elapsed >= maxSeconds) break
+      if (elapsed >= maxSeconds) {
+        // If segment would be too small (< 4 entries), include this entry anyway
+        if (segEnd - segStart + 1 < 4) segEnd = i
+        break
+      }
       segEnd = i
 
       if (elapsed >= minSeconds && lastSentenceEnd > segStart) {
-        // We've passed minimum and have a sentence boundary
-        segEnd = lastSentenceEnd
-        break
+        // Only break at sentence boundary if it gives a reasonable segment duration.
+        // This prevents tiny segments when there's a big time gap in the transcript
+        // (e.g., a 54-second jump between consecutive timecodes).
+        const sentenceElapsed = entries[lastSentenceEnd].seconds - startTime
+        if (sentenceElapsed >= minSeconds / 2) {
+          segEnd = lastSentenceEnd
+          break
+        }
       }
     }
 
-    // If we haven't found a sentence boundary, just use where we got to
+    // If we haven't found enough entries, extend
     if (segEnd === segStart && segStart < entries.length - 1) {
       segEnd = Math.min(segStart + 3, entries.length - 1)
     }

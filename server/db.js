@@ -104,7 +104,43 @@ const migrations = [
   ['video_groups', 'assembly_details_json', 'ALTER TABLE video_groups ADD COLUMN assembly_details_json TEXT'],
   ['experiments', 'video_ids_json', 'ALTER TABLE experiments ADD COLUMN video_ids_json TEXT'],
   ['experiment_runs', 'error_message', 'ALTER TABLE experiment_runs ADD COLUMN error_message TEXT'],
+  ['video_groups', 'upload_batch_id', 'ALTER TABLE video_groups ADD COLUMN upload_batch_id TEXT'],
+  ['video_groups', 'timeline_json', 'ALTER TABLE video_groups ADD COLUMN timeline_json TEXT'],
+  ['videos', 'media_type', "ALTER TABLE videos ADD COLUMN media_type TEXT DEFAULT 'video'"],
+  ['video_groups', 'rough_cut_config_json', 'ALTER TABLE video_groups ADD COLUMN rough_cut_config_json TEXT'],
+  ['video_groups', 'sync_mode', "ALTER TABLE video_groups ADD COLUMN sync_mode TEXT"],
+  ['video_groups', 'editor_state_json', 'ALTER TABLE video_groups ADD COLUMN editor_state_json TEXT'],
+  ['videos', 'frames_status', 'ALTER TABLE videos ADD COLUMN frames_status TEXT'],
 ]
+
+// Migrate experiment_runs CHECK constraint to allow 'partial' status
+try {
+  const tableInfo = db.exec("SELECT sql FROM sqlite_master WHERE name='experiment_runs'")
+  const createSql = tableInfo[0]?.values[0]?.[0] || ''
+  if (createSql.includes("'partial'") === false) {
+    console.log('[db] Migrating experiment_runs to allow partial status...')
+    db.exec(`PRAGMA foreign_keys = OFF;
+      DROP TABLE IF EXISTS experiment_runs_new;
+      CREATE TABLE experiment_runs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        experiment_id INTEGER NOT NULL REFERENCES experiments(id),
+        video_id INTEGER NOT NULL REFERENCES videos(id),
+        run_number INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'complete', 'failed', 'partial')),
+        total_score REAL, score_breakdown_json TEXT, total_tokens INTEGER, total_cost REAL,
+        total_runtime_ms INTEGER, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT,
+        error_message TEXT
+      );
+      INSERT INTO experiment_runs_new SELECT id, experiment_id, video_id, run_number, status,
+        total_score, score_breakdown_json, total_tokens, total_cost, total_runtime_ms,
+        created_at, completed_at, error_message FROM experiment_runs;
+      DROP TABLE experiment_runs;
+      ALTER TABLE experiment_runs_new RENAME TO experiment_runs;
+      PRAGMA foreign_keys = ON;
+    `)
+    console.log('[db] Migration complete')
+  }
+} catch (e) { console.error('[db] Migration error:', e.message) }
 
 for (const [table, column, sql] of migrations) {
   try {

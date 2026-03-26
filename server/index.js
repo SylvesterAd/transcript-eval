@@ -14,6 +14,7 @@ const PORT = 3001
 
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
+app.use(express.text({ limit: '10mb' })) // for sendBeacon (text/plain)
 app.use('/uploads', express.static(join(__dirname, '..', 'uploads')))
 
 app.use('/api/videos', videosRouter)

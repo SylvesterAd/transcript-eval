@@ -15,6 +15,7 @@ router.get('/', (req, res) => {
       sv.version_number,
       (SELECT COUNT(*) FROM experiment_runs er WHERE er.experiment_id = e.id) AS run_count,
       (SELECT COUNT(*) FROM experiment_runs er WHERE er.experiment_id = e.id AND er.status = 'complete') AS completed_runs,
+      (SELECT COUNT(*) FROM experiment_runs er WHERE er.experiment_id = e.id AND er.status = 'partial') AS partial_runs,
       (SELECT ROUND(AVG(er2.total_score), 3) FROM experiment_runs er2 WHERE er2.experiment_id = e.id AND er2.status = 'complete') AS avg_score
     FROM experiments e
     JOIN strategy_versions sv ON sv.id = e.strategy_version_id
@@ -214,6 +215,7 @@ router.get('/:id/progress', (req, res) => {
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END) AS partial,
       ROUND(AVG(CASE WHEN status = 'complete' THEN total_score END), 3) AS avg_score
     FROM experiment_runs WHERE experiment_id = ?
   `).get(expId)
@@ -243,8 +245,8 @@ router.get('/:id/progress', (req, res) => {
         }
       }
     }
-    // For complete runs, attach per-stage similarity from metrics
-    if (run.status === 'complete') {
+    // Attach per-stage data (for complete, partial, AND running runs)
+    if (run.status === 'complete' || run.status === 'partial' || run.status === 'running') {
       run.stages = db.prepare(`
         SELECT rso.stage_index, rso.stage_name, m.similarity_percent
         FROM run_stage_outputs rso
@@ -263,6 +265,7 @@ router.get('/:id/progress', (req, res) => {
     failed: dbStatus.failed,
     running: dbStatus.running,
     pending: dbStatus.pending,
+    partial: dbStatus.partial,
     avgScore: dbStatus.avg_score,
     runs,
   }
@@ -325,6 +328,52 @@ router.post('/:id/retry', (req, res) => {
   res.json({ retried: runIds.length, experimentId: expId })
 })
 
+// Resume partial runs — runs stages that don't have outputs yet
+router.post('/:id/resume', (req, res) => {
+  const expId = parseInt(req.params.id)
+  const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(expId)
+  if (!experiment) return res.status(404).json({ error: 'Experiment not found' })
+
+  const partialRuns = db.prepare(
+    "SELECT id FROM experiment_runs WHERE experiment_id = ? AND status IN ('partial', 'pending')"
+  ).all(expId)
+  if (partialRuns.length === 0) return res.json({ resumed: 0 })
+
+  const runIds = partialRuns.map(r => r.id)
+  for (const runId of runIds) {
+    db.prepare("UPDATE experiment_runs SET status = 'pending' WHERE id = ?").run(runId)
+  }
+
+  const tracker = activeExecutions.get(expId) || { total: 0, completed: 0, failed: 0, running: 0, done: false, runIds: [] }
+  tracker.total += runIds.length
+  tracker.done = false
+  tracker.runIds = [...tracker.runIds, ...runIds]
+  activeExecutions.set(expId, tracker)
+
+  ;(async () => {
+    for (const runId of runIds) {
+      if (abortedExperiments.has(expId)) {
+        db.prepare("UPDATE experiment_runs SET status = 'failed' WHERE id = ? AND status = 'pending'").run(runId)
+        tracker.failed++
+        continue
+      }
+      tracker.running++
+      try {
+        await executeRun(runId)
+        tracker.completed++
+      } catch (err) {
+        tracker.failed++
+        console.error(`[resume] Run ${runId} failed:`, err.message)
+      }
+      tracker.running--
+    }
+    if (tracker.running === 0) tracker.done = true
+    abortedExperiments.delete(expId)
+  })()
+
+  res.json({ resumed: runIds.length, experimentId: expId })
+})
+
 // Get a single stage's input/output/human for the View modal
 router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
   const run = db.prepare(`
@@ -350,14 +399,43 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
     SELECT * FROM metrics WHERE run_stage_output_id = ?
   `).all(stage.id)
 
+  // Parse segment data for llm_parallel stages
+  const isParallel = stage.prompt_used && stage.prompt_used.startsWith('[Parallel LLM]')
+  let segments = null
+  let reconstructedOutput = null
+  if (isParallel) {
+    try {
+      const parsed = JSON.parse(stage.output_text)
+      if (Array.isArray(parsed) && parsed[0]?.segment) {
+        segments = parsed
+        reconstructedOutput = parsed.map(s => s.cleanedText || '').join('\n\n')
+      }
+    } catch {
+      // JSON likely truncated at 50k limit — find last complete segment object and close the array
+      const text = stage.output_text
+      const lastSep = text.lastIndexOf('},{"segment":')
+      if (lastSep !== -1) {
+        try {
+          const parsed = JSON.parse(text.slice(0, lastSep + 1) + ']')
+          if (Array.isArray(parsed) && parsed[0]?.segment) {
+            segments = parsed
+            reconstructedOutput = parsed.map(s => s.cleanedText || '').join('\n\n')
+          }
+        } catch {}
+      }
+    }
+  }
+
+  const effectiveOutput = reconstructedOutput || stage.output_text
+
   res.json({
     input: stage.input_text,
-    output: stage.output_text,
+    output: effectiveOutput,
     human: human?.content || null,
     inputNormalized: normalizeForDiff(stage.input_text),
-    outputNormalized: normalizeForDiff(stage.output_text),
+    outputNormalized: normalizeForDiff(effectiveOutput),
     humanNormalized: normalizeForDiff(human?.content),
-    normalizedDiff: computeDiff(human?.content, stage.output_text),
+    normalizedDiff: computeDiff(human?.content, effectiveOutput),
     promptUsed: stage.prompt_used,
     systemInstruction: stage.system_instruction_used,
     stageName: stage.stage_name,
@@ -365,6 +443,9 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
     model: stage.model,
     runtime_ms: stage.runtime_ms,
     metrics,
+    segments,
+    isParallel,
+    llmResponseRaw: stage.llm_response_raw || null,
   })
 })
 
@@ -506,6 +587,20 @@ router.delete('/:id', (req, res) => {
   db.prepare('DELETE FROM experiment_runs WHERE experiment_id = ?').run(req.params.id)
   db.prepare('DELETE FROM experiments WHERE id = ?').run(req.params.id)
   res.json({ success: true })
+})
+
+// Today's LLM spending summary
+router.get('/spending/today', (req, res) => {
+  const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) AS runs,
+      COALESCE(SUM(total_cost), 0) AS total_cost,
+      COALESCE(SUM(total_tokens), 0) AS total_tokens
+    FROM experiment_runs
+    WHERE completed_at >= ? AND status IN ('complete', 'partial')
+  `).get(today)
+  res.json(stats)
 })
 
 export default router

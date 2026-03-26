@@ -16,7 +16,7 @@ if (orphaned.changes > 0) console.log(`[llm-runner] Cleaned up ${orphaned.change
 
 /**
  * Execute a full experiment run for a single video.
- * Supports stage types: "llm" (default), "programmatic", "llm_parallel"
+ * Supports stage types: "llm" (default), "programmatic", "llm_parallel", "llm_question"
  */
 export async function executeRun(experimentRunId) {
   const run = db.prepare(`
@@ -70,6 +70,7 @@ export async function executeRun(experimentRunId) {
   const human = humanTranscript.content
   let currentInput = raw
   let segments = null // For parallel processing
+  let llmAnswer = '' // Stores most recent llm_question output for {{llm_answer}} template
   const startTime = Date.now()
   let totalTokens = 0
   let totalCost = 0
@@ -85,9 +86,16 @@ export async function executeRun(experimentRunId) {
     const lastStage = stages[lastCompleted.stage_index]
     const lastType = lastStage?.type || 'llm'
 
-    // Restore state based on what the last completed stage was
-    if (lastType === 'llm' || (lastType === 'programmatic' && lastStage?.action === 'reassemble')) {
-      currentInput = lastCompleted.output_text
+    // Restore currentInput from the most recent stage that modifies it
+    // (llm_question doesn't modify currentInput, so walk backward to find the right one)
+    for (let ci = completedStages.length - 1; ci >= 0; ci--) {
+      const cs = completedStages[ci]
+      const csStage = stages[cs.stage_index]
+      const csType = csStage?.type || 'llm'
+      if (csType === 'llm' || (csType === 'programmatic' && csStage?.action === 'reassemble')) {
+        currentInput = cs.output_text
+        break
+      }
     }
     if (lastType === 'programmatic' && lastStage?.action === 'segment') {
       // Rebuild segments for the next llm_parallel stage
@@ -125,6 +133,13 @@ export async function executeRun(experimentRunId) {
         } catch { /* couldn't parse, will need to re-run */ }
       }
     }
+    // Restore llmAnswer from the most recent llm_question stage
+    for (const cs of completedStages) {
+      const s = stages[cs.stage_index]
+      if (s?.type === 'llm_question') {
+        llmAnswer = cs.output_text
+      }
+    }
     console.log(`[llm-runner] Resuming run ${experimentRunId} from stage ${resumeFrom} (${completedStages.length} stages already done)`)
   }
 
@@ -152,6 +167,7 @@ export async function executeRun(experimentRunId) {
       })
       const stageStart = Date.now()
       let stageOutput = ''
+      let llmResponseRaw = null
       let tokensIn = 0
       let tokensOut = 0
       let stageCost = 0
@@ -201,15 +217,19 @@ export async function executeRun(experimentRunId) {
         // Run LLM on each segment separately
         if (!segments || segments.length === 0) {
           // Fallback: treat as single LLM call
-          const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput)
+          const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput).replace(/\{\{llm_answer\}\}/g, llmAnswer)
+          const augmentedSystem = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect).replace(/\{\{llm_answer\}\}/g, llmAnswer)
           const llmResult = await callLLM({
             model: stage.model || 'claude-sonnet-4-20250514',
-            systemInstruction: stage.system_instruction || '',
+            systemInstruction: augmentedSystem,
             prompt,
             params: stage.params || {},
             experimentId: run.experiment_id,
           })
-          stageOutput = llmResult.text
+          stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
+          if (stage.output_mode && stage.output_mode !== 'passthrough') {
+            llmResponseRaw = llmResult.text
+          }
           tokensIn = llmResult.tokensIn
           tokensOut = llmResult.tokensOut
           stageCost = llmResult.cost
@@ -217,6 +237,12 @@ export async function executeRun(experimentRunId) {
           systemUsed = stage.system_instruction || ''
           modelUsed = stage.model || 'claude-sonnet-4-20250514'
         } else {
+          // Backward compat: if system_instruction doesn't contain segment rules, inject them
+          const sysInstr = stage.system_instruction || ''
+          if (!sysInstr.includes('SEGMENT BOUNDARY FORMAT') && !sysInstr.includes('transcript segments in a special format')) {
+            stage = { ...stage, system_instruction: augmentSystemForSegments(sysInstr, stage.output_mode) }
+          }
+
           // Process segments with staggered concurrency pool (max 3, 1s stagger)
           // Saves each segment result to DB immediately so nothing is lost on crash/restart
           const CONCURRENCY = 3
@@ -256,8 +282,8 @@ export async function executeRun(experimentRunId) {
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)
             `).run(
               experimentRunId, i, stage.name || `Stage ${i + 1}`,
-              typeof currentInput === 'string' ? currentInput.slice(0, 50000) : JSON.stringify(currentInput).slice(0, 50000),
-              '[]', '', stage.system_instruction || '',
+              typeof currentInput === 'string' ? currentInput.slice(0, 500000) : JSON.stringify(currentInput).slice(0, 500000),
+              '[]', '', augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect),
               stage.model || 'claude-sonnet-4-20250514',
               JSON.stringify(stage.params || {})
             )
@@ -269,6 +295,7 @@ export async function executeRun(experimentRunId) {
 
           let nextIdx = 0
           let aborted = false
+          const pendingContextDeletions = [] // { sourceSegment, timecode, text }
           async function worker() {
             while (nextIdx < segments.length && !aborted) {
               if (abortedExperiments.has(run.experiment_id)) { aborted = true; return }
@@ -285,10 +312,12 @@ export async function executeRun(experimentRunId) {
               segPrompt = insertTranscript(segPrompt, fullSegText)
               segPrompt = segPrompt.replace(/\{\{segment_number\}\}/g, String(s + 1))
               segPrompt = segPrompt.replace(/\{\{total_segments\}\}/g, String(segments.length))
+              segPrompt = segPrompt.replace(/\{\{llm_answer\}\}/g, llmAnswer)
 
+              const augmentedSystem = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect).replace(/\{\{llm_answer\}\}/g, llmAnswer)
               const llmResult = await callLLM({
                 model: stage.model || 'claude-sonnet-4-20250514',
-                systemInstruction: stage.system_instruction || '',
+                systemInstruction: augmentedSystem,
                 prompt: segPrompt,
                 params: stage.params || {},
                 experimentId: run.experiment_id,
@@ -296,18 +325,24 @@ export async function executeRun(experimentRunId) {
 
               if (abortedExperiments.has(run.experiment_id)) { aborted = true; return }
 
-              seg.cleanedText = llmResult.text
+              const applied = applyOutputMode(stage.output_mode, llmResult.text, seg.mainText)
+              seg.cleanedText = applied.cleanedText
+              if (applied.contextDeletions.length > 0) {
+                for (const cd of applied.contextDeletions) {
+                  pendingContextDeletions.push({ sourceSegment: s, ...cd })
+                }
+              }
               tokensIn += llmResult.tokensIn || 0
               tokensOut += llmResult.tokensOut || 0
               stageCost += llmResult.cost || 0
               segmentsDone++
 
-              partialResults[s] = { segment: s + 1, cleanedText: llmResult.text }
+              partialResults[s] = { segment: s + 1, cleanedText: llmResult.text, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt }
 
               // Save to DB immediately after each segment
               const currentOutput = JSON.stringify(partialResults.filter(r => r !== null))
               db.prepare('UPDATE run_stage_outputs SET output_text = ?, tokens_in = ?, tokens_out = ?, cost = ? WHERE id = ?')
-                .run(currentOutput.slice(0, 50000), tokensIn, tokensOut, stageCost, stageRowId)
+                .run(currentOutput.slice(0, 500000), tokensIn, tokensOut, stageCost, stageRowId)
 
               const p = runStageProgress.get(experimentRunId)
               if (p) p.segmentsDone = segmentsDone
@@ -326,44 +361,88 @@ export async function executeRun(experimentRunId) {
             // Save whatever we have so far before marking failed
             const currentOutput = JSON.stringify(partialResults.filter(r => r !== null))
             db.prepare('UPDATE run_stage_outputs SET output_text = ?, runtime_ms = ? WHERE id = ?')
-              .run(currentOutput.slice(0, 50000), Date.now() - stageStart, stageRowId)
+              .run(currentOutput.slice(0, 500000), Date.now() - stageStart, stageRowId)
             db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Aborted by user' WHERE id = ?").run(experimentRunId)
             runStageProgress.delete(experimentRunId)
             throw new Error('Aborted')
           }
 
-          // Final save with all segments
+          // Apply context deletions: deletions targeting timecodes outside a segment's mainText
+          if (pendingContextDeletions.length > 0 && stage.output_mode === 'deletion') {
+            console.log(`[llm-runner] Applying ${pendingContextDeletions.length} context deletion(s) to neighboring segments`)
+            for (const cd of pendingContextDeletions) {
+              const targetIdx = segments.findIndex((seg, idx) =>
+                idx !== cd.sourceSegment && seg.mainText.includes(cd.timecode)
+              )
+              if (targetIdx === -1) {
+                console.warn(`[llm-runner] Context deletion: timecode ${cd.timecode} not found in any neighbor`)
+                continue
+              }
+              segments[targetIdx].cleanedText = applySingleDeletion(
+                segments[targetIdx].cleanedText, cd.timecode, cd.text
+              )
+            }
+          }
+
+          // Final save with all segments (include input for segment detail view)
           stageOutput = JSON.stringify(segments.map((s, idx) => ({
             segment: idx + 1,
             cleanedText: s.cleanedText || s.mainText,
+            llmResponseRaw: partialResults[idx]?.llmResponseRaw || null,
+            inputText: partialResults[idx]?.inputText || buildSegmentPromptText(s),
+            promptUsed: partialResults[idx]?.promptUsed || '',
           })))
           // Update the existing row instead of inserting a new one
           db.prepare(`UPDATE run_stage_outputs SET output_text = ?, prompt_used = ?, tokens_in = ?, tokens_out = ?, cost = ?, runtime_ms = ? WHERE id = ?`)
-            .run(stageOutput.slice(0, 50000),
+            .run(stageOutput.slice(0, 500000),
               `[Parallel LLM] Processed ${segments.length} segments (3x concurrent) with: ${(stage.prompt || '').slice(0, 200)}...`,
               tokensIn, tokensOut, stageCost, Date.now() - stageStart, stageRowId)
           promptUsed = '__already_saved__'
-          systemUsed = stage.system_instruction || ''
+          systemUsed = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect)
           modelUsed = stage.model || 'claude-sonnet-4-20250514'
         }
 
-      } else {
-        // Standard LLM stage
-        const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput)
+      } else if (stageType === 'llm_question') {
+        // LLM Question: ask LLM a question, store answer as {{llm_answer}}, pass transcript through unchanged
+        const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput).replace(/\{\{llm_answer\}\}/g, llmAnswer)
+        const sysInstr = (stage.system_instruction || '').replace(/\{\{llm_answer\}\}/g, llmAnswer)
         const llmResult = await callLLM({
           model: stage.model || 'claude-sonnet-4-20250514',
-          systemInstruction: stage.system_instruction || '',
+          systemInstruction: sysInstr,
+          prompt,
+          params: stage.params || {},
+          experimentId: run.experiment_id,
+        })
+        stageOutput = llmResult.text
+        llmAnswer = llmResult.text // Store for {{llm_answer}} in subsequent stages
+        tokensIn = llmResult.tokensIn
+        tokensOut = llmResult.tokensOut
+        stageCost = llmResult.cost
+        promptUsed = prompt
+        systemUsed = sysInstr
+        modelUsed = stage.model || 'claude-sonnet-4-20250514'
+
+      } else {
+        // Standard LLM stage
+        const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput).replace(/\{\{llm_answer\}\}/g, llmAnswer)
+        const augmentedSystem = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect).replace(/\{\{llm_answer\}\}/g, llmAnswer)
+        const llmResult = await callLLM({
+          model: stage.model || 'claude-sonnet-4-20250514',
+          systemInstruction: augmentedSystem,
           prompt,
           params: stage.params || {},
           experimentId: run.experiment_id,
         })
 
-        stageOutput = llmResult.text
+        stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
+        if (stage.output_mode && stage.output_mode !== 'passthrough') {
+          llmResponseRaw = llmResult.text
+        }
         tokensIn = llmResult.tokensIn
         tokensOut = llmResult.tokensOut
         stageCost = llmResult.cost
         promptUsed = prompt
-        systemUsed = stage.system_instruction || ''
+        systemUsed = augmentedSystem
         modelUsed = stage.model || 'claude-sonnet-4-20250514'
       }
 
@@ -380,17 +459,18 @@ export async function executeRun(experimentRunId) {
       } else {
         const stageResult = db.prepare(`
           INSERT INTO run_stage_outputs (experiment_run_id, stage_index, stage_name, input_text, output_text,
-            prompt_used, system_instruction_used, model, params_json, tokens_in, tokens_out, cost, runtime_ms)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            prompt_used, system_instruction_used, model, params_json, tokens_in, tokens_out, cost, runtime_ms, llm_response_raw)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           experimentRunId, i, stage.name || `Stage ${i + 1}`,
-          typeof currentInput === 'string' ? currentInput.slice(0, 50000) : JSON.stringify(currentInput).slice(0, 50000),
-          stageOutput.slice(0, 50000),
-          (promptUsed || '').slice(0, 50000), systemUsed,
+          typeof currentInput === 'string' ? currentInput.slice(0, 500000) : JSON.stringify(currentInput).slice(0, 500000),
+          stageOutput.slice(0, 500000),
+          (promptUsed || '').slice(0, 500000), systemUsed,
           modelUsed,
           JSON.stringify(stage.params || {}),
           tokensIn, tokensOut,
-          stageCost, stageRuntime
+          stageCost, stageRuntime,
+          llmResponseRaw ? llmResponseRaw.slice(0, 500000) : null
         )
         stageOutputId = stageResult.lastInsertRowid
       }
@@ -451,16 +531,348 @@ function insertTranscript(template, text) {
     .replace(/\{\{transcript\}\}/g, text)
 }
 
+/**
+ * Augment system instruction with output format rules for deletion/keep_only modes.
+ * In these modes, the LLM returns a JSON array of timecoded items instead of a full transcript.
+ */
+function augmentSystemForOutputMode(systemInstruction, outputMode, identifyPreselect) {
+  if (!outputMode || outputMode === 'passthrough') return systemInstruction
+
+  const modeInstructions = {
+    deletion: `
+
+## CRITICAL OUTPUT FORMAT — DELETION MODE
+You are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.
+
+Return ONLY a valid JSON array like this:
+\`\`\`json
+[
+  {"timecode": "[00:01:23]", "text": "Um, you know,"},
+  {"timecode": "[00:02:45]"},
+  {"timecode": "[00:03:10]", "text": "basically like"}
+]
+\`\`\`
+
+Rules:
+- "timecode" (REQUIRED) — the exact timecode from the transcript (e.g., "[00:01:23]")
+- If "text" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)
+- If "text" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.
+- "text" must be a VERBATIM substring copied from the transcript
+- Return ONLY the JSON array — no commentary, no explanation, no markdown outside the JSON block
+- Be precise — the text must match EXACTLY what appears in the transcript`,
+
+    keep_only: `
+
+## CRITICAL OUTPUT FORMAT — KEEP ONLY MODE
+You are in KEEP ONLY mode. Instead of returning a cleaned transcript, you must return a JSON array identifying the text to KEEP. Everything else will be removed.
+
+Each item references a timecode from the transcript. You can keep an entire timecoded segment or specific text within it.
+
+Return ONLY a valid JSON array like this:
+\`\`\`json
+[
+  {"timecode": "[00:00:15]"},
+  {"timecode": "[00:01:23]", "text": "The main point is that we need to focus"},
+  {"timecode": "[00:05:30]"}
+]
+\`\`\`
+
+Rules:
+- Include "timecode" — the exact timecode from the transcript (e.g., "[00:01:23]")
+- Include "text" — the specific text to keep from that segment. Must be a verbatim substring.
+- If "text" is OMITTED, the ENTIRE segment at that timecode is kept (timecode + all its text)
+- Return ONLY the JSON array — no commentary, no explanation, no markdown outside the JSON block
+- All timecodes for kept segments are preserved in the output
+- Be precise — the text must match exactly what appears in the transcript`,
+
+    identify: `
+
+## CRITICAL OUTPUT FORMAT — IDENTIFY MODE
+You are in IDENTIFY mode. Instead of editing the transcript, classify problematic segments by category with reasons.
+
+Return ONLY a valid JSON array like this:
+\`\`\`json
+[
+  {"timecode": "[00:01:23]", "text": "Um, you know, basically", "category": "repetition", "reason": "Repeats the same point made at [00:00:45]"},
+  {"timecode": "[00:02:45]", "category": "lengthy", "reason": "Over-explains a simple concept that was already clear"}
+]
+\`\`\`
+
+Categories (use EXACTLY these values):
+- "repetition" — Same idea repeated, duplicate examples, saying it twice in different words
+- "lengthy" — Over-explanation, too much setup, hedging, unnecessary detail
+- "technical_unclear" — Too technical, vague phrasing, unclear structure, assumed context
+- "irrelevance" — Irrelevant jokes, tangents, tone mismatch, distracting from the point
+
+Rules:
+- "timecode" (REQUIRED) — exact timecode from transcript
+- "category" (REQUIRED) — one of the four categories above
+- "reason" (REQUIRED) — brief explanation of WHY this is a problem
+- "text" (OPTIONAL) — the specific problematic text. If omitted, the entire segment is flagged
+- Return ONLY the JSON array — no commentary`,
+  }
+
+  let result = (systemInstruction || '') + (modeInstructions[outputMode] || '')
+
+  // Append reason tracking when identifyPreselect is enabled
+  if (identifyPreselect?.enabled && identifyPreselect?.categories?.length > 0 &&
+      (outputMode === 'deletion' || outputMode === 'keep_only')) {
+    const allCategories = {
+      filler_words: 'Filler words: um, uh, you know, like, basically, I mean',
+      false_starts: 'False starts: abandoned sentences, self-corrections, incomplete thoughts',
+      repetition: 'Same idea repeated, duplicate examples',
+      lengthy: 'Over-explanation, unnecessary detail',
+      technical_unclear: 'Too technical, vague phrasing, unclear',
+      irrelevance: 'Irrelevant tangents, jokes, off-topic',
+    }
+    const selected = identifyPreselect.categories
+    const focusLabels = selected.map(c => `"${c}"`).join(', ')
+    const categoryList = Object.entries(allCategories)
+      .map(([key, desc]) => `- "${key}" — ${desc}${selected.includes(key) ? ' ✓ PRIMARY' : ''}`)
+      .join('\n')
+
+    result += `
+
+## REASON TRACKING (IDENTIFICATION PRESELECT)
+Every item in your JSON array MUST also include "category" and "reason" fields.
+
+Updated format example:
+\`\`\`json
+[
+  {"timecode": "[00:01:23]", "text": "Um, you know,", "category": "filler_words", "reason": "Verbal fillers that add no content"},
+  {"timecode": "[00:02:45]", "category": "false_starts", "reason": "Speaker abandons sentence and restarts at [00:02:50]"},
+  {"timecode": "[00:03:10]", "text": "basically like", "category": "repetition", "reason": "Repeats concept from [00:01:00]"}
+]
+\`\`\`
+
+Categories (use EXACTLY these values):
+${categoryList}
+
+PRIMARY FOCUS for this stage: ${focusLabels}
+Prioritize finding and categorizing these types, but also flag other categories when encountered.
+
+Additional rules:
+- "category" (REQUIRED) — one of the six categories above
+- "reason" (REQUIRED) — brief explanation of WHY this text should be ${outputMode === 'deletion' ? 'deleted' : 'kept'}`
+  }
+
+  return result
+}
+
+/**
+ * Apply output_mode post-processing to LLM output.
+ * For deletion/keep_only modes, parses JSON array of timecoded items and performs text surgery on inputText.
+ */
+function applyOutputMode(outputMode, llmOutput, inputText) {
+  if (!outputMode || outputMode === 'passthrough') return { cleanedText: llmOutput, contextDeletions: [] }
+
+  // Parse the LLM output as JSON array
+  let items
+  try {
+    // Handle markdown code fences around JSON
+    const jsonMatch = llmOutput.match(/```(?:json)?\s*([\s\S]*?)```/)
+    const raw = jsonMatch ? jsonMatch[1].trim() : llmOutput.trim()
+    items = JSON.parse(raw)
+  } catch (e) {
+    console.error(`[llm-runner] Failed to parse LLM output as JSON for output_mode=${outputMode}:`, e.message)
+    console.error(`[llm-runner] Raw output (first 500 chars):`, llmOutput.slice(0, 500))
+    // Fallback: return input unchanged — deletion/keep_only requires JSON, so nothing can be applied
+    return { cleanedText: inputText, contextDeletions: [] }
+  }
+
+  if (!Array.isArray(items)) {
+    console.error('[llm-runner] LLM output is not an array, falling back to unchanged input')
+    return { cleanedText: inputText, contextDeletions: [] }
+  }
+
+  // Parse the input transcript into timecoded entries
+  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const entries = []
+  let match
+  while ((match = tcRegex.exec(inputText)) !== null) {
+    const start = match.index
+    const textStart = match.index + match[0].length
+    const nextMatch = inputText.indexOf('[', textStart)
+    // Check if the next '[' is actually a timecode or a pause marker
+    let end = inputText.length
+    const searchFrom = textStart
+    const remaining = inputText.slice(searchFrom)
+    const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/)
+    if (nextTcMatch) {
+      end = searchFrom + nextTcMatch.index
+    }
+    entries.push({
+      timecode: match[0].trim(),
+      fullMatch: inputText.slice(start, end),
+      text: inputText.slice(textStart, end),
+      start,
+      end,
+    })
+  }
+
+  if (outputMode === 'deletion') {
+    let result = inputText
+    // Process deletions in reverse order to preserve positions
+    const deletions = []
+    const contextDeletions = []
+    for (const item of items) {
+      if (!item.timecode) continue
+      const entry = entries.find(e => e.timecode === item.timecode)
+      if (!entry) {
+        // Timecode not in mainText — collect as context deletion for neighboring segments
+        contextDeletions.push({ timecode: item.timecode, text: item.text })
+        continue
+      }
+      if (!item.text) {
+        // No text field = delete entire timecoded segment
+        deletions.push({ start: entry.start, end: entry.end })
+        continue
+      }
+      // Check if the text covers the entire segment content
+      const segText = entry.text.trim()
+      const itemText = item.text.trim()
+      if (segText === itemText || segText.toLowerCase() === itemText.toLowerCase()) {
+        // Full segment deletion — remove timecode + all text
+        deletions.push({ start: entry.start, end: entry.end })
+      } else {
+        // Partial deletion — find and remove just the specified words
+        const idx = entry.text.indexOf(item.text)
+        if (idx !== -1) {
+          const absStart = entry.start + (entry.fullMatch.length - entry.text.length) + idx
+          deletions.push({ start: absStart, end: absStart + item.text.length })
+        } else {
+          // Try case-insensitive match
+          const lowerIdx = entry.text.toLowerCase().indexOf(item.text.toLowerCase())
+          if (lowerIdx !== -1) {
+            const absStart = entry.start + (entry.fullMatch.length - entry.text.length) + lowerIdx
+            deletions.push({ start: absStart, end: absStart + item.text.length })
+          } else {
+            console.warn(`[llm-runner] Deletion: text "${item.text.slice(0, 80)}" not found in segment ${item.timecode}`)
+          }
+        }
+      }
+    }
+
+    // Sort by position descending and apply
+    deletions.sort((a, b) => b.start - a.start)
+    for (const del of deletions) {
+      result = result.slice(0, del.start) + result.slice(del.end)
+    }
+
+    // Clean up: collapse multiple newlines, trim whitespace
+    const cleanedText = result.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').replace(/  +/g, ' ').trim()
+    return { cleanedText, contextDeletions }
+  }
+
+  if (outputMode === 'keep_only') {
+    // Build result from kept segments only
+    const kept = []
+    for (const item of items) {
+      if (!item.timecode) continue
+      const entry = entries.find(e => e.timecode === item.timecode)
+      if (!entry) {
+        console.warn(`[llm-runner] Keep: timecode ${item.timecode} not found in input`)
+        continue
+      }
+      if (item.text) {
+        // Keep only specific text from this segment
+        const idx = entry.text.indexOf(item.text)
+        if (idx !== -1) {
+          kept.push(`${entry.timecode} ${item.text.trim()}`)
+        } else {
+          // Try case-insensitive
+          const lowerIdx = entry.text.toLowerCase().indexOf(item.text.toLowerCase())
+          if (lowerIdx !== -1) {
+            // Use the original text from the transcript (preserve casing)
+            const originalText = entry.text.slice(lowerIdx, lowerIdx + item.text.length)
+            kept.push(`${entry.timecode} ${originalText.trim()}`)
+          } else {
+            console.warn(`[llm-runner] Keep: text "${item.text.slice(0, 50)}" not found in segment ${item.timecode}`)
+          }
+        }
+      } else {
+        // Keep entire segment
+        kept.push(entry.fullMatch.trim())
+      }
+    }
+    return { cleanedText: kept.join('\n').trim(), contextDeletions: [] }
+  }
+
+  if (outputMode === 'identify') {
+    // Identify mode: pass input through unchanged — raw JSON stored in llm_response_raw
+    return { cleanedText: inputText, contextDeletions: [] }
+  }
+
+  // Unknown mode, return as-is
+  return { cleanedText: llmOutput, contextDeletions: [] }
+}
+
+function applySingleDeletion(text, timecode, deleteText) {
+  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const entries = []
+  let match
+  while ((match = tcRegex.exec(text)) !== null) {
+    const start = match.index
+    const textStart = match.index + match[0].length
+    let end = text.length
+    const remaining = text.slice(textStart)
+    const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/)
+    if (nextTcMatch) end = textStart + nextTcMatch.index
+    entries.push({ timecode: match[0].trim(), text: text.slice(textStart, end), start, end,
+      fullMatchLen: match[0].length })
+  }
+
+  const entry = entries.find(e => e.timecode === timecode)
+  if (!entry) return text // already removed or not present
+
+  if (!deleteText) {
+    // Full timecoded line deletion
+    return (text.slice(0, entry.start) + text.slice(entry.end))
+      .replace(/\n{3,}/g, '\n\n').replace(/  +/g, ' ').trim()
+  }
+
+  // Partial text deletion
+  const idx = entry.text.indexOf(deleteText)
+  const searchIdx = idx !== -1 ? idx : entry.text.toLowerCase().indexOf(deleteText.toLowerCase())
+  if (searchIdx !== -1) {
+    const absStart = entry.start + entry.fullMatchLen + searchIdx
+    return (text.slice(0, absStart) + text.slice(absStart + deleteText.length))
+      .replace(/\n{3,}/g, '\n\n').replace(/  +/g, ' ').trim()
+  }
+
+  console.warn(`[llm-runner] Context deletion: text "${deleteText?.slice(0, 80)}" not found in ${timecode}`)
+  return text
+}
+
 function buildSegmentPromptText(seg) {
   let text = ''
   if (seg.beforeContext) {
-    text += `--- CONTEXT BEFORE (do NOT modify) ---\n${seg.beforeContext}\n--- END CONTEXT BEFORE ---\n\n`
+    text += `<context>\n${seg.beforeContext}\n`
   }
-  text += `--- MAIN SEGMENT (process this) ---\n${seg.mainText}\n--- END MAIN SEGMENT ---`
+  text += `*****\n<segment>\n${seg.mainText}\n*****`
   if (seg.afterContext) {
-    text += `\n\n--- CONTEXT AFTER (do NOT modify) ---\n${seg.afterContext}\n--- END CONTEXT AFTER ---`
+    text += `\n<context>\n${seg.afterContext}`
   }
   return text
+}
+
+function augmentSystemForSegments(systemInstruction, outputMode) {
+  const base = `
+
+## SEGMENT BOUNDARY FORMAT
+The transcript uses ***** markers and XML-style tags:
+- <context> sections = surrounding text for continuity — READ for context awareness but do NOT modify or include in output
+- <segment> section (between ***** markers) = ONLY text to process
+- Use <context> to maintain natural transitions, avoid abrupt starts/ends, and understand what comes before/after`
+
+  if (outputMode === 'deletion' || outputMode === 'keep_only' || outputMode === 'identify') {
+    return (systemInstruction || '') + base + `
+- Your JSON array must reference ONLY timecodes found within the <segment> section — ignore timecodes in <context>
+- Do NOT output markers, tags, or context text — output ONLY the JSON array as specified above`
+  }
+
+  return (systemInstruction || '') + base + `
+- Output ONLY the processed <segment> content — no markers, no tags, no context text`
 }
 
 function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex, raw, human, current, videoId) {
@@ -690,6 +1102,9 @@ async function callOpenAI({ model, systemInstruction, prompt, params, apiKey, si
   messages.push({ role: 'user', content: prompt })
 
   const body = { model, messages }
+  if (params.thinking_level && params.thinking_level !== 'OFF') {
+    body.reasoning_effort = params.thinking_level.toLowerCase()
+  }
   if (params.temperature !== undefined) body.temperature = params.temperature
 
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -713,9 +1128,9 @@ async function callOpenAI({ model, systemInstruction, prompt, params, apiKey, si
   const tokensOut = data.usage?.completion_tokens || 0
 
   const pricing = {
-    'gpt-5.4': { input: 2.5, output: 10 },
+    'gpt-5.4': { input: 2.5, output: 15 },
   }
-  const p = pricing[model] || { input: 2.5, output: 10 }
+  const p = pricing[model] || { input: 2.5, output: 15 }
   const cost = (tokensIn * p.input + tokensOut * p.output) / 1_000_000
 
   return { text, tokensIn, tokensOut, cost }
@@ -782,16 +1197,17 @@ async function callGemini({ model, systemInstruction, prompt, params, apiKey, si
     // Usage metadata is in the last chunk
     if (chunk.usageMetadata) {
       tokensIn = chunk.usageMetadata.promptTokenCount || 0
-      tokensOut = chunk.usageMetadata.candidatesTokenCount || 0
+      // candidatesTokenCount does NOT include thinking tokens — add thoughtsTokenCount
+      tokensOut = (chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0)
     }
   }
 
   const pricing = {
-    'gemini-3.1-pro-preview': { input: 2.5, output: 15 },
-    'gemini-3-pro-preview': { input: 2.5, output: 15 },
-    'gemini-3-flash-preview': { input: 0.15, output: 0.6 },
+    'gemini-3.1-pro-preview': { input: 2.0, output: 12 },
+    'gemini-3-pro-preview': { input: 2.0, output: 12 },
+    'gemini-3-flash-preview': { input: 0.5, output: 3 },
   }
-  const p = pricing[model] || { input: 1.25, output: 10 }
+  const p = pricing[model] || { input: 2.0, output: 12 }
   const cost = (tokensIn * p.input + tokensOut * p.output) / 1_000_000
 
   return { text, tokensIn, tokensOut, cost }

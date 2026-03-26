@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom'
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useApi, apiPost } from '../../hooks/useApi.js'
 import DiffPanel from '../shared/DiffPanel.jsx'
 import ScoreCard from '../shared/ScoreCard.jsx'
@@ -23,7 +23,7 @@ export default function RunDetailView() {
       {/* Header */}
       <div>
         <div className="text-sm text-zinc-500 mb-1">
-          <Link to="/experiments" className="hover:text-zinc-300">Experiments</Link>
+          <Link to="/admin/experiments" className="hover:text-zinc-300">Experiments</Link>
           <span className="mx-2">&rarr;</span>
           {run.experiment_name}
         </div>
@@ -94,7 +94,7 @@ export default function RunDetailView() {
       )}
 
       {/* Stage detail tabs */}
-      {currentStage && <StageDetail stage={currentStage} diff={stageDiff?.diff} human={run.human} raw={run.raw} />}
+      {currentStage && <StageDetail stage={currentStage} diff={stageDiff?.diff} human={run.human} raw={run.raw} allStages={stages} activeStageIndex={activeStage} />}
 
       {/* AI Analysis */}
       <AnalysisPanel runId={runId} />
@@ -194,13 +194,263 @@ function ReasonAccuracy({ scores }) {
   )
 }
 
-function StageDetail({ stage, diff, human, raw }) {
+const CATEGORY_COLORS = {
+  filler_words:      { bg: 'bg-red-800/40',     text: 'text-red-300',    border: 'border-red-700',    label: 'Filler Words' },
+  false_starts:      { bg: 'bg-rose-950/50',    text: 'text-rose-300',   border: 'border-rose-800',   label: 'False Starts' },
+  repetition:        { bg: 'bg-blue-900/40',    text: 'text-blue-300',   border: 'border-blue-800',   label: 'Repetition' },
+  lengthy:           { bg: 'bg-purple-900/40',   text: 'text-purple-300', border: 'border-purple-800', label: 'Lengthy' },
+  technical_unclear: { bg: 'bg-zinc-700/40',     text: 'text-zinc-300',   border: 'border-zinc-600',   label: 'Technical / Unclear' },
+  irrelevance:       { bg: 'bg-white/10',        text: 'text-white',      border: 'border-zinc-500',   label: 'Irrelevance' },
+}
+
+const CATEGORY_V2 = {
+  filler_words:      { bg: 'bg-red-800/40',     bgSubtle: 'bg-red-800/20',     borderLeft: 'border-red-400' },
+  false_starts:      { bg: 'bg-rose-950/50',    bgSubtle: 'bg-rose-950/25',    borderLeft: 'border-rose-400' },
+  repetition:        { bg: 'bg-blue-900/40',    bgSubtle: 'bg-blue-900/20',    borderLeft: 'border-blue-400' },
+  lengthy:           { bg: 'bg-purple-900/40',   bgSubtle: 'bg-purple-900/20',  borderLeft: 'border-purple-400' },
+  technical_unclear: { bg: 'bg-zinc-700/40',     bgSubtle: 'bg-zinc-700/20',    borderLeft: 'border-zinc-500' },
+  irrelevance:       { bg: 'bg-white/10',        bgSubtle: 'bg-white/5',        borderLeft: 'border-zinc-400' },
+}
+
+function parseIdentifications(stage) {
+  const items = []
+  const parse = (raw) => {
+    if (!raw) return
+    try {
+      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+      const str = jsonMatch ? jsonMatch[1].trim() : raw.trim()
+      const arr = JSON.parse(str)
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          if (item.category && item.timecode) items.push(item)
+        }
+      }
+    } catch {}
+  }
+
+  // Check if it's a parallel stage (output_text is JSON array of segments)
+  let outputParsed
+  try { outputParsed = JSON.parse(stage.output_text) } catch {}
+  if (Array.isArray(outputParsed) && outputParsed[0]?.llmResponseRaw !== undefined) {
+    for (const seg of outputParsed) parse(seg.llmResponseRaw)
+  } else {
+    parse(stage.llm_response_raw)
+  }
+  return items
+}
+
+function aggregateIdentifications(stages, upToIndex) {
+  const all = []
+  for (let i = 0; i < upToIndex; i++) {
+    const items = parseIdentifications(stages[i])
+    all.push(...items)
+  }
+  return all
+}
+
+function buildWordCategoryMap(rawText, identifications) {
+  if (!rawText || !identifications.length) return new Map()
+
+  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const entries = []
+  let match
+  while ((match = tcRegex.exec(rawText)) !== null) {
+    entries.push({
+      timecode: match[0].trim(),
+      tcValue: match[1],
+      matchStart: match.index,
+      textStart: match.index + match[0].length,
+    })
+  }
+  for (let i = 0; i < entries.length; i++) {
+    entries[i].textEnd = (i + 1 < entries.length) ? entries[i + 1].matchStart : rawText.length
+  }
+
+  const wordPositions = []
+  const wsRegex = /\S+/g
+  let wm
+  while ((wm = wsRegex.exec(rawText)) !== null) {
+    wordPositions.push({ start: wm.index, end: wm.index + wm[0].length })
+  }
+
+  const categoryMap = new Map()
+
+  for (const ident of identifications) {
+    const entry = entries.find(e =>
+      e.timecode === ident.timecode ||
+      e.tcValue === ident.timecode ||
+      e.timecode === `[${ident.timecode}]`
+    )
+    if (!entry) continue
+
+    let rangeStart, rangeEnd
+    if (ident.text) {
+      const segment = rawText.slice(entry.textStart, entry.textEnd)
+      const idx = segment.indexOf(ident.text)
+      if (idx !== -1) {
+        rangeStart = entry.textStart + idx
+        rangeEnd = rangeStart + ident.text.length
+      } else {
+        rangeStart = entry.textStart
+        rangeEnd = entry.textEnd
+      }
+    } else {
+      rangeStart = entry.textStart
+      rangeEnd = entry.textEnd
+    }
+
+    for (let wi = 0; wi < wordPositions.length; wi++) {
+      const wp = wordPositions[wi]
+      if (wp.start >= rangeStart && wp.start < rangeEnd) {
+        if (!categoryMap.has(wi)) {
+          categoryMap.set(wi, { category: ident.category, reason: ident.reason })
+        }
+      }
+    }
+  }
+
+  return categoryMap
+}
+
+function IdentificationPanel({ identifications, transcript }) {
+  // Summary counts
+  const counts = useMemo(() => {
+    const c = { repetition: 0, lengthy: 0, technical_unclear: 0, irrelevance: 0 }
+    for (const item of identifications) {
+      if (c[item.category] !== undefined) c[item.category]++
+    }
+    return c
+  }, [identifications])
+
+  // Build timecode → identifications lookup
+  const tcLookup = useMemo(() => {
+    const map = {}
+    for (const item of identifications) {
+      if (!map[item.timecode]) map[item.timecode] = []
+      map[item.timecode].push(item)
+    }
+    return map
+  }, [identifications])
+
+  // Parse transcript into timecoded entries
+  const entries = useMemo(() => {
+    if (!transcript) return []
+    const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+    const result = []
+    let match
+    while ((match = tcRegex.exec(transcript)) !== null) {
+      const start = match.index
+      const textStart = match.index + match[0].length
+      const remaining = transcript.slice(textStart)
+      const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/)
+      const end = nextTcMatch ? textStart + nextTcMatch.index : transcript.length
+      result.push({
+        timecode: match[0].trim(),
+        text: transcript.slice(textStart, end),
+      })
+    }
+    return result
+  }, [transcript])
+
+  return (
+    <div className="space-y-3">
+      {/* Summary bar */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 flex gap-6">
+        <span className="text-xs text-zinc-500 self-center">Categories:</span>
+        {Object.entries(CATEGORY_COLORS).map(([key, cfg]) => (
+          <div key={key} className="text-center">
+            <div className={`text-lg font-bold ${cfg.text}`}>{counts[key]}</div>
+            <div className="text-xs text-zinc-500">{cfg.label}</div>
+          </div>
+        ))}
+        <div className="text-center ml-auto">
+          <div className="text-lg font-bold text-zinc-300">{identifications.length}</div>
+          <div className="text-xs text-zinc-500">Total</div>
+        </div>
+      </div>
+
+      {/* Colored transcript */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400 font-medium">Highlighted Transcript</div>
+        <div className="p-4 text-sm font-mono leading-relaxed max-h-[500px] overflow-auto whitespace-pre-wrap">
+          {entries.map((entry, i) => {
+            const items = tcLookup[entry.timecode]
+            if (!items) {
+              return <span key={i}><span className="text-zinc-500">{entry.timecode}</span> {entry.text}</span>
+            }
+            // Check if any item has specific text to highlight
+            const textHighlights = items.filter(it => it.text)
+            const fullSegment = items.find(it => !it.text)
+            if (fullSegment) {
+              const cfg = CATEGORY_COLORS[fullSegment.category] || CATEGORY_COLORS.irrelevance
+              return (
+                <span key={i} className={`${cfg.bg} ${cfg.text} rounded px-0.5`} title={`[${cfg.label}] ${fullSegment.reason}`}>
+                  <span className="text-zinc-500">{entry.timecode}</span> {entry.text}
+                </span>
+              )
+            }
+            // Partial text highlights
+            let remaining = entry.text
+            const parts = []
+            for (const hl of textHighlights) {
+              const idx = remaining.indexOf(hl.text)
+              if (idx === -1) continue
+              if (idx > 0) parts.push({ text: remaining.slice(0, idx), highlight: null })
+              const cfg = CATEGORY_COLORS[hl.category] || CATEGORY_COLORS.irrelevance
+              parts.push({ text: hl.text, highlight: cfg, reason: hl.reason, label: cfg.label })
+              remaining = remaining.slice(idx + hl.text.length)
+            }
+            if (remaining) parts.push({ text: remaining, highlight: null })
+            return (
+              <span key={i}>
+                <span className="text-zinc-500">{entry.timecode}</span>{' '}
+                {parts.map((p, j) => p.highlight
+                  ? <span key={j} className={`${p.highlight.bg} ${p.highlight.text} rounded px-0.5`} title={`[${p.label}] ${p.reason}`}>{p.text}</span>
+                  : <span key={j}>{p.text}</span>
+                )}
+              </span>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Identification list */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400 font-medium">
+          All Identifications ({identifications.length})
+        </div>
+        <div className="divide-y divide-zinc-800/50 max-h-96 overflow-auto">
+          {identifications.map((item, i) => {
+            const cfg = CATEGORY_COLORS[item.category] || CATEGORY_COLORS.irrelevance
+            return (
+              <div key={i} className={`px-4 py-2 flex items-start gap-3 ${cfg.bg}`}>
+                <span className="text-xs text-zinc-500 font-mono shrink-0 pt-0.5">{item.timecode}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded shrink-0 ${cfg.bg} ${cfg.text} border ${cfg.border}`}>{cfg.label}</span>
+                <span className="text-sm text-zinc-300 flex-1">{item.reason}</span>
+                {item.text && <span className="text-xs text-zinc-500 font-mono max-w-48 truncate shrink-0" title={item.text}>"{item.text}"</span>}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StageDetail({ stage, diff, human, raw, allStages, activeStageIndex }) {
   const [tab, setTab] = useState('comparison')
+  const identifications = useMemo(() => parseIdentifications(stage), [stage])
+  const hasIdentifications = identifications.length > 0
+  const priorIdentifications = useMemo(() => aggregateIdentifications(allStages, activeStageIndex), [allStages, activeStageIndex])
+  // Merge prior stage identifications + current stage's own categories (from deletion/keep_only with preselect)
+  const allIdentifications = useMemo(() => [...priorIdentifications, ...identifications], [priorIdentifications, identifications])
+  const hasV2 = allIdentifications.length > 0
+  const tabs = ['comparison', 'diff', 'output', ...(hasIdentifications ? ['identify'] : []), 'prompt', 'metadata']
 
   return (
     <div className="space-y-2">
       <div className="flex gap-1 border-b border-zinc-800">
-        {['comparison', 'diff', 'output', 'prompt', 'metadata'].map(t => (
+        {tabs.map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -208,13 +458,15 @@ function StageDetail({ stage, diff, human, raw }) {
               tab === t ? 'text-white border-b-2 border-white' : 'text-zinc-500 hover:text-zinc-300'
             }`}
           >
-            {t === 'comparison' ? '3-Way Compare' : t}
+            {t === 'comparison' ? (hasV2 ? '3-Way Compare V2' : '3-Way Compare') : t === 'identify' ? `Identify (${identifications.length})` : t}
           </button>
         ))}
       </div>
 
       {tab === 'comparison' && (
-        <ThreeWayComparison raw={raw} human={human} current={stage.output_text} stageName={stage.stage_name} />
+        hasV2
+          ? <ThreeWayComparisonV2 raw={raw} human={human} current={stage.output_text} stageName={stage.stage_name} identifications={allIdentifications} />
+          : <ThreeWayComparison raw={raw} human={human} current={stage.output_text} stageName={stage.stage_name} />
       )}
 
       {tab === 'diff' && diff && (
@@ -226,6 +478,10 @@ function StageDetail({ stage, diff, human, raw }) {
           <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">Stage Output</div>
           <pre className="p-4 text-sm whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-auto">{stage.output_text}</pre>
         </div>
+      )}
+
+      {tab === 'identify' && hasIdentifications && (
+        <IdentificationPanel identifications={identifications} transcript={stage.input_text} />
       )}
 
       {tab === 'prompt' && (
@@ -357,6 +613,135 @@ function ThreeWayComparison({ raw, human, current, stageName }) {
         <span><span className="inline-block w-3 h-3 rounded bg-amber-900/60 mr-1 align-middle" /> Missed / Extra</span>
         <span><span className="inline-block w-3 h-3 rounded bg-red-900/60 mr-1 align-middle" /> Wrongly removed</span>
         <span className="ml-auto text-zinc-600">Word-level alignment (approximate)</span>
+      </div>
+    </div>
+  )
+}
+
+function ThreeWayComparisonV2({ raw, human, current, stageName, identifications }) {
+  if (!raw || !human || !current) {
+    return <div className="text-zinc-500 text-sm p-4">All three transcripts needed for comparison.</div>
+  }
+
+  const rawWords = tokenize(raw)
+  const humanWords = tokenize(human)
+  const currentWords = tokenize(current)
+
+  const rawToHuman = alignWords(rawWords, humanWords)
+  const rawToCurrent = alignWords(rawWords, currentWords)
+  const humanToCurrent = alignWords(humanWords, currentWords)
+
+  const categoryMap = useMemo(
+    () => buildWordCategoryMap(raw, identifications),
+    [raw, identifications]
+  )
+
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      {/* Raw transcript - enhanced with category colors */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="px-3 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium flex items-center justify-between">
+          <span>Raw Transcript</span>
+          <span className="text-blue-400">Original</span>
+        </div>
+        <div className="p-3 text-xs font-mono leading-relaxed max-h-[500px] overflow-auto whitespace-pre-wrap">
+          {rawWords.map((word, i) => {
+            const inHuman = rawToHuman[i]
+            const inCurrent = rawToCurrent[i]
+            const cat = categoryMap.get(i)
+
+            if (!inHuman && !inCurrent) {
+              if (cat) {
+                const cfg = CATEGORY_COLORS[cat.category] || CATEGORY_COLORS.irrelevance
+                const v2 = CATEGORY_V2[cat.category] || CATEGORY_V2.irrelevance
+                return (
+                  <span key={i} className={`${v2.bg} text-emerald-300 border-l-2 ${v2.borderLeft} rounded-r px-0.5`}
+                    title={`[${cfg.label}] ${cat.reason} (correctly removed)`}>{word} </span>
+                )
+              }
+              return <span key={i} className="bg-emerald-900/40 text-emerald-300 rounded px-0.5" title="Correctly removed by both">{word} </span>
+            }
+            if (!inHuman && inCurrent) {
+              if (cat) {
+                const cfg = CATEGORY_COLORS[cat.category] || CATEGORY_COLORS.irrelevance
+                const v2 = CATEGORY_V2[cat.category] || CATEGORY_V2.irrelevance
+                return (
+                  <span key={i} className={`${v2.bg} text-amber-300 border-l-2 ${v2.borderLeft} rounded-r px-0.5`}
+                    title={`[${cfg.label}] ${cat.reason} (missed removal)`}>{word} </span>
+                )
+              }
+              return <span key={i} className="bg-amber-900/40 text-amber-300 rounded px-0.5" title="Human removed, current kept (missed)">{word} </span>
+            }
+            if (inHuman && !inCurrent) {
+              return <span key={i} className="bg-red-900/40 text-red-300 rounded px-0.5" title="Human kept, current removed (wrong)">{word} </span>
+            }
+            if (cat) {
+              const cfg = CATEGORY_COLORS[cat.category] || CATEGORY_COLORS.irrelevance
+              const v2 = CATEGORY_V2[cat.category] || CATEGORY_V2.irrelevance
+              return (
+                <span key={i} className={`${v2.bgSubtle} rounded px-0.5`}
+                  title={`[${cfg.label}] ${cat.reason} (flagged, kept by both)`}>{word} </span>
+              )
+            }
+            return <span key={i}>{word} </span>
+          })}
+        </div>
+      </div>
+
+      {/* Human edited */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="px-3 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium flex items-center justify-between">
+          <span>Human Edited</span>
+          <span className="text-purple-400">Ground Truth</span>
+        </div>
+        <div className="p-3 text-xs font-mono leading-relaxed max-h-[500px] overflow-auto whitespace-pre-wrap">
+          {humanWords.map((word, i) => {
+            const inCurrent = humanToCurrent[i]
+            if (!inCurrent) {
+              return <span key={i} className="bg-red-900/40 text-red-300 rounded px-0.5" title="Current removed this (wrong)">{word} </span>
+            }
+            return <span key={i}>{word} </span>
+          })}
+        </div>
+      </div>
+
+      {/* Current stage output */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="px-3 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium flex items-center justify-between">
+          <span>{stageName} Output</span>
+          <span className="text-violet-400">Current</span>
+        </div>
+        <div className="p-3 text-xs font-mono leading-relaxed max-h-[500px] overflow-auto whitespace-pre-wrap">
+          {currentWords.map((word, i) => {
+            const inHuman = alignedContains(humanWords, currentWords, i)
+            if (!inHuman) {
+              return <span key={i} className="bg-amber-900/40 text-amber-300 rounded px-0.5" title="Not in human edit (extra)">{word} </span>
+            }
+            return <span key={i}>{word} </span>
+          })}
+        </div>
+      </div>
+
+      {/* Legend - two rows */}
+      <div className="col-span-3 space-y-1.5 text-xs text-zinc-500 px-1">
+        <div className="flex gap-4">
+          <span><span className="inline-block w-3 h-3 rounded bg-emerald-900/60 mr-1 align-middle" /> Correctly removed</span>
+          <span><span className="inline-block w-3 h-3 rounded bg-amber-900/60 mr-1 align-middle" /> Missed / Extra</span>
+          <span><span className="inline-block w-3 h-3 rounded bg-red-900/60 mr-1 align-middle" /> Wrongly removed</span>
+          <span className="ml-auto text-zinc-600">Word-level alignment (approximate)</span>
+        </div>
+        <div className="flex gap-4">
+          <span className="text-zinc-400 mr-1">Categories:</span>
+          {Object.entries(CATEGORY_COLORS).map(([key, cfg]) => {
+            const v2 = CATEGORY_V2[key]
+            return (
+              <span key={key} className="flex items-center gap-1">
+                <span className={`inline-block w-3 h-3 rounded ${v2?.bg || cfg.bg} border ${cfg.border}`} />
+                <span className={cfg.text}>{cfg.label}</span>
+              </span>
+            )
+          })}
+        </div>
       </div>
     </div>
   )

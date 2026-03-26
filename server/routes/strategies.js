@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import db from '../db.js'
+import { findFirstChangedIndex, invalidateFromIndex } from '../services/stage-diff.js'
 
 const router = Router()
 
@@ -82,12 +83,25 @@ router.put('/:id/versions/:versionId', (req, res) => {
   ).get(req.params.versionId, req.params.id)
   if (!version) return res.status(404).json({ error: 'Version not found' })
 
+  const oldStages = JSON.parse(version.stages_json || '[]')
+  const newStages = stages || []
+
   db.prepare(
     'UPDATE strategy_versions SET stages_json = ?, notes = ? WHERE id = ?'
-  ).run(JSON.stringify(stages || []), notes !== undefined ? notes : version.notes, req.params.versionId)
+  ).run(JSON.stringify(newStages), notes !== undefined ? notes : version.notes, req.params.versionId)
+
+  // Invalidate affected experiment runs
+  const changedFrom = findFirstChangedIndex(oldStages, newStages)
+  let invalidated = 0
+  if (changedFrom !== null) {
+    invalidated = invalidateFromIndex(db, version.id, changedFrom, newStages.length)
+    if (invalidated > 0) {
+      console.log(`[strategies] Invalidated ${invalidated} run(s) from stage ${changedFrom} onward`)
+    }
+  }
 
   const updated = db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(req.params.versionId)
-  res.json(updated)
+  res.json({ ...updated, invalidated })
 })
 
 // Generate short LLM description for a strategy
@@ -165,11 +179,14 @@ Splits a long transcript into overlapping time-based segments for parallel proce
   "type": "programmatic",
   "action": "segment",
   "description": "Split into segments for parallel processing",
-  "actionParams": { "minSeconds": 40, "maxSeconds": 80, "contextSeconds": 30 }
+  "actionParams": { "preset": "short", "minSeconds": 40, "maxSeconds": 60, "contextSeconds": 30 }
 }
 \`\`\`
-- minSeconds/maxSeconds: target segment duration range (default 40-80)
-- contextSeconds: overlap with previous segment for continuity (default 30)
+Available presets (use ONLY these):
+- "short": 40-60s segments, 30s context — best for dense/technical content
+- "medium": 60-100s segments, 30s context — best for interviews, mixed content (RECOMMENDED DEFAULT)
+- "long": 100-130s segments, 30s context — best for casual conversation, monologues
+Always include both "preset" AND the raw numbers in actionParams.
 
 ### 2. Programmatic: "reassemble"
 Rejoins processed segments back into a single transcript.
@@ -197,16 +214,83 @@ Sends the ENTIRE transcript to an LLM in one call. Best for short transcripts or
 
 ### 4. LLM: "llm_parallel" (per segment)
 Sends EACH segment separately to an LLM. Must be used between a "segment" and "reassemble" stage. Much more cost-effective for long transcripts.
+
+How it works at runtime:
+- The {{transcript}} variable gets replaced with a SINGLE formatted segment (NOT the whole transcript)
+- The LLM receives one segment at a time in this exact format:
+
+<context>
+[00:01:00] Previous surrounding text for reference...
+*****
+<segment>
+[00:01:30] This is the main text to edit...
+*****
+<context>
+[00:02:35] Following surrounding text for reference...
+
+- <context> = surrounding text, read for continuity, do NOT edit or output
+- <segment> (between *****) = the ONLY part to edit and return
+- The LLM must output ONLY the cleaned <segment> content, no markers or tags
+
+The system_instruction for llm_parallel stages MUST explain this format. Example:
+
 \`\`\`json
 {
   "name": "Clean Segments",
   "type": "llm_parallel",
   "model": "gemini-3-flash-preview",
-  "system_instruction": "You are a transcript editor...",
+  "system_instruction": "You are a transcript editor. You receive transcript segments in a special format: <context> sections contain surrounding text for reference — read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the cleaned segment content, no ***** markers, no <context>, no <segment> tags. YOUR TASK: [specific editing instructions here]",
   "prompt": "Process segment {{segment_number}} of {{total_segments}}:\\n\\n{{transcript}}",
   "description": "Per-segment filler word removal"
 }
 \`\`\`
+CRITICAL: Every llm_parallel system_instruction MUST explain the ***** and <context>/<segment> format as shown above. If missing, the LLM will not understand the segment boundaries and the workflow will fail.
+
+## OUTPUT MODE (optional field for LLM stages)
+By default (no output_mode field), the LLM returns the cleaned transcript text directly. You can add an \`"output_mode"\` field to change this behavior:
+
+- **"deletion"**: LLM returns a JSON array identifying text to DELETE by timecode. The system removes those parts programmatically. Use when the LLM's job is to identify unwanted content (meta-commentary, filler, off-topic tangents).
+- **"keep_only"**: LLM returns a JSON array identifying text to KEEP. Everything else is removed. Use when the LLM's job is to identify the valuable/relevant content.
+
+Do NOT set output_mode for standard editing tasks (filler removal, grammar fixes, formatting) — just omit the field entirely.
+
+### Deletion mode example:
+\`\`\`json
+{
+  "name": "Remove Meta-Commentary",
+  "type": "llm",
+  "model": "gemini-3.1-pro-preview",
+  "output_mode": "deletion",
+  "system_instruction": "You are a transcript editor. Identify all meta-commentary, self-corrections, and off-topic tangents in this transcript.",
+  "prompt": "Find all meta-commentary and off-topic segments to delete:\\n\\n{{transcript}}",
+  "description": "Identify and remove meta-commentary by timecode"
+}
+\`\`\`
+The LLM returns JSON like: \`[{"timecode": "[00:01:23]", "text": "Sorry, let me start over."}, {"timecode": "[00:05:30]"}, {"timecode": "[00:03:10]", "text": "basically like"}]\`
+- "timecode" (REQUIRED) — the exact timecode from the transcript
+- If "text" is OMITTED — the ENTIRE timecoded segment is deleted (timecode + all its text)
+- If "text" is provided — only those exact words are deleted, timecode and remaining words stay
+- "text" must be a VERBATIM substring from the transcript
+
+### Keep-only mode example:
+\`\`\`json
+{
+  "name": "Extract Key Points",
+  "type": "llm",
+  "model": "gemini-3.1-pro-preview",
+  "output_mode": "keep_only",
+  "system_instruction": "You are a transcript editor. Identify the most important and relevant segments of this transcript.",
+  "prompt": "Select the segments worth keeping:\\n\\n{{transcript}}",
+  "description": "Keep only the most relevant segments"
+}
+\`\`\`
+
+### When to use output_mode:
+- Use **"deletion"** when most of the transcript is good but you need to surgically remove specific parts
+- Use **"keep_only"** when you need to extract specific relevant sections from a longer transcript
+- For standard editing (grammar, fillers, formatting) — do NOT add output_mode, just let the LLM return cleaned text directly
+- Deletion/keep_only modes work with both \`"llm"\` and \`"llm_parallel"\` stage types
+- When used with \`"llm_parallel"\`: the LLM still receives <context>/<segment> markers, but the JSON timecodes should reference only timecodes within the <segment> section
 
 ## TEMPLATE VARIABLES FOR PROMPTS
 - \`<transcript>\` or \`{{transcript}}\` — the transcript text (REQUIRED in every LLM prompt)
@@ -216,7 +300,7 @@ Sends EACH segment separately to an LLM. Must be used between a "segment" and "r
 ## AVAILABLE MODELS (use ONLY these)
 - gemini-3.1-pro-preview (Gemini 3.1 Pro — best quality, supports thinking)
 - gemini-3-flash-preview (Gemini 3 Flash — fast, good balance, supports thinking)
-- gpt-5.4 (GPT 5.4 — high quality, no thinking support)
+- gpt-5.4 (GPT 5.4 — high quality, supports thinking)
 - claude-opus-4-20250514 (Claude Opus 4.6 — best quality, supports thinking)
 - claude-sonnet-4-20250514 (Claude Sonnet 4.6 — good balance, supports thinking)
 
@@ -235,16 +319,41 @@ Sends EACH segment separately to an LLM. Must be used between a "segment" and "r
 - Always tell the LLM to output ONLY the cleaned transcript, no commentary
 - Be explicit about what counts as filler (um, uh, you know, like, basically, etc.)
 - Be explicit about preserving meaning — never remove content-bearing words
+- **MANDATORY for llm_parallel stages**: The system_instruction MUST start with the segment boundary explanation (about *****, <context>, <segment>) before any editing instructions. Copy the pattern from the llm_parallel example above. If missing, the workflow is INVALID.
 
 ## OUTPUT FORMAT
-You MUST respond with valid JSON in this exact structure, nothing else:
+You MUST respond with valid JSON in this exact structure. Here is a COMPLETE example:
 \`\`\`json
 {
-  "name": "Short Flow Name",
-  "explanation": "2-4 sentence explanation of what this pipeline does and why these stages were chosen.",
-  "stages": [ ...array of stage objects as defined above... ]
+  "name": "Filler Removal Pipeline",
+  "explanation": "Segments the transcript, removes filler words per segment using Gemini 3 Flash, then reassembles.",
+  "stages": [
+    {
+      "name": "Segment Transcript",
+      "type": "programmatic",
+      "action": "segment",
+      "description": "Split into medium segments for parallel processing",
+      "actionParams": { "preset": "medium", "minSeconds": 60, "maxSeconds": 100, "contextSeconds": 30 }
+    },
+    {
+      "name": "Remove Filler Words",
+      "type": "llm_parallel",
+      "model": "gemini-3-flash-preview",
+      "system_instruction": "You are a transcript editor. You receive transcript segments in a special format: <context> sections contain surrounding text for reference — read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the cleaned segment content, no ***** markers, no <context>, no <segment> tags. YOUR TASK: Remove filler words (um, uh, like, you know, basically, sort of, I mean) while preserving all content-bearing words, meaning, and timecodes in [HH:MM:SS] format.",
+      "prompt": "Process segment {{segment_number}} of {{total_segments}}:\\n\\n{{transcript}}",
+      "description": "Per-segment filler word removal"
+    },
+    {
+      "name": "Reassemble",
+      "type": "programmatic",
+      "action": "reassemble",
+      "description": "Rejoin cleaned segments into full transcript"
+    }
+  ]
 }
 \`\`\`
+
+Note: "type": "llm_parallel" = Per Segment processing (each segment sent to LLM separately). "type": "llm" = Whole Transcript processing (entire transcript in one call).
 
 Do NOT include any text outside the JSON code block. Do NOT use markdown headings or bullets outside the JSON.`
 
@@ -309,7 +418,6 @@ Do NOT include any text outside the JSON code block. Do NOT use markdown heading
         body: JSON.stringify({
           model,
           messages,
-          max_tokens: 8192,
           temperature: 1,
         })
       })
@@ -343,7 +451,6 @@ Do NOT include any text outside the JSON code block. Do NOT use markdown heading
           model,
           system: systemInstruction,
           messages,
-          max_tokens: 8192,
           temperature: 1,
         })
       })
@@ -375,6 +482,16 @@ Do NOT include any text outside the JSON code block. Do NOT use markdown heading
 
     if (!parsed.stages || !Array.isArray(parsed.stages)) {
       throw new Error('AI response missing stages array')
+    }
+
+    // Force-inject segment boundary rules into every llm_parallel system_instruction
+    const SEGMENT_RULES = `\n\n## Important\nYou receive transcript segments in a special format: <context> sections contain surrounding text for reference — read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must process. Process ONLY the <segment> content — no ***** markers, no <context>, no <segment> tags in your response. If you are in deletion or keep_only mode, your JSON array must reference ONLY timecodes from within the <segment> section.`
+    for (const stage of parsed.stages) {
+      console.log(`[ai-propose] Stage "${stage.name}" type="${stage.type}"`)
+      if (stage.type === 'llm_parallel') {
+        stage.system_instruction = (stage.system_instruction || '') + SEGMENT_RULES
+        console.log(`[ai-propose] Injected segment rules into "${stage.name}"`)
+      }
     }
 
     res.json({

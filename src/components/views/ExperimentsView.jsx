@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useApi, apiPost, apiDelete } from '../../hooks/useApi.js'
-import { Brain, Play, Plus, ChevronDown, ChevronRight, ChevronUp, Loader2, BarChart3, Trash2, Bot, Layers, Cpu, Sparkles, MessageSquare, Check, RotateCcw, Send, ArrowUp, ArrowDown, X, Copy } from 'lucide-react'
+import { previewAugmentedSystem, updateSegmentRulesInSystem, stripSegmentRules } from '../../lib/promptPreview.js'
+import { Brain, Play, Plus, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, BarChart3, Trash2, Bot, Layers, Cpu, Sparkles, MessageSquare, MessageCircleQuestion, Check, RotateCcw, Send, ArrowUp, ArrowDown, X, Copy } from 'lucide-react'
 
 const MODEL_OPTIONS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', provider: 'gemini' },
@@ -13,10 +14,34 @@ const MODEL_OPTIONS = [
 
 const THINKING_LEVELS = ['OFF', 'LOW', 'MEDIUM', 'HIGH']
 
+const SEGMENT_PRESETS = {
+  short:  { label: 'Short (40–60s)',   minSeconds: 40,  maxSeconds: 60,  contextSeconds: 30 },
+  medium: { label: 'Medium (60–100s)', minSeconds: 60,  maxSeconds: 100, contextSeconds: 30 },
+  long:   { label: 'Long (100–130s)',  minSeconds: 100, maxSeconds: 130, contextSeconds: 30 },
+}
+
 export default function ExperimentsView() {
   const { data: experiments, loading, refetch } = useApi('/experiments')
   const [showCreate, setShowCreate] = useState(false)
-  const [expandedId, setExpandedId] = useState(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  const expandedId = searchParams.get('experiment') ? Number(searchParams.get('experiment')) : null
+  const urlRun = searchParams.get('run') ? Number(searchParams.get('run')) : null
+  const urlStage = searchParams.get('stage') != null ? Number(searchParams.get('stage')) : null
+
+  const setExpandedId = (id) => {
+    const next = new URLSearchParams()
+    if (id) next.set('experiment', id)
+    setSearchParams(next, { replace: true })
+  }
+  const setViewModal = (val, experimentId) => {
+    const next = new URLSearchParams()
+    const expId = experimentId || expandedId
+    if (expId) next.set('experiment', expId)
+    if (val) { next.set('run', val.runId); next.set('stage', val.stageIndex) }
+    setSearchParams(next, { replace: true })
+  }
+  const viewModal = (urlRun != null && urlStage != null && expandedId) ? { runId: urlRun, stageIndex: urlStage } : null
 
   if (loading) return <div className="p-6 text-zinc-500 text-sm">Loading...</div>
 
@@ -49,6 +74,8 @@ export default function ExperimentsView() {
               expanded={expandedId === e.id}
               onToggle={() => setExpandedId(expandedId === e.id ? null : e.id)}
               onRefetch={refetch}
+              viewModal={expandedId === e.id ? viewModal : null}
+              setViewModal={setViewModal}
             />
           ))}
         </div>
@@ -57,17 +84,17 @@ export default function ExperimentsView() {
   )
 }
 
-function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
+function ExperimentCard({ experiment, expanded, onToggle, onRefetch, viewModal, setViewModal }) {
   const { data: detail, refetch: refetchDetail } = useApi(expanded ? `/experiments/${experiment.id}` : null, [expanded])
   const { data: allVideos } = useApi(expanded ? '/videos' : null, [expanded])
   const [executing, setExecuting] = useState(false)
+  const [aborting, setAborting] = useState(false)
   const [progress, setProgress] = useState(null)
   const [execError, setExecError] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [analysisResult, setAnalysisResult] = useState(null)
   const [showFlow, setShowFlow] = useState(false)
   const [showVideoSelect, setShowVideoSelect] = useState(false)
-  const [viewModal, setViewModal] = useState(null) // { runId, stageIndex }
   const pollRef = useRef(null)
 
   // Compute selectable videos (collapsed groups)
@@ -131,6 +158,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
           clearInterval(pollRef.current)
           pollRef.current = null
           setExecuting(false)
+          setAborting(false)
           onRefetch()
           if (expanded) refetchDetail()
         }
@@ -147,7 +175,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
       .then(r => r.json())
       .then(prog => {
         setProgress(prog)
-        if (prog.active) {
+        if (prog.active || prog.running > 0) {
           setExecuting(true)
           startPolling()
         }
@@ -157,6 +185,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
 
   async function handleExecute(repeat = 1) {
     setExecuting(true)
+    setAborting(false)
     setExecError(null)
     setProgress(null)
     try {
@@ -169,6 +198,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
   }
 
   async function handleAbort() {
+    setAborting(true)
     try {
       await apiPost(`/experiments/${experiment.id}/abort`)
     } catch { /* ignore */ }
@@ -186,38 +216,52 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
     }
   }
 
+  async function handleResume() {
+    setExecuting(true)
+    setExecError(null)
+    try {
+      await apiPost(`/experiments/${experiment.id}/resume`)
+      startPolling()
+    } catch (err) {
+      setExecError(err.message)
+      setExecuting(false)
+    }
+  }
+
   const hasFailedRuns = progress?.failed > 0 && !executing
+  const hasPartialRuns = (progress?.partial > 0 || experiment.partial_runs > 0) && !executing
 
   const stages = detail?.stages_json ? JSON.parse(detail.stages_json) : []
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-lg">
       {/* Header */}
-      <div className="p-4 flex items-center justify-between cursor-pointer" onClick={onToggle}>
-        <div className="flex items-center gap-2">
-          {expanded ? <ChevronDown size={16} className="text-zinc-500" /> : <ChevronRight size={16} className="text-zinc-500" />}
-          <div>
-            <div className="font-medium">{experiment.name}</div>
-            <div className="text-sm text-zinc-400 mt-0.5">
-              {experiment.strategy_name} v{experiment.version_number}
-              <span className="ml-3 text-zinc-500">{experiment.completed_runs}/{experiment.run_count} runs</span>
-              {experiment.avg_score !== null && (
-                <span className={`ml-3 font-medium ${scoreColor(experiment.avg_score)}`}>{Math.round(experiment.avg_score * 100)}%</span>
-              )}
+      <div className="p-4 cursor-pointer" onClick={onToggle}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {expanded ? <ChevronDown size={16} className="text-zinc-500" /> : <ChevronRight size={16} className="text-zinc-500" />}
+            <div>
+              <div className="font-medium">{experiment.name}</div>
+              <div className="text-sm text-zinc-400 mt-0.5">
+                {experiment.strategy_name} v{experiment.version_number}
+                <span className="ml-3 text-zinc-500">{experiment.completed_runs}/{experiment.run_count} runs</span>
+                {experiment.partial_runs > 0 && (
+                  <span className="ml-2 text-blue-400 text-xs">{experiment.partial_runs} partial</span>
+                )}
+                {experiment.avg_score !== null && (
+                  <span className={`ml-3 font-medium ${scoreColor(experiment.avg_score)}`}>{Math.round(experiment.avg_score * 100)}%</span>
+                )}
+              </div>
             </div>
           </div>
+          <button
+            onClick={e => { e.stopPropagation(); if (confirm(`Delete experiment "${experiment.name}" and all its runs?`)) apiDelete(`/experiments/${experiment.id}`).then(onRefetch) }}
+            className="flex items-center gap-1 text-xs text-zinc-600 hover:text-red-400 hover:bg-red-900/30 px-2 py-1 rounded transition-colors">
+            <Trash2 size={12} />
+          </button>
         </div>
-        <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
-          {executing && (
-            <button onClick={handleAbort} className="flex items-center gap-1 text-xs bg-red-900/50 hover:bg-red-800/50 text-red-300 px-2 py-1 rounded transition-colors">
-              <X size={12} /> Abort
-            </button>
-          )}
-          {hasFailedRuns && (
-            <button onClick={handleRetry} className="flex items-center gap-1 text-xs bg-amber-900/50 hover:bg-amber-800/50 text-amber-300 px-2 py-1 rounded transition-colors">
-              <RotateCcw size={12} /> Retry Failed ({progress.failed})
-            </button>
-          )}
+        {/* Action bar */}
+        <div className="flex items-center gap-2 flex-wrap mt-2 ml-6" onClick={e => e.stopPropagation()}>
           <button onClick={() => handleExecute(1)} disabled={executing}
             className="flex items-center gap-1 text-xs bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded transition-colors disabled:opacity-50">
             {executing ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />} Run
@@ -226,8 +270,23 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
             className="flex items-center gap-1 text-xs bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded transition-colors disabled:opacity-50">
             {executing ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />} x3
           </button>
+          {executing && (
+            <button onClick={handleAbort} disabled={aborting} className="flex items-center gap-1 text-xs bg-red-900/50 hover:bg-red-800/50 text-red-300 px-2.5 py-1 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              {aborting ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />} {aborting ? 'Aborting...' : 'Abort'}
+            </button>
+          )}
+          {hasPartialRuns && (
+            <button onClick={handleResume} className="flex items-center gap-1 text-xs bg-blue-900/50 hover:bg-blue-800/50 text-blue-300 px-2 py-1 rounded transition-colors">
+              <Play size={12} /> Resume ({progress?.partial || experiment.partial_runs})
+            </button>
+          )}
+          {hasFailedRuns && (
+            <button onClick={handleRetry} className="flex items-center gap-1 text-xs bg-amber-900/50 hover:bg-amber-800/50 text-amber-300 px-2 py-1 rounded transition-colors">
+              <RotateCcw size={12} /> Retry Failed ({progress.failed})
+            </button>
+          )}
           {experiment.completed_runs >= 2 && (
-            <Link to={`/experiments/${experiment.id}/stability`}
+            <Link to={`/admin/experiments/${experiment.id}/stability`}
               className="flex items-center gap-1 text-xs bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded transition-colors">
               <BarChart3 size={12} /> Stability
             </Link>
@@ -281,25 +340,38 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
                     )}
                   </div>
 
-                  {/* Running: show stage progress */}
+                  {/* Running: show stage progress with View buttons for completed stages */}
                   {run.status === 'running' && run.totalStages && (
-                    <div className="flex gap-1 items-center">
+                    <div className="flex gap-1 items-center flex-wrap">
                       {Array.from({ length: run.totalStages }, (_, si) => {
                         const isDone = si < run.currentStage
                         const isCurrent = si === run.currentStage
+                        const stageData = run.stages?.find(s => s.stage_index === si)
                         return (
                           <div key={si} className="flex items-center gap-1">
                             {si > 0 && <span className="text-zinc-700 text-[10px]">→</span>}
-                            <div className={`px-2 py-1 rounded text-[10px] font-medium ${
-                              isCurrent ? 'bg-blue-900/50 text-blue-300 border border-blue-700/50 animate-pulse'
-                              : isDone ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-800/50'
-                              : 'bg-zinc-800 text-zinc-600 border border-zinc-700/50'
+                            <div className={`rounded text-center shrink-0 ${
+                              isCurrent ? 'bg-blue-900/50 border border-blue-700/50'
+                              : isDone ? 'bg-emerald-900/40 border border-emerald-800/50'
+                              : 'bg-zinc-800 border border-zinc-700/50'
                             }`}>
-                              {isCurrent
-                                ? (run.segmentsTotal
-                                    ? `${run.stageName} (${run.segmentsDone || 0}/${run.segmentsTotal})`
-                                    : run.stageName)
-                                : isDone ? 'Done' : 'Waiting'}
+                              <div className={`px-2 py-1 text-[10px] font-medium ${
+                                isCurrent ? 'text-blue-300 animate-pulse'
+                                : isDone ? 'text-emerald-400'
+                                : 'text-zinc-600'
+                              }`}>
+                                {isCurrent
+                                  ? (run.segmentsTotal
+                                      ? `${run.stageName} (${run.segmentsDone || 0}/${run.segmentsTotal})`
+                                      : run.stageName)
+                                  : isDone ? (stageData?.stage_name || 'Done') : 'Waiting'}
+                              </div>
+                              {isDone && stageData && (
+                                <button
+                                  onClick={() => setViewModal({ runId: run.runId, stageIndex: si }, experiment.id)}
+                                  className="text-[10px] text-zinc-600 hover:text-white transition-colors pb-1 px-2"
+                                >View</button>
+                              )}
                             </div>
                           </div>
                         )
@@ -319,7 +391,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
                               <div className={`text-xs font-bold ${simColor(st.similarity_percent)}`}>{st.similarity_percent}%</div>
                             )}
                             <button
-                              onClick={() => setViewModal({ runId: run.runId, stageIndex: st.stage_index })}
+                              onClick={() => setViewModal({ runId: run.runId, stageIndex: st.stage_index }, experiment.id)}
                               className="text-[10px] text-zinc-600 hover:text-white transition-colors mt-0.5"
                             >View</button>
                           </div>
@@ -328,6 +400,29 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
                     </div>
                   )}
 
+                  {run.status === 'partial' && run.stages && run.stages.length > 0 && (
+                    <div className="flex gap-1 items-center flex-wrap">
+                      {run.stages.map((st, si) => (
+                        <div key={si} className="flex items-center gap-1">
+                          {si > 0 && <span className="text-zinc-700 text-[10px]">→</span>}
+                          <div className="bg-zinc-800 rounded px-2 py-1 text-center shrink-0">
+                            <div className="text-[10px] text-zinc-500 truncate max-w-20">{st.stage_name}</div>
+                            {st.similarity_percent !== null && (
+                              <div className={`text-xs font-bold ${simColor(st.similarity_percent)}`}>{st.similarity_percent}%</div>
+                            )}
+                            <button
+                              onClick={() => setViewModal({ runId: run.runId, stageIndex: st.stage_index }, experiment.id)}
+                              className="text-[10px] text-zinc-600 hover:text-white transition-colors mt-0.5"
+                            >View</button>
+                          </div>
+                        </div>
+                      ))}
+                      <span className="text-[10px] text-blue-400 ml-1">+ pending stages</span>
+                    </div>
+                  )}
+                  {run.status === 'partial' && (!run.stages || run.stages.length === 0) && (
+                    <div className="text-[10px] text-blue-400">Partial — needs resume</div>
+                  )}
                   {run.status === 'pending' && <div className="text-[10px] text-zinc-600">Waiting...</div>}
                   {run.status === 'failed' && (
                     <div className="text-[10px] text-red-400" title={run.errorMessage || ''}>
@@ -398,7 +493,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch }) {
                       <span className="text-sm font-medium">{stage.name}</span>
                       {stage.model && stage.model !== 'programmatic' && <span className="text-xs text-zinc-500">{stage.model}</span>}
                     </div>
-                    {stage.system_instruction && (<div><div className="text-xs text-zinc-500 mb-1">System Prompt</div><pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-24 overflow-auto">{stage.system_instruction}</pre></div>)}
+                    {(stage.system_instruction || stage.output_mode) && (<div><div className="text-xs text-zinc-500 mb-1">System Prompt {stage.type !== 'llm_question' && <span className="text-zinc-600">(with auto-appended output mode rules)</span>}</div><pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-24 overflow-auto">{stage.type === 'llm_question' ? stage.system_instruction : previewAugmentedSystem(stage.system_instruction, stage.output_mode, stage.type)}</pre></div>)}
                     {stage.prompt && (<div><div className="text-xs text-zinc-500 mb-1">User Prompt</div><pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-24 overflow-auto">{stage.prompt}</pre></div>)}
                   </div>
                 ))}
@@ -459,8 +554,9 @@ function StageViewModal({ runId, stageIndex, onClose }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [view, setView] = useState('comparison') // comparison | input_log | output_log
+  const [view, setView] = useState(null) // set after data loads
   const [copied, setCopied] = useState(null)
+  const [selectedSegment, setSelectedSegment] = useState(null) // null = list, index = detail
 
   useEffect(() => {
     fetch(`/api/experiments/runs/${runId}/stages/${stageIndex}?_t=${Date.now()}`)
@@ -468,7 +564,7 @@ function StageViewModal({ runId, stageIndex, onClose }) {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
         return r.json()
       })
-      .then(d => { setData(d); setLoading(false) })
+      .then(d => { setData(d); setView(d.isParallel && d.segments ? 'segments' : 'comparison'); setLoading(false) })
       .catch(err => { setError(err.message); setLoading(false) })
   }, [runId, stageIndex])
 
@@ -544,7 +640,12 @@ function StageViewModal({ runId, stageIndex, onClose }) {
     })
   }
 
-  const alignedRows = buildAlignedDiff(data.input, data.output)
+  let alignedRows = []
+  try {
+    alignedRows = buildAlignedDiff(data.input, data.output)
+  } catch (e) {
+    console.error('[StageViewModal] buildAlignedDiff failed:', e)
+  }
   function clientNormalize(text) {
     if (!text) return ''
     const DIGIT_WORDS = ['zero','one','two','three','four','five','six','seven','eight','nine']
@@ -609,6 +710,7 @@ function StageViewModal({ runId, stageIndex, onClose }) {
     { id: 'final_comparison', label: 'Final Comparison' },
     { id: 'input_log', label: 'Input Log' },
     { id: 'output_log', label: 'Output Log' },
+    ...(data.segments ? [{ id: 'segments', label: `Segments (${data.segments.length})` }] : []),
   ]
 
   return (
@@ -801,21 +903,200 @@ function StageViewModal({ runId, stageIndex, onClose }) {
           </div>
         )}
 
-        {/* Output Log: raw LLM response */}
+        {/* Output Log: raw LLM response + processed output */}
         {view === 'output_log' && (
-          <div className="flex-1 overflow-auto p-5">
-            <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-2">
-              <Bot size={12} /> LLM Response
-              {data.metrics?.find(m => m.comparison_type === 'human_vs_current') && (
-                <span className="text-zinc-600 ml-2">
-                  {data.output?.length?.toLocaleString()} chars
-                </span>
-              )}
+          <div className="flex-1 overflow-auto p-5 space-y-4">
+            {data.llmResponseRaw && (
+              <div>
+                <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-2">
+                  <Bot size={12} /> Raw LLM Response
+                  <span className="text-zinc-600">{data.llmResponseRaw.length.toLocaleString()} chars</span>
+                </div>
+                <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4 max-h-[50vh] overflow-auto">{data.llmResponseRaw}</pre>
+              </div>
+            )}
+            <div>
+              <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-2">
+                <Bot size={12} /> {data.llmResponseRaw ? 'Processed Output (after applying deletions/keeps)' : 'LLM Response'}
+                <span className="text-zinc-600">{data.output?.length?.toLocaleString()} chars</span>
+              </div>
+              <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4 max-h-[80vh] overflow-auto">{data.output || 'N/A'}</pre>
             </div>
-            <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4 max-h-[80vh] overflow-auto">{data.output || 'N/A'}</pre>
           </div>
         )}
+
+        {view === 'segments' && data.segments && selectedSegment === null && (
+          <div className="flex-1 overflow-auto p-5">
+            <div className="text-xs text-zinc-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+              <Layers size={12} /> {data.segments.length} Segments — click to view details
+            </div>
+            <div className="grid grid-cols-1 gap-2">
+              {data.segments.map((seg, i) => (
+                <button
+                  key={i}
+                  onClick={() => setSelectedSegment(i)}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700/50 rounded-lg transition-colors text-left group"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-xs bg-zinc-700 px-2 py-0.5 rounded text-zinc-300 font-medium shrink-0">#{seg.segment}</span>
+                    <span className="text-xs text-zinc-400 truncate">
+                      {seg.inputText?.replace(/<[^>]+>/g, '').replace(/\*{5}/g, '').trim().slice(0, 120)}...
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-[10px] text-zinc-500">{seg.cleanedText?.length || 0} chars out</span>
+                    <ChevronRight size={14} className="text-zinc-600 group-hover:text-zinc-300 transition-colors" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {view === 'segments' && data.segments && selectedSegment !== null && (
+          <SegmentDetailView
+            segment={data.segments[selectedSegment]}
+            segmentIndex={selectedSegment}
+            totalSegments={data.segments.length}
+            systemInstruction={data.systemInstruction}
+            onBack={() => setSelectedSegment(null)}
+            onNavigate={setSelectedSegment}
+          />
+        )}
       </div>
+    </div>
+  )
+}
+
+function SegmentDetailView({ segment, segmentIndex, totalSegments, systemInstruction, onBack, onNavigate }) {
+  const [tab, setTab] = useState('side_by_side')
+  const [copied, setCopied] = useState(null)
+  const seg = segment
+  const inputText = seg.inputText || ''
+  const outputText = seg.cleanedText || ''
+
+  function copyText(text, label) {
+    navigator.clipboard.writeText(text || '').then(() => {
+      setCopied(label)
+      setTimeout(() => setCopied(null), 1500)
+    })
+  }
+
+  const tabs = [
+    { id: 'side_by_side', label: 'Input / Output' },
+    { id: 'input_log', label: 'Input Log' },
+    { id: 'output_log', label: 'Output Log' },
+  ]
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Navigation bar */}
+      <div className="flex items-center justify-between px-5 py-2 border-b border-zinc-800 shrink-0">
+        <div className="flex items-center gap-3">
+          <button onClick={onBack} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors">
+            <ChevronLeft size={14} /> All Segments
+          </button>
+          <span className="text-zinc-600">|</span>
+          <span className="text-sm font-medium text-zinc-200">Segment #{seg.segment}</span>
+          <span className="text-xs text-zinc-500">of {totalSegments}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1">
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                  tab === t.id ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}>{t.label}</button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 ml-3">
+            <button onClick={() => onNavigate(segmentIndex - 1)} disabled={segmentIndex === 0}
+              className="p-1 text-zinc-500 hover:text-white disabled:opacity-30 transition-colors" title="Previous segment">
+              <ArrowUp size={14} />
+            </button>
+            <button onClick={() => onNavigate(segmentIndex + 1)} disabled={segmentIndex >= totalSegments - 1}
+              className="p-1 text-zinc-500 hover:text-white disabled:opacity-30 transition-colors" title="Next segment">
+              <ArrowDown size={14} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Side-by-side: Input text vs Output text */}
+      {tab === 'side_by_side' && (
+        <div className="flex-1 grid grid-cols-2 divide-x divide-zinc-800 overflow-hidden">
+          <div className="flex flex-col overflow-hidden">
+            <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium flex items-center justify-between shrink-0">
+              <span>Prompt Sent to LLM</span>
+              <button onClick={() => copyText(seg.promptUsed || inputText, 'seg-input')} className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                {copied === 'seg-input' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+              </button>
+            </div>
+            <pre className="p-4 text-xs font-mono whitespace-pre-wrap leading-relaxed overflow-auto flex-1 text-zinc-300">{seg.promptUsed || inputText || 'N/A'}</pre>
+          </div>
+          <div className="flex flex-col overflow-hidden">
+            <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 font-medium flex items-center justify-between shrink-0">
+              <span>LLM Output <span className="text-zinc-600 ml-1">{outputText.length.toLocaleString()} chars</span></span>
+              <button onClick={() => copyText(outputText, 'seg-output')} className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                {copied === 'seg-output' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+              </button>
+            </div>
+            <pre className="p-4 text-xs font-mono whitespace-pre-wrap leading-relaxed overflow-auto flex-1 text-zinc-300">{outputText || 'N/A'}</pre>
+          </div>
+        </div>
+      )}
+
+      {/* Input Log: system instruction + full prompt */}
+      {tab === 'input_log' && (
+        <div className="flex-1 overflow-auto p-5 space-y-4">
+          {systemInstruction && (
+            <div>
+              <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-2">
+                <Cpu size={12} /> System Instruction <span className="text-zinc-600 font-normal normal-case">(shared across all segments)</span>
+              </div>
+              <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4">{systemInstruction}</pre>
+            </div>
+          )}
+          <div>
+            <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-2">
+              <MessageSquare size={12} /> User Prompt (with transcript)
+            </div>
+            <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4 max-h-[70vh] overflow-auto">{seg.promptUsed || 'N/A'}</pre>
+          </div>
+        </div>
+      )}
+
+      {/* Output Log: raw LLM response */}
+      {tab === 'output_log' && (
+        <div className="flex-1 overflow-auto p-5 space-y-4">
+          {seg.llmResponseRaw && (
+            <div>
+              <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Bot size={12} /> Raw LLM Response
+                  <span className="text-zinc-600 font-normal normal-case">{seg.llmResponseRaw.length.toLocaleString()} chars</span>
+                </div>
+                <button onClick={() => copyText(seg.llmResponseRaw, 'seg-raw')} className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                  {copied === 'seg-raw' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                </button>
+              </div>
+              <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4 max-h-[40vh] overflow-auto">{seg.llmResponseRaw}</pre>
+            </div>
+          )}
+          <div>
+            <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Bot size={12} /> {seg.llmResponseRaw ? 'Processed Output (after applying deletions)' : 'LLM Response'}
+                <span className="text-zinc-600 font-normal normal-case">{outputText.length.toLocaleString()} chars</span>
+              </div>
+              <button onClick={() => copyText(outputText, 'seg-out-log')} className="text-zinc-600 hover:text-zinc-300 transition-colors">
+                {copied === 'seg-out-log' ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+              </button>
+            </div>
+            <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4 max-h-[80vh] overflow-auto">{outputText || 'N/A'}</pre>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -995,8 +1276,9 @@ function CreateExperimentForm({ onCreated }) {
       prompt: '',
       params: { temperature: 1, thinking_level: 'HIGH' },
       description: '',
+      output_mode: 'passthrough',
       action: 'segment',
-      actionParams: { minSeconds: 40, maxSeconds: 80, contextSeconds: 30 },
+      actionParams: { preset: 'short', minSeconds: 40, maxSeconds: 60, contextSeconds: 30 },
     }
     setManualStages(prev => {
       if (atIndex !== undefined) {
@@ -1048,6 +1330,9 @@ function CreateExperimentForm({ onCreated }) {
         prompt: s.prompt,
         params: { temperature: Number(s.params.temperature) ?? 1 },
         description: s.description || undefined,
+      }
+      if (s.output_mode && s.output_mode !== 'passthrough') {
+        stage.output_mode = s.output_mode
       }
       const modelOpt = MODEL_OPTIONS.find(m => m.id === s.model)
       if (modelOpt && modelOpt.provider !== 'openai') {
@@ -1162,6 +1447,7 @@ function CreateExperimentForm({ onCreated }) {
                     <span className={`text-xs px-2 py-1 rounded border ${
                       stage.type === 'programmatic' ? 'border-amber-800/50 bg-amber-900/20 text-amber-400' :
                       stage.type === 'llm_parallel' ? 'border-cyan-800/50 bg-cyan-900/20 text-cyan-400' :
+                      stage.type === 'llm_question' ? 'border-pink-800/50 bg-pink-900/20 text-pink-400' :
                       'border-violet-800/50 bg-violet-900/20 text-violet-400'
                     }`}>
                       {stage.name}
@@ -1313,7 +1599,7 @@ function CreateExperimentForm({ onCreated }) {
             <div>
               {manualStages.map((stage, idx) => {
                 const modelOpt = MODEL_OPTIONS.find(m => m.id === stage.model)
-                const showThinking = stage.type !== 'programmatic' && modelOpt && modelOpt.provider !== 'openai'
+                const showThinking = stage.type !== 'programmatic'
                 return (
                   <div key={idx}>
                     {/* Insert-between button */}
@@ -1356,10 +1642,20 @@ function CreateExperimentForm({ onCreated }) {
                     <div className="grid grid-cols-3 gap-2">
                       <div>
                         <label className="block text-[10px] text-zinc-500 mb-0.5">Type</label>
-                        <select value={stage.type} onChange={e => updateManualStage(idx, { type: e.target.value })}
+                        <select value={stage.type} onChange={e => {
+                          const newType = e.target.value
+                          const updates = { type: newType }
+                          if (newType === 'llm_parallel') {
+                            updates.system_instruction = updateSegmentRulesInSystem(stage.system_instruction, stage.output_mode)
+                          } else if (stage.type === 'llm_parallel') {
+                            updates.system_instruction = stripSegmentRules(stage.system_instruction)
+                          }
+                          updateManualStage(idx, updates)
+                        }}
                           className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none">
                           <option value="llm">LLM (whole transcript)</option>
                           <option value="llm_parallel">LLM Parallel (per segment)</option>
+                          <option value="llm_question">LLM Question</option>
                           <option value="programmatic">Programmatic</option>
                         </select>
                       </div>
@@ -1376,23 +1672,26 @@ function CreateExperimentForm({ onCreated }) {
                           </div>
                           <div></div>
                           {stage.action === 'segment' && (
-                            <div className="col-span-3 grid grid-cols-3 gap-2">
+                            <div className="col-span-3 grid grid-cols-2 gap-2">
                               <div>
-                                <label className="block text-[10px] text-zinc-500 mb-0.5">Min Seconds</label>
-                                <input type="number" value={stage.actionParams.minSeconds}
-                                  onChange={e => updateManualStage(idx, { actionParams: { ...stage.actionParams, minSeconds: e.target.value } })}
-                                  className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none" />
+                                <label className="block text-[10px] text-zinc-500 mb-0.5">Segment Size</label>
+                                <select
+                                  value={stage.actionParams?.preset || 'short'}
+                                  onChange={e => {
+                                    const p = SEGMENT_PRESETS[e.target.value]
+                                    updateManualStage(idx, { actionParams: { ...stage.actionParams, preset: e.target.value, minSeconds: p.minSeconds, maxSeconds: p.maxSeconds } })
+                                  }}
+                                  className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none"
+                                >
+                                  {Object.entries(SEGMENT_PRESETS).map(([k, v]) => (
+                                    <option key={k} value={k}>{v.label}</option>
+                                  ))}
+                                </select>
                               </div>
                               <div>
-                                <label className="block text-[10px] text-zinc-500 mb-0.5">Max Seconds</label>
-                                <input type="number" value={stage.actionParams.maxSeconds}
-                                  onChange={e => updateManualStage(idx, { actionParams: { ...stage.actionParams, maxSeconds: e.target.value } })}
-                                  className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none" />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] text-zinc-500 mb-0.5">Context Seconds</label>
-                                <input type="number" value={stage.actionParams.contextSeconds}
-                                  onChange={e => updateManualStage(idx, { actionParams: { ...stage.actionParams, contextSeconds: e.target.value } })}
+                                <label className="block text-[10px] text-zinc-500 mb-0.5">Context Sec</label>
+                                <input type="number" value={stage.actionParams?.contextSeconds ?? 30}
+                                  onChange={e => updateManualStage(idx, { actionParams: { ...stage.actionParams, contextSeconds: Number(e.target.value) } })}
                                   className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none" />
                               </div>
                             </div>
@@ -1427,6 +1726,30 @@ function CreateExperimentForm({ onCreated }) {
                               </select>
                             </div>
                           )}
+                          {stage.type !== 'llm_question' && (
+                            <div className="col-span-3 sm:col-span-1">
+                              <label className="block text-[10px] text-zinc-500 mb-0.5">Output Mode</label>
+                              <select value={stage.output_mode || ''}
+                                onChange={e => {
+                                  const newMode = e.target.value || undefined
+                                  const updates = { output_mode: newMode }
+                                  if (stage.type === 'llm_parallel') {
+                                    updates.system_instruction = updateSegmentRulesInSystem(stage.system_instruction, newMode)
+                                  }
+                                  updateManualStage(idx, updates)
+                                }}
+                                className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs focus:outline-none">
+                                <option value="">None (return cleaned text)</option>
+                                <option value="deletion">Deletion (LLM identifies text to remove)</option>
+                                <option value="keep_only">Keep Only (LLM identifies text to keep)</option>
+                              </select>
+                            </div>
+                          )}
+                          {stage.type === 'llm_parallel' && (
+                            <div className="col-span-3 text-[10px] text-cyan-400/70 bg-cyan-900/10 border border-cyan-800/20 rounded px-2 py-1.5">
+                              Segment boundary rules are included in the system instruction below. Edit them to customize how the LLM handles {'<context>'}/{'<segment>'} markers.
+                            </div>
+                          )}
                           <div className="col-span-3">
                             <label className="block text-[10px] text-zinc-500 mb-0.5">System Instruction</label>
                             <textarea value={stage.system_instruction}
@@ -1441,8 +1764,13 @@ function CreateExperimentForm({ onCreated }) {
                               className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-zinc-500 min-h-[48px] resize-y"
                               placeholder="User prompt... Use {{transcript}}, {{segment_number}}, {{total_segments}} as placeholders" rows={2} />
                             <div className="text-[10px] text-zinc-600 mt-0.5">
-                              Available: {'{{transcript}}'}, {'{{segment_number}}'}, {'{{total_segments}}'}
+                              Available: {'{{transcript}}'}, {'{{segment_number}}'}, {'{{total_segments}}'}, {'{{llm_answer}}'}
                             </div>
+                            {stage.type === 'llm_question' && (
+                              <div className="text-[10px] text-pink-400/70 bg-pink-900/10 border border-pink-800/20 rounded px-2 py-1.5 mt-1">
+                                Question stage: LLM answer stored as <code className="font-mono bg-pink-900/30 px-1 rounded">{'{{llm_answer}}'}</code>. Transcript passes through unchanged.
+                              </div>
+                            )}
                           </div>
                         </>
                       )}
@@ -1576,6 +1904,9 @@ function StageBadge({ type }) {
   }
   if (type === 'llm_parallel') {
     return <span className="text-xs px-1.5 py-0.5 rounded border border-cyan-800 bg-cyan-900/30 text-cyan-300 flex items-center gap-1"><Layers size={10} /></span>
+  }
+  if (type === 'llm_question') {
+    return <span className="text-xs px-1.5 py-0.5 rounded border border-pink-800 bg-pink-900/30 text-pink-300 flex items-center gap-1"><MessageCircleQuestion size={10} /></span>
   }
   return <span className="text-xs px-1.5 py-0.5 rounded border border-violet-800 bg-violet-900/30 text-violet-300 flex items-center gap-1"><Bot size={10} /></span>
 }

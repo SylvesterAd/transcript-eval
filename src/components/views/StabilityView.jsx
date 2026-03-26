@@ -16,7 +16,7 @@ export default function StabilityView() {
       {/* Header */}
       <div>
         <div className="text-sm text-zinc-500 mb-1">
-          <Link to="/experiments" className="hover:text-zinc-300">Experiments</Link>
+          <Link to="/admin/experiments" className="hover:text-zinc-300">Experiments</Link>
           <span className="mx-2">→</span>
           {experiment?.name || `Experiment #${experimentId}`}
           <span className="mx-2">→</span>

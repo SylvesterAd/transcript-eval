@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
   experiment_id INTEGER NOT NULL REFERENCES experiments(id),
   video_id INTEGER NOT NULL REFERENCES videos(id),
   run_number INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'complete', 'failed')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'complete', 'failed', 'partial')),
   total_score REAL,
   score_breakdown_json TEXT,
   total_tokens INTEGER,
@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS run_stage_outputs (
   tokens_out INTEGER,
   cost REAL,
   runtime_ms INTEGER,
+  llm_response_raw TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
