@@ -46,6 +46,15 @@ export default function PlaybackControls() {
   }
 
   const handleSplit = () => {
+    if (state.activeTab === 'roughcut') {
+      // Single-click razor: create a zero-width cut at the playhead.
+      // User drags an edge to open it into a visible cut region.
+      dispatch({
+        type: 'ADD_CUT',
+        payload: { id: `cut-${Date.now()}`, start: state.currentTime, end: state.currentTime, source: 'split' },
+      })
+      return
+    }
     const selected = [...state.selectedTrackIds]
     if (selected.length === 1) {
       dispatch({ type: 'SPLIT_TRACK', payload: { trackId: selected[0], time: state.currentTime } })
@@ -93,41 +102,38 @@ export default function PlaybackControls() {
             </>
           )}
         </div>
-        <div className="border-l border-white/10 pl-3">
-          <button
-            onClick={async () => {
-              if (!state.groupId || syncing) return
-              setSyncing(true)
-              setSyncError(null)
-              dispatch({ type: 'MARK_CLEAN' }) // stop auto-save from racing with sync
-              dispatch({ type: 'PAUSE' })
-              try {
-                await apiPost(`/videos/groups/${state.groupId}/start-assembly`, { sync_mode: 'sync' })
-                const ac = new AbortController()
-                const result = await pollUntilDone(state.groupId, ac.signal)
-                if (result === 'done') {
+        {state.activeTab !== 'roughcut' && (
+          <div className="border-l border-white/10 pl-3">
+            <button
+              onClick={async () => {
+                if (!state.groupId || syncing) return
+                setSyncing(true)
+                setSyncError(null)
+                dispatch({ type: 'MARK_CLEAN' }) // stop auto-save from racing with sync
+                dispatch({ type: 'PAUSE' })
+                try {
+                  await apiPost(`/videos/groups/${state.groupId}/start-assembly`, { sync_mode: 'sync' })
+                  // Refetch immediately so EditorView sees in-progress status and shows SyncingScreen
                   refetchDetail()
-                  refetchTimestamps()
+                } catch (e) {
+                  console.error('Re-sync failed:', e)
+                  setSyncError(e.message)
+                  setTimeout(() => setSyncError(null), 5000)
+                  setSyncing(false)
                 }
-              } catch (e) {
-                console.error('Re-sync failed:', e)
-                setSyncError(e.message)
-                setTimeout(() => setSyncError(null), 5000)
-              } finally {
-                setSyncing(false)
-              }
-            }}
-            disabled={syncing || !state.groupId}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            <span className={`material-symbols-outlined text-sm ${syncing ? 'animate-spin' : ''}`}>
-              {syncing ? 'progress_activity' : syncError ? 'error' : 'sync'}
-            </span>
-            <span className="text-[10px] font-bold uppercase tracking-wider">
-              {syncing ? 'Syncing...' : syncError ? 'Failed' : 'Re-sync'}
-            </span>
-          </button>
-        </div>
+              }}
+              disabled={syncing || !state.groupId}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <span className={`material-symbols-outlined text-sm ${syncing ? 'animate-spin' : ''}`}>
+                {syncing ? 'progress_activity' : syncError ? 'error' : 'sync'}
+              </span>
+              <span className="text-[10px] font-bold uppercase tracking-wider">
+                {syncing ? 'Syncing...' : syncError ? 'Failed' : 'Re-sync'}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Center: play, speed, split */}
@@ -146,11 +152,11 @@ export default function PlaybackControls() {
           </button>
           <button
             onClick={handleSplit}
-            disabled={state.selectedTrackIds.size !== 1}
+            disabled={state.activeTab !== 'roughcut' && state.selectedTrackIds.size !== 1}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed group"
           >
             <span className="material-symbols-outlined text-sm">content_cut</span>
-            <span className="text-[10px] font-bold uppercase tracking-wider">Split</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider">{state.activeTab === 'roughcut' ? 'Cut' : 'Split'}</span>
           </button>
         </div>
       </div>

@@ -2,7 +2,7 @@ import db from '../db.js'
 import { scoreOutput } from './scorer.js'
 import { calculateSimilarity, checkTimecodePreservation, checkPausePreservation, computeDiff, extractDeletions } from './diff-engine.js'
 import { classifyDeletions } from './classifier.js'
-import { segmentTranscript, reassembleSegments } from './segmenter.js'
+import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
 
 // ── Live progress & abort tracking ──────────────────────────────────────
 // Maps experimentRunId → { stageIndex, totalStages, stageName, status }
@@ -62,15 +62,25 @@ export async function executeRun(experimentRunId) {
     }
   }
 
-  if (!rawTranscript || !humanTranscript) throw new Error('Transcripts not found')
+  if (!rawTranscript) throw new Error('Raw transcript not found')
 
   db.prepare("UPDATE experiment_runs SET status = 'running' WHERE id = ?").run(experimentRunId)
 
   const raw = rawTranscript.content
-  const human = humanTranscript.content
+  const human = humanTranscript?.content || null
   let currentInput = raw
   let segments = null // For parallel processing
   let llmAnswer = '' // Stores most recent llm_question output for {{llm_answer}} template
+  const llmAnswers = {} // Stores numbered answers: {{llm_answer_1}}, {{llm_answer_2}}, etc.
+  let llmQuestionCount = 0
+  function replaceAnswerPlaceholders(text) {
+    let result = text.replace(/\{\{llm_answer\}\}/g, llmAnswer)
+    for (const [num, ans] of Object.entries(llmAnswers)) {
+      result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
+    }
+    return result
+  }
+
   const startTime = Date.now()
   let totalTokens = 0
   let totalCost = 0
@@ -105,22 +115,48 @@ export async function executeRun(experimentRunId) {
         maxSeconds: params.maxSeconds || 80,
         contextSeconds: params.contextSeconds || 30,
       })
+    } else if (lastType === 'programmatic' && lastStage?.action === 'segment_by_chapters') {
+      // Rebuild chapter-based segments for the next llm_parallel stage
+      let chaptersData = ''
+      for (const cs of completedStages) {
+        const s = stages[cs.stage_index]
+        if (s?.type === 'llm_question') chaptersData = cs.output_text
+      }
+      if (chaptersData) {
+        const params = lastStage.actionParams || {}
+        segments = segmentByChapters(currentInput, chaptersData, {
+          contextSeconds: params.contextSeconds || 30,
+        })
+      }
     }
     if (lastType === 'llm_parallel') {
       // Restore segments with their cleaned text from saved output
       // Find the segment stage before this one to rebuild segment structure
       const segStageData = completedStages.find(cs => {
         const s = stages[cs.stage_index]
-        return s?.type === 'programmatic' && s?.action === 'segment'
+        return s?.type === 'programmatic' && (s?.action === 'segment' || s?.action === 'segment_by_chapters')
       })
       if (segStageData) {
         const segStage = stages[segStageData.stage_index]
         const params = segStage.actionParams || {}
-        segments = segmentTranscript(currentInput, {
-          minSeconds: params.minSeconds || 40,
-          maxSeconds: params.maxSeconds || 80,
-          contextSeconds: params.contextSeconds || 30,
-        })
+        if (segStage.action === 'segment_by_chapters') {
+          let chaptersData = ''
+          for (const cs of completedStages) {
+            const s = stages[cs.stage_index]
+            if (s?.type === 'llm_question') chaptersData = cs.output_text
+          }
+          if (chaptersData) {
+            segments = segmentByChapters(currentInput, chaptersData, {
+              contextSeconds: params.contextSeconds || 30,
+            })
+          }
+        } else {
+          segments = segmentTranscript(currentInput, {
+            minSeconds: params.minSeconds || 40,
+            maxSeconds: params.maxSeconds || 80,
+            contextSeconds: params.contextSeconds || 30,
+          })
+        }
         // Restore cleanedText from saved llm_parallel output
         try {
           const saved = JSON.parse(lastCompleted.output_text)
@@ -207,6 +243,25 @@ export async function executeRun(experimentRunId) {
           promptUsed = '[Programmatic] Reassembled cleaned segments into full text'
           modelUsed = 'programmatic'
 
+        } else if (action === 'segment_by_chapters') {
+          const params = stage.actionParams || {}
+          if (!llmAnswer) {
+            throw new Error('segment_by_chapters requires a preceding llm_question stage (no {{llm_answer}} found)')
+          }
+          segments = segmentByChapters(currentInput, llmAnswer, {
+            contextSeconds: params.contextSeconds || 30,
+          })
+          stageOutput = JSON.stringify(segments.map((s, idx) => ({
+            segment: idx + 1,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            entries: s.entryCount,
+            chapterName: s.chapterName,
+            mainTextPreview: s.mainText.slice(0, 100) + '...',
+          })))
+          promptUsed = `[Programmatic] Segmented transcript into ${segments.length} chapters (${params.contextSeconds || 30}s context)`
+          modelUsed = 'programmatic'
+
         } else {
           stageOutput = currentInput
           promptUsed = `[Programmatic] Unknown action: ${action}`
@@ -217,22 +272,36 @@ export async function executeRun(experimentRunId) {
         // Run LLM on each segment separately
         if (!segments || segments.length === 0) {
           // Fallback: treat as single LLM call
-          const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput).replace(/\{\{llm_answer\}\}/g, llmAnswer)
-          const augmentedSystem = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect).replace(/\{\{llm_answer\}\}/g, llmAnswer)
-          const llmResult = await callLLM({
-            model: stage.model || 'claude-sonnet-4-20250514',
-            systemInstruction: augmentedSystem,
-            prompt,
-            params: stage.params || {},
-            experimentId: run.experiment_id,
-          })
-          stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
-          if (stage.output_mode && stage.output_mode !== 'passthrough') {
-            llmResponseRaw = llmResult.text
+          const prompt = replaceAnswerPlaceholders(insertTranscript(stage.prompt || '{{transcript}}', currentInput))
+          const augmentedSystem = replaceAnswerPlaceholders(augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect))
+
+          const MAX_OUTPUT_RETRIES = 2
+          for (let attempt = 0; attempt <= MAX_OUTPUT_RETRIES; attempt++) {
+            const llmResult = await callLLM({
+              model: stage.model || 'claude-sonnet-4-20250514',
+              systemInstruction: augmentedSystem,
+              prompt,
+              params: stage.params || {},
+              experimentId: run.experiment_id,
+            })
+            tokensIn += llmResult.tokensIn || 0
+            tokensOut += llmResult.tokensOut || 0
+            stageCost += llmResult.cost || 0
+
+            try {
+              stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
+              if (stage.output_mode && stage.output_mode !== 'passthrough') {
+                llmResponseRaw = llmResult.text
+              }
+              break
+            } catch (parseErr) {
+              if (attempt === MAX_OUTPUT_RETRIES) {
+                throw new Error(`Stage failed after ${MAX_OUTPUT_RETRIES + 1} attempts: ${parseErr.message}`)
+              }
+              console.log(`[llm-runner] Attempt ${attempt + 1} failed, retrying: ${parseErr.message}`)
+            }
           }
-          tokensIn = llmResult.tokensIn
-          tokensOut = llmResult.tokensOut
-          stageCost = llmResult.cost
+
           promptUsed = prompt
           systemUsed = stage.system_instruction || ''
           modelUsed = stage.model || 'claude-sonnet-4-20250514'
@@ -312,32 +381,48 @@ export async function executeRun(experimentRunId) {
               segPrompt = insertTranscript(segPrompt, fullSegText)
               segPrompt = segPrompt.replace(/\{\{segment_number\}\}/g, String(s + 1))
               segPrompt = segPrompt.replace(/\{\{total_segments\}\}/g, String(segments.length))
-              segPrompt = segPrompt.replace(/\{\{llm_answer\}\}/g, llmAnswer)
+              segPrompt = segPrompt.replace(/\{\{chapter_name\}\}/g, seg.chapterName || '')
+              segPrompt = segPrompt.replace(/\{\{chapter_description\}\}/g, seg.chapterDescription || '')
+              segPrompt = segPrompt.replace(/\{\{chapter_purpose\}\}/g, seg.chapterPurpose || '')
+              const beatsStr = (seg.chapterBeats || []).map(b => `- ${b.timecode}: ${b.description}${b.purpose ? ' (' + b.purpose + ')' : ''}`).join('\n')
+              segPrompt = segPrompt.replace(/\{\{chapter_beats\}\}/g, beatsStr)
+              segPrompt = replaceAnswerPlaceholders(segPrompt)
+              const augmentedSystem = replaceAnswerPlaceholders(augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect))
 
-              const augmentedSystem = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect).replace(/\{\{llm_answer\}\}/g, llmAnswer)
-              const llmResult = await callLLM({
-                model: stage.model || 'claude-sonnet-4-20250514',
-                systemInstruction: augmentedSystem,
-                prompt: segPrompt,
-                params: stage.params || {},
-                experimentId: run.experiment_id,
-              })
+              const MAX_OUTPUT_RETRIES = 2
+              for (let attempt = 0; attempt <= MAX_OUTPUT_RETRIES; attempt++) {
+                const llmResult = await callLLM({
+                  model: stage.model || 'claude-sonnet-4-20250514',
+                  systemInstruction: augmentedSystem,
+                  prompt: segPrompt,
+                  params: stage.params || {},
+                  experimentId: run.experiment_id,
+                })
 
-              if (abortedExperiments.has(run.experiment_id)) { aborted = true; return }
+                if (abortedExperiments.has(run.experiment_id)) { aborted = true; return }
 
-              const applied = applyOutputMode(stage.output_mode, llmResult.text, seg.mainText)
-              seg.cleanedText = applied.cleanedText
-              if (applied.contextDeletions.length > 0) {
-                for (const cd of applied.contextDeletions) {
-                  pendingContextDeletions.push({ sourceSegment: s, ...cd })
+                tokensIn += llmResult.tokensIn || 0
+                tokensOut += llmResult.tokensOut || 0
+                stageCost += llmResult.cost || 0
+
+                try {
+                  const applied = applyOutputMode(stage.output_mode, llmResult.text, seg.mainText)
+                  seg.cleanedText = applied.cleanedText
+                  if (applied.contextDeletions.length > 0) {
+                    for (const cd of applied.contextDeletions) {
+                      pendingContextDeletions.push({ sourceSegment: s, ...cd })
+                    }
+                  }
+                  partialResults[s] = { segment: s + 1, cleanedText: llmResult.text, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt }
+                  break
+                } catch (parseErr) {
+                  if (attempt === MAX_OUTPUT_RETRIES) {
+                    throw new Error(`Segment ${s + 1} failed after ${MAX_OUTPUT_RETRIES + 1} attempts: ${parseErr.message}`)
+                  }
+                  console.log(`[llm-runner] Segment ${s + 1} attempt ${attempt + 1} failed, retrying: ${parseErr.message}`)
                 }
               }
-              tokensIn += llmResult.tokensIn || 0
-              tokensOut += llmResult.tokensOut || 0
-              stageCost += llmResult.cost || 0
               segmentsDone++
-
-              partialResults[s] = { segment: s + 1, cleanedText: llmResult.text, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt }
 
               // Save to DB immediately after each segment
               const currentOutput = JSON.stringify(partialResults.filter(r => r !== null))
@@ -404,8 +489,8 @@ export async function executeRun(experimentRunId) {
 
       } else if (stageType === 'llm_question') {
         // LLM Question: ask LLM a question, store answer as {{llm_answer}}, pass transcript through unchanged
-        const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput).replace(/\{\{llm_answer\}\}/g, llmAnswer)
-        const sysInstr = (stage.system_instruction || '').replace(/\{\{llm_answer\}\}/g, llmAnswer)
+        const prompt = replaceAnswerPlaceholders(insertTranscript(stage.prompt || '{{transcript}}', currentInput))
+        const sysInstr = replaceAnswerPlaceholders(stage.system_instruction || '')
         const llmResult = await callLLM({
           model: stage.model || 'claude-sonnet-4-20250514',
           systemInstruction: sysInstr,
@@ -414,7 +499,9 @@ export async function executeRun(experimentRunId) {
           experimentId: run.experiment_id,
         })
         stageOutput = llmResult.text
-        llmAnswer = llmResult.text // Store for {{llm_answer}} in subsequent stages
+        llmQuestionCount++
+        llmAnswer = llmResult.text
+        llmAnswers[llmQuestionCount] = llmResult.text
         tokensIn = llmResult.tokensIn
         tokensOut = llmResult.tokensOut
         stageCost = llmResult.cost
@@ -424,23 +511,36 @@ export async function executeRun(experimentRunId) {
 
       } else {
         // Standard LLM stage
-        const prompt = insertTranscript(stage.prompt || '{{transcript}}', currentInput).replace(/\{\{llm_answer\}\}/g, llmAnswer)
-        const augmentedSystem = augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect).replace(/\{\{llm_answer\}\}/g, llmAnswer)
-        const llmResult = await callLLM({
-          model: stage.model || 'claude-sonnet-4-20250514',
-          systemInstruction: augmentedSystem,
-          prompt,
-          params: stage.params || {},
-          experimentId: run.experiment_id,
-        })
+        const prompt = replaceAnswerPlaceholders(insertTranscript(stage.prompt || '{{transcript}}', currentInput))
+        const augmentedSystem = replaceAnswerPlaceholders(augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect))
 
-        stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
-        if (stage.output_mode && stage.output_mode !== 'passthrough') {
-          llmResponseRaw = llmResult.text
+        const MAX_OUTPUT_RETRIES = 2
+        for (let attempt = 0; attempt <= MAX_OUTPUT_RETRIES; attempt++) {
+          const llmResult = await callLLM({
+            model: stage.model || 'claude-sonnet-4-20250514',
+            systemInstruction: augmentedSystem,
+            prompt,
+            params: stage.params || {},
+            experimentId: run.experiment_id,
+          })
+          tokensIn += llmResult.tokensIn || 0
+          tokensOut += llmResult.tokensOut || 0
+          stageCost += llmResult.cost || 0
+
+          try {
+            stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
+            if (stage.output_mode && stage.output_mode !== 'passthrough') {
+              llmResponseRaw = llmResult.text
+            }
+            break
+          } catch (parseErr) {
+            if (attempt === MAX_OUTPUT_RETRIES) {
+              throw new Error(`Stage failed after ${MAX_OUTPUT_RETRIES + 1} attempts: ${parseErr.message}`)
+            }
+            console.log(`[llm-runner] Attempt ${attempt + 1} failed, retrying: ${parseErr.message}`)
+          }
         }
-        tokensIn = llmResult.tokensIn
-        tokensOut = llmResult.tokensOut
-        stageCost = llmResult.cost
+
         promptUsed = prompt
         systemUsed = augmentedSystem
         modelUsed = stage.model || 'claude-sonnet-4-20250514'
@@ -487,9 +587,9 @@ export async function executeRun(experimentRunId) {
         currentInput = stageOutput
       }
 
-      // Compute metrics for stages that produce text output
-      if (stageType === 'llm' || (stageType === 'programmatic' && stage.action === 'reassemble')
-          || (stageType === 'llm_parallel' && (!segments || segments.length === 0))) {
+      // Compute metrics for stages that produce text output (requires human transcript)
+      if (human && (stageType === 'llm' || (stageType === 'programmatic' && stage.action === 'reassemble')
+          || (stageType === 'llm_parallel' && (!segments || segments.length === 0)))) {
         computeAndStoreMetrics(stageOutputId, experimentRunId, i, raw, human, currentInput, run.video_id)
       }
 
@@ -498,8 +598,8 @@ export async function executeRun(experimentRunId) {
       if (prog) prog.status = 'done'
     }
 
-    // Compute final score
-    const finalScore = scoreOutput(raw, human, currentInput)
+    // Compute final score (requires human transcript)
+    const finalScore = human ? scoreOutput(raw, human, currentInput) : null
     const totalRuntime = Date.now() - startTime
 
     db.prepare(`
@@ -507,7 +607,7 @@ export async function executeRun(experimentRunId) {
         total_tokens = ?, total_cost = ?, total_runtime_ms = ?, completed_at = datetime('now')
       WHERE id = ?
     `).run(
-      finalScore.totalScore, JSON.stringify(finalScore),
+      finalScore?.totalScore ?? null, finalScore ? JSON.stringify(finalScore) : null,
       totalTokens, totalCost, totalRuntime,
       experimentRunId
     )
@@ -588,13 +688,13 @@ Rules:
     identify: `
 
 ## CRITICAL OUTPUT FORMAT — IDENTIFY MODE
-You are in IDENTIFY mode. Instead of editing the transcript, classify problematic segments by category with reasons.
+You are in IDENTIFY mode. Instead of editing the transcript, classify problematic segments by category.
 
 Return ONLY a valid JSON array like this:
 \`\`\`json
 [
-  {"timecode": "[00:01:23]", "text": "Um, you know, basically", "category": "repetition", "reason": "Repeats the same point made at [00:00:45]"},
-  {"timecode": "[00:02:45]", "category": "lengthy", "reason": "Over-explains a simple concept that was already clear"}
+  {"timecode": "[00:01:23]", "text": "Um, you know, basically", "category": "repetition"},
+  {"timecode": "[00:02:45]", "category": "lengthy"}
 ]
 \`\`\`
 
@@ -607,7 +707,6 @@ Categories (use EXACTLY these values):
 Rules:
 - "timecode" (REQUIRED) — exact timecode from transcript
 - "category" (REQUIRED) — one of the four categories above
-- "reason" (REQUIRED) — brief explanation of WHY this is a problem
 - "text" (OPTIONAL) — the specific problematic text. If omitted, the entire segment is flagged
 - Return ONLY the JSON array — no commentary`,
   }
@@ -620,6 +719,7 @@ Rules:
     const allCategories = {
       filler_words: 'Filler words: um, uh, you know, like, basically, I mean',
       false_starts: 'False starts: abandoned sentences, self-corrections, incomplete thoughts',
+      meta_commentary: 'Meta commentary: talking about the recording process, directing crew, discussing takes, behind-the-scenes remarks not meant for the final video',
       repetition: 'Same idea repeated, duplicate examples',
       lengthy: 'Over-explanation, unnecessary detail',
       technical_unclear: 'Too technical, vague phrasing, unclear',
@@ -674,15 +774,11 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
     const raw = jsonMatch ? jsonMatch[1].trim() : llmOutput.trim()
     items = JSON.parse(raw)
   } catch (e) {
-    console.error(`[llm-runner] Failed to parse LLM output as JSON for output_mode=${outputMode}:`, e.message)
-    console.error(`[llm-runner] Raw output (first 500 chars):`, llmOutput.slice(0, 500))
-    // Fallback: return input unchanged — deletion/keep_only requires JSON, so nothing can be applied
-    return { cleanedText: inputText, contextDeletions: [] }
+    throw new Error(`Failed to parse LLM output as JSON for ${outputMode} mode: ${e.message}. Output starts with: ${llmOutput.slice(0, 200)}`)
   }
 
   if (!Array.isArray(items)) {
-    console.error('[llm-runner] LLM output is not an array, falling back to unchanged input')
-    return { cleanedText: inputText, contextDeletions: [] }
+    throw new Error(`LLM output is not a JSON array for ${outputMode} mode`)
   }
 
   // Parse the input transcript into timecoded entries
@@ -846,6 +942,22 @@ function applySingleDeletion(text, timecode, deleteText) {
 
 function buildSegmentPromptText(seg) {
   let text = ''
+  // Add chapter info block if present
+  if (seg.chapterName) {
+    text += `<chapter_info>\n`
+    text += `Chapter: ${seg.chapterName}\n`
+    if (seg.chapterDescription) text += `Description: ${seg.chapterDescription}\n`
+    if (seg.chapterPurpose) text += `Purpose: ${seg.chapterPurpose}\n`
+    if (seg.chapterBeats && seg.chapterBeats.length > 0) {
+      text += `Beats:\n`
+      for (const beat of seg.chapterBeats) {
+        text += `  - ${beat.timecode}: ${beat.description}`
+        if (beat.purpose) text += ` (${beat.purpose})`
+        text += '\n'
+      }
+    }
+    text += `</chapter_info>\n\n`
+  }
   if (seg.beforeContext) {
     text += `<context>\n${seg.beforeContext}\n`
   }

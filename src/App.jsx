@@ -9,6 +9,7 @@ import VideoDetailView from './components/views/VideoDetailView.jsx'
 import StrategiesView from './components/views/StrategiesView.jsx'
 import ExperimentsView from './components/views/ExperimentsView.jsx'
 import RunDetailView from './components/views/RunDetailView.jsx'
+import RunsView from './components/views/RunsView.jsx'
 import StabilityView from './components/views/StabilityView.jsx'
 import ProjectsView from './components/views/ProjectsView.jsx'
 import EditorView from './components/editor/EditorView.jsx'
@@ -47,6 +48,7 @@ export default function App() {
         <Route path="videos/:id" element={<VideoDetailView />} />
         <Route path="strategies" element={<StrategiesView />} />
         <Route path="experiments" element={<ExperimentsView />} />
+        <Route path="runs" element={<RunsView />} />
         <Route path="runs/:runId" element={<RunDetailView />} />
         <Route path="experiments/:experimentId/stability" element={<StabilityView />} />
       </Route>

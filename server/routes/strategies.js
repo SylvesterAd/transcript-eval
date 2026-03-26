@@ -1,13 +1,14 @@
 import { Router } from 'express'
 import db from '../db.js'
 import { findFirstChangedIndex, invalidateFromIndex } from '../services/stage-diff.js'
+import { requireAuth } from '../auth.js'
 
 const router = Router()
 
 // List all strategies with latest version info
 router.get('/', (req, res) => {
   const strategies = db.prepare(`
-    SELECT s.*,
+    SELECT s.*, s.is_main,
       (SELECT MAX(sv.version_number) FROM strategy_versions sv WHERE sv.strategy_id = s.id) AS latest_version,
       (SELECT COUNT(*) FROM strategy_versions sv WHERE sv.strategy_id = s.id) AS version_count,
       (SELECT sv.stages_json FROM strategy_versions sv WHERE sv.strategy_id = s.id ORDER BY sv.version_number DESC LIMIT 1) AS stages_json,
@@ -34,7 +35,7 @@ router.get('/:id', (req, res) => {
 })
 
 // Create strategy
-router.post('/', (req, res) => {
+router.post('/', requireAuth, (req, res) => {
   const { name, description } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
 
@@ -47,7 +48,7 @@ router.post('/', (req, res) => {
 })
 
 // Create strategy version
-router.post('/:id/versions', (req, res) => {
+router.post('/:id/versions', requireAuth, (req, res) => {
   const { stages, notes } = req.body
   const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
@@ -76,7 +77,7 @@ router.get('/:id/versions/:versionId', (req, res) => {
 })
 
 // Update strategy version
-router.put('/:id/versions/:versionId', (req, res) => {
+router.put('/:id/versions/:versionId', requireAuth, (req, res) => {
   const { stages, notes } = req.body
   const version = db.prepare(
     'SELECT * FROM strategy_versions WHERE id = ? AND strategy_id = ?'
@@ -105,7 +106,7 @@ router.put('/:id/versions/:versionId', (req, res) => {
 })
 
 // Generate short LLM description for a strategy
-router.post('/:id/summarize', async (req, res) => {
+router.post('/:id/summarize', requireAuth, async (req, res) => {
   const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
@@ -161,7 +162,7 @@ ${stageDescriptions}`
 })
 
 // AI-propose a transcript processing workflow
-router.post('/ai-propose', async (req, res) => {
+router.post('/ai-propose', requireAuth, async (req, res) => {
   const { message, history, model = 'gemini-3.1-pro-preview' } = req.body
 
   const systemInstruction = `You are a transcript processing workflow designer. You design multi-stage pipelines that clean, edit, and improve raw video transcripts.
@@ -506,8 +507,20 @@ Do NOT include any text outside the JSON code block. Do NOT use markdown heading
   }
 })
 
+// Set strategy as main flow
+router.put('/:id/set-main', (req, res) => {
+  const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+  if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
+
+  db.prepare('UPDATE strategies SET is_main = 0').run()
+  db.prepare('UPDATE strategies SET is_main = 1 WHERE id = ?').run(req.params.id)
+
+  const updated = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+  res.json(updated)
+})
+
 // Delete strategy
-router.delete('/:id', (req, res) => {
+router.delete('/:id', requireAuth, (req, res) => {
   db.prepare('DELETE FROM strategy_versions WHERE strategy_id = ?').run(req.params.id)
   db.prepare('DELETE FROM strategies WHERE id = ?').run(req.params.id)
   res.json({ success: true })

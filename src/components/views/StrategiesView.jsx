@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { useApi, apiPost, apiPut, apiDelete } from '../../hooks/useApi.js'
 import { previewAugmentedSystem, updateSegmentRulesInSystem, hasSegmentRules, stripSegmentRules } from '../../lib/promptPreview.js'
-import { Plus, ChevronDown, ChevronRight, Trash2, ArrowUp, ArrowDown, Bot, Layers, Cpu, Pencil, Copy, Loader2, Sparkles, Send, Check, RotateCcw, MessageCircleQuestion } from 'lucide-react'
+import { Plus, ChevronDown, ChevronRight, Trash2, ArrowUp, ArrowDown, Bot, Layers, Cpu, Pencil, Copy, Loader2, Sparkles, Send, Check, RotateCcw, MessageCircleQuestion, Star } from 'lucide-react'
 
 const MODELS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', provider: 'gemini' },
@@ -19,12 +19,191 @@ const SEGMENT_PRESETS = {
   long:   { label: 'Long (100–130s)',  minSeconds: 100, maxSeconds: 130, contextSeconds: 30 },
 }
 
+const CHAPTERS_PIPELINE = [
+  {
+    name: 'Identify Chapters & Beats',
+    type: 'llm_question',
+    model: 'claude-sonnet-4-20250514',
+    prompt: `Analyze this transcript and identify its chapters and beats.\n\n{{transcript}}`,
+    system_instruction: `You are a content structure analyst. Identify the natural chapters and beats in this transcript.
+
+## What is a Chapter?
+A chapter is a large section of the story with a clear purpose. It groups many smaller moments together into one meaningful phase.
+A chapter usually:
+- covers one stage of the journey
+- has its own goal or focus
+- ends when the story moves into a new phase
+Examples: "Setup," "Conflict," "Turning Point," "Resolution"
+A chapter answers: "What part of the story are we in?"
+
+## What is a Beat?
+A beat is a small story moment where something changes. It is one unit of movement inside the story.
+Examples of beats:
+- a realization
+- a reaction
+- a decision
+- a reveal
+- a joke landing
+- a rise in tension
+- a shift in emotion
+A beat answers: "What changes right now?"
+
+## Relationship
+A chapter is made of many beats.
+- Chapter: a major section of the story with one main purpose.
+- Beat: a small moment inside the story where information, emotion, or direction changes.
+
+## Output format
+For each chapter provide:
+- timecode_start: the [HH:MM:SS] timecode where the chapter begins
+- timecode_end: the [HH:MM:SS] timecode where the chapter ends
+- name: a concise chapter title
+- description: what this chapter covers
+- purpose: why this chapter exists in the content
+- beats: key moments within the chapter, each with:
+  - timecode: the [HH:MM:SS] timecode
+  - description: what happens at this beat
+  - purpose: why this beat matters
+
+Return ONLY a JSON array:
+\`\`\`json
+[
+  {
+    "timecode_start": "[00:00:00]",
+    "timecode_end": "[00:05:30]",
+    "name": "Introduction",
+    "description": "Host introduces the topic and guests",
+    "purpose": "Set context for the discussion",
+    "beats": [
+      { "timecode": "[00:00:15]", "description": "Host greeting", "purpose": "Open the episode" },
+      { "timecode": "[00:02:00]", "description": "Guest introduction", "purpose": "Establish credibility" }
+    ]
+  }
+]
+\`\`\``,
+    params: { temperature: 1 },
+  },
+  {
+    name: 'Segment by Chapters',
+    type: 'programmatic',
+    action: 'segment_by_chapters',
+    actionParams: { contextSeconds: 0 },
+    description: 'Segment transcript by identified chapters',
+  },
+  {
+    name: 'Process Per Chapter',
+    type: 'llm_parallel',
+    model: 'gemini-3.1-pro-preview',
+    prompt: '{{transcript}}',
+    system_instruction: `You are an advanced transcript editor. Your task is to identify Repetition, Lengthy, Technical&Unclear OR Irrelevant parts of the transcription.
+
+## You are processing chapter "{{chapter_name}}".
+
+Chapter context:
+- Description: {{chapter_description}}
+- Purpose: {{chapter_purpose}}
+- Key beats: {{chapter_beats}}
+
+## Repetition
+Repetition is when the same idea, meaning, or instruction is said more than once in slightly different or identical wording, without adding new useful information. This includes duplicate examples, rephrased restatements, saying the conclusion twice, or repeating a point after it is already clear. Repetition increases length but does not improve understanding.
+
+Repetition can use different words but still express the same idea.
+For example: "We need to make this simple. It should be easy to understand. It must not be complicated."
+These may use different wording, but they repeat the same core point and should be reduced to one clear version.
+
+Repetition should be identified only when it does not add new meaning.
+For example: "The user is upset. They are angry because the payment failed."
+This is not pure repetition, because the second part adds the reason.
+
+A phrase is likely repetition if removing it does not materially reduce the factual meaning or instruction.
+If two nearby parts communicate the same message, keep only the strongest or clearest one.
+
+Repetition can be word-level, phrase-level, sentence-level, or example-level.
+It can appear as:
+- the same statement repeated twice,
+- two examples showing the exact same thing,
+- a point explained and then re-explained immediately,
+- a sentence that restates what the previous sentence already said.
+
+Repetition often appears at the start or end of an explanation, but it can also appear in the middle.
+For example: "This is very important. Really important. Extremely important."
+Only one strong form is needed unless intensity itself is meaningful.
+
+IMPORTANT: remove repeated ideas, duplicate examples, and restatements, but keep reinforcement if it adds function such as contrast, emphasis with purpose, or a new nuance.
+
+## Lengthy
+Lengthy means the response takes more words than needed to communicate the point clearly. It includes over-explanation, too much setup, excessive hedging, unnecessary detail, long lead-ins, and explanations that continue after the main point is already understood. A lengthy response is not wrong, but it is inefficient and can make the message harder to follow.
+
+Important: Lengthy content often contains useful words, but too many of them.
+The problem is not necessarily incorrectness; the problem is that the same result could be achieved more directly.
+
+A response is likely lengthy if the key answer could be understood with much less text and no loss of meaning.
+Ask: does this sentence help the user understand, decide, or act? If not, it is likely unnecessary.
+
+Lengthy writing can include:
+- words that don't add any value and without it sentence would just be more robust
+- long introductions before the real answer,
+- too many qualifiers,
+- repeated caveats,
+- excessive background,
+- obvious explanations,
+- too many examples for a simple point.
+
+Lengthy content is especially common around transitions and framing.
+For example: "In order to give you the best possible answer, it is important to first consider…"
+Often this can be shortened or removed entirely.
+
+IMPORTANT: shorten setup, trim extra explanation, reduce hedging, and remove detail that does not change the outcome; however, do not cut information that is needed for correctness, safety, or meaning.
+
+## Technical & Unclear
+Technical_unclear means the response is difficult to understand because it uses overly technical language, vague phrasing, abstract wording, unexplained jargon, or poor structure. The issue is not just that the content is advanced — it is that the explanation is not made clear for the intended reader. A technically unclear response may be correct, but the meaning is hard to extract.
+
+Important: A response can be technical_unclear even if every sentence is individually valid.
+If the reader cannot easily tell what is being said, what matters, or what to do next, the wording is too unclear.
+
+Technical words are not automatically a problem.
+They are a problem when they are unnecessary, undefined, stacked together, or used instead of a simpler explanation.
+
+Technical_unclear language often includes:
+- jargon without explanation,
+- abstract nouns instead of concrete actions,
+- unclear references
+- compressed logic with missing steps
+- sentences that are grammatically correct but hard to parse AND not important for context
+
+## Irrelevance
+Irrelevance is any content that does not help answer the user's request or support the intended purpose of the message. This includes irrelevant jokes, tangents, side comments, off-topic examples, unnecessary personality, or a tone that does not match the situation. Irrelevant content may be interesting or entertaining, but it distracts from the main goal.
+
+A part is likely irrelevant if removing it would make the answer more focused without losing needed meaning, evidence, or instruction.
+If it does not help the user understand, decide, or act, it is probably irrelevant.
+
+Irrelevance can appear as:
+- jokes that do not help,
+- side tangents,
+- extra commentary about style or personality,
+- unrelated comparisons,
+- decorative text with no function,
+- emotional tone that distracts from the request.
+
+Irrelevant content often appears before the answer, after the answer, or between useful points.
+It may interrupt the flow even if each sentence is understandable on its own.`,
+    params: { temperature: 1, thinking_level: 'MEDIUM' },
+    output_mode: 'identify',
+  },
+]
+
 const TEMPLATE_VARS = [
   { tag: '<transcript>', desc: 'Full transcript text' },
   { tag: '{{transcript}}', desc: 'Full transcript (mustache)' },
   { tag: '{{segment_number}}', desc: 'Current segment #' },
   { tag: '{{total_segments}}', desc: 'Total segments' },
   { tag: '{{llm_answer}}', desc: 'Output from most recent LLM Question stage' },
+  { tag: '{{llm_answer_1}}', desc: 'Output from 1st Question stage' },
+  { tag: '{{llm_answer_2}}', desc: 'Output from 2nd Question stage' },
+  { tag: '{{chapter_name}}', desc: 'Chapter name (from chapter segmentation)' },
+  { tag: '{{chapter_description}}', desc: 'Chapter description' },
+  { tag: '{{chapter_purpose}}', desc: 'Chapter purpose' },
+  { tag: '{{chapter_beats}}', desc: 'Formatted list of beats in chapter' },
 ]
 
 export default function StrategiesView() {
@@ -98,6 +277,16 @@ function FlowCard({ strategy, expanded, onToggle, onRefetch }) {
     }
   }
 
+  async function handleSetMain(e) {
+    e.stopPropagation()
+    try {
+      await apiPut(`/strategies/${strategy.id}/set-main`)
+      onRefetch()
+    } catch (err) {
+      alert(err.message)
+    }
+  }
+
   async function handleSummarize(e) {
     e.stopPropagation()
     setSummarizing(true)
@@ -135,6 +324,11 @@ function FlowCard({ strategy, expanded, onToggle, onRefetch }) {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
+          <button onClick={handleSetMain}
+            className={`p-1 transition-colors ${strategy.is_main ? 'text-[#cefc00]' : 'text-zinc-600 hover:text-zinc-300'}`}
+            title={strategy.is_main ? 'Main flow (runs after transcription)' : 'Set as main flow'}>
+            <Star size={14} fill={strategy.is_main ? '#cefc00' : 'none'} />
+          </button>
           {strategy.description && (
             <button onClick={handleSummarize} disabled={summarizing}
               className="text-zinc-600 hover:text-zinc-300 p-1 transition-colors" title="Regenerate summary">
@@ -194,9 +388,11 @@ function StagePipeline({ stages }) {
               <span className={`text-xs px-1.5 py-0.5 rounded ${
                 stage.output_mode === 'deletion'
                   ? 'bg-red-900/30 border border-red-800 text-red-300'
+                  : stage.output_mode === 'identify'
+                  ? 'bg-violet-900/30 border border-violet-800 text-violet-300'
                   : 'bg-emerald-900/30 border border-emerald-800 text-emerald-300'
               }`}>
-                {stage.output_mode === 'deletion' ? 'Deletion' : 'Keep Only'}
+                {stage.output_mode === 'deletion' ? 'Deletion' : stage.output_mode === 'identify' ? 'Identify' : 'Keep Only'}
               </span>
             )}
             {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
@@ -206,7 +402,7 @@ function StagePipeline({ stages }) {
             )}
           </div>
           {stage.type === 'programmatic' && (
-            <div className="text-xs text-zinc-400">{stage.action === 'reassemble' ? 'Reassemble segments' : (stage.description || 'Segment transcript')}</div>
+            <div className="text-xs text-zinc-400">{stage.action === 'reassemble' ? 'Reassemble segments' : stage.action === 'segment_by_chapters' ? 'Segment by chapters' : (stage.description || 'Segment transcript')}</div>
           )}
           {stage.type !== 'programmatic' && stage.description && <div className="text-xs text-zinc-400">{stage.description}</div>}
           {stage.type === 'programmatic' && stage.action === 'segment' && stage.actionParams && (
@@ -222,6 +418,13 @@ function StagePipeline({ stages }) {
                   </span>
                 ))
               )}
+            </div>
+          )}
+          {stage.type === 'programmatic' && stage.action === 'segment_by_chapters' && (
+            <div className="flex flex-wrap gap-2">
+              <span className="text-xs bg-zinc-800 border border-zinc-700 px-2 py-0.5 rounded text-zinc-400">
+                Chapters from {'{{llm_answer}}'} · {stage.actionParams?.contextSeconds ?? 30}s context
+              </span>
             </div>
           )}
           {(stage.type === 'llm' || stage.type === 'llm_parallel' || stage.type === 'llm_question') && (
@@ -262,7 +465,7 @@ function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
   const [saving, setSaving] = useState(false)
 
   const stageOps = makeStageOps(stages, setStages)
-  const { addStage, removeStage, moveStage, updateStage, duplicateStage, insertStage } = stageOps
+  const { addStage, addChaptersPipeline, removeStage, moveStage, updateStage, duplicateStage, insertStage } = stageOps
 
   function insertTemplate(stageIndex, field, template) {
     const prefix = isEditing ? '' : 'new-'
@@ -321,6 +524,10 @@ function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
           <button type="button" onClick={() => addStage('programmatic')}
             className="flex items-center gap-1 text-xs text-amber-500/70 hover:text-amber-400 transition-colors">
             <Plus size={12} /> Add Segment Step
+          </button>
+          <button type="button" onClick={addChaptersPipeline}
+            className="flex items-center gap-1 text-xs text-teal-500/70 hover:text-teal-400 transition-colors">
+            <Plus size={12} /> Chapters Pipeline
           </button>
         </div>
 
@@ -565,6 +772,7 @@ function CreateStrategyForm({ onCreated }) {
             <button type="button" onClick={() => addStage('llm')} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors"><Plus size={12} /> Add LLM Run</button>
             <button type="button" onClick={() => addStage('llm_question')} className="flex items-center gap-1 text-xs text-pink-500/70 hover:text-pink-400 transition-colors"><Plus size={12} /> Add Question</button>
             <button type="button" onClick={() => addStage('programmatic')} className="flex items-center gap-1 text-xs text-amber-500/70 hover:text-amber-400 transition-colors"><Plus size={12} /> Add Segment Step</button>
+            <button type="button" onClick={stageOps.addChaptersPipeline} className="flex items-center gap-1 text-xs text-teal-500/70 hover:text-teal-400 transition-colors"><Plus size={12} /> Chapters Pipeline</button>
           </div>
 
           <button type="submit" disabled={creating || !name.trim()}
@@ -614,6 +822,12 @@ function makeStageOps(stages, setStages) {
   function updateParams(i, paramKey, paramValue) {
     setStages(prev => { const u = [...prev]; u[i] = { ...u[i], params: { ...u[i].params, [paramKey]: paramValue } }; return u })
   }
+  function addChaptersPipeline() {
+    setStages(prev => [...prev, ...CHAPTERS_PIPELINE.map((s, i) => ({
+      ...s,
+      name: s.name || `Stage ${prev.length + i + 1}`,
+    }))])
+  }
   function duplicateStage(i) { setStages(prev => { const copy = { ...prev[i], name: prev[i].name + ' (copy)' }; const u = [...prev]; u.splice(i + 1, 0, copy); return u }) }
   function changeType(i, newType) {
     setStages(prev => {
@@ -638,7 +852,7 @@ function makeStageOps(stages, setStages) {
       return u
     })
   }
-  return { addStage, insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType }
+  return { addStage, addChaptersPipeline, insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType }
 }
 
 /** Shared stage list with insert buttons, temperature, and thinking */
@@ -765,6 +979,7 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                           {[
                             { key: 'filler_words', label: 'Fillers', color: 'text-red-300' },
                             { key: 'false_starts', label: 'False Starts', color: 'text-rose-400' },
+                            { key: 'meta_commentary', label: 'Meta Commentary', color: 'text-amber-300' },
                           ].map(cat => (
                             <label key={cat.key} className={`flex items-center gap-1.5 text-xs cursor-pointer ${cat.color}`}>
                               <input type="checkbox"
@@ -795,9 +1010,18 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                 <>
                   <div>
                     <label className="block text-xs text-zinc-500 mb-1">Action</label>
-                    <select value={stage.action || 'segment'} onChange={e => updateStage(i, 'action', e.target.value)}
+                    <select value={stage.action || 'segment'} onChange={e => {
+                      const newAction = e.target.value
+                      updateStage(i, 'action', newAction)
+                      if (newAction === 'segment_by_chapters') {
+                        updateStage(i, 'actionParams', { contextSeconds: stage.actionParams?.contextSeconds || 30 })
+                      } else if (newAction === 'segment') {
+                        updateStage(i, 'actionParams', { preset: 'short', minSeconds: 40, maxSeconds: 60, contextSeconds: stage.actionParams?.contextSeconds || 30 })
+                      }
+                    }}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none">
                       <option value="segment">Segment Transcript</option>
+                      <option value="segment_by_chapters">Segment by Chapters</option>
                       <option value="reassemble">Reassemble Segments</option>
                     </select>
                   </div>
@@ -826,6 +1050,19 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                       </div>
                     </div>
                   )}
+                  {stage.action === 'segment_by_chapters' && (
+                    <div className="space-y-2">
+                      <div className="text-[10px] text-amber-400/70 bg-amber-900/10 border border-amber-800/20 rounded px-2 py-1.5">
+                        Reads chapters JSON from <code className="font-mono bg-amber-900/30 px-1 rounded">{'{{llm_answer}}'}</code> (most recent LLM Question stage). Each chapter becomes a segment with chapter metadata injected into prompts.
+                      </div>
+                      <div>
+                        <label className="block text-xs text-zinc-500 mb-1">Context Sec</label>
+                        <input type="number" value={stage.actionParams?.contextSeconds ?? 30}
+                          onChange={e => updateStage(i, 'actionParams', { ...stage.actionParams, contextSeconds: Number(e.target.value) })}
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none" />
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <label className="block text-xs text-zinc-500 mb-1">Description</label>
                     <input type="text" value={stage.description || ''} onChange={e => updateStage(i, 'description', e.target.value)}
@@ -837,7 +1074,7 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
               {/* LLM Question info banner */}
               {stage.type === 'llm_question' && (
                 <div className="text-[10px] text-pink-400/70 bg-pink-900/10 border border-pink-800/20 rounded px-2 py-1.5">
-                  Question stage: LLM answer is stored as <code className="font-mono bg-pink-900/30 px-1 rounded">{'{{llm_answer}}'}</code> for use in later stages. Transcript passes through unchanged.
+                  Question stage: answer stored as <code className="font-mono bg-pink-900/30 px-1 rounded">{'{{llm_answer}}'}</code> (latest) and <code className="font-mono bg-pink-900/30 px-1 rounded">{`{{llm_answer_${stages.filter((s, si) => si <= i && s.type === 'llm_question').length}}}`}</code> (numbered). Transcript passes through unchanged.
                 </div>
               )}
 

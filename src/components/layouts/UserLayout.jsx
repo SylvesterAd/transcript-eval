@@ -1,29 +1,10 @@
-import { useState, useRef, useEffect } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { Outlet } from 'react-router-dom'
 import { Search, HelpCircle, MessageSquare, Database } from 'lucide-react'
 import { useRole } from '../../contexts/RoleContext.jsx'
+import AuthDropdown from '../auth/AuthDropdown.jsx'
 
 export default function UserLayout() {
-  const { setRole } = useRole()
-  const navigate = useNavigate()
-  const [dropdownOpen, setDropdownOpen] = useState(false)
-  const dropdownRef = useRef(null)
-
-  useEffect(() => {
-    const handleClick = (e) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-        setDropdownOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [])
-
-  const switchToAdmin = () => {
-    setRole('admin')
-    navigate('/admin')
-    setDropdownOpen(false)
-  }
+  const { authEnabled, isAuthenticated, role, userDisplayName } = useRole()
 
   return (
     <div className="min-h-screen bg-obsidian text-gray-100 flex flex-col">
@@ -46,36 +27,16 @@ export default function UserLayout() {
           <div className="flex items-center bg-surface rounded-md border border-border-subtle p-1 text-sm px-1">
             <div className="flex items-center px-3 space-x-2 text-muted">
               <Database size={14} />
-              <span>500 Credits Total</span>
+              <span>{isAuthenticated ? userDisplayName : 'Guest Mode'}</span>
             </div>
-            <button className="bg-lime text-black px-3 py-1 rounded text-xs font-bold hover:opacity-90 transition-colors ml-2 shadow-[0_0_10px_rgba(208,255,0,0.2)]">
-              Upgrade
-            </button>
+            <div className="bg-lime text-black px-3 py-1 rounded text-xs font-bold ml-2 shadow-[0_0_10px_rgba(208,255,0,0.2)]">
+              {isAuthenticated ? role : authEnabled ? 'Sign in available' : 'Auth pending'}
+            </div>
           </div>
           {/* Actions */}
           <div className="flex items-center space-x-3">
             {/* Avatar with dropdown */}
-            <div className="relative" ref={dropdownRef}>
-              <button
-                onClick={() => setDropdownOpen(!dropdownOpen)}
-                className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-white text-sm font-medium hover:opacity-90 transition-opacity"
-              >
-                S
-              </button>
-              {dropdownOpen && (
-                <div className="absolute right-0 top-10 w-48 bg-surface border border-border-subtle rounded-md shadow-lg z-50 py-1">
-                  <div className="px-3 py-2 text-xs text-muted border-b border-border-subtle">
-                    Role: User
-                  </div>
-                  <button
-                    onClick={switchToAdmin}
-                    className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-obsidian transition-colors"
-                  >
-                    Switch to Admin
-                  </button>
-                </div>
-              )}
-            </div>
+            <AuthDropdown panel="user" />
             {/* Help */}
             <div className="relative">
               <button className="text-muted hover:text-gray-300 transition-colors">

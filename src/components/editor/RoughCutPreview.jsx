@@ -3,36 +3,52 @@ import { EditorContext } from './EditorView.jsx'
 import { formatTime } from './useEditorState.js'
 
 export default function RoughCutPreview() {
-  const { state, videoRefs } = useContext(EditorContext)
+  const { state, videoRefs, totalDuration } = useContext(EditorContext)
 
   const videoTracks = state.tracks.filter(t => t.type === 'video')
   const isMainMode = state.roughCutTrackMode === 'main'
 
-  // In Main Track mode, compute non-overlapping segments to find the active video
+  // In Main Track mode, merge overlapping tracks into segments
   const mainSegments = useMemo(() => {
     if (!isMainMode) return null
     const sorted = [...videoTracks].sort((a, b) => a.offset - b.offset)
     const segments = []
-    let covered = 0
+    let cur = null
     for (const track of sorted) {
       const trackEnd = track.offset + track.duration
-      if (trackEnd <= covered) continue
-      const segStart = Math.max(track.offset, covered)
-      if (segStart >= trackEnd) continue
-      segments.push({ start: segStart, end: trackEnd, videoId: track.videoId, track })
-      covered = trackEnd
+      if (cur && track.offset < cur.end) {
+        cur.end = Math.max(cur.end, trackEnd)
+      } else {
+        cur = { start: track.offset, end: trackEnd, videoId: track.videoId, track }
+        segments.push(cur)
+      }
     }
     return segments
   }, [isMainMode, videoTracks])
 
-  // Find the active video at current playhead time
+  // Find the active video at current playhead time (with video override support)
   const activeTrack = useMemo(() => {
     if (isMainMode && mainSegments?.length) {
-      const seg = mainSegments.find(s => state.currentTime >= s.start && state.currentTime < s.end)
+      // Search backwards: find the last segment whose start <= currentTime
+      // (handles boundaries and gaps without falling back to segment 0)
+      let segIdx = 0
+      for (let i = mainSegments.length - 1; i >= 0; i--) {
+        if (state.currentTime >= mainSegments[i].start) { segIdx = i; break }
+      }
+      const seg = mainSegments[segIdx]
+      const idx = segIdx
+      // Check for video override
+      const ov = state.segmentVideoOverrides[idx]
+      if (ov) {
+        const ovTrack = videoTracks.find(t => t.videoId === ov)
+        if (ovTrack && state.currentTime >= ovTrack.offset && state.currentTime < ovTrack.offset + ovTrack.duration) {
+          return ovTrack
+        }
+      }
       return seg?.track || mainSegments[0].track
     }
     return videoTracks[0] || null
-  }, [isMainMode, mainSegments, state.currentTime, videoTracks])
+  }, [isMainMode, mainSegments, state.currentTime, state.segmentVideoOverrides, videoTracks])
 
   const localTime = activeTrack ? state.currentTime - activeTrack.offset : 0
   const beforeStart = activeTrack && localTime < 0
@@ -63,6 +79,17 @@ export default function RoughCutPreview() {
       ) : (
         <span className="text-on-surface-variant text-sm">No video tracks</span>
       )}
+      {/* Duration overlay */}
+      <div className="absolute bottom-2 right-2 flex items-center gap-3 bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-md pointer-events-none z-10">
+        <span className="text-[10px] font-mono text-on-surface-variant">
+          Total: {formatTime(totalDuration)}
+        </span>
+        {state.cuts.length > 0 && (
+          <span className="text-[10px] font-mono text-primary-fixed">
+            After cuts: {formatTime(Math.max(0, totalDuration - state.cuts.reduce((s, c) => s + Math.max(0, Math.min(c.end, totalDuration) - Math.max(c.start, 0)), 0)))}
+          </span>
+        )}
+      </div>
     </div>
   )
 }

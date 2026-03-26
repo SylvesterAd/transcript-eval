@@ -1,24 +1,28 @@
 const items = [
-  { icon: 'folder', label: 'Files', id: 'files', filled: true },
-  { icon: 'sync', label: 'Sync', id: 'sync' },
-  { icon: 'movie_edit', label: 'Rough Cut', id: 'roughcut' },
+  { icon: 'folder', label: 'Assets', id: 'assets', filled: true },
+  { icon: 'sync', label: 'Sync', id: 'sync', needsSync: true },
+  { icon: 'movie_edit', label: 'Rough Cut', id: 'roughcut', needsSync: true },
   { icon: 'video_library', label: 'B-Rolls', id: 'brolls', disabled: true },
 ]
 
-export default function EditorSidebar({ activeTab = 'sync', onTabChange }) {
+const SYNC_READY_STATUSES = ['done', 'confirmed']
+
+export default function EditorSidebar({ activeTab = 'sync', assemblyStatus, onTabChange }) {
   return (
     <aside className="flex flex-col items-center py-4 gap-8 border-r border-white/5 bg-[#0e0e10] w-20 shrink-0">
       <nav className="flex flex-col gap-6 w-full px-2">
         {items.map(item => {
+          const locked = item.needsSync && !SYNC_READY_STATUSES.includes(assemblyStatus)
+          const disabled = item.disabled || locked
           const active = item.id === activeTab
           return (
             <div
               key={item.id}
-              onClick={() => !item.disabled && onTabChange?.(item.id)}
+              onClick={() => !disabled && onTabChange?.(item.id)}
               className={`flex flex-col items-center gap-1 cursor-pointer py-3 rounded-lg transition-all ${
                 active
                   ? 'text-[#cefc00] bg-[#cefc00]/5'
-                  : item.disabled
+                  : disabled
                     ? 'text-[#f6f3f5] opacity-20 cursor-not-allowed'
                     : 'text-[#f6f3f5] opacity-40 hover:opacity-100 hover:bg-[#1a1a1c]'
               }`}

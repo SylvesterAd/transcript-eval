@@ -32,6 +32,11 @@
   --color-surface-container: #19191c;
   --color-surface-variant: #262528;
   --color-surface-container-lowest: #000000;
+  --color-error: #ff7351;
+  --color-error-dim: #d53d18;
+  --color-error-container: #b92902;
+  --color-on-error: #450900;
+  --color-on-error-container: #ffd2c8;
 }
 
 .bg-glass {

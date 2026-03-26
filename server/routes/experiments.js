@@ -4,8 +4,36 @@ import { executeRun, runStageProgress, abortedExperiments } from '../services/ll
 import { computeDiff, normalizeForDiff } from '../services/diff-engine.js'
 import { computeStability, computeExperimentStability } from '../services/stability.js'
 import { analyzeExperiment, analyzRunWithLLM, analyzeRunCustom } from '../services/llm-analyzer.js'
+import { requireAuth } from '../auth.js'
 
 const router = Router()
+
+// All-time LLM spending summary (must be before /:id)
+router.get('/spending/total', (req, res) => {
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) AS runs,
+      COALESCE(SUM(total_cost), 0) AS total_cost,
+      COALESCE(SUM(total_tokens), 0) AS total_tokens
+    FROM experiment_runs
+    WHERE status IN ('complete', 'partial')
+  `).get()
+  res.json(stats)
+})
+
+// Today's LLM spending summary (must be before /:id)
+router.get('/spending/today', (req, res) => {
+  const today = new Date().toISOString().slice(0, 10)
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) AS runs,
+      COALESCE(SUM(total_cost), 0) AS total_cost,
+      COALESCE(SUM(total_tokens), 0) AS total_tokens
+    FROM experiment_runs
+    WHERE completed_at >= ? AND status IN ('complete', 'partial')
+  `).get(today)
+  res.json(stats)
+})
 
 // List all experiments
 router.get('/', (req, res) => {
@@ -24,6 +52,220 @@ router.get('/', (req, res) => {
   `).all()
   res.json(experiments)
 })
+
+// ── /runs routes MUST be before /:id to avoid Express treating "runs" as an :id param ──
+
+// List all runs (for dedicated Runs view)
+router.get('/runs', (req, res) => {
+  const runs = db.prepare(`
+    SELECT er.*, v.title AS video_title, v.group_id,
+      e.name AS experiment_name,
+      s.name AS strategy_name, sv.version_number,
+      sv.stages_json,
+      (SELECT COUNT(*) FROM run_stage_outputs rso WHERE rso.experiment_run_id = er.id) AS completed_stages
+    FROM experiment_runs er
+    JOIN videos v ON v.id = er.video_id
+    JOIN experiments e ON e.id = er.experiment_id
+    JOIN strategy_versions sv ON sv.id = e.strategy_version_id
+    JOIN strategies s ON s.id = sv.strategy_id
+    ORDER BY er.created_at DESC
+    LIMIT 100
+  `).all()
+
+  for (const run of runs) {
+    // Parse stages_json to get total stage count
+    try {
+      const stages = JSON.parse(run.stages_json)
+      run.totalStages = Array.isArray(stages) ? stages.length : 0
+    } catch {
+      run.totalStages = 0
+    }
+    delete run.stages_json
+
+    // Attach live progress for running runs
+    if (run.status === 'running') {
+      const prog = runStageProgress.get(run.id)
+      if (prog) {
+        run.currentStage = prog.stageIndex
+        run.stageName = prog.stageName
+        run.stageStatus = prog.status
+        if (prog.segmentsTotal) {
+          run.segmentsDone = prog.segmentsDone || 0
+          run.segmentsTotal = prog.segmentsTotal
+        }
+      }
+    }
+  }
+
+  res.json(runs)
+})
+
+// Get a single stage's input/output/human for the View modal
+router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
+  const run = db.prepare(`
+    SELECT er.video_id, v.group_id FROM experiment_runs er
+    JOIN videos v ON v.id = er.video_id WHERE er.id = ?
+  `).get(req.params.runId)
+  if (!run) return res.status(404).json({ error: 'Run not found' })
+
+  const stage = db.prepare(
+    'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index = ?'
+  ).get(req.params.runId, parseInt(req.params.stageIndex))
+  if (!stage) return res.status(404).json({ error: 'Stage not found' })
+
+  let human = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(run.video_id)
+  if (!human && run.group_id) {
+    human = db.prepare(`
+      SELECT t.content FROM transcripts t JOIN videos v ON v.id = t.video_id
+      WHERE v.group_id = ? AND t.type = 'human_edited' LIMIT 1
+    `).get(run.group_id)
+  }
+
+  const metrics = db.prepare(`
+    SELECT * FROM metrics WHERE run_stage_output_id = ?
+  `).all(stage.id)
+
+  // Parse segment data for llm_parallel stages
+  const isParallel = stage.prompt_used && stage.prompt_used.startsWith('[Parallel LLM]')
+  let segments = null
+  let reconstructedOutput = null
+  if (isParallel) {
+    try {
+      const parsed = JSON.parse(stage.output_text)
+      if (Array.isArray(parsed) && parsed[0]?.segment) {
+        segments = parsed
+        reconstructedOutput = parsed.map(s => s.cleanedText || '').join('\n\n')
+      }
+    } catch {
+      // JSON likely truncated at 50k limit — find last complete segment object and close the array
+      const text = stage.output_text
+      const lastSep = text.lastIndexOf('},{"segment":')
+      if (lastSep !== -1) {
+        try {
+          const parsed = JSON.parse(text.slice(0, lastSep + 1) + ']')
+          if (Array.isArray(parsed) && parsed[0]?.segment) {
+            segments = parsed
+            reconstructedOutput = parsed.map(s => s.cleanedText || '').join('\n\n')
+          }
+        } catch {}
+      }
+    }
+  }
+
+  const effectiveOutput = reconstructedOutput || stage.output_text
+
+  res.json({
+    input: stage.input_text,
+    output: effectiveOutput,
+    human: human?.content || null,
+    inputNormalized: normalizeForDiff(stage.input_text),
+    outputNormalized: normalizeForDiff(effectiveOutput),
+    humanNormalized: normalizeForDiff(human?.content),
+    normalizedDiff: computeDiff(human?.content, effectiveOutput),
+    promptUsed: stage.prompt_used,
+    systemInstruction: stage.system_instruction_used,
+    stageName: stage.stage_name,
+    stageIndex: stage.stage_index,
+    model: stage.model,
+    runtime_ms: stage.runtime_ms,
+    metrics,
+    segments,
+    isParallel,
+    llmResponseRaw: stage.llm_response_raw || null,
+  })
+})
+
+// Get run detail with stage outputs
+router.get('/runs/:runId', (req, res) => {
+  const run = db.prepare(`
+    SELECT er.*, v.title AS video_title, e.name AS experiment_name,
+      s.name AS strategy_name, sv.version_number
+    FROM experiment_runs er
+    JOIN videos v ON v.id = er.video_id
+    JOIN experiments e ON e.id = er.experiment_id
+    JOIN strategy_versions sv ON sv.id = e.strategy_version_id
+    JOIN strategies s ON s.id = sv.strategy_id
+    WHERE er.id = ?
+  `).get(req.params.runId)
+  if (!run) return res.status(404).json({ error: 'Run not found' })
+
+  const stages = db.prepare(
+    'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
+  ).all(req.params.runId)
+
+  const metrics = db.prepare(`
+    SELECT m.*, rso.stage_index, rso.stage_name FROM metrics m
+    JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
+    WHERE rso.experiment_run_id = ?
+    ORDER BY rso.stage_index, m.comparison_type
+  `).all(req.params.runId)
+
+  // Get human-edited transcript for diff display
+  const human = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(run.video_id)
+  const raw = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
+
+  // Compute diffs for each stage (human vs stage output)
+  const stageDiffs = stages.map(stage => {
+    const diff = computeDiff(human?.content, stage.output_text)
+    return { stage_index: stage.stage_index, diff }
+  })
+
+  const scoreBreakdown = run.score_breakdown_json ? JSON.parse(run.score_breakdown_json) : null
+
+  const rawNormalized = normalizeForDiff(raw?.content)
+  const humanNormalized = normalizeForDiff(human?.content)
+
+  res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content, rawNormalized, humanNormalized })
+})
+
+// Analyze a run (deterministic or LLM-powered)
+router.post('/runs/:runId/analyze', requireAuth, async (req, res) => {
+  try {
+    const { system_prompt, user_prompt, model, include_raw_transcript, include_stage_outputs } = req.body || {}
+
+    // If custom prompts provided, use custom analysis
+    if (user_prompt) {
+      const result = await analyzeRunCustom(parseInt(req.params.runId), {
+        systemPrompt: system_prompt,
+        userPrompt: user_prompt,
+        model: model || 'claude-haiku-4-5-20251001',
+        includeRawTranscript: include_raw_transcript,
+        includeStageOutputs: include_stage_outputs,
+      })
+      if (!result) return res.status(404).json({ error: 'Run not found or not complete' })
+      return res.json(result)
+    }
+
+    const result = await analyzRunWithLLM(parseInt(req.params.runId))
+    if (!result) return res.status(404).json({ error: 'Run not found or not complete' })
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Get analysis for a run
+router.get('/runs/:runId/analysis', (req, res) => {
+  const analyses = db.prepare(
+    'SELECT * FROM analysis_records WHERE experiment_run_id = ? ORDER BY analysis_type'
+  ).all(req.params.runId)
+  res.json(analyses)
+})
+
+// Delete a single run
+router.delete('/runs/:runId', requireAuth, (req, res) => {
+  const run = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(req.params.runId)
+  if (!run) return res.status(404).json({ error: 'Run not found' })
+
+  db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
+  db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
+  db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
+  db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
+  db.prepare('DELETE FROM experiment_runs WHERE id = ?').run(run.id)
+  res.json({ success: true })
+})
+
+// ── /:id routes ──
 
 // Get experiment with runs
 router.get('/:id', (req, res) => {
@@ -76,7 +318,7 @@ router.get('/:id', (req, res) => {
 })
 
 // Create experiment
-router.post('/', (req, res) => {
+router.post('/', requireAuth, (req, res) => {
   const { strategy_version_id, name, notes, video_ids } = req.body
   if (!strategy_version_id || !name) {
     return res.status(400).json({ error: 'strategy_version_id and name are required' })
@@ -98,7 +340,7 @@ router.post('/', (req, res) => {
 })
 
 // Update experiment (video selection)
-router.post('/:id/update', (req, res) => {
+router.post('/:id/update', requireAuth, (req, res) => {
   const id = parseInt(req.params.id)
   const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(id)
   if (!experiment) return res.status(404).json({ error: 'Experiment not found' })
@@ -117,7 +359,7 @@ router.post('/:id/update', (req, res) => {
 const activeExecutions = new Map() // experimentId -> { total, completed, failed, running, runIds, done }
 
 // Execute experiment — kicks off runs in background, returns immediately
-router.post('/:id/execute', (req, res) => {
+router.post('/:id/execute', requireAuth, (req, res) => {
   const { repeat = 1, video_ids } = req.body || {}
   const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(req.params.id)
   if (!experiment) return res.status(404).json({ error: 'Experiment not found' })
@@ -275,7 +517,7 @@ router.get('/:id/progress', (req, res) => {
 })
 
 // Abort a running experiment
-router.post('/:id/abort', (req, res) => {
+router.post('/:id/abort', requireAuth, (req, res) => {
   const expId = parseInt(req.params.id)
   abortedExperiments.add(expId)
   // Also mark any pending runs as failed immediately
@@ -284,7 +526,7 @@ router.post('/:id/abort', (req, res) => {
 })
 
 // Retry failed runs — resumes from where they left off, keeps completed stages
-router.post('/:id/retry', (req, res) => {
+router.post('/:id/retry', requireAuth, (req, res) => {
   const expId = parseInt(req.params.id)
   const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(expId)
   if (!experiment) return res.status(404).json({ error: 'Experiment not found' })
@@ -329,7 +571,7 @@ router.post('/:id/retry', (req, res) => {
 })
 
 // Resume partial runs — runs stages that don't have outputs yet
-router.post('/:id/resume', (req, res) => {
+router.post('/:id/resume', requireAuth, (req, res) => {
   const expId = parseInt(req.params.id)
   const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(expId)
   if (!experiment) return res.status(404).json({ error: 'Experiment not found' })
@@ -374,124 +616,6 @@ router.post('/:id/resume', (req, res) => {
   res.json({ resumed: runIds.length, experimentId: expId })
 })
 
-// Get a single stage's input/output/human for the View modal
-router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
-  const run = db.prepare(`
-    SELECT er.video_id, v.group_id FROM experiment_runs er
-    JOIN videos v ON v.id = er.video_id WHERE er.id = ?
-  `).get(req.params.runId)
-  if (!run) return res.status(404).json({ error: 'Run not found' })
-
-  const stage = db.prepare(
-    'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index = ?'
-  ).get(req.params.runId, parseInt(req.params.stageIndex))
-  if (!stage) return res.status(404).json({ error: 'Stage not found' })
-
-  let human = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(run.video_id)
-  if (!human && run.group_id) {
-    human = db.prepare(`
-      SELECT t.content FROM transcripts t JOIN videos v ON v.id = t.video_id
-      WHERE v.group_id = ? AND t.type = 'human_edited' LIMIT 1
-    `).get(run.group_id)
-  }
-
-  const metrics = db.prepare(`
-    SELECT * FROM metrics WHERE run_stage_output_id = ?
-  `).all(stage.id)
-
-  // Parse segment data for llm_parallel stages
-  const isParallel = stage.prompt_used && stage.prompt_used.startsWith('[Parallel LLM]')
-  let segments = null
-  let reconstructedOutput = null
-  if (isParallel) {
-    try {
-      const parsed = JSON.parse(stage.output_text)
-      if (Array.isArray(parsed) && parsed[0]?.segment) {
-        segments = parsed
-        reconstructedOutput = parsed.map(s => s.cleanedText || '').join('\n\n')
-      }
-    } catch {
-      // JSON likely truncated at 50k limit — find last complete segment object and close the array
-      const text = stage.output_text
-      const lastSep = text.lastIndexOf('},{"segment":')
-      if (lastSep !== -1) {
-        try {
-          const parsed = JSON.parse(text.slice(0, lastSep + 1) + ']')
-          if (Array.isArray(parsed) && parsed[0]?.segment) {
-            segments = parsed
-            reconstructedOutput = parsed.map(s => s.cleanedText || '').join('\n\n')
-          }
-        } catch {}
-      }
-    }
-  }
-
-  const effectiveOutput = reconstructedOutput || stage.output_text
-
-  res.json({
-    input: stage.input_text,
-    output: effectiveOutput,
-    human: human?.content || null,
-    inputNormalized: normalizeForDiff(stage.input_text),
-    outputNormalized: normalizeForDiff(effectiveOutput),
-    humanNormalized: normalizeForDiff(human?.content),
-    normalizedDiff: computeDiff(human?.content, effectiveOutput),
-    promptUsed: stage.prompt_used,
-    systemInstruction: stage.system_instruction_used,
-    stageName: stage.stage_name,
-    stageIndex: stage.stage_index,
-    model: stage.model,
-    runtime_ms: stage.runtime_ms,
-    metrics,
-    segments,
-    isParallel,
-    llmResponseRaw: stage.llm_response_raw || null,
-  })
-})
-
-// Get run detail with stage outputs
-router.get('/runs/:runId', (req, res) => {
-  const run = db.prepare(`
-    SELECT er.*, v.title AS video_title, e.name AS experiment_name,
-      s.name AS strategy_name, sv.version_number
-    FROM experiment_runs er
-    JOIN videos v ON v.id = er.video_id
-    JOIN experiments e ON e.id = er.experiment_id
-    JOIN strategy_versions sv ON sv.id = e.strategy_version_id
-    JOIN strategies s ON s.id = sv.strategy_id
-    WHERE er.id = ?
-  `).get(req.params.runId)
-  if (!run) return res.status(404).json({ error: 'Run not found' })
-
-  const stages = db.prepare(
-    'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
-  ).all(req.params.runId)
-
-  const metrics = db.prepare(`
-    SELECT m.*, rso.stage_index, rso.stage_name FROM metrics m
-    JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
-    WHERE rso.experiment_run_id = ?
-    ORDER BY rso.stage_index, m.comparison_type
-  `).all(req.params.runId)
-
-  // Get human-edited transcript for diff display
-  const human = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(run.video_id)
-  const raw = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
-
-  // Compute diffs for each stage (human vs stage output)
-  const stageDiffs = stages.map(stage => {
-    const diff = computeDiff(human?.content, stage.output_text)
-    return { stage_index: stage.stage_index, diff }
-  })
-
-  const scoreBreakdown = run.score_breakdown_json ? JSON.parse(run.score_breakdown_json) : null
-
-  const rawNormalized = normalizeForDiff(raw?.content)
-  const humanNormalized = normalizeForDiff(human?.content)
-
-  res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content, rawNormalized, humanNormalized })
-})
-
 // Stability analysis for an experiment
 router.get('/:id/stability', (req, res) => {
   const experiment = db.prepare('SELECT * FROM experiments WHERE id = ?').get(req.params.id)
@@ -506,42 +630,8 @@ router.get('/:id/stability/:videoId', (req, res) => {
   res.json(stability)
 })
 
-// Analyze a run (deterministic or LLM-powered)
-router.post('/runs/:runId/analyze', async (req, res) => {
-  try {
-    const { system_prompt, user_prompt, model, include_raw_transcript, include_stage_outputs } = req.body || {}
-
-    // If custom prompts provided, use custom analysis
-    if (user_prompt) {
-      const result = await analyzeRunCustom(parseInt(req.params.runId), {
-        systemPrompt: system_prompt,
-        userPrompt: user_prompt,
-        model: model || 'claude-haiku-4-5-20251001',
-        includeRawTranscript: include_raw_transcript,
-        includeStageOutputs: include_stage_outputs,
-      })
-      if (!result) return res.status(404).json({ error: 'Run not found or not complete' })
-      return res.json(result)
-    }
-
-    const result = await analyzRunWithLLM(parseInt(req.params.runId))
-    if (!result) return res.status(404).json({ error: 'Run not found or not complete' })
-    res.json(result)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// Get analysis for a run
-router.get('/runs/:runId/analysis', (req, res) => {
-  const analyses = db.prepare(
-    'SELECT * FROM analysis_records WHERE experiment_run_id = ? ORDER BY analysis_type'
-  ).all(req.params.runId)
-  res.json(analyses)
-})
-
 // Analyze experiment across all videos
-router.post('/:id/analyze', async (req, res) => {
+router.post('/:id/analyze', requireAuth, async (req, res) => {
   try {
     const analysis = await analyzeExperiment(parseInt(req.params.id))
     if (!analysis) return res.status(404).json({ error: 'No completed runs found' })
@@ -562,21 +652,8 @@ router.get('/:id/analysis', (req, res) => {
   res.json(analyses)
 })
 
-// Delete a single run
-router.delete('/runs/:runId', (req, res) => {
-  const run = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(req.params.runId)
-  if (!run) return res.status(404).json({ error: 'Run not found' })
-
-  db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
-  db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
-  db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
-  db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
-  db.prepare('DELETE FROM experiment_runs WHERE id = ?').run(run.id)
-  res.json({ success: true })
-})
-
 // Delete experiment
-router.delete('/:id', (req, res) => {
+router.delete('/:id', requireAuth, (req, res) => {
   const runs = db.prepare('SELECT id FROM experiment_runs WHERE experiment_id = ?').all(req.params.id)
   for (const run of runs) {
     db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
@@ -587,20 +664,6 @@ router.delete('/:id', (req, res) => {
   db.prepare('DELETE FROM experiment_runs WHERE experiment_id = ?').run(req.params.id)
   db.prepare('DELETE FROM experiments WHERE id = ?').run(req.params.id)
   res.json({ success: true })
-})
-
-// Today's LLM spending summary
-router.get('/spending/today', (req, res) => {
-  const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) AS runs,
-      COALESCE(SUM(total_cost), 0) AS total_cost,
-      COALESCE(SUM(total_tokens), 0) AS total_tokens
-    FROM experiment_runs
-    WHERE completed_at >= ? AND status IN ('complete', 'partial')
-  `).get(today)
-  res.json(stats)
 })
 
 export default router

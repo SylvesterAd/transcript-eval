@@ -384,7 +384,7 @@ function IdentificationPanel({ identifications, transcript }) {
             if (fullSegment) {
               const cfg = CATEGORY_COLORS[fullSegment.category] || CATEGORY_COLORS.irrelevance
               return (
-                <span key={i} className={`${cfg.bg} ${cfg.text} rounded px-0.5`} title={`[${cfg.label}] ${fullSegment.reason}`}>
+                <span key={i} className={`${cfg.bg} ${cfg.text} rounded px-0.5`} title={`[${cfg.label}]${fullSegment.reason ? ' ' + fullSegment.reason : ''}`}>
                   <span className="text-zinc-500">{entry.timecode}</span> {entry.text}
                 </span>
               )
@@ -405,7 +405,7 @@ function IdentificationPanel({ identifications, transcript }) {
               <span key={i}>
                 <span className="text-zinc-500">{entry.timecode}</span>{' '}
                 {parts.map((p, j) => p.highlight
-                  ? <span key={j} className={`${p.highlight.bg} ${p.highlight.text} rounded px-0.5`} title={`[${p.label}] ${p.reason}`}>{p.text}</span>
+                  ? <span key={j} className={`${p.highlight.bg} ${p.highlight.text} rounded px-0.5`} title={`[${p.label}]${p.reason ? ' ' + p.reason : ''}`}>{p.text}</span>
                   : <span key={j}>{p.text}</span>
                 )}
               </span>
@@ -426,7 +426,7 @@ function IdentificationPanel({ identifications, transcript }) {
               <div key={i} className={`px-4 py-2 flex items-start gap-3 ${cfg.bg}`}>
                 <span className="text-xs text-zinc-500 font-mono shrink-0 pt-0.5">{item.timecode}</span>
                 <span className={`text-xs px-1.5 py-0.5 rounded shrink-0 ${cfg.bg} ${cfg.text} border ${cfg.border}`}>{cfg.label}</span>
-                <span className="text-sm text-zinc-300 flex-1">{item.reason}</span>
+                {item.reason && <span className="text-sm text-zinc-300 flex-1">{item.reason}</span>}
                 {item.text && <span className="text-xs text-zinc-500 font-mono max-w-48 truncate shrink-0" title={item.text}>"{item.text}"</span>}
               </div>
             )
@@ -656,7 +656,7 @@ function ThreeWayComparisonV2({ raw, human, current, stageName, identifications 
                 const v2 = CATEGORY_V2[cat.category] || CATEGORY_V2.irrelevance
                 return (
                   <span key={i} className={`${v2.bg} text-emerald-300 border-l-2 ${v2.borderLeft} rounded-r px-0.5`}
-                    title={`[${cfg.label}] ${cat.reason} (correctly removed)`}>{word} </span>
+                    title={`[${cfg.label}]${cat.reason ? ' ' + cat.reason : ''} (correctly removed)`}>{word} </span>
                 )
               }
               return <span key={i} className="bg-emerald-900/40 text-emerald-300 rounded px-0.5" title="Correctly removed by both">{word} </span>
@@ -667,7 +667,7 @@ function ThreeWayComparisonV2({ raw, human, current, stageName, identifications 
                 const v2 = CATEGORY_V2[cat.category] || CATEGORY_V2.irrelevance
                 return (
                   <span key={i} className={`${v2.bg} text-amber-300 border-l-2 ${v2.borderLeft} rounded-r px-0.5`}
-                    title={`[${cfg.label}] ${cat.reason} (missed removal)`}>{word} </span>
+                    title={`[${cfg.label}]${cat.reason ? ' ' + cat.reason : ''} (missed removal)`}>{word} </span>
                 )
               }
               return <span key={i} className="bg-amber-900/40 text-amber-300 rounded px-0.5" title="Human removed, current kept (missed)">{word} </span>
@@ -680,7 +680,7 @@ function ThreeWayComparisonV2({ raw, human, current, stageName, identifications 
               const v2 = CATEGORY_V2[cat.category] || CATEGORY_V2.irrelevance
               return (
                 <span key={i} className={`${v2.bgSubtle} rounded px-0.5`}
-                  title={`[${cfg.label}] ${cat.reason} (flagged, kept by both)`}>{word} </span>
+                  title={`[${cfg.label}]${cat.reason ? ' ' + cat.reason : ''} (flagged, kept by both)`}>{word} </span>
               )
             }
             return <span key={i}>{word} </span>

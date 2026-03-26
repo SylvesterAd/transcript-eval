@@ -5,7 +5,6 @@ import { Home, LayoutGrid, List, Film, Loader2, CheckCircle2, AlertCircle, Trash
 import UploadModal from './UploadModal.jsx'
 import RoughCutConfigModal from './RoughCutConfigModal.jsx'
 import ProcessingModal from './ProcessingModal.jsx'
-import SyncOptionsModal from './SyncOptionsModal.jsx'
 
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
 
@@ -76,7 +75,7 @@ export default function ProjectsView() {
   })()
 
   const handleProjectClick = (project) => {
-    navigate(`/editor/${project.id}`)
+    navigate(`/editor/${project.id}/assets`)
   }
 
   const handleDelete = async (e, project) => {
@@ -289,21 +288,9 @@ export default function ProjectsView() {
           groupId={groupId}
           initialFiles={filesRef.current}
           onBack={() => setStep('config', groupId)}
-          onComplete={(gid, files) => {
-            const successfulVideos = (files || []).filter(f => f.status === 'complete')
-            if (successfulVideos.length > 1) {
-              setStep('sync', gid, files)
-            } else {
-              setStep(null); refetch(); navigate(`/editor/${gid}`)
-            }
+          onComplete={(gid) => {
+            setStep(null); refetch(); navigate(`/editor/${gid}/assets`)
           }}
-        />
-      )}
-      {step === 'sync' && (
-        <SyncOptionsModal
-          groupId={groupId}
-          onBack={() => setStep('processing', groupId)}
-          onComplete={(gid) => { setStep(null); refetch(); navigate(`/editor/${gid}`) }}
         />
       )}
     </div>

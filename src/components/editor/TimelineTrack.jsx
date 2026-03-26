@@ -1,6 +1,6 @@
 import { useContext, useRef, useMemo, useCallback, useEffect } from 'react'
 import { EditorContext } from './EditorView.jsx'
-import { GROUP_COLORS } from './useEditorState.js'
+import { GROUP_COLORS, buildSentences } from './useEditorState.js'
 import WaveformData from 'waveform-data'
 
 /**
@@ -39,6 +39,103 @@ function drawWaveform(ctx, channel, length, width, height, color) {
   }
 }
 
+/**
+ * Shared LOD word-group algorithm for transcript rendering.
+ * Works in any coordinate system — caller provides words/sentences and visible range.
+ */
+function computeWordGroups(words, sentences, zoom, vStart, vEnd) {
+  if (!words?.length) return []
+
+  const AVG_CHAR_W = 5.5
+  const PAD_PX = 12
+  const MIN_GAP_PX = 3
+  const groups = []
+
+  if (sentences?.length) {
+    let lo = 0, hi = sentences.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (sentences[mid].end < vStart) lo = mid + 1
+      else hi = mid
+    }
+
+    for (let si = lo; si < sentences.length; si++) {
+      const sent = sentences[si]
+      if (sent.start > vEnd) break
+
+      const sentPx = (sent.end - sent.start) * zoom
+      const textW = AVG_CHAR_W * sent.text.length
+
+      if (sentPx >= textW * 0.8) {
+        let cur = null
+        for (let wi = sent.firstWord; wi <= sent.lastWord; wi++) {
+          const w = words[wi]
+          if (!cur) {
+            cur = { text: w.word, start: w.start, end: w.end }
+          } else {
+            const gapTooSmall = (w.start - cur.end) * zoom < MIN_GAP_PX
+            const boxTooNarrow = (cur.end - cur.start) * zoom < AVG_CHAR_W * cur.text.length + PAD_PX
+            if (gapTooSmall || boxTooNarrow) {
+              cur.text += ' ' + w.word
+              cur.end = w.end
+            } else {
+              groups.push(cur)
+              cur = { text: w.word, start: w.start, end: w.end }
+            }
+          }
+        }
+        if (cur) groups.push(cur)
+      } else {
+        groups.push({ text: sent.text, start: sent.start, end: sent.end })
+      }
+    }
+  } else {
+    let lo = 0, hi = words.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (words[mid].end < vStart) lo = mid + 1
+      else hi = mid
+    }
+    let cur = null
+    for (let i = lo; i < words.length; i++) {
+      const w = words[i]
+      if (w.start > vEnd) break
+      if (!cur) {
+        cur = { text: w.word, start: w.start, end: w.end }
+      } else if ((w.start - cur.end) * zoom < MIN_GAP_PX) {
+        cur.text += ' ' + w.word
+        cur.end = w.end
+      } else {
+        groups.push(cur)
+        cur = { text: w.word, start: w.start, end: w.end }
+      }
+    }
+    if (cur) groups.push(cur)
+  }
+
+  const MIN_BOX_W = 4
+  const result = []
+  for (const g of groups) {
+    const prev = result[result.length - 1]
+    if (prev) {
+      const prevVisualEnd = Math.max(prev.end * zoom, prev.start * zoom + MIN_BOX_W)
+      if (g.start * zoom < prevVisualEnd + MIN_GAP_PX) {
+        prev.text += ' ' + g.text
+        prev.end = g.end
+        continue
+      }
+    }
+    result.push(g)
+  }
+  for (let i = 0; i < result.length; i++) {
+    const g = result[i]
+    const textNeed = (AVG_CHAR_W * g.text.length + PAD_PX) / zoom
+    const maxEnd = i < result.length - 1 ? result[i + 1].start - 2 / zoom : g.end + 10
+    g.displayEnd = Math.min(maxEnd, Math.max(g.end, g.start + textNeed))
+  }
+  return result
+}
+
 export function VideoTrack({ track, zoom }) {
   const { state, dispatch } = useContext(EditorContext)
   const selected = state.selectedTrackIds.has(track.id)
@@ -51,6 +148,7 @@ export function VideoTrack({ track, zoom }) {
 
   const onMouseDown = useCallback((e) => {
     if (e.button !== 0) return
+    if (state.activeTab === 'roughcut') return
     e.preventDefault()
     const startX = e.clientX
     const startOffset = track.offset
@@ -66,7 +164,7 @@ export function VideoTrack({ track, zoom }) {
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [track.id, track.offset, zoom, dispatch])
+  }, [track.id, track.offset, zoom, dispatch, state.activeTab])
 
   const onContextMenu = useCallback((e) => {
     e.preventDefault()
@@ -74,10 +172,12 @@ export function VideoTrack({ track, zoom }) {
     dispatch({ type: 'OPEN_CONTEXT_MENU', payload: { x: e.clientX, y: e.clientY, trackId: track.id } })
   }, [track.id, dispatch])
 
+  const isRoughCut = state.activeTab === 'roughcut'
+
   return (
     <div className={`h-6 border-b border-white/10 flex items-center relative ${selected ? 'bg-primary-container/5' : 'bg-white/[0.02]'}`}>
       <div
-        className={`absolute h-4 top-1 flex items-center px-2 rounded-r overflow-hidden text-[8px] font-bold cursor-grab active:cursor-grabbing ${
+        className={`absolute h-4 top-1 flex items-center px-2 rounded-r overflow-hidden text-[8px] font-bold ${isRoughCut ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'} ${
           selected ? 'active-glow z-10' : ''
         } ${isUnsynced ? 'border border-dashed !border-[#ff7351]' : ''}`}
         style={{
@@ -105,6 +205,24 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
   const group = track.groupId ? state.groups[track.groupId] : null
   const color = group?.color || '#48e5d0'
   const containerRef = useRef(null)
+
+  // Cut edge drag handler
+  const handleEdgeDrag = useCallback((cutId, edge, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const cut = state.cuts.find(c => c.id === cutId)
+    if (!cut) return
+    const startVal = edge === 'left' ? cut.start : cut.end
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX
+      const newVal = Math.max(0, startVal + dx / zoom)
+      dispatch({ type: 'UPDATE_CUT', payload: { id: cutId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+    }
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [state.cuts, zoom, dispatch])
 
   // Build WaveformData from min/max peaks (100 peaks/s from server)
   const waveformData = useMemo(() => {
@@ -149,112 +267,12 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
   // Binary search on pre-computed sentences for viewport, per-sentence LOD decision.
   // Sentence boundaries always start a new box.
   const mergedGroups = useMemo(() => {
-    const words = track.transcriptWords
-    const sentences = track.transcriptSentences
-    if (!words?.length) return []
-
     const viewW = scrollRef?.current?.clientWidth || 1200
     const labelW = 144
     const buffer = 300
     const vStart = Math.max(0, (scrollX - labelW - buffer) / zoom - track.offset)
     const vEnd = (scrollX - labelW + viewW + buffer) / zoom - track.offset
-
-    const AVG_CHAR_W = 5.5 // approx px per char at 9px font
-    const PAD_PX = 12 // px-1.5 = 6px each side
-    const MIN_GAP_PX = 3
-    const groups = []
-
-    if (sentences?.length) {
-      // Sentence-aware LOD path — binary search on sentences
-      let lo = 0, hi = sentences.length
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1
-        if (sentences[mid].end < vStart) lo = mid + 1
-        else hi = mid
-      }
-
-      for (let si = lo; si < sentences.length; si++) {
-        const sent = sentences[si]
-        if (sent.start > vEnd) break
-
-        const sentPx = (sent.end - sent.start) * zoom
-        const textW = AVG_CHAR_W * sent.text.length
-
-        if (sentPx >= textW * 0.8) {
-          // Words fit — render individual words with gap-based merge within sentence
-          // Also merge when current box is too narrow for its text (prevents clipped words)
-          let cur = null
-          for (let wi = sent.firstWord; wi <= sent.lastWord; wi++) {
-            const w = words[wi]
-            if (!cur) {
-              cur = { text: w.word, start: w.start, end: w.end }
-            } else {
-              const gapTooSmall = (w.start - cur.end) * zoom < MIN_GAP_PX
-              const boxTooNarrow = (cur.end - cur.start) * zoom < AVG_CHAR_W * cur.text.length + PAD_PX
-              if (gapTooSmall || boxTooNarrow) {
-                cur.text += ' ' + w.word
-                cur.end = w.end
-              } else {
-                groups.push(cur)
-                cur = { text: w.word, start: w.start, end: w.end }
-              }
-            }
-          }
-          if (cur) groups.push(cur)
-        } else {
-          // Sentence as single box
-          groups.push({ text: sent.text, start: sent.start, end: sent.end })
-        }
-      }
-    } else {
-      // Fallback: word-only merge (sentences not yet computed)
-      let lo = 0, hi = words.length
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1
-        if (words[mid].end < vStart) lo = mid + 1
-        else hi = mid
-      }
-      let cur = null
-      for (let i = lo; i < words.length; i++) {
-        const w = words[i]
-        if (w.start > vEnd) break
-        if (!cur) {
-          cur = { text: w.word, start: w.start, end: w.end }
-        } else if ((w.start - cur.end) * zoom < MIN_GAP_PX) {
-          cur.text += ' ' + w.word
-          cur.end = w.end
-        } else {
-          groups.push(cur)
-          cur = { text: w.word, start: w.start, end: w.end }
-        }
-      }
-      if (cur) groups.push(cur)
-    }
-
-    // Post-process: merge any adjacent groups that visually overlap
-    // (cross-sentence collisions, min-width pushing into next box)
-    const MIN_BOX_W = 4
-    const result = []
-    for (const g of groups) {
-      const prev = result[result.length - 1]
-      if (prev) {
-        const prevVisualEnd = Math.max(prev.end * zoom, prev.start * zoom + MIN_BOX_W)
-        if (g.start * zoom < prevVisualEnd + MIN_GAP_PX) {
-          prev.text += ' ' + g.text
-          prev.end = g.end
-          continue
-        }
-      }
-      result.push(g)
-    }
-    // Extend display width to fit text, capped by next group's start
-    for (let i = 0; i < result.length; i++) {
-      const g = result[i]
-      const textNeed = (AVG_CHAR_W * g.text.length + PAD_PX) / zoom
-      const maxEnd = i < result.length - 1 ? result[i + 1].start - 2 / zoom : g.end + 10
-      g.displayEnd = Math.min(maxEnd, Math.max(g.end, g.start + textNeed))
-    }
-    return result
+    return computeWordGroups(track.transcriptWords, track.transcriptSentences, zoom, vStart, vEnd)
   }, [track.transcriptWords, track.transcriptSentences, zoom, scrollX, track.offset, scrollRef])
 
   // Resample for current zoom: downsample via WaveformData.resample() when
@@ -394,6 +412,7 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
 
   const onMouseDown = useCallback((e) => {
     if (e.button !== 0) return
+    if (state.activeTab === 'roughcut') return
     e.preventDefault()
     const startX = e.clientX
     const startOffset = track.offset
@@ -409,13 +428,15 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [track.id, track.offset, zoom, dispatch])
+  }, [track.id, track.offset, zoom, dispatch, state.activeTab])
 
   const onContextMenu = useCallback((e) => {
     e.preventDefault()
     dispatch({ type: 'SELECT_TRACK', payload: { trackId: track.id, shift: false, meta: false } })
     dispatch({ type: 'OPEN_CONTEXT_MENU', payload: { x: e.clientX, y: e.clientY, trackId: track.id } })
   }, [track.id, dispatch])
+
+  const isRoughCut = state.activeTab === 'roughcut'
 
   return (
     <div
@@ -425,7 +446,7 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
     >
       {/* Waveform */}
       <div
-        className="h-14 w-full relative overflow-hidden cursor-grab active:cursor-grabbing"
+        className={`h-14 w-full relative overflow-hidden ${isRoughCut ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}
         onMouseDown={onMouseDown}
       >
         {/* Background + left accent — separate from canvas container to avoid border shifting canvas positions */}
@@ -442,17 +463,28 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
         <div ref={containerRef} className="absolute top-0 h-full" style={{ left: `${track.offset * zoom}px` }} />
       </div>
 
-      {/* Cut overlays */}
+      {/* Cut overlays with draggable edges */}
       {cuts?.map(cut => {
         const cStart = Math.max(track.offset, cut.start)
         const cEnd = Math.min(track.offset + track.duration, cut.end)
-        if (cEnd <= cStart) return null
+        if (cEnd < cStart) return null
+        const rawWidth = (cEnd - cStart) * zoom
+        const MIN_GAP = 4
+        const gapWidth = Math.max(MIN_GAP, rawWidth)
+        const gapOffset = rawWidth < MIN_GAP ? (MIN_GAP - rawWidth) / 2 : 0
+        const R = 6
         return (
           <div
             key={cut.id}
-            className="absolute top-0 h-full bg-black/50 pointer-events-none z-10"
-            style={{ left: `${cStart * zoom}px`, width: `${(cEnd - cStart) * zoom}px` }}
-          />
+            className="absolute top-0 h-full z-10"
+            style={{ left: `${cStart * zoom - gapOffset - R}px`, width: `${gapWidth + R * 2}px` }}
+          >
+            <div className="absolute left-0 top-0 h-full bg-black/70 rounded-r-md" style={{ width: `${R}px` }} />
+            <div className="absolute top-0 h-full bg-black/70" style={{ left: `${R}px`, width: `${gapWidth}px` }} />
+            <div className="absolute right-0 top-0 h-full bg-black/70 rounded-l-md" style={{ width: `${R}px` }} />
+            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)} />
+            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)} />
+          </div>
         )
       })}
 
@@ -505,9 +537,27 @@ const COMPOSITE_CHUNK_W = 1000
  * Each segment draws the waveform from the corresponding audio track.
  * segments: [{start, end, videoId, offset, duration, filePath, groupId, title}]
  */
-export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX }) {
-  const { state } = useContext(EditorContext)
+export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX, showTranscript }) {
+  const { state, dispatch } = useContext(EditorContext)
   const containerRef = useRef(null)
+
+  // Cut edge drag handler
+  const handleEdgeDrag = useCallback((cutId, edge, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const cut = state.cuts.find(c => c.id === cutId)
+    if (!cut) return
+    const startVal = edge === 'left' ? cut.start : cut.end
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX
+      const newVal = Math.max(0, startVal + dx / zoom)
+      dispatch({ type: 'UPDATE_CUT', payload: { id: cutId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+    }
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [state.cuts, zoom, dispatch])
 
   // Map segments to audio tracks + build WaveformData
   const segmentData = useMemo(() => {
@@ -651,8 +701,57 @@ export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX }
     }
   }, [segmentData, zoom, scrollRef])
 
+  // Composite transcript word groups — per-segment words mapped to timeline coordinates
+  const compositeGroups = useMemo(() => {
+    if (!showTranscript) return []
+
+    const viewW = scrollRef?.current?.clientWidth || 1200
+    const labelW = 144
+    const buffer = 300
+    const globalVStart = Math.max(0, (scrollX - labelW - buffer) / zoom)
+    const globalVEnd = (scrollX - labelW + viewW + buffer) / zoom
+
+    const allGroups = []
+
+    for (const seg of segmentData) {
+      if (!seg.audioTrack) continue
+      const words = seg.audioTrack.transcriptWords
+      if (!words?.length) continue
+
+      const trackOffset = seg.audioTrack.offset
+      const segLocalStart = seg.start - trackOffset
+      const segLocalEnd = seg.end - trackOffset
+
+      // Filter words to segment range and map to timeline coordinates
+      const segWords = []
+      for (const w of words) {
+        if (w.start >= segLocalStart && w.start < segLocalEnd) {
+          segWords.push({
+            word: w.word,
+            start: w.start + trackOffset,
+            end: Math.min(w.end, segLocalEnd) + trackOffset,
+          })
+        }
+      }
+      if (!segWords.length) continue
+
+      const segSentences = buildSentences(segWords)
+
+      const vStart = Math.max(seg.start, globalVStart)
+      const vEnd = Math.min(seg.end, globalVEnd)
+      if (vStart >= vEnd) continue
+
+      const groups = computeWordGroups(segWords, segSentences, zoom, vStart, vEnd)
+      for (const g of groups) {
+        allGroups.push({ ...g, color: seg.color })
+      }
+    }
+
+    return allGroups
+  }, [showTranscript, segmentData, zoom, scrollX, scrollRef])
+
   return (
-    <div className="relative border-b border-white/5" style={{ height: '56px' }}>
+    <div className="relative border-b border-white/5" style={{ height: showTranscript ? '112px' : '56px' }}>
       {/* Background + accent per segment */}
       {segmentData.map((seg, si) => (
         <div
@@ -662,24 +761,59 @@ export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX }
         >
           <div className="absolute inset-0" style={{ backgroundColor: `${seg.color}15`, borderLeft: `4px solid ${seg.color}` }} />
           {si > 0 && <div className="absolute left-0 top-0 w-[2px] h-full bg-white/40 z-10" />}
-          <div className="absolute top-1 right-1 bg-black/60 px-1.5 py-0.5 rounded text-[8px] font-bold z-10" style={{ color: seg.color }}>
+          <div className="absolute top-1 left-1 bg-black/60 px-1.5 py-0.5 rounded text-[8px] font-bold z-10" style={{ color: seg.color }}>
             {seg.title || `A${si + 1}`}
           </div>
         </div>
       ))}
 
       {/* Waveform canvases */}
-      <div ref={containerRef} className="absolute inset-0 overflow-hidden" />
+      <div ref={containerRef} className="absolute top-0 left-0 right-0 overflow-hidden" style={{ height: '56px' }} />
 
-      {/* Cut overlays */}
+      {/* Transcript */}
+      {showTranscript && (
+        <div className="absolute left-0 right-0 overflow-hidden" style={{ top: '56px', height: '56px' }}>
+          {compositeGroups.map((g, i) => (
+            <div
+              key={`${g.start}-${i}`}
+              className="absolute top-3 h-8 px-1.5 bg-black/30 rounded border flex items-center text-[9px] font-medium overflow-hidden whitespace-nowrap"
+              style={{
+                left: `${g.start * zoom}px`,
+                width: `${Math.max(((g.displayEnd || g.end) - g.start) * zoom, 4)}px`,
+                borderColor: `${g.color}30`,
+                color: g.color,
+              }}
+            >
+              {g.text}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Cut overlays with draggable edges */}
       {cuts?.map(cut => {
         const totalStart = segments[0]?.start || 0
         const totalEnd = segments[segments.length - 1]?.end || 0
         const cStart = Math.max(totalStart, cut.start)
         const cEnd = Math.min(totalEnd, cut.end)
-        if (cEnd <= cStart) return null
+        if (cEnd < cStart) return null
+        const rawWidth = (cEnd - cStart) * zoom
+        const MIN_GAP = 4
+        const gapWidth = Math.max(MIN_GAP, rawWidth)
+        const gapOffset = rawWidth < MIN_GAP ? (MIN_GAP - rawWidth) / 2 : 0
+        const R = 6
         return (
-          <div key={cut.id} className="absolute inset-y-0 bg-black/50 pointer-events-none z-20" style={{ left: `${cStart * zoom}px`, width: `${(cEnd - cStart) * zoom}px` }} />
+          <div
+            key={cut.id}
+            className="absolute inset-y-0 z-20"
+            style={{ left: `${cStart * zoom - gapOffset - R}px`, width: `${gapWidth + R * 2}px` }}
+          >
+            <div className="absolute left-0 top-0 h-full bg-black/70 rounded-r-md" style={{ width: `${R}px` }} />
+            <div className="absolute top-0 h-full bg-black/70" style={{ left: `${R}px`, width: `${gapWidth}px` }} />
+            <div className="absolute right-0 top-0 h-full bg-black/70 rounded-l-md" style={{ width: `${R}px` }} />
+            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)} />
+            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)} />
+          </div>
         )
       })}
     </div>

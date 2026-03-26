@@ -98,29 +98,44 @@ export default function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX 
           </div>
         ))}
 
-        {/* Cut overlays with draggable edges */}
+        {/* Cut overlays with draggable edges — rounded clip edges like FCP */}
         {cuts.map(cut => {
           const cutLocalStart = Math.max(0, cut.start - track.offset)
           const cutLocalEnd = Math.min(track.duration, cut.end - track.offset)
           const cutLeft = cutLocalStart * zoom
-          const cutWidth = (cutLocalEnd - cutLocalStart) * zoom
-          if (cutWidth <= 0) return null
+          const rawWidth = (cutLocalEnd - cutLocalStart) * zoom
+          if (cutLocalEnd < cutLocalStart) return null
+
+          const MIN_GAP = 4
+          const gapWidth = Math.max(MIN_GAP, rawWidth)
+          const gapOffset = rawWidth < MIN_GAP ? (MIN_GAP - rawWidth) / 2 : 0
+          const R = 6 // corner radius
 
           return (
             <div
               key={cut.id}
-              className="absolute inset-y-0 bg-black/60 z-10 group/cut"
-              style={{ left: `${cutLeft}px`, width: `${cutWidth}px` }}
+              className="absolute inset-y-0 z-10 group/cut"
+              style={{ left: `${cutLeft - gapOffset - R}px`, width: `${gapWidth + R * 2}px` }}
             >
-              <span className="material-symbols-outlined absolute top-1 left-1 text-white/40" style={{ fontSize: '12px' }}>content_cut</span>
-              {/* Left edge handle */}
+              {/* Left rounded corner mask — rounds the right edge of the left clip */}
+              <div className="absolute left-0 top-0 h-full bg-black/70 rounded-r-md" style={{ width: `${R}px` }} />
+              {/* Dark gap center */}
+              <div className="absolute top-0 h-full bg-black/70" style={{ left: `${R}px`, width: `${gapWidth}px` }} />
+              {/* Right rounded corner mask — rounds the left edge of the right clip */}
+              <div className="absolute right-0 top-0 h-full bg-black/70 rounded-l-md" style={{ width: `${R}px` }} />
+              {gapWidth > 40 && (
+                <span className="material-symbols-outlined absolute top-1 text-white/40 z-10" style={{ fontSize: '12px', left: `${R + 4}px` }}>content_cut</span>
+              )}
+              {/* Left edge drag handle */}
               <div
-                className="absolute left-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-fixed/50 transition-colors z-20"
+                className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20"
+                style={{ width: `${R + 4}px` }}
                 onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)}
               />
-              {/* Right edge handle */}
+              {/* Right edge drag handle */}
               <div
-                className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-fixed/50 transition-colors z-20"
+                className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20"
+                style={{ width: `${R + 4}px` }}
                 onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)}
               />
             </div>
@@ -165,8 +180,11 @@ export function CompositeFrameTrack({ segments, zoom, cuts, scrollRef, scrollX }
     window.addEventListener('mouseup', onUp)
   }, [state.cuts, zoom, dispatch])
 
+  const totalEnd = segments[segments.length - 1]?.end || 0
+  const contentWidth = totalEnd * zoom
+
   return (
-    <div className="relative border-b border-white/10" style={{ height: `${FRAME_H}px` }}>
+    <div className="relative border-b border-white/10 overflow-hidden" style={{ height: `${FRAME_H}px` }}>
       {/* Segments */}
       {segments.map((seg, si) => {
         const group = seg.groupId ? state.groups[seg.groupId] : null
@@ -214,30 +232,41 @@ export function CompositeFrameTrack({ segments, zoom, cuts, scrollRef, scrollX }
               <div className="absolute left-0 top-0 w-[2px] h-full bg-white/40 z-10" />
             )}
 
-            {/* Source label at top-right */}
-            <div className="absolute top-1 right-1 bg-black/60 px-1.5 py-0.5 rounded text-[8px] font-bold z-10" style={{ color }}>
+            {/* Source label at top-left */}
+            <div className="absolute top-1 left-1 bg-black/60 px-1.5 py-0.5 rounded text-[8px] font-bold z-10" style={{ color }}>
               {seg.title || `V${si + 1}`}
             </div>
           </div>
         )
       })}
 
-      {/* Cut overlays — span across all segments */}
+      {/* Cut overlays — rounded clip edges */}
       {cuts.map(cut => {
         const totalStart = segments[0]?.start || 0
         const totalEnd = segments[segments.length - 1]?.end || 0
         const cStart = Math.max(totalStart, cut.start)
         const cEnd = Math.min(totalEnd, cut.end)
-        if (cEnd <= cStart) return null
+        if (cEnd < cStart) return null
+        const rawWidth = (cEnd - cStart) * zoom
+        const MIN_GAP = 4
+        const gapWidth = Math.max(MIN_GAP, rawWidth)
+        const gapOffset = rawWidth < MIN_GAP ? (MIN_GAP - rawWidth) / 2 : 0
+        const R = 6
+
         return (
           <div
             key={cut.id}
-            className="absolute inset-y-0 bg-black/60 z-20"
-            style={{ left: `${cStart * zoom}px`, width: `${(cEnd - cStart) * zoom}px` }}
+            className="absolute inset-y-0 z-20"
+            style={{ left: `${cStart * zoom - gapOffset - R}px`, width: `${gapWidth + R * 2}px` }}
           >
-            <span className="material-symbols-outlined absolute top-1 left-1 text-white/40" style={{ fontSize: '12px' }}>content_cut</span>
-            <div className="absolute left-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-fixed/50 transition-colors z-20" onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)} />
-            <div className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-fixed/50 transition-colors z-20" onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)} />
+            <div className="absolute left-0 top-0 h-full bg-black/70 rounded-r-md" style={{ width: `${R}px` }} />
+            <div className="absolute top-0 h-full bg-black/70" style={{ left: `${R}px`, width: `${gapWidth}px` }} />
+            <div className="absolute right-0 top-0 h-full bg-black/70 rounded-l-md" style={{ width: `${R}px` }} />
+            {gapWidth > 40 && (
+              <span className="material-symbols-outlined absolute top-1 text-white/40 z-10" style={{ fontSize: '12px', left: `${R + 4}px` }}>content_cut</span>
+            )}
+            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)} />
+            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)} />
           </div>
         )
       })}

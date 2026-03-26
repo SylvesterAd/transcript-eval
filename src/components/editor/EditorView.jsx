@@ -1,4 +1,4 @@
-import { createContext, useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useApi } from '../../hooks/useApi.js'
 import useEditorState from './useEditorState.js'
@@ -8,6 +8,7 @@ import PlaybackControls from './PlaybackControls.jsx'
 import Timeline from './Timeline.jsx'
 import TranscriptEditor from './TranscriptEditor.jsx'
 import RoughCutPreview from './RoughCutPreview.jsx'
+import AssetsView from './AssetsView.jsx'
 
 export const EditorContext = createContext(null)
 
@@ -17,9 +18,13 @@ export default function EditorView() {
   const { data: groupDetail, loading, error, refetch: refetchDetail } = useApi(`/videos/groups/${id}/detail`)
   const { data: wordTimestamps, refetch: refetchTimestamps } = useApi(`/videos/groups/${id}/word-timestamps`)
   const { state, dispatch, totalDuration, formatTime } = useEditorState()
+  const [showRoughCutWarning, setShowRoughCutWarning] = useState(false)
+  const [flowRunState, setFlowRunState] = useState(null)
+  // shape: { experimentId, runId, status: 'running'|'complete'|'error', progress: {...} }
 
   // URL tab is source of truth — sync to state before paint
-  const activeTab = tab || 'sync'
+  const assetsStatuses = ['classifying', 'classified', 'classification_failed', 'confirmed']
+  const activeTab = tab || (assetsStatuses.includes(groupDetail?.assembly_status) ? 'assets' : 'sync')
   useLayoutEffect(() => {
     if (state.activeTab !== activeTab) {
       dispatch({ type: 'SET_ACTIVE_TAB', payload: activeTab })
@@ -52,6 +57,80 @@ export default function EditorView() {
     })
   }, [groupDetail, id, dispatch])
 
+  // Load annotations from server
+  useEffect(() => {
+    if (!groupDetail?.annotations || !state.groupId) return
+    // Only set once — don't overwrite if already loaded
+    if (state.annotations) return
+    dispatch({ type: 'SET_ANNOTATIONS', payload: groupDetail.annotations })
+  }, [groupDetail, state.groupId, state.annotations, dispatch])
+
+  // Trigger main flow when switching to roughcut tab
+  const flowTriggeredRef = useRef(false)
+  useEffect(() => {
+    if (activeTab !== 'roughcut' || !state.groupId || flowTriggeredRef.current) return
+    flowTriggeredRef.current = true
+
+    // If annotations already exist, apply defaults and done
+    if (groupDetail?.annotations?.items?.length > 0) {
+      applyConfigDefaults(groupDetail.rough_cut_config, dispatch)
+      return
+    }
+
+    // Trigger main flow
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/videos/groups/${state.groupId}/run-main-flow`, { method: 'POST' })
+        const data = await res.json()
+        if (data.already_exists) {
+          // Auto-run already completed — refetch to load annotations
+          await refetchDetail()
+          return
+        }
+        if (data.experimentId) {
+          setFlowRunState({ experimentId: data.experimentId, runId: data.runId, status: 'running', progress: null, totalStages: data.totalStages || 0, stageNames: data.stageNames || [] })
+        }
+      } catch (err) {
+        console.error('[main-flow] Trigger failed:', err)
+      }
+    })()
+  }, [activeTab, state.groupId, groupDetail, dispatch, refetchDetail])
+
+  // Poll flow progress
+  useEffect(() => {
+    if (!flowRunState?.experimentId || flowRunState.status !== 'running') return
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/experiments/${flowRunState.experimentId}/progress`)
+        const data = await res.json()
+        const run = data.runs?.[0]
+        if (run?.status === 'complete' || run?.status === 'partial') {
+          clearInterval(interval)
+          setFlowRunState(prev => ({ ...prev, status: 'complete', progress: data }))
+          await refetchDetail()
+        } else if (run?.status === 'failed') {
+          clearInterval(interval)
+          setFlowRunState(prev => ({ ...prev, status: 'error', progress: data }))
+        } else {
+          setFlowRunState(prev => ({ ...prev, progress: data }))
+        }
+      } catch {}
+    }, 2500)
+    return () => clearInterval(interval)
+  }, [flowRunState?.experimentId, flowRunState?.status, refetchDetail])
+
+  // Apply defaults when annotations arrive after flow completes
+  useEffect(() => {
+    if (flowRunState?.status !== 'complete') return
+    if (!groupDetail?.annotations?.items?.length) return
+    if (!state.annotations) {
+      dispatch({ type: 'SET_ANNOTATIONS', payload: groupDetail.annotations })
+    }
+    applyConfigDefaults(groupDetail.rough_cut_config, dispatch)
+    setFlowRunState(null)
+  }, [flowRunState?.status, groupDetail, state.annotations, dispatch])
+
+
   // Trigger server-side frame extraction for existing projects that don't have frames yet
   useEffect(() => {
     if (!groupDetail?.videos) return
@@ -61,12 +140,16 @@ export default function EditorView() {
     }
   }, [groupDetail, id])
 
-  // Load word timestamps — re-runs when tracks change (e.g. after INIT_TRACKS)
-  // to handle the case where timestamps loaded before tracks were populated
+  // Load word timestamps — re-runs when tracks reference changes (e.g. after INIT_TRACKS)
+  // to handle the case where timestamps loaded before tracks were populated,
+  // or INIT_TRACKS rebuilt tracks and wiped transcriptWords.
   useEffect(() => {
     if (!wordTimestamps || !state.groupId || state.tracks.length === 0) return
+    // Only apply if some audio track is missing words
+    const needsWords = state.tracks.some(t => t.type === 'audio' && wordTimestamps[t.videoId] && !t.transcriptWords?.length)
+    if (!needsWords) return
     dispatch({ type: 'SET_WORD_TIMESTAMPS', payload: { wordTimestamps } })
-  }, [wordTimestamps, state.groupId, state.tracks.length, dispatch])
+  }, [wordTimestamps, state.groupId, state.tracks, dispatch])
 
   // Playback engine (rAF loop) — media-driven clock
   // Uses the master video element's currentTime as the time source instead of
@@ -161,18 +244,59 @@ export default function EditorView() {
     // (the video whose segment covers the playhead — same logic as composite track)
     const isMainMode = state.activeTab === 'roughcut' && state.roughCutTrackMode === 'main'
     let mainActiveVideoId = null
+    let mainActiveAudioId = null
+    let mainSegIdx = -1
     if (isMainMode) {
+      // Build merged segments (same logic as mainTrackSegments in Timeline)
       const sorted = [...videoTracks].sort((a, b) => a.offset - b.offset)
-      let covered = 0
+      const segments = []
+      let cur = null
       for (const t of sorted) {
         const tEnd = t.offset + t.duration
-        if (tEnd <= covered) continue
-        const segStart = Math.max(t.offset, covered)
-        if (segStart >= tEnd) continue
-        if (newTime >= segStart && newTime < tEnd) { mainActiveVideoId = t.videoId; break }
-        covered = tEnd
+        if (cur && t.offset < cur.end) {
+          cur.end = Math.max(cur.end, tEnd)
+        } else {
+          cur = { start: t.offset, end: tEnd, videoId: t.videoId }
+          segments.push(cur)
+        }
       }
-      if (!mainActiveVideoId && sorted.length) mainActiveVideoId = sorted[0].videoId
+      // Search backwards: find the last segment whose start <= newTime
+      if (segments.length) {
+        for (let i = segments.length - 1; i >= 0; i--) {
+          if (newTime >= segments[i].start) {
+            mainActiveVideoId = segments[i].videoId
+            mainSegIdx = i
+            break
+          }
+        }
+        if (!mainActiveVideoId) {
+          mainActiveVideoId = segments[0].videoId
+          mainSegIdx = 0
+        }
+      }
+
+      // Apply video override
+      if (mainSegIdx >= 0) {
+        const vidOv = state.segmentVideoOverrides[mainSegIdx]
+        if (vidOv) {
+          const ovTrack = videoTracks.find(t => t.videoId === vidOv)
+          if (ovTrack && newTime >= ovTrack.offset && newTime < ovTrack.offset + ovTrack.duration) {
+            mainActiveVideoId = vidOv
+          }
+        }
+      }
+
+      // Audio override (independent of video)
+      mainActiveAudioId = mainActiveVideoId
+      if (mainSegIdx >= 0) {
+        const audioOv = state.segmentAudioOverrides[mainSegIdx]
+        if (audioOv) {
+          const ovTrack = videoTracks.find(t => t.videoId === audioOv)
+          if (ovTrack && newTime >= ovTrack.offset && newTime < ovTrack.offset + ovTrack.duration) {
+            mainActiveAudioId = audioOv
+          }
+        }
+      }
     }
 
     // Sync video elements
@@ -191,7 +315,7 @@ export default function EditorView() {
         // In All Tracks mode, unmute per the track's mute setting.
         const audioTrack = state.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
         if (isMainMode) {
-          if (track.videoId === mainActiveVideoId) {
+          if (track.videoId === mainActiveAudioId) {
             el.muted = false
             el.volume = state.volume
           } else {
@@ -227,7 +351,7 @@ export default function EditorView() {
     }
 
     rafId.current = requestAnimationFrame(tick)
-  }, [state.tracks, state.playbackRate, state.zoom, state.volume, state.activeTab, state.roughCutTrackMode, state.cuts, totalDuration, dispatch])
+  }, [state.tracks, state.playbackRate, state.zoom, state.volume, state.activeTab, state.roughCutTrackMode, state.cuts, state.segmentVideoOverrides, state.segmentAudioOverrides, totalDuration, dispatch])
 
   const stopAllVideos = useCallback(() => {
     Object.values(videoRefs.current).forEach(el => {
@@ -319,11 +443,31 @@ export default function EditorView() {
       } else if (e.code === 'KeyY' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
         dispatch({ type: 'REDO' })
+      } else if ((e.code === 'Backspace' || e.code === 'Delete') && state.activeTab === 'roughcut') {
+        if (state.transcriptSelection) {
+          e.preventDefault()
+          const { startTime, endTime } = state.transcriptSelection
+          // Find cuts that overlap the selection
+          const overlapping = state.cuts.filter(c => c.start < endTime && c.end > startTime)
+          if (overlapping.length > 0) {
+            // Selection is already cut — remove those cuts (toggle off)
+            for (const cut of overlapping) {
+              dispatch({ type: 'REMOVE_CUT', payload: cut.id })
+            }
+          } else {
+            // Selection is not cut — create a cut
+            dispatch({
+              type: 'ADD_CUT',
+              payload: { id: `cut-${Date.now()}`, start: startTime, end: endTime, source: 'transcript' },
+            })
+          }
+          dispatch({ type: 'SET_TRANSCRIPT_SELECTION', payload: null })
+        }
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [state.isPlaying, state.currentTime, totalDuration, dispatch])
+  }, [state.isPlaying, state.currentTime, state.activeTab, state.transcriptSelection, totalDuration, dispatch])
 
   if (loading) {
     return (
@@ -343,7 +487,7 @@ export default function EditorView() {
 
   // Show syncing screen if assembly is still in progress
   const assemblyStatus = groupDetail?.assembly_status
-  const isAssembling = assemblyStatus && !['done', 'error'].includes(assemblyStatus)
+  const isAssembling = assemblyStatus && !['done', 'error', 'classifying', 'classified', 'classification_failed', 'confirmed'].includes(assemblyStatus)
   if (isAssembling) {
     return <SyncingScreen groupId={id} status={assemblyStatus} onDone={() => { refetchDetail(); refetchTimestamps() }} />
   }
@@ -359,7 +503,7 @@ export default function EditorView() {
   }
 
   return (
-    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps }}>
+    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState }}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
@@ -388,14 +532,63 @@ export default function EditorView() {
         <div className="flex flex-1 overflow-hidden">
           <EditorSidebar
             activeTab={activeTab}
+            assemblyStatus={groupDetail?.assembly_status}
             onTabChange={(newTab) => {
+              // Warn when leaving roughcut with progress
+              const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0
+              if (state.activeTab === 'roughcut' && newTab === 'sync' && hasRoughCutProgress) {
+                setShowRoughCutWarning(true)
+                return
+              }
               navigate(`/editor/${id}/${newTab}`)
               dispatch({ type: 'SET_ACTIVE_TAB', payload: newTab })
             }}
           />
-          <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} />
+          {activeTab === 'assets' ? (
+            <AssetsView />
+          ) : (
+            <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} isMainMode={activeTab === 'roughcut' && state.roughCutTrackMode === 'main'} />
+          )}
         </div>
       </div>
+
+      {/* Rough Cut → Sync confirmation modal */}
+      {showRoughCutWarning && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm px-6">
+          <div className="max-w-md w-full rounded-xl overflow-hidden shadow-2xl shadow-black/60 border border-outline-variant/20" style={{ background: 'rgba(25, 25, 28, 0.7)', backdropFilter: 'blur(20px)' }}>
+            <div className="px-8 pt-8 pb-4">
+              <div className="w-12 h-12 bg-error-container/20 rounded-full flex items-center justify-center mb-6">
+                <span className="material-symbols-outlined text-error text-2xl">warning</span>
+              </div>
+              <h2 className="font-['Manrope'] text-3xl font-extrabold tracking-tight text-on-surface mb-3">Lose Rough Cut Progress?</h2>
+              <p className="text-on-surface-variant leading-relaxed">
+                If you continue, you will lose all your progress in <span className="text-primary-fixed font-semibold">Rough Cut</span>. Are you sure you want to go back to <span className="text-secondary font-semibold">Sync</span>?
+              </p>
+            </div>
+            <div className="p-8 space-y-3">
+              <button
+                onClick={() => {
+                  dispatch({ type: 'CLEAR_ROUGH_CUT' })
+                  setShowRoughCutWarning(false)
+                  navigate(`/editor/${id}/sync`)
+                  dispatch({ type: 'SET_ACTIVE_TAB', payload: 'sync' })
+                }}
+                className="w-full flex items-center justify-center gap-2 py-4 bg-error text-on-error font-bold rounded-lg hover:bg-error-dim transition-colors active:scale-95 duration-150"
+              >
+                <span className="material-symbols-outlined text-xl">delete_forever</span>
+                Delete progress and go to sync
+              </button>
+              <button
+                onClick={() => setShowRoughCutWarning(false)}
+                className="w-full py-4 text-on-surface font-semibold hover:bg-surface-bright/40 rounded-lg transition-all duration-200 active:scale-95"
+              >
+                No, continue editing
+              </button>
+            </div>
+            <div className="h-1 w-full bg-gradient-to-r from-transparent via-error/20 to-transparent" />
+          </div>
+        </div>
+      )}
     </EditorContext.Provider>
   )
 }
@@ -404,11 +597,21 @@ export default function EditorView() {
  * Main workspace with resizable splitter between video preview and bottom tools.
  * Drag the handle to resize — video preview grows/shrinks, timeline follows.
  */
-function MainWorkspace({ audioOnly, isRoughCut }) {
-  const [bottomH, setBottomH] = useState(350) // px — playback controls + timeline
+function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
+  const { flowRunState } = useContext(EditorContext)
+  const [bottomH, setBottomH] = useState(isMainMode ? 310 : 350) // px — playback controls + timeline
+  const [videoW, setVideoW] = useState(45) // % width of video preview panel (rough cut)
+  const prevMainMode = useRef(isMainMode)
+  useEffect(() => {
+    if (prevMainMode.current !== isMainMode) {
+      prevMainMode.current = isMainMode
+      setBottomH(isMainMode ? 310 : 350)
+    }
+  }, [isMainMode])
   const dragging = useRef(false)
   const startY = useRef(0)
   const startH = useRef(0)
+  const splitRef = useRef(null)
 
   const onMouseDown = useCallback((e) => {
     e.preventDefault()
@@ -430,16 +633,52 @@ function MainWorkspace({ audioOnly, isRoughCut }) {
     window.addEventListener('mouseup', onUp)
   }, [bottomH])
 
+  const onSplitMouseDown = useCallback((e) => {
+    e.preventDefault()
+    const containerW = splitRef.current?.getBoundingClientRect().width || 1
+    const startX = e.clientX
+    const startW = videoW
+
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX // dragging right = transcript bigger, video smaller
+      const newW = Math.max(20, Math.min(75, startW - (dx / containerW) * 100))
+      setVideoW(newW)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [videoW])
+
+  // Full-screen flow progress — replaces entire workspace
+  if (isRoughCut && (flowRunState?.status === 'running' || flowRunState?.status === 'error')) {
+    return (
+      <main className="flex-1 flex flex-col bg-surface-dim overflow-hidden">
+        <FlowProgressScreen progress={flowRunState.progress} initialTotalStages={flowRunState.totalStages} initialStageNames={flowRunState.stageNames} error={flowRunState.status === 'error'} onDismissError={() => setFlowRunState(null)} />
+      </main>
+    )
+  }
+
   return (
     <main className="flex-1 flex flex-col bg-surface-dim overflow-hidden px-6">
       {/* Video preview — takes remaining space */}
       <div className="flex-1 flex flex-col min-h-0 pt-4">
         {isRoughCut ? (
-          <div className="flex-1 flex gap-4 min-h-0">
+          <div ref={splitRef} className="flex-1 flex min-h-0">
             <div className="flex-1 bg-surface-container-low rounded-xl border border-white/5 overflow-hidden flex flex-col min-w-0">
               <TranscriptEditor />
             </div>
-            <div className="w-[45%] shrink-0 flex flex-col min-h-0">
+            {/* Vertical splitter — transcript / video preview */}
+            <div
+              className="w-4 shrink-0 flex items-center justify-center group relative z-40 cursor-ew-resize"
+              onMouseDown={onSplitMouseDown}
+            >
+              <div className="h-full w-px bg-white/5 group-hover:bg-primary-fixed/30 transition-colors" />
+              <div className="absolute h-10 w-1 bg-outline-variant/50 rounded-full group-hover:bg-primary-fixed group-hover:shadow-[0_0_10px_rgba(206,252,0,0.5)] transition-all" />
+            </div>
+            <div style={{ width: `${videoW}%` }} className="shrink-0 flex flex-col min-h-0">
               <RoughCutPreview />
             </div>
           </div>
@@ -515,6 +754,111 @@ function SyncingScreen({ groupId, status, onDone }) {
           }`} />
         ))}
       </div>
+    </div>
+  )
+}
+
+function applyConfigDefaults(config, dispatch) {
+  if (!config) return
+  dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: {
+    false_starts: config.false_starts ?? false,
+    filler_words: config.filler_words ?? true,
+    meta_commentary: config.meta_commentary ?? false,
+  }})
+  dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: {
+    repetition: config.repetition ?? true,
+    lengthy: config.lengthy ?? false,
+    technical_unclear: config.technical_unclear ?? false,
+    irrelevance: config.irrelevance ?? false,
+  }})
+}
+
+function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageNames = [], error = false, onDismissError }) {
+  const run = progress?.runs?.[0]
+  // Use live totalStages from poll if available, otherwise fall back to initial from endpoint
+  const totalStages = run?.totalStages || initialTotalStages
+  // currentStage from runStageProgress (0-indexed). If not set yet, treat stage 0 as current
+  // (run is pending/starting). Only use -1 if we have no run data at all.
+  const currentStage = run?.currentStage ?? (run ? 0 : -1)
+  const completedStages = run?.stages || []
+
+  if (error) {
+    const errorMsg = run?.errorMessage || 'Unknown error'
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-6">
+        <span className="material-symbols-outlined text-5xl text-red-400">error</span>
+        <h2 className="text-lg font-bold text-on-surface">Analysis failed</h2>
+        <p className="text-sm text-on-surface-variant max-w-md text-center">{errorMsg}</p>
+        <button onClick={onDismissError} className="px-5 py-2.5 text-sm rounded-lg bg-white/5 hover:bg-white/10 text-on-surface-variant transition-colors">
+          Continue to editor
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center gap-8">
+      {/* Spinner */}
+      <div className="relative">
+        <span className="material-symbols-outlined animate-spin text-5xl text-primary-fixed">progress_activity</span>
+      </div>
+
+      <h2 className="text-lg font-bold text-on-surface">Analyzing transcript...</h2>
+
+      {/* Vertical stage list */}
+      {totalStages > 0 ? (
+        <div className="flex flex-col gap-2 w-80">
+          {Array.from({ length: totalStages }, (_, si) => {
+            const isDone = currentStage >= 0 && si < currentStage
+            const isCurrent = currentStage >= 0 && si === currentStage
+            const stageData = completedStages.find(s => s.stage_index === si)
+            // Best name: live stage name for current, DB stage_name for done, initial names as fallback
+            const stageName = isCurrent ? (run?.stageName || initialStageNames[si] || `Stage ${si + 1}`)
+              : isDone ? (stageData?.stage_name || initialStageNames[si] || `Stage ${si + 1}`)
+              : (initialStageNames[si] || `Stage ${si + 1}`)
+
+            let statusText
+            if (isDone) statusText = 'done'
+            else if (isCurrent) {
+              statusText = run?.segmentsTotal > 1
+                ? `analyzing (${run.segmentsDone || 0}/${run.segmentsTotal})`
+                : 'running...'
+            } else statusText = 'waiting'
+
+            return (
+              <div key={si} className={`flex items-center gap-3 rounded-lg px-4 py-2.5 transition-all ${
+                isCurrent ? 'bg-primary-fixed/5 border border-primary-fixed/20'
+                : isDone ? 'bg-white/[0.02] border border-transparent'
+                : 'border border-transparent opacity-40'
+              }`}>
+                <span className={`material-symbols-outlined text-[18px] shrink-0 ${
+                  isDone ? 'text-green-500' : isCurrent ? 'text-primary-fixed' : 'text-on-surface-variant/30'
+                }`} style={isDone ? { fontVariationSettings: '"FILL" 1' } : undefined}>
+                  {isDone ? 'check_circle' : isCurrent ? 'pending' : 'radio_button_unchecked'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className={`text-xs font-medium truncate ${
+                    isCurrent ? 'text-on-surface' : isDone ? 'text-on-surface-variant' : 'text-on-surface-variant/50'
+                  }`}>
+                    Stage {si + 1}: {stageName}
+                  </div>
+                  <div className={`text-[10px] ${
+                    isCurrent ? 'text-primary-fixed/80' : isDone ? 'text-green-500/60' : 'text-on-surface-variant/30'
+                  }`}>
+                    {statusText}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="flex gap-1.5 mt-2">
+          {[0, 1, 2, 3, 4].map(i => (
+            <div key={i} className="w-2 h-2 rounded-full bg-white/10 animate-pulse" style={{ animationDelay: `${i * 200}ms` }} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

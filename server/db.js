@@ -111,6 +111,11 @@ const migrations = [
   ['video_groups', 'sync_mode', "ALTER TABLE video_groups ADD COLUMN sync_mode TEXT"],
   ['video_groups', 'editor_state_json', 'ALTER TABLE video_groups ADD COLUMN editor_state_json TEXT'],
   ['videos', 'frames_status', 'ALTER TABLE videos ADD COLUMN frames_status TEXT'],
+  ['video_groups', 'classification_json', 'ALTER TABLE video_groups ADD COLUMN classification_json TEXT'],
+  ['videos', 'media_info_json', 'ALTER TABLE videos ADD COLUMN media_info_json TEXT'],
+  ['video_groups', 'parent_group_id', 'ALTER TABLE video_groups ADD COLUMN parent_group_id INTEGER REFERENCES video_groups(id)'],
+  ['strategies', 'is_main', "ALTER TABLE strategies ADD COLUMN is_main INTEGER DEFAULT 0"],
+  ['video_groups', 'annotations_json', 'ALTER TABLE video_groups ADD COLUMN annotations_json TEXT'],
 ]
 
 // Migrate experiment_runs CHECK constraint to allow 'partial' status

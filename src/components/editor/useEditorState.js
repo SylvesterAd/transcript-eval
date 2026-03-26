@@ -104,7 +104,48 @@ const initialState = {
   isDirty: false,
   activeTab: 'sync',
   cuts: [],          // [{id, start, end, source: 'transcript'}]
+  aiCutsSelected: { silences: false, false_starts: false, filler_words: false, meta_commentary: false },
+  aiIdentifySelected: { repetition: false, lengthy: false, technical_unclear: false, irrelevance: false },
   roughCutTrackMode: 'main', // 'main' = single composite track, 'all' = individual tracks
+  compositeShowTranscript: false,
+  syncTranscriptState: null,      // stashed per-track showTranscript for sync mode
+  roughcutTranscriptState: null,  // stashed compositeShowTranscript for roughcut mode
+  transcriptSelection: null, // {startTime, endTime} — set by TranscriptEditor, read by EditorView for Backspace cut
+  segmentVideoOverrides: {},  // { [segmentIndex]: videoId }
+  segmentAudioOverrides: {},  // { [segmentIndex]: videoId }
+  annotations: null,          // loaded from server, not serialized
+}
+
+function cascadeOverlaps(tracks) {
+  // Build group units: { id, indices[], start, end }
+  const unitMap = new Map()
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i]
+    const unitId = t.groupId || t.id
+    if (!unitMap.has(unitId)) {
+      unitMap.set(unitId, { id: unitId, indices: [], start: Infinity, end: -Infinity })
+    }
+    const u = unitMap.get(unitId)
+    u.indices.push(i)
+    u.start = Math.min(u.start, t.offset)
+    u.end = Math.max(u.end, t.offset + t.duration)
+  }
+  // Sort by start, sweep, push overlapping units right
+  const units = [...unitMap.values()].sort((a, b) => a.start - b.start)
+  const result = [...tracks]
+  let prevEnd = -Infinity
+  for (const u of units) {
+    if (u.start < prevEnd) {
+      const delta = prevEnd - u.start
+      for (const idx of u.indices) {
+        result[idx] = { ...result[idx], offset: result[idx].offset + delta }
+      }
+      u.start += delta
+      u.end += delta
+    }
+    prevEnd = Math.max(prevEnd, u.end)
+  }
+  return result
 }
 
 function reducer(state, action) {
@@ -141,8 +182,16 @@ function reducer(state, action) {
           selectedTrackIds: new Set(),
           isDirty: false,
           cuts: restoredState.cuts || [],
+          aiCutsSelected: restoredState.aiCutsSelected || initialState.aiCutsSelected,
+          aiIdentifySelected: restoredState.aiIdentifySelected || initialState.aiIdentifySelected,
           activeTab: restoredState.activeTab || 'sync',
           roughCutTrackMode: restoredState.roughCutTrackMode || 'main',
+          compositeShowTranscript: restoredState.compositeShowTranscript ?? false,
+          syncTranscriptState: restoredState.syncTranscriptState || null,
+          roughcutTranscriptState: restoredState.roughcutTranscriptState ?? null,
+          transcriptSelection: null,
+          segmentVideoOverrides: restoredState.segmentVideoOverrides || {},
+          segmentAudioOverrides: restoredState.segmentAudioOverrides || {},
         }
       }
       return { ...state, groupId, groupDetail, tracks, groups, originalVideoOrder, selectedTrackIds: new Set(), isDirty: false }
@@ -189,28 +238,30 @@ function reducer(state, action) {
       const track = state.tracks.find(t => t.id === trackId)
       if (!track) return state
       const clampedOffset = Math.max(0, newOffset)
+      let movedTracks
       // If grouped, move all tracks in the group
       if (track.groupId) {
         const group = state.groups[track.groupId]
         if (group) {
           const delta = clampedOffset - track.offset
-          const tracks = state.tracks.map(t =>
+          movedTracks = state.tracks.map(t =>
             group.trackIds.includes(t.id) ? { ...t, offset: Math.max(0, t.offset + delta) } : t
           )
-          return { ...state, tracks, isDirty: true }
         }
       }
-      const tracks = state.tracks.map(t => t.id === trackId ? { ...t, offset: clampedOffset } : t)
-      return { ...state, tracks, isDirty: true }
+      if (!movedTracks) {
+        movedTracks = state.tracks.map(t => t.id === trackId ? { ...t, offset: clampedOffset } : t)
+      }
+      return { ...state, tracks: cascadeOverlaps(movedTracks), isDirty: true }
     }
     case 'MOVE_GROUP': {
       const { groupId, delta } = action.payload
       const group = state.groups[groupId]
       if (!group) return state
-      const tracks = state.tracks.map(t =>
+      const movedTracks = state.tracks.map(t =>
         group.trackIds.includes(t.id) ? { ...t, offset: Math.max(0, t.offset + delta) } : t
       )
-      return { ...state, tracks, isDirty: true }
+      return { ...state, tracks: cascadeOverlaps(movedTracks), isDirty: true }
     }
     case 'TOGGLE_VISIBILITY': {
       const tracks = state.tracks.map(t =>
@@ -230,6 +281,8 @@ function reducer(state, action) {
       )
       return { ...state, tracks }
     }
+    case 'TOGGLE_COMPOSITE_TRANSCRIPT':
+      return { ...state, compositeShowTranscript: !state.compositeShowTranscript }
     case 'TOGGLE_AUDIO_ONLY':
       return { ...state, audioOnly: !state.audioOnly, isDirty: true }
     case 'SET_VOLUME':
@@ -342,16 +395,75 @@ function reducer(state, action) {
       return { ...state, contextMenu: null }
     case 'MARK_CLEAN':
       return { ...state, isDirty: false }
-    case 'SET_ACTIVE_TAB':
-      return { ...state, activeTab: action.payload, isDirty: true }
+    case 'SET_ACTIVE_TAB': {
+      const from = state.activeTab
+      const to = action.payload
+      if (from === to) return state
+      // Stash current mode's transcript state, restore target mode's
+      const stash = {}
+      if (from === 'sync') {
+        // Save per-track showTranscript map
+        const trackTranscripts = {}
+        for (const t of state.tracks) {
+          if (t.type === 'audio') trackTranscripts[t.id] = t.showTranscript
+        }
+        stash.syncTranscriptState = trackTranscripts
+      } else if (from === 'roughcut') {
+        stash.roughcutTranscriptState = state.compositeShowTranscript
+      }
+      let tracks = state.tracks
+      let compositeShowTranscript = state.compositeShowTranscript
+      if (to === 'sync' && state.syncTranscriptState) {
+        tracks = state.tracks.map(t =>
+          t.type === 'audio' && state.syncTranscriptState[t.id] !== undefined
+            ? { ...t, showTranscript: state.syncTranscriptState[t.id] }
+            : t
+        )
+      } else if (to === 'roughcut') {
+        compositeShowTranscript = state.roughcutTranscriptState ?? true
+      }
+      return { ...state, ...stash, activeTab: to, tracks, compositeShowTranscript, isDirty: true }
+    }
+    case 'CLEAR_ROUGH_CUT':
+      return { ...state, cuts: [], segmentVideoOverrides: {}, segmentAudioOverrides: {}, roughcutTranscriptState: null, isDirty: true }
     case 'ADD_CUT':
       return { ...state, cuts: [...state.cuts, action.payload], isDirty: true }
     case 'REMOVE_CUT':
       return { ...state, cuts: state.cuts.filter(c => c.id !== action.payload), isDirty: true }
     case 'UPDATE_CUT':
       return { ...state, cuts: state.cuts.map(c => c.id === action.payload.id ? { ...c, ...action.payload.updates } : c), isDirty: true }
+    case 'SET_AI_CUTS': {
+      const { prefix, cuts } = action.payload
+      return { ...state, cuts: [...state.cuts.filter(c => !c.id.startsWith(prefix)), ...cuts], isDirty: true }
+    }
+    case 'SET_AI_CUTS_SELECTED':
+      return { ...state, aiCutsSelected: { ...state.aiCutsSelected, ...action.payload }, isDirty: true }
+    case 'SET_AI_IDENTIFY_SELECTED':
+      return { ...state, aiIdentifySelected: { ...state.aiIdentifySelected, ...action.payload }, isDirty: true }
     case 'SET_ROUGH_CUT_TRACK_MODE':
       return { ...state, roughCutTrackMode: action.payload }
+    case 'SET_TRANSCRIPT_SELECTION':
+      return { ...state, transcriptSelection: action.payload }
+    case 'SET_SEGMENT_VIDEO_OVERRIDE': {
+      const { segIndex, videoId } = action.payload
+      return { ...state, segmentVideoOverrides: { ...state.segmentVideoOverrides, [segIndex]: videoId }, isDirty: true }
+    }
+    case 'SET_SEGMENT_AUDIO_OVERRIDE': {
+      const { segIndex, videoId } = action.payload
+      return { ...state, segmentAudioOverrides: { ...state.segmentAudioOverrides, [segIndex]: videoId }, isDirty: true }
+    }
+    case 'SET_ANNOTATIONS':
+      return { ...state, annotations: action.payload }
+    case 'DISMISS_ANNOTATION': {
+      if (!state.annotations) return state
+      return {
+        ...state,
+        annotations: {
+          ...state.annotations,
+          items: state.annotations.items.filter(a => a.id !== action.payload),
+        },
+      }
+    }
     default:
       return state
   }
@@ -361,10 +473,11 @@ function reducer(state, action) {
 const TRACKED_ACTIONS = new Set([
   'MOVE_TRACK', 'MOVE_GROUP', 'REORDER_TRACK',
   'REORDER_AUDIO_TRACKS', 'REORDER_VIDEO_TRACKS',
-  'TOGGLE_VISIBILITY', 'TOGGLE_MUTE', 'TOGGLE_TRANSCRIPT', 'TOGGLE_AUDIO_ONLY',
+  'TOGGLE_VISIBILITY', 'TOGGLE_MUTE', 'TOGGLE_TRANSCRIPT', 'TOGGLE_COMPOSITE_TRANSCRIPT', 'TOGGLE_AUDIO_ONLY',
   'SPLIT_TRACK', 'UNGROUP_TRACK', 'GROUP_TRACKS', 'RESYNC_TRACK',
   'SET_ZOOM', 'SET_VOLUME',
-  'ADD_CUT', 'REMOVE_CUT', 'UPDATE_CUT',
+  'ADD_CUT', 'REMOVE_CUT', 'UPDATE_CUT', 'SET_AI_CUTS', 'SET_AI_IDENTIFY_SELECTED',
+  'SET_SEGMENT_VIDEO_OVERRIDE', 'SET_SEGMENT_AUDIO_OVERRIDE',
 ])
 
 // Actions that coalesce (rapid-fire same type = one undo step, e.g. dragging)
@@ -420,9 +533,9 @@ function undoableReducer(historyState, action) {
 }
 
 function serializeState(state) {
-  const { tracks, groups, zoom, audioOnly, volume, cuts, activeTab, roughCutTrackMode } = state
+  const { tracks, groups, zoom, audioOnly, volume, cuts, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides } = state
   const serializableTracks = tracks.map(({ transcriptSegments, transcriptWords, transcriptSentences, waveform, waveformPeaks, ...rest }) => rest)
-  return { tracks: serializableTracks, groups, zoom, audioOnly, volume, cuts, activeTab, roughCutTrackMode }
+  return { tracks: serializableTracks, groups, zoom, audioOnly, volume, cuts, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides }
 }
 
 export default function useEditorState() {
@@ -478,4 +591,4 @@ export default function useEditorState() {
   return { state, dispatch, totalDuration, formatTime, canUndo, canRedo }
 }
 
-export { formatTime, formatTimeRuler, GROUP_COLORS }
+export { formatTime, formatTimeRuler, GROUP_COLORS, buildSentences }

@@ -204,6 +204,105 @@ function segmentByText(text, { minChars = 800, maxChars = 2000, contextChars = 6
 }
 
 /**
+ * Convert a timecode string like "[00:02:15]" or "00:02:15" to seconds.
+ */
+function timecodeToSeconds(tc) {
+  const clean = tc.replace(/[\[\]]/g, '')
+  const parts = clean.split(':').map(Number)
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+  if (parts.length === 2) return parts[0] * 60 + parts[1]
+  return 0
+}
+
+/**
+ * Segment transcript by chapter boundaries from LLM-generated chapters JSON.
+ * Each chapter becomes a segment enriched with chapter metadata (name, description, purpose, beats).
+ *
+ * @param {string} text - Full transcript text
+ * @param {string|Array} chaptersJson - Chapters JSON (string with optional markdown fences, or parsed array)
+ * @param {Object} options
+ * @param {number} options.contextSeconds - Seconds of surrounding context (default 30)
+ * @returns Array of segments with chapter metadata
+ */
+export function segmentByChapters(text, chaptersJson, { contextSeconds = 30 } = {}) {
+  // Parse chapters JSON (strip markdown fences if present)
+  let chapters
+  if (typeof chaptersJson === 'string') {
+    const jsonMatch = chaptersJson.match(/```(?:json)?\s*([\s\S]*?)```/)
+    const raw = jsonMatch ? jsonMatch[1].trim() : chaptersJson.trim()
+    chapters = JSON.parse(raw)
+  } else {
+    chapters = chaptersJson
+  }
+
+  if (!Array.isArray(chapters) || chapters.length === 0) {
+    throw new Error('Chapters JSON must be a non-empty array')
+  }
+
+  const entries = parseTimecodes(text)
+  if (entries.length === 0) {
+    throw new Error('No timecodes found in transcript')
+  }
+
+  const segments = []
+
+  for (const chapter of chapters) {
+    const startSec = timecodeToSeconds(chapter.timecode_start)
+    const endSec = timecodeToSeconds(chapter.timecode_end)
+
+    // Find entries within this chapter's range
+    const chapterEntries = entries.filter(e => e.seconds >= startSec && e.seconds <= endSec)
+    if (chapterEntries.length === 0) continue
+
+    const mainText = chapterEntries
+      .map(e => `${e.timecode} ${e.text}`)
+      .join('\n\n')
+
+    const actualStart = chapterEntries[0].seconds
+    const actualEnd = chapterEntries[chapterEntries.length - 1].seconds
+
+    // Before context: entries within contextSeconds before chapter start
+    const beforeEntries = entries.filter(
+      e => e.seconds < actualStart && e.seconds >= actualStart - contextSeconds
+    )
+    const beforeContext = beforeEntries
+      .map(e => `${e.timecode} ${e.text}`)
+      .join('\n\n')
+
+    // After context: entries within contextSeconds after chapter end
+    const afterEntries = entries.filter(
+      e => e.seconds > actualEnd && e.seconds <= actualEnd + contextSeconds
+    )
+    const afterContext = afterEntries
+      .map(e => `${e.timecode} ${e.text}`)
+      .join('\n\n')
+
+    // Format beats
+    const chapterBeats = (chapter.beats || []).map(b => ({
+      timecode: b.timecode,
+      description: b.description,
+      purpose: b.purpose,
+    }))
+
+    segments.push({
+      segmentIndex: segments.length,
+      startTime: actualStart,
+      endTime: actualEnd,
+      mainText,
+      beforeContext,
+      afterContext,
+      entryCount: chapterEntries.length,
+      chapterName: chapter.name || '',
+      chapterDescription: chapter.description || '',
+      chapterPurpose: chapter.purpose || '',
+      chapterBeats,
+    })
+  }
+
+  return segments
+}
+
+/**
  * Reassemble cleaned segments back into a single transcript.
  * Expects array of cleaned text strings (one per segment).
  */

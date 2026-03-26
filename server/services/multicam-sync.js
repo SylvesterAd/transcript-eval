@@ -40,6 +40,121 @@ async function refineWithAudalign(primaryPath, secondaryPath, roughOffset, maxLa
 /** Re-export buildTimeline for use by the rebuild-timeline API endpoint */
 export { buildTimeline as buildTimelineForGroup }
 
+/**
+ * Classify videos in a group for user review before sync.
+ * Uses Gemini to propose groupings, stores in classification_json.
+ */
+export async function classifyVideosForReview(groupId) {
+  const videos = db.prepare(`
+    SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
+    FROM videos v
+    LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+    WHERE v.group_id = ? AND v.video_type = 'raw'
+    ORDER BY v.id
+  `).all(groupId)
+
+  if (videos.length === 0) {
+    return updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
+  }
+
+  // Single video or no API key — auto-classify as one MAIN group
+  if (videos.length === 1 || !process.env.GOOGLE_API_KEY) {
+    const classification = {
+      groups: [{ name: 'MAIN', videoIds: videos.map(v => v.id) }],
+      gemini: null,
+    }
+    db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
+      .run(JSON.stringify(classification), 'classified', groupId)
+    console.log(`[classify] Group ${groupId}: auto-classified ${videos.length} video(s) as MAIN`)
+    return
+  }
+
+  updateStatus(groupId, 'classifying')
+
+  const previews = videos.map(v => {
+    const text = (v.transcript || '')
+      .replace(/\[\d{2}:\d{2}:\d{2}\]/g, '').trim()
+    return `--- VIDEO (id: ${v.id}, title: "${v.title}") ---\n${text}`
+  }).join('\n\n')
+
+  const prompt = `Group these video transcripts by context. Rules:
+- Videos matching in context go in one group (Part A/B together)
+- Multicam setups with similar/same transcription go together
+- Non-matching context (usually promo videos) go in separate groups
+- Videos without sound or b-roll-like content go in the main group
+- All videos are Talking Head videos for YouTube
+- Give each group a short name, maximum 4 words
+
+Respond ONLY with JSON: { "groups": [{ "name": "MAIN", "videoIds": [1, 2] }, { "name": "PRMO", "videoIds": [3] }] }
+
+${previews}`
+
+  const MAX_RETRIES = 2
+  let lastError = null
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GOOGLE_API_KEY}`
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          systemInstruction: { parts: [{ text: 'You classify video transcripts into groups by context. Respond ONLY with JSON. No explanation.' }] },
+          generationConfig: {
+            temperature: 1,
+            thinkingConfig: { thinkingLevel: 'MEDIUM' },
+          },
+        })
+      })
+      if (!r.ok) throw new Error(`Gemini ${r.status}`)
+
+      const data = await r.json()
+      const parts = data.candidates?.[0]?.content?.parts || []
+      const textPart = [...parts].reverse().find(p => p.text !== undefined)
+      const text = textPart?.text || ''
+      const thoughtPart = parts.find(p => p.thought === true)
+      const geminiData = { prompt, response: text, thinking: thoughtPart?.text || null }
+
+      const jsonMatch = text.match(/\{[\s\S]*"groups"[\s\S]*\}/)
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0])
+        if (Array.isArray(parsed.groups) && parsed.groups.length > 0) {
+          const allIds = new Set(videos.map(v => v.id))
+          const returnedIds = parsed.groups.flatMap(g => g.videoIds || [])
+          const valid = returnedIds.length === allIds.size &&
+            returnedIds.every(id => allIds.has(id)) &&
+            new Set(returnedIds).size === returnedIds.length
+
+          if (valid) {
+            const classification = { groups: parsed.groups, gemini: geminiData }
+            db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
+              .run(JSON.stringify(classification), 'classified', groupId)
+            console.log(`[classify] Group ${groupId}: ${parsed.groups.length} groups — ${parsed.groups.map(g => `${g.name}(${g.videoIds.length})`).join(', ')}`)
+            return
+          }
+        }
+      }
+
+      lastError = 'Could not parse valid classification from Gemini response'
+      console.warn(`[classify] Attempt ${attempt}/${MAX_RETRIES} failed: ${lastError}`)
+    } catch (err) {
+      lastError = err.message || String(err)
+      console.warn(`[classify] Attempt ${attempt}/${MAX_RETRIES} failed: ${lastError}`)
+    }
+
+    // Wait before retry
+    if (attempt < MAX_RETRIES) {
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+  }
+
+  // Both attempts failed — set error status so user sees it
+  console.error(`[classify] Group ${groupId} classification failed after ${MAX_RETRIES} attempts: ${lastError}`)
+  db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
+    .run('classification_failed', `Classification failed: ${lastError}`, groupId)
+}
+
 export async function analyzeMulticam(groupId, options = {}) {
   let videos = db.prepare(`
     SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
@@ -281,15 +396,23 @@ export async function analyzeMulticam(groupId, options = {}) {
     if (ordered.length > 1) {
       let cumulativeOffset = 0
       for (const seg of ordered) {
+        const segVideoIds = new Set(seg.videoIds)
         if (cumulativeOffset > 0) {
-          const segVideoIds = new Set(seg.videoIds)
           for (const track of timeline.tracks) {
             if (segVideoIds.has(track.videoId)) {
               track.offset += cumulativeOffset
             }
           }
         }
-        cumulativeOffset += seg.duration || 0
+        // Use actual max track end (not seg.duration) to avoid overlaps
+        // when audalign pushes a secondary track past the primary's end
+        let segEnd = 0
+        for (const track of timeline.tracks) {
+          if (segVideoIds.has(track.videoId)) {
+            segEnd = Math.max(segEnd, track.offset + track.duration)
+          }
+        }
+        cumulativeOffset = segEnd > cumulativeOffset ? segEnd : cumulativeOffset + (seg.duration || 0)
       }
     }
 

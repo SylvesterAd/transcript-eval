@@ -286,6 +286,41 @@ export async function extractVideoFrames(videoPath, videoId) {
 }
 
 /**
+ * Get video media info (resolution, fps, codec, filesize) using ffprobe.
+ */
+export async function getVideoMediaInfo(videoPath) {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'quiet',
+      '-show_entries', 'stream=width,height,r_frame_rate,codec_name',
+      '-show_entries', 'format=size',
+      '-of', 'json',
+      videoPath,
+    ], { timeout: 10000 })
+
+    const data = JSON.parse(stdout)
+    const videoStream = data.streams?.find(s => s.width && s.height) || data.streams?.[0] || {}
+    const format = data.format || {}
+
+    let fps = null
+    if (videoStream.r_frame_rate) {
+      const [num, den] = videoStream.r_frame_rate.split('/')
+      if (den && +den > 0) fps = Math.round(+num / +den)
+    }
+
+    return {
+      width: videoStream.width || null,
+      height: videoStream.height || null,
+      fps,
+      codec: videoStream.codec_name || null,
+      filesize: format.size ? parseInt(format.size) : null,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Check if ffmpeg is available on the system.
  */
 export async function checkFfmpeg() {

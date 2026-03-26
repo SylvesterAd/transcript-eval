@@ -7,9 +7,12 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
 import db from '../db.js'
+import { requireAuth } from '../auth.js'
 import { transcribeVideo, findCutWords } from '../services/whisper.js'
-import { extractThumbnail, getVideoDuration, checkFfmpeg, concatenateVideos, extractEnergyEnvelope, extractWaveformPeaks, extractVideoFrames } from '../services/video-processor.js'
-import { analyzeMulticam } from '../services/multicam-sync.js'
+import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, concatenateVideos, extractEnergyEnvelope, extractWaveformPeaks, extractVideoFrames } from '../services/video-processor.js'
+import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
+// Lazy import to avoid blocking server startup
+const annotationMapper = () => import('../services/annotation-mapper.js')
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const UPLOADS_DIR = join(__dirname, '..', '..', 'uploads', 'videos')
@@ -181,15 +184,19 @@ async function runTranscription(videoId, signal) {
     // Check if this completes a multicam group that needs assembly
     if (video.group_id) {
       const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(video.group_id)
-      if (group?.assembly_status === 'transcribing') {
+      const skipStatuses = ['classifying', 'classified', 'confirmed', 'done']
+      if (group && !skipStatuses.includes(group.assembly_status)) {
         const pending = db.prepare(`
           SELECT COUNT(*) as cnt FROM videos
           WHERE group_id = ? AND video_type = 'raw'
           AND (transcription_status IS NULL OR transcription_status NOT IN ('done', 'failed'))
         `).get(video.group_id)
         if (pending.cnt === 0) {
-          console.log(`[transcribe] All videos in group ${video.group_id} done, starting multicam analysis`)
-          analyzeMulticam(video.group_id)
+          console.log(`[transcribe] All videos in group ${video.group_id} done, starting classification`)
+          classifyVideosForReview(video.group_id)
+          annotationMapper().then(m => m.runMainFlowForGroup(video.group_id)).catch(err => {
+            console.error(`[main-flow] Group ${video.group_id} failed:`, err.message)
+          })
         }
       }
     }
@@ -308,15 +315,23 @@ function startBackgroundFrameExtraction(videoId) {
 router.get('/', (req, res) => {
   const videos = db.prepare(`
     SELECT v.*,
-      vg.name AS group_name,
-      vg.assembly_status AS group_assembly_status,
-      vg.assembly_error AS group_assembly_error,
+      COALESCE(parent.name, vg.name) AS group_name,
+      COALESCE(parent.assembly_status, vg.assembly_status) AS group_assembly_status,
+      COALESCE(parent.assembly_error, vg.assembly_error) AS group_assembly_error,
+      COALESCE(parent.id, vg.id) AS effective_group_id,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'raw') AS has_raw,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'human_edited') AS has_human_edited
     FROM videos v
     LEFT JOIN video_groups vg ON vg.id = v.group_id
+    LEFT JOIN video_groups parent ON parent.id = vg.parent_group_id
     ORDER BY v.created_at DESC
   `).all()
+  // Remap group_id to parent for project list
+  for (const v of videos) {
+    if (v.effective_group_id) {
+      v.group_id = v.effective_group_id
+    }
+  }
   res.json(videos)
 })
 
@@ -350,6 +365,7 @@ router.get('/groups/:id/detail', (req, res) => {
     timeline: group.timeline_json ? JSON.parse(group.timeline_json) : null,
     rough_cut_config: group.rough_cut_config_json ? JSON.parse(group.rough_cut_config_json) : null,
     editor_state: group.editor_state_json ? JSON.parse(group.editor_state_json) : null,
+    annotations: group.annotations_json ? JSON.parse(group.annotations_json) : null,
   })
 })
 
@@ -360,8 +376,141 @@ router.get('/groups/:id/status', (req, res) => {
   res.json({ assembly_status: row.assembly_status, assembly_error: row.assembly_error })
 })
 
+// Get classification data + videos with media info
+router.get('/groups/:id/classification', (req, res) => {
+  const group = db.prepare('SELECT id, name, assembly_status, assembly_error, classification_json FROM video_groups WHERE id = ?').get(req.params.id)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  // If confirmed, videos live in sub-groups — gather them all
+  const isConfirmed = group.assembly_status === 'confirmed'
+  let videos
+  if (isConfirmed) {
+    const subGroups = db.prepare('SELECT id FROM video_groups WHERE parent_group_id = ?').all(req.params.id)
+    const subIds = subGroups.map(sg => sg.id)
+    if (subIds.length > 0) {
+      videos = db.prepare(`
+        SELECT id, title, duration_seconds, thumbnail_path, media_info_json, file_path
+        FROM videos WHERE group_id IN (${subIds.map(() => '?').join(',')}) AND video_type = 'raw' ORDER BY id
+      `).all(...subIds)
+    } else {
+      videos = []
+    }
+  } else {
+    videos = db.prepare(`
+      SELECT id, title, duration_seconds, thumbnail_path, media_info_json, file_path
+      FROM videos WHERE group_id = ? AND video_type = 'raw' ORDER BY id
+    `).all(req.params.id)
+  }
+
+  let classification = null
+  try { classification = JSON.parse(group.classification_json) } catch {}
+
+  // If no classification exists, build a default single-group one
+  if (!classification) {
+    classification = { groups: [{ name: 'MAIN', videoIds: videos.map(v => v.id) }], gemini: null }
+  }
+
+  const videosWithInfo = videos.map(v => {
+    let mediaInfo = null
+    try { mediaInfo = JSON.parse(v.media_info_json) } catch {}
+    return { ...v, media_info: mediaInfo, media_info_json: undefined }
+  })
+
+  // Include sub-group info when confirmed
+  let subGroups = null
+  if (isConfirmed) {
+    subGroups = db.prepare('SELECT id, name, assembly_status FROM video_groups WHERE parent_group_id = ? ORDER BY id').all(req.params.id)
+  }
+
+  res.json({
+    group: { id: group.id, name: group.name, assembly_status: group.assembly_status, assembly_error: group.assembly_error },
+    classification,
+    videos: videosWithInfo,
+    subGroups,
+  })
+})
+
+// Re-run Gemini classification (gathers split videos back from sub-groups first)
+router.post('/groups/:id/reclassify', async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const group = db.prepare('SELECT id FROM video_groups WHERE id = ?').get(groupId)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  // Gather videos back from child sub-groups
+  const subGroups = db.prepare('SELECT id FROM video_groups WHERE parent_group_id = ?').all(groupId)
+  for (const sg of subGroups) {
+    db.prepare('UPDATE videos SET group_id = ? WHERE group_id = ?').run(groupId, sg.id)
+    db.prepare('DELETE FROM video_groups WHERE id = ?').run(sg.id)
+  }
+  if (subGroups.length > 0) {
+    console.log(`[reclassify] Gathered videos back from ${subGroups.length} sub-groups into project ${groupId}`)
+  }
+
+  res.json({ ok: true, message: 'Reclassification started' })
+  classifyVideosForReview(groupId)
+})
+
+// Save modified grouping from user
+router.post('/groups/:id/update-classification', (req, res) => {
+  const group = db.prepare('SELECT id, classification_json FROM video_groups WHERE id = ?').get(req.params.id)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  const { groups } = req.body
+  if (!Array.isArray(groups)) return res.status(400).json({ error: 'groups array required' })
+
+  let existing = null
+  try { existing = JSON.parse(group.classification_json) } catch {}
+
+  const classification = {
+    groups,
+    gemini: existing?.gemini || null,
+  }
+  db.prepare('UPDATE video_groups SET classification_json = ? WHERE id = ?')
+    .run(JSON.stringify(classification), req.params.id)
+
+  res.json({ ok: true, classification })
+})
+
+// Confirm classification → split groups + start sync
+router.post('/groups/:id/confirm-classification', async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(groupId)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  const { groups } = req.body
+  if (!Array.isArray(groups) || groups.length === 0) return res.status(400).json({ error: 'groups array required' })
+
+  // Project (original group) stays as parent container.
+  // ALL videos move to new child sub-groups.
+  const subGroupIds = []
+
+  for (const g of groups) {
+    const r = db.prepare(
+      'INSERT INTO video_groups (name, assembly_status, parent_group_id) VALUES (?, ?, ?)'
+    ).run(g.name, 'pending', groupId)
+    const subId = r.lastInsertRowid
+    subGroupIds.push(subId)
+
+    for (const videoId of g.videoIds) {
+      db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(subId, videoId)
+    }
+    console.log(`[confirm] Sub-group "${g.name}": ${g.videoIds.length} videos → group ${subId}`)
+  }
+
+  // Mark project as confirmed, store sub-group mapping
+  db.prepare('UPDATE video_groups SET assembly_status = ? WHERE id = ?')
+    .run('confirmed', groupId)
+
+  // Start sync for each sub-group
+  for (const subId of subGroupIds) {
+    analyzeMulticam(subId, { skipClassification: true })
+  }
+
+  res.json({ ok: true, groupIds: subGroupIds })
+})
+
 // Save editor state for a group
-router.put('/groups/:id/editor-state', (req, res) => {
+router.put('/groups/:id/editor-state', requireAuth, (req, res) => {
   const group = db.prepare('SELECT id FROM video_groups WHERE id = ?').get(req.params.id)
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const { editor_state } = req.body
@@ -400,6 +549,143 @@ router.post('/groups/:id/extract-frames', async (req, res) => {
     started++
   }
   res.json({ ok: true, started, total: videos.length })
+})
+
+// Trigger main flow LLM pipeline for a group
+router.post('/groups/:id/run-main-flow', async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const force = req.query.force === 'true'
+  const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(groupId)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  // Check if annotations already exist
+  if (!force && group.annotations_json) {
+    return res.json({ already_exists: true })
+  }
+
+  // Check if a run is already in progress for this group
+  const inProgressRun = db.prepare(`
+    SELECT er.id AS runId, e.id AS experimentId FROM experiment_runs er
+    JOIN experiments e ON e.id = er.experiment_id
+    WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
+      AND er.status IN ('pending', 'running')
+      AND e.name LIKE 'Auto:%'
+    ORDER BY er.id DESC LIMIT 1
+  `).get(groupId)
+  if (inProgressRun) {
+    // Return existing run for polling — don't create a new one
+    const version = db.prepare(`
+      SELECT sv.stages_json FROM experiments e
+      JOIN strategy_versions sv ON sv.id = e.strategy_version_id
+      WHERE e.id = ?
+    `).get(inProgressRun.experimentId)
+    let stageNames = []
+    try {
+      const stages = JSON.parse(version?.stages_json || '[]')
+      stageNames = stages.map((s, i) => s.name || `Stage ${i + 1}`)
+    } catch { /* ignore */ }
+    return res.json({ experimentId: inProgressRun.experimentId, runId: inProgressRun.runId, totalStages: stageNames.length, stageNames })
+  }
+
+  // Find is_main=1 strategy + latest version
+  const mainStrategy = db.prepare('SELECT * FROM strategies WHERE is_main = 1').get()
+  if (!mainStrategy) return res.status(400).json({ error: 'No main strategy configured' })
+
+  const version = db.prepare(
+    'SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY version_number DESC LIMIT 1'
+  ).get(mainStrategy.id)
+  if (!version) return res.status(400).json({ error: 'Main strategy has no versions' })
+
+  // Find the group's primary video with a transcript
+  const video = db.prepare(`
+    SELECT v.* FROM videos v
+    JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+    WHERE v.group_id = ? AND v.video_type = 'raw'
+    ORDER BY v.id LIMIT 1
+  `).get(groupId)
+  if (!video) return res.status(400).json({ error: 'No video with transcript found' })
+
+  // Create experiment + run records
+  const expResult = db.prepare(
+    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json) VALUES (?, ?, ?, ?)'
+  ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]))
+
+  const experimentId = Number(expResult.lastInsertRowid)
+  const runResult = db.prepare(
+    'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, 1, ?)'
+  ).run(experimentId, video.id, 'pending')
+
+  const runId = Number(runResult.lastInsertRowid)
+
+  // Parse stage names from the strategy version for immediate progress display
+  let stageNames = []
+  try {
+    const stages = JSON.parse(version.stages_json || '[]')
+    stageNames = stages.map((s, i) => s.name || `Stage ${i + 1}`)
+  } catch { /* ignore */ }
+
+  // Return IDs immediately for polling
+  res.json({ experimentId, runId, totalStages: stageNames.length, stageNames })
+
+  // Execute in background with 1 auto-retry on failure
+  ;(async () => {
+    const MAX_ATTEMPTS = 2
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const { executeRun } = await import('../services/llm-runner.js')
+
+        // On retry, create a new run record (the failed one stays as-is)
+        let currentRunId = runId
+        if (attempt > 1) {
+          console.log(`[main-flow] Retry attempt ${attempt} for group ${groupId}`)
+          const retryResult = db.prepare(
+            'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, ?, ?)'
+          ).run(experimentId, video.id, attempt, 'pending')
+          currentRunId = Number(retryResult.lastInsertRowid)
+        }
+
+        await executeRun(currentRunId)
+
+        // Check if run completed
+        const completedRun = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(currentRunId)
+        if (completedRun.status !== 'complete' && completedRun.status !== 'partial') {
+          console.error(`[main-flow] Run ${currentRunId} ended with status: ${completedRun.status}`)
+          if (attempt < MAX_ATTEMPTS) continue // retry
+          return
+        }
+
+        // Success — build annotations
+        const transcript = db.prepare(
+          'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
+        ).get(video.id, 'raw')
+
+        let wordTimestamps = []
+        if (transcript?.word_timestamps_json) {
+          try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+        }
+
+        if (!wordTimestamps.length) {
+          console.log(`[main-flow] No word timestamps for video ${video.id}, skipping annotation mapping`)
+          return
+        }
+
+        // Build annotations
+        const { buildAnnotationsFromRun } = await annotationMapper()
+        const annotations = buildAnnotationsFromRun(currentRunId, wordTimestamps)
+        console.log(`[main-flow] Built ${annotations.items.length} annotations for group ${groupId}`)
+
+        // Store annotations
+        db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
+          .run(JSON.stringify(annotations), groupId)
+        return // success — exit retry loop
+      } catch (err) {
+        console.error(`[main-flow] Attempt ${attempt} failed for group ${groupId}:`, err.message)
+        if (attempt >= MAX_ATTEMPTS) {
+          console.error(`[main-flow] All attempts exhausted for group ${groupId}`)
+        }
+      }
+    }
+  })()
 })
 
 // Get word timestamps for all videos in a group
@@ -460,7 +746,7 @@ router.post('/groups/:id/regenerate-waveforms', async (req, res) => {
 })
 
 // Cancel all transcriptions for a group
-router.post('/groups/:id/cancel-transcriptions', (req, res) => {
+router.post('/groups/:id/cancel-transcriptions', requireAuth, (req, res) => {
   const group = db.prepare('SELECT id FROM video_groups WHERE id = ?').get(req.params.id)
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const result = cancelGroupTranscriptions(parseInt(req.params.id))
@@ -468,7 +754,7 @@ router.post('/groups/:id/cancel-transcriptions', (req, res) => {
 })
 
 // Batch-start transcription for all untranscribed videos in a group (up to 3 concurrent)
-router.post('/groups/:id/transcribe', (req, res) => {
+router.post('/groups/:id/transcribe', requireAuth, (req, res) => {
   const group = db.prepare('SELECT id FROM video_groups WHERE id = ?').get(req.params.id)
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
@@ -666,16 +952,18 @@ router.post('/upload', handleUpload('video'), async (req, res) => {
     }
   }
 
-  // Get duration
+  // Get duration + media info
   let duration = null
+  let mediaInfo = null
   if (hasFfmpeg) {
     duration = await getVideoDuration(filePath)
+    mediaInfo = await getVideoMediaInfo(filePath)
   }
 
   // Insert video record
   const result = db.prepare(
-    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(videoName, `/uploads/videos/${req.file.filename}`, thumbnailPath, video_type, finalGroupId, duration)
+    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(videoName, `/uploads/videos/${req.file.filename}`, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
   const videoId = result.lastInsertRowid
 
@@ -736,11 +1024,15 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
       }
 
       let duration = null
-      if (hasFfmpeg) duration = await getVideoDuration(file.path)
+      let mediaInfo = null
+      if (hasFfmpeg) {
+        duration = await getVideoDuration(file.path)
+        mediaInfo = await getVideoMediaInfo(file.path)
+      }
 
       const r = db.prepare(
-        'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(vidName, `/uploads/videos/${file.filename}`, thumbPath, 'raw', groupId, duration)
+        'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(vidName, `/uploads/videos/${file.filename}`, thumbPath, 'raw', groupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
       videoIds.push(r.lastInsertRowid)
     }
@@ -809,11 +1101,15 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
   }
 
   let duration = null
-  if (hasFfmpeg) duration = await getVideoDuration(finalFilePath)
+  let mediaInfo = null
+  if (hasFfmpeg) {
+    duration = await getVideoDuration(finalFilePath)
+    mediaInfo = await getVideoMediaInfo(finalFilePath)
+  }
 
   const result = db.prepare(
-    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(videoName, `/uploads/videos/${finalFilename}`, thumbnailPath, video_type, finalGroupId, duration)
+    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(videoName, `/uploads/videos/${finalFilename}`, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
   const videoId = result.lastInsertRowid
   startBackgroundTranscription(videoId)
@@ -873,11 +1169,15 @@ router.post('/import-local', async (req, res) => {
   }
 
   let duration = null
-  if (hasFfmpeg) duration = await getVideoDuration(destPath)
+  let mediaInfo = null
+  if (hasFfmpeg) {
+    duration = await getVideoDuration(destPath)
+    mediaInfo = await getVideoMediaInfo(destPath)
+  }
 
   const result = db.prepare(
-    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(videoName, `/uploads/videos/${filename}`, thumbnailPath, video_type, finalGroupId, duration)
+    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(videoName, `/uploads/videos/${filename}`, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
   const videoId = result.lastInsertRowid
   console.log(`[import-local] Video created: id=${videoId}, title="${videoName}", type=${video_type}, duration=${duration}s`)
@@ -1067,7 +1367,7 @@ router.post('/upload-script', handleUpload('script'), async (req, res) => {
 })
 
 // Import file from URL (video or script)
-router.post('/import-url', async (req, res) => {
+router.post('/import-url', requireAuth, async (req, res) => {
   const { url, type = 'video', group_id, title } = req.body
 
   if (!url) return res.status(400).json({ error: 'Please enter a URL' })
@@ -1119,20 +1419,22 @@ router.post('/import-url', async (req, res) => {
     const mediaType = type === 'script' ? 'script' : 'video'
 
     if (mediaType === 'video') {
-      // Extract thumbnail + duration
+      // Extract thumbnail + duration + media info
       let thumbnailPath = null
       let duration = null
+      let mediaInfo = null
       const hasFfmpeg = await checkFfmpeg()
       if (hasFfmpeg) {
         const thumbFilename = filename.replace(ext, '.jpg')
         thumbnailPath = await extractThumbnail(destPath, thumbFilename)
         if (thumbnailPath) thumbnailPath = `/uploads/thumbnails/${thumbFilename}`
         duration = await getVideoDuration(destPath)
+        mediaInfo = await getVideoMediaInfo(destPath)
       }
 
       const result = db.prepare(
-        'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(finalTitle, `/uploads/videos/${filename}`, thumbnailPath, 'raw', finalGroupId, duration, 'video')
+        'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_type, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(finalTitle, `/uploads/videos/${filename}`, thumbnailPath, 'raw', finalGroupId, duration, 'video', mediaInfo ? JSON.stringify(mediaInfo) : null)
 
       const videoId = result.lastInsertRowid
       startBackgroundTranscription(videoId)
@@ -1156,7 +1458,7 @@ router.post('/import-url', async (req, res) => {
 })
 
 // Create video group
-router.post('/groups', (req, res) => {
+router.post('/groups', requireAuth, (req, res) => {
   const { name } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
   const result = db.prepare('INSERT INTO video_groups (name) VALUES (?)').run(name)
@@ -1165,7 +1467,7 @@ router.post('/groups', (req, res) => {
 })
 
 // Update video group
-router.put('/groups/:id', (req, res) => {
+router.put('/groups/:id', requireAuth, (req, res) => {
   const { rough_cut_config_json } = req.body
   const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(req.params.id)
   if (!group) return res.status(404).json({ error: 'Group not found' })
@@ -1176,7 +1478,7 @@ router.put('/groups/:id', (req, res) => {
 })
 
 // Start assembly for a group (called from SyncOptionsModal after user picks sync mode)
-router.post('/groups/:id/start-assembly', (req, res) => {
+router.post('/groups/:id/start-assembly', requireAuth, (req, res) => {
   const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(req.params.id)
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
@@ -1216,7 +1518,7 @@ router.put('/:id', (req, res) => {
 })
 
 // Delete a group and all its videos (and all related experiment data)
-router.delete('/groups/:id', (req, res) => {
+router.delete('/groups/:id', requireAuth, (req, res) => {
   const videos = db.prepare('SELECT id FROM videos WHERE group_id = ?').all(req.params.id)
   for (const v of videos) {
     const runs = db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)

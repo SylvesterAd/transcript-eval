@@ -138,19 +138,44 @@ export default function Timeline() {
     }
   }, [state.zoom, state.currentTime])
 
-  // Auto-scroll during playback
+  // Auto-scroll during playback — smooth follow, playhead stays at ~1/5 from left
+  const currentTimeRef = useRef(state.currentTime)
+  currentTimeRef.current = state.currentTime
   useEffect(() => {
     if (!state.isPlaying || !scrollRef.current) return
-    const interval = setInterval(() => {
+    let raf
+    let following = false
+    const tick = () => {
       const el = scrollRef.current
-      if (!el) return
-      const playheadX = state.currentTime * state.zoom
+      const ph = playheadRef.current
+      if (!el || !ph) { raf = requestAnimationFrame(tick); return }
+      // Read playhead pixel position directly from DOM (updated at 60fps by playback engine)
+      const match = ph.style.transform.match(/translateX\(([^)]+)px\)/)
+      const playheadX = match ? parseFloat(match[1]) : currentTimeRef.current * zoomRef.current
       const { scrollLeft, clientWidth } = el
-      if (playheadX > scrollLeft + clientWidth - 100) {
-        el.scrollLeft = playheadX - clientWidth / 2
+      const screenPos = playheadX - scrollLeft
+
+      if (!following && screenPos > clientWidth * 0.8) {
+        following = true
       }
-    }, 200)
-    return () => clearInterval(interval)
+      if (following) {
+        el.scrollLeft = playheadX - clientWidth * 0.8
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [state.isPlaying])
+
+  // Scroll timeline into view on seek (word click, etc.) when not playing
+  useEffect(() => {
+    if (state.isPlaying || !scrollRef.current) return
+    const el = scrollRef.current
+    const playheadX = state.currentTime * state.zoom
+    const { scrollLeft, clientWidth } = el
+    if (playheadX < scrollLeft + 100 || playheadX > scrollLeft + clientWidth - 100) {
+      el.scrollLeft = playheadX - clientWidth / 3
+    }
   }, [state.isPlaying, state.currentTime, state.zoom])
 
   const playheadX = state.currentTime * state.zoom
@@ -167,8 +192,9 @@ export default function Timeline() {
   const isRoughCut = state.activeTab === 'roughcut'
   const isMainMode = isRoughCut && state.roughCutTrackMode === 'main'
 
-  // In MAIN mode, compute non-overlapping segments from video tracks.
-  // Sorted by offset (earliest first) — the track that starts earliest gets priority.
+  // In MAIN mode, compute merged segments from video tracks.
+  // Overlapping tracks are merged into one segment — the earliest track is the default camera,
+  // and the segment extends to the max end of all overlapping tracks.
   const mainTrackSegments = useMemo(() => {
     if (!isMainMode) return null
     const videoTracks = state.tracks
@@ -176,21 +202,93 @@ export default function Timeline() {
       .sort((a, b) => a.offset - b.offset)
     if (!videoTracks.length) return []
     const segments = []
-    let covered = 0
+    let cur = null
     for (const track of videoTracks) {
       const trackEnd = track.offset + track.duration
-      if (trackEnd <= covered) continue
-      const segStart = Math.max(track.offset, covered)
-      if (segStart >= trackEnd) continue
-      segments.push({ start: segStart, end: trackEnd, videoId: track.videoId, trackId: track.id, title: track.title, offset: track.offset, duration: track.duration, filePath: track.filePath, groupId: track.groupId })
-      covered = trackEnd
+      if (cur && track.offset < cur.end) {
+        // Overlapping — extend segment end
+        cur.end = Math.max(cur.end, trackEnd)
+      } else {
+        // New segment — first track is the default camera
+        cur = { start: track.offset, end: trackEnd, videoId: track.videoId, trackId: track.id, title: track.title, offset: track.offset, duration: track.duration, filePath: track.filePath, groupId: track.groupId }
+        segments.push(cur)
+      }
     }
     return segments
   }, [isMainMode, state.tracks])
 
+  // Available cameras per segment (stable, only recomputes on track changes)
+  const segmentCameras = useMemo(() => {
+    if (!mainTrackSegments?.length) return []
+    return mainTrackSegments.map(seg => {
+      return state.tracks
+        .filter(t => t.type === 'video' && t.offset < seg.end && t.offset + t.duration > seg.start)
+        .map(t => ({ videoId: t.videoId, trackId: t.id, number: trackNumber(t) }))
+    })
+  }, [mainTrackSegments, state.tracks, trackNumber])
+
+  // Which segment contains the playhead (search backwards for robustness at boundaries)
+  const currentSegmentIndex = useMemo(() => {
+    if (!mainTrackSegments?.length) return 0
+    for (let i = mainTrackSegments.length - 1; i >= 0; i--) {
+      if (state.currentTime >= mainTrackSegments[i].start) return i
+    }
+    return 0
+  }, [mainTrackSegments, state.currentTime])
+
+  // Effective video segments with overrides applied
+  const effectiveVideoSegments = useMemo(() => {
+    if (!mainTrackSegments?.length) return mainTrackSegments
+    return mainTrackSegments.map((seg, i) => {
+      const ov = state.segmentVideoOverrides[i]
+      if (!ov || ov === seg.videoId) return seg
+      const t = state.tracks.find(t => t.type === 'video' && t.videoId === ov)
+      if (!t || t.offset >= seg.end || t.offset + t.duration <= seg.start) return seg
+      return { ...seg, videoId: ov, trackId: t.id, title: t.title, filePath: t.filePath, groupId: t.groupId, offset: t.offset, duration: t.duration }
+    })
+  }, [mainTrackSegments, state.segmentVideoOverrides, state.tracks])
+
+  // Effective audio segments with overrides applied
+  const effectiveAudioSegments = useMemo(() => {
+    if (!mainTrackSegments?.length) return mainTrackSegments
+    return mainTrackSegments.map((seg, i) => {
+      const ov = state.segmentAudioOverrides[i]
+      if (!ov || ov === seg.videoId) return seg
+      const t = state.tracks.find(t => t.type === 'video' && t.videoId === ov)
+      if (!t || t.offset >= seg.end || t.offset + t.duration <= seg.start) return seg
+      return { ...seg, videoId: ov, trackId: t.id, title: t.title, filePath: t.filePath, groupId: t.groupId, offset: t.offset, duration: t.duration }
+    })
+  }, [mainTrackSegments, state.segmentAudioOverrides, state.tracks])
+
+  // Active video/audio IDs for the current segment (with override + fallback)
+  const activeVideoId = useMemo(() => {
+    const seg = mainTrackSegments?.[currentSegmentIndex]
+    if (!seg) return null
+    const ov = state.segmentVideoOverrides[currentSegmentIndex]
+    if (ov) {
+      const t = state.tracks.find(t => t.type === 'video' && t.videoId === ov)
+      if (t && state.currentTime >= t.offset && state.currentTime < t.offset + t.duration) return ov
+    }
+    return seg.videoId
+  }, [mainTrackSegments, currentSegmentIndex, state.segmentVideoOverrides, state.tracks, state.currentTime])
+
+  const activeAudioId = useMemo(() => {
+    const seg = mainTrackSegments?.[currentSegmentIndex]
+    if (!seg) return null
+    const ov = state.segmentAudioOverrides[currentSegmentIndex]
+    if (ov) {
+      const t = state.tracks.find(t => t.type === 'video' && t.videoId === ov)
+      if (t && state.currentTime >= t.offset && state.currentTime < t.offset + t.duration) return ov
+    }
+    return seg.videoId
+  }, [mainTrackSegments, currentSegmentIndex, state.segmentAudioOverrides, state.tracks, state.currentTime])
+
+  const currentCameras = segmentCameras[currentSegmentIndex] || []
+
   const visibleLayout = useMemo(() => {
     const items = []
-    let y = isMainMode ? COMPOSITE_H + COMPOSITE_AUDIO_H : 0
+    const compositeAudioH = state.compositeShowTranscript ? 112 : 56
+    let y = isMainMode ? COMPOSITE_H + compositeAudioH : 0
     for (let i = 0; i < state.tracks.length; i++) {
       const t = state.tracks[i]
       if (t.type === 'video' && ((!isRoughCut && state.audioOnly) || isMainMode)) continue
@@ -200,7 +298,7 @@ export default function Timeline() {
       y += h
     }
     return items
-  }, [state.tracks, state.audioOnly, isRoughCut, isMainMode])
+  }, [state.tracks, state.audioOnly, isRoughCut, isMainMode, state.compositeShowTranscript])
 
   // Context menu
   const ctxTrack = state.contextMenu ? state.tracks.find(t => t.id === state.contextMenu.trackId) : null
@@ -348,23 +446,74 @@ export default function Timeline() {
             <>
               <div className="relative">
                 <div className="flex">
-                  <div className="sticky left-0 w-36 shrink-0 border-b border-r border-white/10 flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 z-10 bg-surface-container text-on-surface-variant" style={{ height: '80px' }}>
+                  <div className="sticky left-0 w-36 shrink-0 border-b border-r border-white/10 flex items-center pl-2 pr-2 text-[10px] font-bold gap-1 z-30 bg-surface-container text-on-surface-variant" style={{ height: '80px' }}>
                     <span className="material-symbols-outlined text-[12px] shrink-0 opacity-30">drag_indicator</span>
-                    <span className="w-5 shrink-0">V</span>
+                    <div className="grid grid-cols-2 gap-px flex-1 min-w-0">
+                      {currentCameras.map(cam => {
+                        const isActive = cam.videoId === activeVideoId
+                        const t = state.tracks.find(t => t.type === 'video' && t.videoId === cam.videoId)
+                        const trackCoversNow = t && state.currentTime >= t.offset && state.currentTime < t.offset + t.duration
+                        return (
+                          <button key={cam.videoId}
+                            disabled={!trackCoversNow}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); dispatch({ type: 'SET_SEGMENT_VIDEO_OVERRIDE', payload: { segIndex: currentSegmentIndex, videoId: cam.videoId } }) }}
+                            className={`text-[8px] font-bold rounded px-1 py-0.5 transition-colors ${!trackCoversNow ? 'cursor-not-allowed' : ''}`}
+                            style={isActive
+                              ? { color: '#cefc00', backgroundColor: 'rgba(206,252,0,0.15)' }
+                              : trackCoversNow
+                                ? { color: '#fff', opacity: 0.7 }
+                                : { opacity: 0.2 }}
+                          >
+                            V{cam.number}
+                          </button>
+                        )
+                      })}
+                    </div>
                   </div>
-                  <div className="flex-1 relative">
-                    <CompositeFrameTrack segments={mainTrackSegments} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} />
+                  <div className="flex-1 relative z-0">
+                    <CompositeFrameTrack segments={effectiveVideoSegments} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} />
                   </div>
                 </div>
               </div>
               <div className="relative">
                 <div className="flex">
-                  <div className="sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 z-10 bg-surface-container text-on-surface-variant" style={{ height: '56px' }}>
+                  <div className="sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 pr-2 text-[10px] font-bold gap-1 z-30 bg-surface-container text-on-surface-variant" style={{ height: state.compositeShowTranscript ? '112px' : '56px' }}>
                     <span className="material-symbols-outlined text-[12px] shrink-0 opacity-30">drag_indicator</span>
-                    <span className="w-5 shrink-0">A</span>
+                    <div className="grid grid-cols-2 gap-px flex-1 min-w-0">
+                      {currentCameras.map(cam => {
+                        const isActive = cam.videoId === activeAudioId
+                        const t = state.tracks.find(t => t.type === 'video' && t.videoId === cam.videoId)
+                        const trackCoversNow = t && state.currentTime >= t.offset && state.currentTime < t.offset + t.duration
+                        return (
+                          <button key={cam.videoId}
+                            disabled={!trackCoversNow}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); dispatch({ type: 'SET_SEGMENT_AUDIO_OVERRIDE', payload: { segIndex: currentSegmentIndex, videoId: cam.videoId } }) }}
+                            className={`text-[8px] font-bold rounded px-1 py-0.5 transition-colors ${!trackCoversNow ? 'cursor-not-allowed' : ''}`}
+                            style={isActive
+                              ? { color: '#cefc00', backgroundColor: 'rgba(206,252,0,0.15)' }
+                              : trackCoversNow
+                                ? { color: '#fff', opacity: 0.7 }
+                                : { opacity: 0.2 }}
+                          >
+                            A{cam.number}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <div className="h-3 w-[1px] shrink-0 bg-white/30" />
+                    <button
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => dispatch({ type: 'TOGGLE_COMPOSITE_TRANSCRIPT' })}
+                      className="material-symbols-outlined text-[9px] shrink-0"
+                      style={state.compositeShowTranscript ? { fontVariationSettings: '"FILL" 1', color: '#cefc00' } : { opacity: 0.4 }}
+                    >
+                      text_fields
+                    </button>
                   </div>
-                  <div className="flex-1 relative">
-                    <CompositeAudioTrack segments={mainTrackSegments} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} />
+                  <div className="flex-1 relative z-0">
+                    <CompositeAudioTrack segments={effectiveAudioSegments} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} showTranscript={state.compositeShowTranscript} />
                   </div>
                 </div>
               </div>
@@ -396,7 +545,7 @@ export default function Timeline() {
                   <div
                     onMouseDown={(e) => handleTrackDragStart(e, absIdx)}
                     style={isVideo ? (isRoughCut ? { height: '80px' } : undefined) : { height: track.showTranscript ? '112px' : '56px' }}
-                    className={`sticky left-0 w-36 shrink-0 ${isVideo ? 'h-6 border-b border-r border-white/10' : 'border-b border-r border-white/5'} flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none z-10 bg-surface-container ${
+                    className={`sticky left-0 w-36 shrink-0 ${isVideo ? 'h-6 border-b border-r border-white/10' : 'border-b border-r border-white/5'} flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none z-30 bg-surface-container ${
                       selected ? 'text-primary-fixed bg-primary-container/5' : 'text-on-surface-variant'
                     } ${isDragSource ? 'ring-1 ring-primary-fixed bg-primary-fixed/10' : ''}`}
                   >
@@ -456,25 +605,11 @@ export default function Timeline() {
             className="absolute top-0 h-full w-[2px] bg-primary-fixed pointer-events-none z-20"
             style={{ transform: `translateX(${playheadX}px)`, left: '9rem' }}
           >
-            <div className="sticky top-1 -left-1.5 w-3.5 h-3.5 bg-primary-fixed rotate-45 rounded-sm" />
+            <div className="sticky top-1 w-3.5 h-3.5 bg-primary-fixed rotate-45 rounded-sm" style={{ marginLeft: '-6px' }} />
           </div>
         </div>
       </div>
 
-      {/* Time display overlay */}
-      <div className="absolute bottom-4 right-6 flex items-center gap-4 bg-surface-dim/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/5 pointer-events-none z-30">
-        <span className="text-[10px] font-mono text-on-surface-variant">
-          Position: {formatTime(state.currentTime)}
-        </span>
-        <span className="text-[10px] font-mono text-on-surface-variant">
-          Total: {formatTime(totalDuration)}
-        </span>
-        {isRoughCut && state.cuts.length > 0 && (
-          <span className="text-[10px] font-mono text-primary-fixed">
-            After cuts: {formatTime(Math.max(0, totalDuration - state.cuts.reduce((s, c) => s + Math.max(0, Math.min(c.end, totalDuration) - Math.max(c.start, 0)), 0)))}
-          </span>
-        )}
-      </div>
 
       {/* Context menu */}
       {state.contextMenu && ctxTrack && (
