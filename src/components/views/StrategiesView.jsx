@@ -1,6 +1,7 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useApi, apiPost, apiPut, apiDelete } from '../../hooks/useApi.js'
-import { previewAugmentedSystem, updateSegmentRulesInSystem, hasSegmentRules, stripSegmentRules } from '../../lib/promptPreview.js'
+import { previewAugmentedSystem, updateSegmentRulesInSystem, updateFormatInSystem, updateFocusInSystem, hasSegmentRules, stripSegmentRules } from '../../lib/promptPreview.js'
 import { Plus, ChevronDown, ChevronRight, Trash2, ArrowUp, ArrowDown, Bot, Layers, Cpu, Pencil, Copy, Loader2, Sparkles, Send, Check, RotateCcw, MessageCircleQuestion, Star } from 'lucide-react'
 
 const MODELS = [
@@ -192,6 +193,49 @@ It may interrupt the flow even if each sentence is understandable on its own.`,
   },
 ]
 
+const INTRO_TRIM_PIPELINE = [
+  {
+    name: 'Identify Intro Start',
+    type: 'llm_question',
+    model: 'claude-sonnet-4-20250514',
+    prompt: `{{transcript}}`,
+    system_instruction: `You are a video content analyst. Your task is to identify where the actual intro/hook of the video begins, skipping any pre-roll meta commentary.
+
+## Pre-roll vs Intro
+
+**Pre-roll meta commentary** is content at the very start of a video where the creator talks about the video itself rather than starting the actual content. Examples:
+- "Hey guys, before we start, make sure to like and subscribe"
+- "So I've been working on this video for a while..."
+- "Are we rolling? Yeah, okay let me start"
+- "Quick announcement before we get into it..."
+- Camera/mic checks, behind-the-scenes chatter
+
+**The intro/hook** is where the actual content begins — the creator starts telling the story, presenting the topic, or engaging the audience with the subject matter. This is often a hook, a question, a bold statement, or the opening of the narrative.
+
+## Instructions
+1. Read through the opening of the transcript
+2. Identify the exact timecode where the real intro/hook starts
+3. Everything before that timecode is pre-roll meta commentary
+
+If the video starts directly with content (no pre-roll), return the very first timecode.
+
+## Output format
+Return ONLY valid JSON:
+\`\`\`json
+{"timecode": "[MM:SS]", "reason": "Brief explanation of why this is where the intro starts"}
+\`\`\``,
+    params: { temperature: 1 },
+  },
+  {
+    name: 'Trim Pre-roll',
+    type: 'programmatic',
+    action: 'trim_before',
+    output_mode: 'deletion',
+    identifyPreselect: { enabled: true, categories: ['meta_commentary'] },
+    description: 'Delete all transcript content before the identified intro timecode',
+  },
+]
+
 const TEMPLATE_VARS = [
   { tag: '<transcript>', desc: 'Full transcript text' },
   { tag: '{{transcript}}', desc: 'Full transcript (mustache)' },
@@ -209,7 +253,19 @@ const TEMPLATE_VARS = [
 export default function StrategiesView() {
   const { data: strategies, loading, refetch } = useApi('/strategies')
   const [showCreate, setShowCreate] = useState(false)
-  const [expandedId, setExpandedId] = useState(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [expandedId, setExpandedId] = useState(() => {
+    const id = searchParams.get('id')
+    return id ? parseInt(id) : null
+  })
+
+  useEffect(() => {
+    if (expandedId) {
+      setSearchParams({ id: String(expandedId) }, { replace: true })
+    } else {
+      setSearchParams({}, { replace: true })
+    }
+  }, [expandedId, setSearchParams])
 
   if (loading) return <div className="p-6 text-zinc-500 text-sm">Loading...</div>
 
@@ -431,8 +487,8 @@ function StagePipeline({ stages }) {
             <>
               {(stage.system_instruction || stage.output_mode) && (
                 <div>
-                  <div className="text-xs text-zinc-500 mb-1">System Prompt {stage.type !== 'llm_question' && <span className="text-zinc-600">(with auto-appended output mode rules)</span>}</div>
-                  <pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-32 overflow-auto">{stage.type === 'llm_question' ? stage.system_instruction : previewAugmentedSystem(stage.system_instruction, stage.output_mode, stage.type)}</pre>
+                  <div className="text-xs text-zinc-500 mb-1">System Prompt</div>
+                  <pre className="text-xs text-zinc-400 bg-zinc-900 rounded p-2 whitespace-pre-wrap max-h-32 overflow-auto">{stage.system_instruction || '(empty)'}</pre>
                 </div>
               )}
               {stage.prompt && (
@@ -452,14 +508,8 @@ function StagePipeline({ stages }) {
 function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
   const isEditing = !!editingVersion
   const initialStages = isEditing
-    ? JSON.parse(editingVersion.stages_json || '[]').map(s => {
-        // Migrate: inject segment rules into llm_parallel stages that don't have them yet
-        if (s.type === 'llm_parallel' && !hasSegmentRules(s.system_instruction)) {
-          return { ...s, system_instruction: updateSegmentRulesInSystem(s.system_instruction, s.output_mode) }
-        }
-        return s
-      })
-    : [{ name: 'Stage 1', type: 'llm', prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: {} }]
+    ? JSON.parse(editingVersion.stages_json || '[]').map(s => ({ ...s, system_instruction: s.system_instruction || '' }))
+    : [{ name: '', type: 'llm', prompt: '', system_instruction: '', model: 'claude-sonnet-4-20250514', params: {} }]
 
   const [stages, setStages] = useState(initialStages)
   const [saving, setSaving] = useState(false)
@@ -528,6 +578,10 @@ function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
           <button type="button" onClick={addChaptersPipeline}
             className="flex items-center gap-1 text-xs text-teal-500/70 hover:text-teal-400 transition-colors">
             <Plus size={12} /> Chapters Pipeline
+          </button>
+          <button type="button" onClick={stageOps.addIntroTrimPipeline}
+            className="flex items-center gap-1 text-xs text-cyan-500/70 hover:text-cyan-400 transition-colors">
+            <Plus size={12} /> Intro Trim
           </button>
         </div>
 
@@ -773,6 +827,7 @@ function CreateStrategyForm({ onCreated }) {
             <button type="button" onClick={() => addStage('llm_question')} className="flex items-center gap-1 text-xs text-pink-500/70 hover:text-pink-400 transition-colors"><Plus size={12} /> Add Question</button>
             <button type="button" onClick={() => addStage('programmatic')} className="flex items-center gap-1 text-xs text-amber-500/70 hover:text-amber-400 transition-colors"><Plus size={12} /> Add Segment Step</button>
             <button type="button" onClick={stageOps.addChaptersPipeline} className="flex items-center gap-1 text-xs text-teal-500/70 hover:text-teal-400 transition-colors"><Plus size={12} /> Chapters Pipeline</button>
+            <button type="button" onClick={stageOps.addIntroTrimPipeline} className="flex items-center gap-1 text-xs text-cyan-500/70 hover:text-cyan-400 transition-colors"><Plus size={12} /> Intro Trim</button>
           </div>
 
           <button type="submit" disabled={creating || !name.trim()}
@@ -788,7 +843,7 @@ function CreateStrategyForm({ onCreated }) {
 /** Shared stage operations factory */
 function makeStageOps(stages, setStages) {
   function addStage(type = 'llm') {
-    const base = { name: `Stage ${stages.length + 1}`, type }
+    const base = { name: '', type }
     if (type === 'programmatic') {
       setStages(prev => [...prev, { ...base, action: 'segment', actionParams: { preset: 'short', minSeconds: 40, maxSeconds: 60, contextSeconds: 30 }, description: 'Segment transcript' }])
     } else if (type === 'llm_question') {
@@ -828,6 +883,34 @@ function makeStageOps(stages, setStages) {
       name: s.name || `Stage ${prev.length + i + 1}`,
     }))])
   }
+  function insertChaptersPipeline(atIndex) {
+    setStages(prev => {
+      const arr = [...prev]
+      const pipeline = CHAPTERS_PIPELINE.map((s, i) => ({
+        ...s,
+        name: s.name || `Stage ${atIndex + i + 1}`,
+      }))
+      arr.splice(atIndex, 0, ...pipeline)
+      return arr
+    })
+  }
+  function addIntroTrimPipeline() {
+    setStages(prev => [...prev, ...INTRO_TRIM_PIPELINE.map((s, i) => ({
+      ...s,
+      name: s.name || `Stage ${prev.length + i + 1}`,
+    }))])
+  }
+  function insertIntroTrimPipeline(atIndex) {
+    setStages(prev => {
+      const arr = [...prev]
+      const pipeline = INTRO_TRIM_PIPELINE.map((s, i) => ({
+        ...s,
+        name: s.name || `Stage ${atIndex + i + 1}`,
+      }))
+      arr.splice(atIndex, 0, ...pipeline)
+      return arr
+    })
+  }
   function duplicateStage(i) { setStages(prev => { const copy = { ...prev[i], name: prev[i].name + ' (copy)' }; const u = [...prev]; u.splice(i + 1, 0, copy); return u }) }
   function changeType(i, newType) {
     setStages(prev => {
@@ -852,12 +935,12 @@ function makeStageOps(stages, setStages) {
       return u
     })
   }
-  return { addStage, addChaptersPipeline, insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType }
+  return { addStage, addChaptersPipeline, insertChaptersPipeline, addIntroTrimPipeline, insertIntroTrimPipeline, insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType }
 }
 
 /** Shared stage list with insert buttons, temperature, and thinking */
 function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
-  const { insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType } = stageOps
+  const { insertStage, insertChaptersPipeline, insertIntroTrimPipeline, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType } = stageOps
 
   return (
     <div>
@@ -874,6 +957,14 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                   className="text-xs text-zinc-500 hover:text-white hover:bg-zinc-700 border border-dashed border-zinc-600 rounded px-3 py-1 transition-colors">
                   + Insert stage
                 </button>
+                <button type="button" onClick={() => insertChaptersPipeline(i)}
+                  className="text-xs text-teal-500/70 hover:text-teal-400 hover:bg-zinc-700 border border-dashed border-teal-700/50 rounded px-3 py-1 transition-colors">
+                  + Chapters Pipeline
+                </button>
+                <button type="button" onClick={() => insertIntroTrimPipeline(i)}
+                  className="text-xs text-cyan-500/70 hover:text-cyan-400 hover:bg-zinc-700 border border-dashed border-cyan-700/50 rounded px-3 py-1 transition-colors">
+                  + Intro Trim
+                </button>
                 <div className="flex-1 border-t border-zinc-700/50" />
               </div>
             )}
@@ -884,7 +975,7 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                   <span className="text-xs bg-zinc-700 px-1.5 py-0.5 rounded">Stage {i + 1}</span>
                   <StageBadge type={stage.type} />
                   <input type="text" value={stage.name} onChange={e => updateStage(i, 'name', e.target.value)}
-                    className="bg-transparent border-none text-sm font-medium focus:outline-none" placeholder="Stage name" />
+                    className="bg-transparent border border-transparent hover:border-zinc-700 focus:border-zinc-600 focus:bg-zinc-800 text-sm font-medium focus:outline-none rounded px-1.5 py-0.5 -ml-1.5 transition-colors" placeholder="Stage name" />
                 </div>
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => moveStage(i, i - 1)} disabled={i === 0}
@@ -949,9 +1040,11 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                         onChange={e => {
                           const newMode = e.target.value || undefined
                           updateStage(i, 'output_mode', newMode)
+                          let sysInstr = updateFormatInSystem(stage.system_instruction, newMode)
                           if (stage.type === 'llm_parallel') {
-                            updateStage(i, 'system_instruction', updateSegmentRulesInSystem(stage.system_instruction, newMode))
+                            sysInstr = updateSegmentRulesInSystem(sysInstr, newMode)
                           }
+                          updateStage(i, 'system_instruction', sysInstr)
                         }}
                         className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none">
                         <option value="">None (return cleaned text)</option>
@@ -966,11 +1059,15 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                       <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer mb-1.5">
                         <input type="checkbox"
                           checked={stage.identifyPreselect?.enabled || false}
-                          onChange={e => updateStage(i, 'identifyPreselect', {
-                            ...stage.identifyPreselect,
-                            enabled: e.target.checked,
-                            categories: stage.identifyPreselect?.categories || []
-                          })}
+                          onChange={e => {
+                            const newPreselect = {
+                              ...stage.identifyPreselect,
+                              enabled: e.target.checked,
+                              categories: stage.identifyPreselect?.categories || []
+                            }
+                            updateStage(i, 'identifyPreselect', newPreselect)
+                            updateStage(i, 'system_instruction', updateFocusInSystem(stage.system_instruction, newPreselect))
+                          }}
                           className="rounded" />
                         Identification Preselect
                       </label>
@@ -989,10 +1086,9 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                                   const newCats = e.target.checked
                                     ? [...cats, cat.key]
                                     : cats.filter(c => c !== cat.key)
-                                  updateStage(i, 'identifyPreselect', {
-                                    ...stage.identifyPreselect,
-                                    categories: newCats
-                                  })
+                                  const newPreselect = { ...stage.identifyPreselect, categories: newCats }
+                                  updateStage(i, 'identifyPreselect', newPreselect)
+                                  updateStage(i, 'system_instruction', updateFocusInSystem(stage.system_instruction, newPreselect))
                                 }}
                                 className="rounded" />
                               {cat.label}
@@ -1089,13 +1185,7 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                     <textarea data-stage={`${dataPrefix}${i}`} data-field="system_instruction"
                       value={stage.system_instruction} onChange={e => updateStage(i, 'system_instruction', e.target.value)}
                       className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-zinc-600"
-                      rows={3} placeholder="You are a transcript editor..." />
-                    {stage.output_mode && (
-                      <details className="mt-1">
-                        <summary className="text-[10px] text-zinc-600 cursor-pointer hover:text-zinc-400">Show full prompt (with auto-appended output mode rules)</summary>
-                        <pre className="mt-1 text-[10px] text-zinc-500 bg-zinc-900/50 border border-zinc-800 rounded p-2 whitespace-pre-wrap max-h-48 overflow-auto">{previewAugmentedSystem(stage.system_instruction, stage.output_mode, stage.type, stage.identifyPreselect)}</pre>
-                      </details>
-                    )}
+                      rows={Math.max(6, Math.min(30, (stage.system_instruction || '').split('\n').length + 1))} placeholder="You are a transcript editor..." />
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
@@ -1105,13 +1195,24 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                     <textarea data-stage={`${dataPrefix}${i}`} data-field="prompt"
                       value={stage.prompt} onChange={e => updateStage(i, 'prompt', e.target.value)}
                       className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-zinc-600"
-                      rows={5} placeholder={'Clean the following transcript:\n\n<transcript>\n{{transcript}}\n</transcript>'} />
+                      rows={Math.max(5, Math.min(20, (stage.prompt || '').split('\n').length + 1))} placeholder={'Clean the following transcript:\n\n<transcript>\n{{transcript}}\n</transcript>'} />
                   </div>
                   <div>
                     <label className="block text-xs text-zinc-500 mb-1">Description</label>
                     <input type="text" value={stage.description || ''} onChange={e => updateStage(i, 'description', e.target.value)}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm focus:outline-none" placeholder="What this step does..." />
                   </div>
+                  <details className="group">
+                    <summary className="text-[11px] text-zinc-600 cursor-pointer hover:text-zinc-400 select-none">Available placeholders</summary>
+                    <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
+                      {TEMPLATE_VARS.map(v => (
+                        <div key={v.tag} className="flex items-center gap-2">
+                          <code className="text-blue-400/70 font-mono shrink-0">{v.tag}</code>
+                          <span className="text-zinc-600">{v.desc}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 </>
               )}
             </div>

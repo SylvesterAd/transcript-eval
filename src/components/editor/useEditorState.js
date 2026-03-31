@@ -104,6 +104,7 @@ const initialState = {
   isDirty: false,
   activeTab: 'sync',
   cuts: [],          // [{id, start, end, source: 'transcript'}]
+  cutExclusions: [], // [{start, end}] — words manually excluded from annotation cuts
   aiCutsSelected: { silences: false, false_starts: false, filler_words: false, meta_commentary: false },
   aiIdentifySelected: { repetition: false, lengthy: false, technical_unclear: false, irrelevance: false },
   roughCutTrackMode: 'main', // 'main' = single composite track, 'all' = individual tracks
@@ -182,6 +183,7 @@ function reducer(state, action) {
           selectedTrackIds: new Set(),
           isDirty: false,
           cuts: restoredState.cuts || [],
+          cutExclusions: restoredState.cutExclusions || [],
           aiCutsSelected: restoredState.aiCutsSelected || initialState.aiCutsSelected,
           aiIdentifySelected: restoredState.aiIdentifySelected || initialState.aiIdentifySelected,
           activeTab: restoredState.activeTab || 'sync',
@@ -430,6 +432,15 @@ function reducer(state, action) {
       return { ...state, cuts: [...state.cuts, action.payload], isDirty: true }
     case 'REMOVE_CUT':
       return { ...state, cuts: state.cuts.filter(c => c.id !== action.payload), isDirty: true }
+    case 'EXCLUDE_FROM_CUT': {
+      const { wordStart, wordEnd } = action.payload
+      // Toggle: if already excluded, re-include
+      const existing = state.cutExclusions.findIndex(e => Math.abs(e.start - wordStart) < 0.01)
+      if (existing >= 0) {
+        return { ...state, cutExclusions: state.cutExclusions.filter((_, i) => i !== existing), isDirty: true }
+      }
+      return { ...state, cutExclusions: [...state.cutExclusions, { start: wordStart, end: wordEnd }], isDirty: true }
+    }
     case 'UPDATE_CUT':
       return { ...state, cuts: state.cuts.map(c => c.id === action.payload.id ? { ...c, ...action.payload.updates } : c), isDirty: true }
     case 'SET_AI_CUTS': {
@@ -476,7 +487,7 @@ const TRACKED_ACTIONS = new Set([
   'TOGGLE_VISIBILITY', 'TOGGLE_MUTE', 'TOGGLE_TRANSCRIPT', 'TOGGLE_COMPOSITE_TRANSCRIPT', 'TOGGLE_AUDIO_ONLY',
   'SPLIT_TRACK', 'UNGROUP_TRACK', 'GROUP_TRACKS', 'RESYNC_TRACK',
   'SET_ZOOM', 'SET_VOLUME',
-  'ADD_CUT', 'REMOVE_CUT', 'UPDATE_CUT', 'SET_AI_CUTS', 'SET_AI_IDENTIFY_SELECTED',
+  'ADD_CUT', 'REMOVE_CUT', 'EXCLUDE_FROM_CUT', 'UPDATE_CUT', 'SET_AI_CUTS', 'SET_AI_IDENTIFY_SELECTED',
   'SET_SEGMENT_VIDEO_OVERRIDE', 'SET_SEGMENT_AUDIO_OVERRIDE',
 ])
 
@@ -533,9 +544,9 @@ function undoableReducer(historyState, action) {
 }
 
 function serializeState(state) {
-  const { tracks, groups, zoom, audioOnly, volume, cuts, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides } = state
+  const { tracks, groups, zoom, audioOnly, volume, cuts, cutExclusions, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides } = state
   const serializableTracks = tracks.map(({ transcriptSegments, transcriptWords, transcriptSentences, waveform, waveformPeaks, ...rest }) => rest)
-  return { tracks: serializableTracks, groups, zoom, audioOnly, volume, cuts, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides }
+  return { tracks: serializableTracks, groups, zoom, audioOnly, volume, cuts, cutExclusions, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides }
 }
 
 export default function useEditorState() {

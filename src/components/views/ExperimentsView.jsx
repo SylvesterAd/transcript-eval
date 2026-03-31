@@ -662,7 +662,7 @@ function StageViewModal({ runId, stageIndex, onClose }) {
     }
     const SYM = {'%':'percent','$':'dollar','&':'and','@':'at','+':'plus'}
     return text
-      .replace(/\[\d{1,2}:\d{2}(?::\d{2})?\]/g, ' ')
+      .replace(/\[\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?\]/g, ' ')
       .replace(/\[\d+\.?\d*s\]/g, ' ')
       .replace(/[-—–]/g, ' ')
       .toLowerCase()

@@ -2,13 +2,23 @@ import db from '../db.js'
 import { scoreOutput } from './scorer.js'
 import { calculateSimilarity, checkTimecodePreservation, checkPausePreservation, computeDiff, extractDeletions } from './diff-engine.js'
 import { classifyDeletions } from './classifier.js'
-import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
+import { segmentTranscript, segmentByChapters, reassembleSegments, timecodeToSeconds } from './segmenter.js'
+
+/** Build a stage label: always position-based, with custom name appended if meaningful */
+function stageLabel(stage, index) {
+  const custom = stage.name || ''
+  // Skip generic "Stage N" names — they're misleading after reordering
+  if (!custom || /^Stage\s+\d+$/i.test(custom)) return `Stage ${index + 1}`
+  return `Stage ${index + 1}: ${custom}`
+}
 
 // ── Live progress & abort tracking ──────────────────────────────────────
 // Maps experimentRunId → { stageIndex, totalStages, stageName, status }
 export const runStageProgress = new Map()
 // Set of experiment IDs that should be aborted
 export const abortedExperiments = new Set()
+// Maps experimentId → Set<AbortController> for killing in-flight LLM requests
+export const activeAbortControllers = new Map()
 
 // ── Startup cleanup: mark orphaned "running" runs as failed ─────────────
 const orphaned = db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Server restarted while run was in progress' WHERE status = 'running'").run()
@@ -152,9 +162,9 @@ export async function executeRun(experimentRunId) {
           }
         } else {
           segments = segmentTranscript(currentInput, {
-            minSeconds: params.minSeconds || 40,
-            maxSeconds: params.maxSeconds || 80,
-            contextSeconds: params.contextSeconds || 30,
+            minSeconds: params.minSeconds ?? 40,
+            maxSeconds: params.maxSeconds ?? 80,
+            contextSeconds: params.contextSeconds ?? 30,
           })
         }
         // Restore cleanedText from saved llm_parallel output
@@ -191,14 +201,14 @@ export async function executeRun(experimentRunId) {
         throw new Error('Aborted')
       }
 
-      const stage = stages[i]
+      let stage = stages[i]
       const stageType = stage.type || 'llm'
 
       // Track stage progress
       runStageProgress.set(experimentRunId, {
         stageIndex: i,
         totalStages: stages.length,
-        stageName: stage.name || `Stage ${i + 1}`,
+        stageName: stageLabel(stage, i),
         status: 'running',
       })
       const stageStart = Date.now()
@@ -218,9 +228,9 @@ export async function executeRun(experimentRunId) {
         if (action === 'segment') {
           const params = stage.actionParams || {}
           segments = segmentTranscript(currentInput, {
-            minSeconds: params.minSeconds || 40,
-            maxSeconds: params.maxSeconds || 80,
-            contextSeconds: params.contextSeconds || 30,
+            minSeconds: params.minSeconds ?? 40,
+            maxSeconds: params.maxSeconds ?? 80,
+            contextSeconds: params.contextSeconds ?? 30,
           })
           stageOutput = JSON.stringify(segments.map((s, idx) => ({
             segment: idx + 1,
@@ -249,7 +259,7 @@ export async function executeRun(experimentRunId) {
             throw new Error('segment_by_chapters requires a preceding llm_question stage (no {{llm_answer}} found)')
           }
           segments = segmentByChapters(currentInput, llmAnswer, {
-            contextSeconds: params.contextSeconds || 30,
+            contextSeconds: params.contextSeconds ?? 30,
           })
           stageOutput = JSON.stringify(segments.map((s, idx) => ({
             segment: idx + 1,
@@ -260,6 +270,45 @@ export async function executeRun(experimentRunId) {
             mainTextPreview: s.mainText.slice(0, 100) + '...',
           })))
           promptUsed = `[Programmatic] Segmented transcript into ${segments.length} chapters (${params.contextSeconds || 30}s context)`
+          modelUsed = 'programmatic'
+
+        } else if (action === 'trim_before') {
+          if (!llmAnswer) {
+            throw new Error('trim_before requires a preceding llm_question stage (no {{llm_answer}} found)')
+          }
+          // Extract timecode from llmAnswer — try JSON parse first, then regex fallback
+          let trimTimecode
+          try {
+            const parsed = JSON.parse(llmAnswer.replace(/```(?:json)?\s*([\s\S]*?)```/, '$1').trim())
+            trimTimecode = parsed.timecode
+          } catch {
+            const tcMatch = llmAnswer.match(/\[[\d:\.]+\]/)
+            trimTimecode = tcMatch ? tcMatch[0] : null
+          }
+          if (!trimTimecode) {
+            throw new Error('trim_before: could not extract timecode from llm_answer')
+          }
+          const trimSeconds = timecodeToSeconds(trimTimecode)
+
+          // Walk transcript lines, collect deletions for lines before trim point
+          const deletionEntries = []
+          const keptLines = []
+          const lineRegex = /(\[[\d:\.]+\])\s*([\s\S]*?)(?=\n\[[\d:\.]+\]|$)/g
+          let lineMatch
+          while ((lineMatch = lineRegex.exec(currentInput)) !== null) {
+            const lineTC = lineMatch[1]
+            const lineText = lineMatch[2].trim()
+            const lineSec = timecodeToSeconds(lineTC)
+            if (lineSec < trimSeconds) {
+              deletionEntries.push({ timecode: lineTC, text: `${lineTC} ${lineText}` })
+            } else {
+              keptLines.push(lineMatch[0])
+            }
+          }
+
+          stageOutput = keptLines.join('\n').trim() || currentInput
+          llmResponseRaw = JSON.stringify(deletionEntries)
+          promptUsed = `[Programmatic] Trimmed ${deletionEntries.length} lines before ${trimTimecode}`
           modelUsed = 'programmatic'
 
         } else {
@@ -307,8 +356,10 @@ export async function executeRun(experimentRunId) {
           modelUsed = stage.model || 'claude-sonnet-4-20250514'
         } else {
           // Backward compat: if system_instruction doesn't contain segment rules, inject them
+          // Skip if no segments have context (e.g. contextSeconds=0)
+          const hasContext = segments.some(s => s.beforeContext || s.afterContext)
           const sysInstr = stage.system_instruction || ''
-          if (!sysInstr.includes('SEGMENT BOUNDARY FORMAT') && !sysInstr.includes('transcript segments in a special format')) {
+          if (hasContext && !sysInstr.includes('SEGMENT BOUNDARY FORMAT') && !sysInstr.includes('transcript segments in a special format')) {
             stage = { ...stage, system_instruction: augmentSystemForSegments(sysInstr, stage.output_mode) }
           }
 
@@ -350,7 +401,7 @@ export async function executeRun(experimentRunId) {
                 prompt_used, system_instruction_used, model, params_json, tokens_in, tokens_out, cost, runtime_ms)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)
             `).run(
-              experimentRunId, i, stage.name || `Stage ${i + 1}`,
+              experimentRunId, i, stageLabel(stage, i),
               typeof currentInput === 'string' ? currentInput.slice(0, 500000) : JSON.stringify(currentInput).slice(0, 500000),
               '[]', '', augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect),
               stage.model || 'claude-sonnet-4-20250514',
@@ -413,7 +464,7 @@ export async function executeRun(experimentRunId) {
                       pendingContextDeletions.push({ sourceSegment: s, ...cd })
                     }
                   }
-                  partialResults[s] = { segment: s + 1, cleanedText: llmResult.text, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt }
+                  partialResults[s] = { segment: s + 1, cleanedText: applied.cleanedText, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt }
                   break
                 } catch (parseErr) {
                   if (attempt === MAX_OUTPUT_RETRIES) {
@@ -491,23 +542,43 @@ export async function executeRun(experimentRunId) {
         // LLM Question: ask LLM a question, store answer as {{llm_answer}}, pass transcript through unchanged
         const prompt = replaceAnswerPlaceholders(insertTranscript(stage.prompt || '{{transcript}}', currentInput))
         const sysInstr = replaceAnswerPlaceholders(stage.system_instruction || '')
-        const llmResult = await callLLM({
-          model: stage.model || 'claude-sonnet-4-20250514',
-          systemInstruction: sysInstr,
-          prompt,
-          params: stage.params || {},
-          experimentId: run.experiment_id,
-        })
-        stageOutput = llmResult.text
-        llmQuestionCount++
-        llmAnswer = llmResult.text
-        llmAnswers[llmQuestionCount] = llmResult.text
-        tokensIn = llmResult.tokensIn
-        tokensOut = llmResult.tokensOut
-        stageCost = llmResult.cost
         promptUsed = prompt
         systemUsed = sysInstr
         modelUsed = stage.model || 'claude-sonnet-4-20250514'
+
+        // Check for cached answer from a previous run (same video + same stage config)
+        const cachedAnswer = db.prepare(`
+          SELECT rso.output_text, rso.tokens_in, rso.tokens_out, rso.cost
+          FROM run_stage_outputs rso
+          JOIN experiment_runs er ON er.id = rso.experiment_run_id
+          WHERE er.video_id = ? AND rso.stage_name = ? AND rso.output_text IS NOT NULL AND rso.output_text != ''
+            AND rso.system_instruction_used = ?
+          ORDER BY rso.id DESC LIMIT 1
+        `).get(run.video_id, stageLabel(stage, i), sysInstr)
+
+        if (cachedAnswer) {
+          console.log(`[llm-runner] Reusing cached llm_question answer for stage "${stage.name}" (video ${run.video_id})`)
+          stageOutput = cachedAnswer.output_text
+          tokensIn = 0
+          tokensOut = 0
+          stageCost = 0
+        } else {
+          const llmResult = await callLLM({
+            model: modelUsed,
+            systemInstruction: sysInstr,
+            prompt,
+            params: stage.params || {},
+            experimentId: run.experiment_id,
+          })
+          stageOutput = llmResult.text
+          tokensIn = llmResult.tokensIn
+          tokensOut = llmResult.tokensOut
+          stageCost = llmResult.cost
+        }
+
+        llmQuestionCount++
+        llmAnswer = stageOutput
+        llmAnswers[llmQuestionCount] = stageOutput
 
       } else {
         // Standard LLM stage
@@ -562,7 +633,7 @@ export async function executeRun(experimentRunId) {
             prompt_used, system_instruction_used, model, params_json, tokens_in, tokens_out, cost, runtime_ms, llm_response_raw)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          experimentRunId, i, stage.name || `Stage ${i + 1}`,
+          experimentRunId, i, stageLabel(stage, i),
           typeof currentInput === 'string' ? currentInput.slice(0, 500000) : JSON.stringify(currentInput).slice(0, 500000),
           stageOutput.slice(0, 500000),
           (promptUsed || '').slice(0, 500000), systemUsed,
@@ -577,8 +648,15 @@ export async function executeRun(experimentRunId) {
       totalTokens += tokensIn + tokensOut
       totalCost += stageCost
 
+      // Persist spending immediately — survives run deletion or restart-from-stage
+      if (stageCost > 0 || tokensIn + tokensOut > 0) {
+        db.prepare(
+          'INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)'
+        ).run(stageCost, tokensIn + tokensOut, Date.now() - stageStart, `run #${experimentRunId} stage ${i}`, new Date().toISOString())
+      }
+
       // Update currentInput for stages that produce cleaned text
-      if (stageType === 'programmatic' && stage.action === 'reassemble') {
+      if (stageType === 'programmatic' && (stage.action === 'reassemble' || stage.action === 'trim_before')) {
         currentInput = stageOutput
       } else if (stageType === 'llm') {
         currentInput = stageOutput
@@ -636,124 +714,36 @@ function insertTranscript(template, text) {
  * In these modes, the LLM returns a JSON array of timecoded items instead of a full transcript.
  */
 function augmentSystemForOutputMode(systemInstruction, outputMode, identifyPreselect) {
-  if (!outputMode || outputMode === 'passthrough') return systemInstruction
+  if (!outputMode || outputMode === 'passthrough') return systemInstruction || ''
 
-  const modeInstructions = {
-    deletion: `
+  let result = systemInstruction || ''
 
-## CRITICAL OUTPUT FORMAT — DELETION MODE
-You are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.
-
-Return ONLY a valid JSON array like this:
-\`\`\`json
-[
-  {"timecode": "[00:01:23]", "text": "Um, you know,"},
-  {"timecode": "[00:02:45]"},
-  {"timecode": "[00:03:10]", "text": "basically like"}
-]
-\`\`\`
-
-Rules:
-- "timecode" (REQUIRED) — the exact timecode from the transcript (e.g., "[00:01:23]")
-- If "text" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)
-- If "text" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.
-- "text" must be a VERBATIM substring copied from the transcript
-- Return ONLY the JSON array — no commentary, no explanation, no markdown outside the JSON block
-- Be precise — the text must match EXACTLY what appears in the transcript`,
-
-    keep_only: `
-
-## CRITICAL OUTPUT FORMAT — KEEP ONLY MODE
-You are in KEEP ONLY mode. Instead of returning a cleaned transcript, you must return a JSON array identifying the text to KEEP. Everything else will be removed.
-
-Each item references a timecode from the transcript. You can keep an entire timecoded segment or specific text within it.
-
-Return ONLY a valid JSON array like this:
-\`\`\`json
-[
-  {"timecode": "[00:00:15]"},
-  {"timecode": "[00:01:23]", "text": "The main point is that we need to focus"},
-  {"timecode": "[00:05:30]"}
-]
-\`\`\`
-
-Rules:
-- Include "timecode" — the exact timecode from the transcript (e.g., "[00:01:23]")
-- Include "text" — the specific text to keep from that segment. Must be a verbatim substring.
-- If "text" is OMITTED, the ENTIRE segment at that timecode is kept (timecode + all its text)
-- Return ONLY the JSON array — no commentary, no explanation, no markdown outside the JSON block
-- All timecodes for kept segments are preserved in the output
-- Be precise — the text must match exactly what appears in the transcript`,
-
-    identify: `
-
-## CRITICAL OUTPUT FORMAT — IDENTIFY MODE
-You are in IDENTIFY mode. Instead of editing the transcript, classify problematic segments by category.
-
-Return ONLY a valid JSON array like this:
-\`\`\`json
-[
-  {"timecode": "[00:01:23]", "text": "Um, you know, basically", "category": "repetition"},
-  {"timecode": "[00:02:45]", "category": "lengthy"}
-]
-\`\`\`
-
-Categories (use EXACTLY these values):
-- "repetition" — Same idea repeated, duplicate examples, saying it twice in different words
-- "lengthy" — Over-explanation, too much setup, hedging, unnecessary detail
-- "technical_unclear" — Too technical, vague phrasing, unclear structure, assumed context
-- "irrelevance" — Irrelevant jokes, tangents, tone mismatch, distracting from the point
-
-Rules:
-- "timecode" (REQUIRED) — exact timecode from transcript
-- "category" (REQUIRED) — one of the four categories above
-- "text" (OPTIONAL) — the specific problematic text. If omitted, the entire segment is flagged
-- Return ONLY the JSON array — no commentary`,
+  // Fallback: if format section is missing (old flow not yet opened in editor), append it at runtime
+  if (!result.includes('## CRITICAL OUTPUT FORMAT')) {
+    const FORMAT_TEMPLATES = {
+      deletion: `\n\n## CRITICAL OUTPUT FORMAT — DELETION MODE\nYou are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.\n\nReturn ONLY a valid JSON array like this:\n\`\`\`json\n[\n  {"timecode": "[00:01:23]", "text": "Um, you know,"},\n  {"timecode": "[00:02:45]"},\n  {"timecode": "[00:02:45.80]"},\n  {"timecode": "[00:03:10.50]", "text": "basically like"}\n]\n\`\`\`\n\nRules:\n- "timecode" (REQUIRED) — the EXACT timecode copied from the transcript, including any sub-second precision (e.g., "[00:01:23]" or "[00:01:23.50]")\n- If "text" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)\n- If "text" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.\n- "text" must be a VERBATIM substring copied from the transcript\n- Return ONLY the JSON array — no commentary, no explanation, no markdown outside the JSON block\n- Be precise — timecodes and text must match EXACTLY what appears in the transcript`,
+      keep_only: `\n\n## CRITICAL OUTPUT FORMAT — KEEP ONLY MODE\nYou are in KEEP ONLY mode. Instead of returning a cleaned transcript, you must return a JSON array identifying the text to KEEP. Everything else will be removed.\n\nReturn ONLY a valid JSON array like this:\n\`\`\`json\n[\n  {"timecode": "[00:00:15]"},\n  {"timecode": "[00:01:23.50]", "text": "The main point is that we need to focus"},\n  {"timecode": "[00:05:30]"}\n]\n\`\`\`\n\nRules:\n- "timecode" — the EXACT timecode copied from the transcript, including any sub-second precision (e.g., "[00:01:23]" or "[00:01:23.50]")\n- "text" — the specific text to keep from that segment. Must be a verbatim substring.\n- If "text" is OMITTED, the ENTIRE segment at that timecode is kept (timecode + all its text)\n- Return ONLY the JSON array — no commentary, no explanation, no markdown outside the JSON block\n- Be precise — timecodes and text must match exactly what appears in the transcript`,
+      identify: `\n\n## CRITICAL OUTPUT FORMAT — IDENTIFY MODE\nYou are in IDENTIFY mode. Instead of editing the transcript, flag problematic segments.\n\nReturn ONLY a valid JSON array like this:\n\`\`\`json\n[\n  {"timecode": "[00:01:23]", "text": "Um, you know, basically"},\n  {"timecode": "[00:02:45.80]"}\n]\n\`\`\`\n\nRules:\n- "timecode" (REQUIRED) — the EXACT timecode copied from the transcript, including any sub-second precision (e.g., "[00:01:23]" or "[00:01:23.50]")\n- "text" (OPTIONAL) — the specific problematic text. If omitted, the entire segment is flagged\n- Return ONLY the JSON array — no commentary`,
+    }
+    result += FORMAT_TEMPLATES[outputMode] || ''
   }
 
-  let result = (systemInstruction || '') + (modeInstructions[outputMode] || '')
-
-  // Append reason tracking when identifyPreselect is enabled
-  if (identifyPreselect?.enabled && identifyPreselect?.categories?.length > 0 &&
+  // Fallback: if FOCUS section is missing but identifyPreselect is enabled, append it
+  if (!result.includes('## FOCUS') && identifyPreselect?.enabled && identifyPreselect?.categories?.length > 0 &&
       (outputMode === 'deletion' || outputMode === 'keep_only')) {
-    const allCategories = {
-      filler_words: 'Filler words: um, uh, you know, like, basically, I mean',
-      false_starts: 'False starts: abandoned sentences, self-corrections, incomplete thoughts',
-      meta_commentary: 'Meta commentary: talking about the recording process, directing crew, discussing takes, behind-the-scenes remarks not meant for the final video',
-      repetition: 'Same idea repeated, duplicate examples',
-      lengthy: 'Over-explanation, unnecessary detail',
-      technical_unclear: 'Too technical, vague phrasing, unclear',
-      irrelevance: 'Irrelevant tangents, jokes, off-topic',
+    const categoryDescriptions = {
+      filler_words: 'filler words (um, uh, you know, like, basically, I mean)',
+      false_starts: 'false starts (abandoned sentences, self-corrections, incomplete thoughts)',
+      meta_commentary: 'meta commentary (talking about the recording process, directing crew, discussing takes, behind-the-scenes remarks not meant for the final video)',
+      repetition: 'repetition (same idea repeated, duplicate examples)',
+      lengthy: 'lengthy sections (over-explanation, unnecessary detail)',
+      technical_unclear: 'too technical or unclear (vague phrasing, assumed context)',
+      irrelevance: 'irrelevance (tangents, jokes, off-topic)',
     }
-    const selected = identifyPreselect.categories
-    const focusLabels = selected.map(c => `"${c}"`).join(', ')
-    const categoryList = Object.entries(allCategories)
-      .map(([key, desc]) => `- "${key}" — ${desc}${selected.includes(key) ? ' ✓ PRIMARY' : ''}`)
-      .join('\n')
-
-    result += `
-
-## REASON TRACKING (IDENTIFICATION PRESELECT)
-Every item in your JSON array MUST also include "category" and "reason" fields.
-
-Updated format example:
-\`\`\`json
-[
-  {"timecode": "[00:01:23]", "text": "Um, you know,", "category": "filler_words", "reason": "Verbal fillers that add no content"},
-  {"timecode": "[00:02:45]", "category": "false_starts", "reason": "Speaker abandons sentence and restarts at [00:02:50]"},
-  {"timecode": "[00:03:10]", "text": "basically like", "category": "repetition", "reason": "Repeats concept from [00:01:00]"}
-]
-\`\`\`
-
-Categories (use EXACTLY these values):
-${categoryList}
-
-PRIMARY FOCUS for this stage: ${focusLabels}
-Prioritize finding and categorizing these types, but also flag other categories when encountered.
-
-Additional rules:
-- "category" (REQUIRED) — one of the six categories above
-- "reason" (REQUIRED) — brief explanation of WHY this text should be ${outputMode === 'deletion' ? 'deleted' : 'kept'}`
+    const focusDescriptions = identifyPreselect.categories
+      .map(c => categoryDescriptions[c] || c)
+      .join('; ')
+    result += `\n\n## FOCUS\nFocus on finding: ${focusDescriptions}.\nDo NOT include "category" or "reason" fields — just "timecode" and optionally "text".`
   }
 
   return result
@@ -782,7 +772,7 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
   }
 
   // Parse the input transcript into timecoded entries
-  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]\s*/g
   const entries = []
   let match
   while ((match = tcRegex.exec(inputText)) !== null) {
@@ -793,7 +783,7 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
     let end = inputText.length
     const searchFrom = textStart
     const remaining = inputText.slice(searchFrom)
-    const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/)
+    const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]/)
     if (nextTcMatch) {
       end = searchFrom + nextTcMatch.index
     }
@@ -806,6 +796,9 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
     })
   }
 
+  // Normalize timecode: strip brackets for comparison
+  function normalizeTc(tc) { return tc.replace(/[\[\]]/g, '') }
+
   if (outputMode === 'deletion') {
     let result = inputText
     // Process deletions in reverse order to preserve positions
@@ -813,39 +806,49 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
     const contextDeletions = []
     for (const item of items) {
       if (!item.timecode) continue
-      const entry = entries.find(e => e.timecode === item.timecode)
-      if (!entry) {
+      const matchingEntries = entries.filter(e => normalizeTc(e.timecode) === normalizeTc(item.timecode))
+      if (matchingEntries.length === 0) {
         // Timecode not in mainText — collect as context deletion for neighboring segments
         contextDeletions.push({ timecode: item.timecode, text: item.text })
         continue
       }
       if (!item.text) {
-        // No text field = delete entire timecoded segment
-        deletions.push({ start: entry.start, end: entry.end })
+        // No text field = delete ALL entries at this timecode
+        for (const entry of matchingEntries) {
+          deletions.push({ start: entry.start, end: entry.end })
+        }
         continue
       }
-      // Check if the text covers the entire segment content
-      const segText = entry.text.trim()
+      // Find the right entry among duplicates — match by text content
       const itemText = item.text.trim()
-      if (segText === itemText || segText.toLowerCase() === itemText.toLowerCase()) {
-        // Full segment deletion — remove timecode + all text
-        deletions.push({ start: entry.start, end: entry.end })
-      } else {
+      let matched = false
+      for (const entry of matchingEntries) {
+        const segText = entry.text.trim()
+        if (segText === itemText || segText.toLowerCase() === itemText.toLowerCase()) {
+          // Full segment deletion — remove timecode + all text
+          deletions.push({ start: entry.start, end: entry.end })
+          matched = true
+          break
+        }
         // Partial deletion — find and remove just the specified words
         const idx = entry.text.indexOf(item.text)
         if (idx !== -1) {
           const absStart = entry.start + (entry.fullMatch.length - entry.text.length) + idx
           deletions.push({ start: absStart, end: absStart + item.text.length })
-        } else {
-          // Try case-insensitive match
-          const lowerIdx = entry.text.toLowerCase().indexOf(item.text.toLowerCase())
-          if (lowerIdx !== -1) {
-            const absStart = entry.start + (entry.fullMatch.length - entry.text.length) + lowerIdx
-            deletions.push({ start: absStart, end: absStart + item.text.length })
-          } else {
-            console.warn(`[llm-runner] Deletion: text "${item.text.slice(0, 80)}" not found in segment ${item.timecode}`)
-          }
+          matched = true
+          break
         }
+        // Try case-insensitive match
+        const lowerIdx = entry.text.toLowerCase().indexOf(item.text.toLowerCase())
+        if (lowerIdx !== -1) {
+          const absStart = entry.start + (entry.fullMatch.length - entry.text.length) + lowerIdx
+          deletions.push({ start: absStart, end: absStart + item.text.length })
+          matched = true
+          break
+        }
+      }
+      if (!matched) {
+        console.warn(`[llm-runner] Deletion: text "${item.text.slice(0, 80)}" not found in any segment at ${item.timecode}`)
       }
     }
 
@@ -865,30 +868,37 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
     const kept = []
     for (const item of items) {
       if (!item.timecode) continue
-      const entry = entries.find(e => e.timecode === item.timecode)
-      if (!entry) {
+      const matchingEntries = entries.filter(e => normalizeTc(e.timecode) === normalizeTc(item.timecode))
+      if (matchingEntries.length === 0) {
         console.warn(`[llm-runner] Keep: timecode ${item.timecode} not found in input`)
         continue
       }
       if (item.text) {
-        // Keep only specific text from this segment
-        const idx = entry.text.indexOf(item.text)
-        if (idx !== -1) {
-          kept.push(`${entry.timecode} ${item.text.trim()}`)
-        } else {
-          // Try case-insensitive
+        // Keep only specific text — search across all entries with this timecode
+        let found = false
+        for (const entry of matchingEntries) {
+          const idx = entry.text.indexOf(item.text)
+          if (idx !== -1) {
+            kept.push(`${entry.timecode} ${item.text.trim()}`)
+            found = true
+            break
+          }
           const lowerIdx = entry.text.toLowerCase().indexOf(item.text.toLowerCase())
           if (lowerIdx !== -1) {
-            // Use the original text from the transcript (preserve casing)
             const originalText = entry.text.slice(lowerIdx, lowerIdx + item.text.length)
             kept.push(`${entry.timecode} ${originalText.trim()}`)
-          } else {
-            console.warn(`[llm-runner] Keep: text "${item.text.slice(0, 50)}" not found in segment ${item.timecode}`)
+            found = true
+            break
           }
         }
+        if (!found) {
+          console.warn(`[llm-runner] Keep: text "${item.text.slice(0, 50)}" not found in any segment at ${item.timecode}`)
+        }
       } else {
-        // Keep entire segment
-        kept.push(entry.fullMatch.trim())
+        // Keep ALL entries at this timecode
+        for (const entry of matchingEntries) {
+          kept.push(entry.fullMatch.trim())
+        }
       }
     }
     return { cleanedText: kept.join('\n').trim(), contextDeletions: [] }
@@ -904,7 +914,7 @@ function applyOutputMode(outputMode, llmOutput, inputText) {
 }
 
 function applySingleDeletion(text, timecode, deleteText) {
-  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]\s*/g
   const entries = []
   let match
   while ((match = tcRegex.exec(text)) !== null) {
@@ -912,13 +922,14 @@ function applySingleDeletion(text, timecode, deleteText) {
     const textStart = match.index + match[0].length
     let end = text.length
     const remaining = text.slice(textStart)
-    const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/)
+    const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]/)
     if (nextTcMatch) end = textStart + nextTcMatch.index
     entries.push({ timecode: match[0].trim(), text: text.slice(textStart, end), start, end,
       fullMatchLen: match[0].length })
   }
 
-  const entry = entries.find(e => e.timecode === timecode)
+  const normTc = (tc) => tc.replace(/[\[\]]/g, '')
+  const entry = entries.find(e => normTc(e.timecode) === normTc(timecode))
   if (!entry) return text // already removed or not present
 
   if (!deleteText) {
@@ -941,23 +952,10 @@ function applySingleDeletion(text, timecode, deleteText) {
 }
 
 function buildSegmentPromptText(seg) {
-  let text = ''
-  // Add chapter info block if present
-  if (seg.chapterName) {
-    text += `<chapter_info>\n`
-    text += `Chapter: ${seg.chapterName}\n`
-    if (seg.chapterDescription) text += `Description: ${seg.chapterDescription}\n`
-    if (seg.chapterPurpose) text += `Purpose: ${seg.chapterPurpose}\n`
-    if (seg.chapterBeats && seg.chapterBeats.length > 0) {
-      text += `Beats:\n`
-      for (const beat of seg.chapterBeats) {
-        text += `  - ${beat.timecode}: ${beat.description}`
-        if (beat.purpose) text += ` (${beat.purpose})`
-        text += '\n'
-      }
-    }
-    text += `</chapter_info>\n\n`
+  if (!seg.beforeContext && !seg.afterContext) {
+    return seg.mainText
   }
+  let text = ''
   if (seg.beforeContext) {
     text += `<context>\n${seg.beforeContext}\n`
   }
@@ -1053,6 +1051,11 @@ async function callLLM({ model, systemInstruction, prompt, params, experimentId 
 
   // AbortController so we can kill in-flight fetch on abort
   const controller = new AbortController()
+  // Register so abort endpoint can cancel in-flight requests immediately
+  if (experimentId) {
+    if (!activeAbortControllers.has(experimentId)) activeAbortControllers.set(experimentId, new Set())
+    activeAbortControllers.get(experimentId).add(controller)
+  }
   // Combine user-abort with a 5-minute timeout so hung connections don't block forever
   const combinedSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60 * 1000)])
 
@@ -1085,62 +1088,73 @@ async function callLLM({ model, systemInstruction, prompt, params, experimentId 
   let currentParams = { ...params }
   let fallbackStep = 0 // 0=original, 1=same+LOW, 2=3-pro+LOW, 3=flash
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    // Check abort before each attempt
-    if (experimentId && abortedExperiments.has(experimentId)) {
-      controller.abort()
-      throw new Error('Aborted')
+  try {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      // Check abort before each attempt
+      if (experimentId && abortedExperiments.has(experimentId)) {
+        controller.abort()
+        throw new Error('Aborted')
+      }
+      try {
+        return await callFn()
+      } catch (err) {
+        if (err.name === 'AbortError' || err.message === 'Aborted') throw new Error('Aborted')
+        if (err.name === 'TimeoutError') throw new Error(`LLM request timed out after 5 minutes for ${currentModel}`)
+        // Extract real error from Node's generic "fetch failed" wrapper
+        const realMsg = err.cause ? `${err.message}: ${err.cause.message || err.cause}` : err.message
+        console.error(`[llm] Attempt ${attempt}/${MAX_RETRIES} failed for ${currentModel}: ${realMsg}`)
+
+        // Auto-fallback chain for Gemini Pro "other side closed" (thinking timeout)
+        if (GEMINI_PRO_MODELS.includes(currentModel) && realMsg.includes('other side closed')) {
+          fallbackStep++
+          if (fallbackStep === 1 && (!currentParams.thinking_level || currentParams.thinking_level === 'HIGH' || currentParams.thinking_level === 'MEDIUM')) {
+            // Step 1: same model but with LOW thinking
+            console.log(`[llm] ${currentModel} thinking timed out, retrying with thinking: LOW`)
+            currentParams = { ...currentParams, thinking_level: 'LOW' }
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+            attempt--; continue
+          } else if (fallbackStep <= 2 && currentModel !== 'gemini-3-pro-preview') {
+            // Step 2: try gemini-3-pro-preview with LOW thinking
+            console.log(`[llm] Falling back to gemini-3-pro-preview with thinking: LOW`)
+            currentModel = 'gemini-3-pro-preview'
+            currentParams = { ...currentParams, thinking_level: 'LOW' }
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+            attempt--; continue
+          } else if (fallbackStep <= 3) {
+            // Step 3: fall back to flash (always works)
+            console.log(`[llm] Falling back to gemini-3-flash-preview`)
+            currentModel = 'gemini-3-flash-preview'
+            currentParams = { ...params } // Reset params for flash
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+            attempt--; continue
+          }
+        }
+
+        // Switch to backup Google key on failure
+        if (currentModel.startsWith('gemini') && googleKeyBackup && currentGoogleKey !== googleKeyBackup) {
+          currentGoogleKey = googleKeyBackup
+          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+          console.log(`[llm] Switching to backup Google API key`)
+        }
+        if (attempt === MAX_RETRIES) throw new Error(realMsg)
+        console.log(`[llm] Retrying in ${RETRY_DELAY_MS / 1000}s...`)
+        // Check abort during retry wait
+        for (let waited = 0; waited < RETRY_DELAY_MS; waited += 500) {
+          if (experimentId && abortedExperiments.has(experimentId)) {
+            controller.abort()
+            throw new Error('Aborted')
+          }
+          await new Promise(r => setTimeout(r, 500))
+        }
+      }
     }
-    try {
-      return await callFn()
-    } catch (err) {
-      if (err.name === 'AbortError' || err.message === 'Aborted') throw new Error('Aborted')
-      if (err.name === 'TimeoutError') throw new Error(`LLM request timed out after 5 minutes for ${currentModel}`)
-      // Extract real error from Node's generic "fetch failed" wrapper
-      const realMsg = err.cause ? `${err.message}: ${err.cause.message || err.cause}` : err.message
-      console.error(`[llm] Attempt ${attempt}/${MAX_RETRIES} failed for ${currentModel}: ${realMsg}`)
-
-      // Auto-fallback chain for Gemini Pro "other side closed" (thinking timeout)
-      if (GEMINI_PRO_MODELS.includes(currentModel) && realMsg.includes('other side closed')) {
-        fallbackStep++
-        if (fallbackStep === 1 && (!currentParams.thinking_level || currentParams.thinking_level === 'HIGH' || currentParams.thinking_level === 'MEDIUM')) {
-          // Step 1: same model but with LOW thinking
-          console.log(`[llm] ${currentModel} thinking timed out, retrying with thinking: LOW`)
-          currentParams = { ...currentParams, thinking_level: 'LOW' }
-          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
-          attempt--; continue
-        } else if (fallbackStep <= 2 && currentModel !== 'gemini-3-pro-preview') {
-          // Step 2: try gemini-3-pro-preview with LOW thinking
-          console.log(`[llm] Falling back to gemini-3-pro-preview with thinking: LOW`)
-          currentModel = 'gemini-3-pro-preview'
-          currentParams = { ...currentParams, thinking_level: 'LOW' }
-          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
-          attempt--; continue
-        } else if (fallbackStep <= 3) {
-          // Step 3: fall back to flash (always works)
-          console.log(`[llm] Falling back to gemini-3-flash-preview`)
-          currentModel = 'gemini-3-flash-preview'
-          currentParams = { ...params } // Reset params for flash
-          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
-          attempt--; continue
-        }
-      }
-
-      // Switch to backup Google key on failure
-      if (currentModel.startsWith('gemini') && googleKeyBackup && currentGoogleKey !== googleKeyBackup) {
-        currentGoogleKey = googleKeyBackup
-        callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
-        console.log(`[llm] Switching to backup Google API key`)
-      }
-      if (attempt === MAX_RETRIES) throw new Error(realMsg)
-      console.log(`[llm] Retrying in ${RETRY_DELAY_MS / 1000}s...`)
-      // Check abort during retry wait
-      for (let waited = 0; waited < RETRY_DELAY_MS; waited += 500) {
-        if (experimentId && abortedExperiments.has(experimentId)) {
-          controller.abort()
-          throw new Error('Aborted')
-        }
-        await new Promise(r => setTimeout(r, 500))
+  } finally {
+    // Unregister controller so it can be GC'd
+    if (experimentId) {
+      const controllers = activeAbortControllers.get(experimentId)
+      if (controllers) {
+        controllers.delete(controller)
+        if (controllers.size === 0) activeAbortControllers.delete(experimentId)
       }
     }
   }

@@ -3,8 +3,44 @@
  * for parallel processing.
  *
  * Strategy: split into segments of 40-80 seconds (by timecodes),
- * ending at sentence boundaries. Add 30s of context before and after.
+ * ending at sentence boundaries. Context is word-count based (~2.5 words/sec)
+ * to handle transcripts where earlier stages deleted content.
  */
+
+// ~2.5 words per second (150 WPM) — used to convert contextSeconds to word count
+const WORDS_PER_SECOND = 2.5
+
+function countWords(text) {
+  return text.split(/\s+/).filter(Boolean).length
+}
+
+/**
+ * Gather context entries by word count, always including complete timecoded entries.
+ * For "before": walk backwards from the segment start.
+ * For "after": walk forwards from the segment end.
+ */
+function gatherContextEntries(allEntries, boundaryIndex, contextSeconds, direction) {
+  if (contextSeconds <= 0) return []
+  const targetWords = Math.round(contextSeconds * WORDS_PER_SECOND)
+  let wordCount = 0
+  const result = []
+
+  if (direction === 'before') {
+    for (let i = boundaryIndex - 1; i >= 0; i--) {
+      result.unshift(allEntries[i])
+      wordCount += countWords(allEntries[i].text)
+      if (wordCount >= targetWords) break
+    }
+  } else {
+    for (let i = boundaryIndex + 1; i < allEntries.length; i++) {
+      result.push(allEntries[i])
+      wordCount += countWords(allEntries[i].text)
+      if (wordCount >= targetWords) break
+    }
+  }
+
+  return result
+}
 
 /**
  * Parse timecodes from transcript text.
@@ -13,18 +49,20 @@
  */
 function parseTimecodes(text) {
   const entries = []
-  const regex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const regex = /\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]\s*/g
   let match
 
   while ((match = regex.exec(text)) !== null) {
     const tc = match[1]
-    const parts = tc.split(':').map(Number)
+    const [timePart, csPart] = tc.split('.')
+    const parts = timePart.split(':').map(Number)
     let seconds
     if (parts.length === 3) {
       seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
     } else {
       seconds = parts[0] * 60 + parts[1]
     }
+    if (csPart) seconds += parseInt(csPart, 10) / 100
 
     // Get text until next timecode or end
     const start = match.index + match[0].length
@@ -112,18 +150,13 @@ export function segmentTranscript(text, {
       .map(e => `${e.timecode} ${e.text}`)
       .join('\n\n')
 
-    // Before context: entries within contextSeconds before startTime
-    const beforeEntries = entries.filter(
-      e => e.seconds < startTime && e.seconds >= startTime - contextSeconds
-    )
+    // Context by word count (not timecodes) — handles content deleted by earlier stages
+    const beforeEntries = gatherContextEntries(entries, segStart, contextSeconds, 'before')
     const beforeContext = beforeEntries
       .map(e => `${e.timecode} ${e.text}`)
       .join('\n\n')
 
-    // After context: entries within contextSeconds after endTime
-    const afterEntries = entries.filter(
-      e => e.seconds > endTime && e.seconds <= endTime + contextSeconds
-    )
+    const afterEntries = gatherContextEntries(entries, segEnd, contextSeconds, 'after')
     const afterContext = afterEntries
       .map(e => `${e.timecode} ${e.text}`)
       .join('\n\n')
@@ -206,12 +239,16 @@ function segmentByText(text, { minChars = 800, maxChars = 2000, contextChars = 6
 /**
  * Convert a timecode string like "[00:02:15]" or "00:02:15" to seconds.
  */
-function timecodeToSeconds(tc) {
+export function timecodeToSeconds(tc) {
   const clean = tc.replace(/[\[\]]/g, '')
-  const parts = clean.split(':').map(Number)
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
-  if (parts.length === 2) return parts[0] * 60 + parts[1]
-  return 0
+  // Handle HH:MM:SS.cc or HH:MM:SS or MM:SS
+  const [timePart, csPart] = clean.split('.')
+  const parts = timePart.split(':').map(Number)
+  let seconds = 0
+  if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+  else if (parts.length === 2) seconds = parts[0] * 60 + parts[1]
+  if (csPart) seconds += parseInt(csPart, 10) / 100
+  return seconds
 }
 
 /**
@@ -261,18 +298,17 @@ export function segmentByChapters(text, chaptersJson, { contextSeconds = 30 } = 
     const actualStart = chapterEntries[0].seconds
     const actualEnd = chapterEntries[chapterEntries.length - 1].seconds
 
-    // Before context: entries within contextSeconds before chapter start
-    const beforeEntries = entries.filter(
-      e => e.seconds < actualStart && e.seconds >= actualStart - contextSeconds
-    )
+    // Find indices in full entries array for context gathering
+    const firstIdx = entries.indexOf(chapterEntries[0])
+    const lastIdx = entries.indexOf(chapterEntries[chapterEntries.length - 1])
+
+    // Context by word count (not timecodes) — handles content deleted by earlier stages
+    const beforeEntries = gatherContextEntries(entries, firstIdx, contextSeconds, 'before')
     const beforeContext = beforeEntries
       .map(e => `${e.timecode} ${e.text}`)
       .join('\n\n')
 
-    // After context: entries within contextSeconds after chapter end
-    const afterEntries = entries.filter(
-      e => e.seconds > actualEnd && e.seconds <= actualEnd + contextSeconds
-    )
+    const afterEntries = gatherContextEntries(entries, lastIdx, contextSeconds, 'after')
     const afterContext = afterEntries
       .map(e => `${e.timecode} ${e.text}`)
       .join('\n\n')

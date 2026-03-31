@@ -91,11 +91,12 @@ export default function TranscriptEditor() {
     if (!state.annotations?.items?.length) return map
     for (const ann of state.annotations.items) {
       // Skip identify annotations whose category is toggled OFF
+      // (Deletion annotations always show highlight; strikethrough controlled separately)
       if (ann.type === 'identify' && !identifySelected[ann.category]) continue
       for (let i = 0; i < displayItems.length; i++) {
         const item = displayItems[i]
         if (item.type !== 'word') continue
-        if (item.start < ann.endTime && item.end > ann.startTime) {
+        if (item.start < ann.endTime && item.end >= ann.startTime) {
           if (!map.has(i)) map.set(i, [])
           map.get(i).push(ann)
         }
@@ -129,10 +130,32 @@ export default function TranscriptEditor() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  // Merged annotation cut regions (used by both silence and annotation cut effects)
+  const annotationRegions = useMemo(() => {
+    if (!state.annotations?.items?.length) return []
+    const allCuts = []
+    for (const category of ['false_starts', 'filler_words', 'meta_commentary']) {
+      if (!cutsSelected[category]) continue
+      for (const ann of state.annotations.items) {
+        if (ann.type === 'deletion' && ann.category === category) {
+          allCuts.push({ start: ann.startTime, end: ann.endTime })
+        }
+      }
+    }
+    if (!allCuts.length) return []
+    allCuts.sort((a, b) => a.start - b.start)
+    const regions = [{ ...allCuts[0] }]
+    for (let i = 1; i < allCuts.length; i++) {
+      const last = regions[regions.length - 1]
+      if (allCuts[i].start <= last.end) last.end = Math.max(last.end, allCuts[i].end)
+      else regions.push({ ...allCuts[i] })
+    }
+    return regions
+  }, [state.annotations, cutsSelected.false_starts, cutsSelected.filler_words, cutsSelected.meta_commentary])
+
   // AI Cut Silences — transcript identifies gaps, waveform refines exact boundaries
   const silenceMountRef = useRef(true)
   useEffect(() => {
-    // Skip initial mount — cuts are already restored from saved state
     if (silenceMountRef.current) {
       silenceMountRef.current = false
       return
@@ -227,22 +250,84 @@ export default function TranscriptEditor() {
     dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-silence-', cuts } })
   }, [cutsSelected.silences, mergedWords, state.tracks, dispatch])
 
-  // AI Cut Annotations — wire deletion checkboxes to annotation cuts
-  const annCutMountRef = useRef(true)
+  // AI Cut Annotations — merge adjacent annotation regions (bridging wordless
+  // gaps), apply head/tail trim and exclusions, emit as continuous cut regions.
   useEffect(() => {
-    if (annCutMountRef.current) { annCutMountRef.current = false; return }
-    for (const category of ['false_starts', 'filler_words', 'meta_commentary']) {
-      const prefix = `cut-ai-ann-${category}-`
-      if (!cutsSelected[category]) {
-        dispatch({ type: 'SET_AI_CUTS', payload: { prefix, cuts: [] } })
-        continue
-      }
-      const cuts = (state.annotations?.items || [])
-        .filter(a => a.type === 'deletion' && a.category === category)
-        .map(ann => ({ id: `${prefix}${ann.id}`, start: ann.startTime, end: ann.endTime, source: 'annotation', annotationId: ann.id }))
-      dispatch({ type: 'SET_AI_CUTS', payload: { prefix, cuts } })
+    if (!annotationRegions.length || !mergedWords.length) {
+      dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-ann-', cuts: [] } })
+      dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-bridge-', cuts: [] } }) // clean legacy
+      return
     }
-  }, [cutsSelected.false_starts, cutsSelected.filler_words, cutsSelected.meta_commentary, state.annotations, dispatch])
+
+    const regions = annotationRegions.map(r => ({ ...r }))
+
+    // Merge adjacent regions when no uncut word exists in the gap between them
+    const merged = [{ ...regions[0] }]
+    for (let i = 1; i < regions.length; i++) {
+      const last = merged[merged.length - 1]
+      const gapStart = last.end
+      const gapEnd = regions[i].start
+      const gapSize = gapEnd - gapStart
+
+      const hasUncutWord = mergedWords.some(w => {
+        const wEnd = Math.max(w.end, w.start + 0.01) // handle 0-duration words
+        if (w.start >= gapEnd || wEnd <= gapStart) return false
+        return !regions.some(r => w.start >= r.start && wEnd <= r.end)
+      })
+      const shouldMerge = !hasUncutWord
+
+      if (shouldMerge) {
+        last.end = regions[i].end
+      } else {
+        merged.push({ ...regions[i] })
+      }
+    }
+
+    // Head trim: if first word is cut, extend to start of timeline
+    const firstWord = mergedWords[0]
+    if (firstWord && merged[0].start <= firstWord.start + 0.05) {
+      merged[0].start = 0
+    }
+
+    // Tail trim: if last word is cut, extend to end of timeline
+    const lastWord = mergedWords[mergedWords.length - 1]
+    const lastMerged = merged[merged.length - 1]
+    const timelineEnd = Math.max(...state.tracks.map(t => (t.offset || 0) + (t.duration || 0)))
+    if (lastWord && lastMerged.end >= lastWord.end - 0.05 && timelineEnd > lastMerged.end) {
+      lastMerged.end = timelineEnd
+    }
+
+    // Split merged cuts around excluded words
+    let splits = merged
+    if (state.cutExclusions?.length) {
+      const exclusions = [...state.cutExclusions].sort((a, b) => a.start - b.start)
+      splits = []
+      for (const region of merged) {
+        let current = { ...region }
+        for (const ex of exclusions) {
+          if (ex.start >= current.end || ex.end <= current.start) continue
+          // Exclusion overlaps this region — split it
+          if (current.start < ex.start - 0.01) {
+            splits.push({ start: current.start, end: ex.start })
+          }
+          current.start = ex.end
+        }
+        if (current.start < current.end - 0.01) {
+          splits.push(current)
+        }
+      }
+    }
+
+    const finalCuts = splits.map((r, i) => ({
+      id: `cut-ai-ann-${i}`,
+      start: r.start,
+      end: r.end,
+      source: 'annotation',
+    }))
+
+    dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-ann-', cuts: finalCuts } })
+    dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-bridge-', cuts: [] } }) // clean legacy
+  }, [annotationRegions, mergedWords, state.tracks, state.cutExclusions, dispatch])
 
   // Selection state — displayItems indices after snap
   const [selStart, setSelStart] = useState(-1)
@@ -355,15 +440,14 @@ export default function TranscriptEditor() {
     return count
   }, [hasSelection, selMin, selMax, displayItems])
 
-  // Remove cut on right-click
+  // Toggle word exclusion from annotation cuts on right-click
   const handleContextMenu = useCallback((idx, e) => {
     e.preventDefault()
     const item = displayItems[idx]
-    const cut = state.cuts.find(c => item.start < c.end && item.end > c.start)
-    if (cut) {
-      dispatch({ type: 'REMOVE_CUT', payload: cut.id })
-    }
-  }, [displayItems, state.cuts, dispatch])
+    if (item.type !== 'word') return
+    const wordEnd = Math.max(item.end, item.start + 0.01)
+    dispatch({ type: 'EXCLUDE_FROM_CUT', payload: { wordStart: item.start, wordEnd } })
+  }, [displayItems, dispatch])
 
   // Tooltip handlers
   const handleMouseEnter = useCallback((idx, e) => {
@@ -521,15 +605,12 @@ export default function TranscriptEditor() {
               bgColor = annColors.bg
             }
 
-            // Determine if this should have strikethrough from annotation
-            const isDeletion = hasAnn && primaryAnn.type === 'deletion'
-
             return (
               <span
                 key={`${item.start}-${idx}`}
                 ref={el => itemRefs.current[idx] = el}
                 className={`cursor-text px-[1px] py-[2px] inline ${
-                  (cut || isDeletion) ? 'line-through text-on-surface-variant' : ''
+                  cut ? 'line-through text-on-surface-variant' : ''
                 } ${
                   cut && !selected ? 'opacity-30' : ''
                 } ${

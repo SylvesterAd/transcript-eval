@@ -140,3 +140,12 @@ CREATE TABLE IF NOT EXISTS diff_cache (
   result_json TEXT NOT NULL,
   created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS spending_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  total_cost REAL DEFAULT 0,
+  total_tokens INTEGER DEFAULT 0,
+  total_runtime_ms INTEGER DEFAULT 0,
+  source TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);

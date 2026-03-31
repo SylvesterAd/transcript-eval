@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
-import { Link } from 'react-router-dom'
-import { useApi } from '../../hooks/useApi.js'
-import { ChevronDown, ChevronRight, ExternalLink, Eye, Loader2, X, Cpu, Layers, MessageSquare, MessageCircleQuestion, Sparkles, Copy, Check } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { useApi, apiDelete, apiPost } from '../../hooks/useApi.js'
+import { ChevronDown, ChevronRight, ExternalLink, Eye, Loader2, X, Cpu, Layers, MessageSquare, MessageCircleQuestion, Sparkles, Copy, Check, Square, Trash2, RotateCcw } from 'lucide-react'
 
 function StatusBadge({ status }) {
   const styles = {
@@ -80,23 +80,40 @@ function formatDuration(createdAt, completedAt) {
 }
 
 export default function RunsView() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const { data: runs, loading, refetch } = useApi('/experiments/runs')
-  const { data: spending } = useApi('/experiments/spending/today')
-  const { data: totalSpending } = useApi('/experiments/spending/total')
-  const pollRef = useRef(null)
+  const { data: spending, refetch: refetchSpending } = useApi('/experiments/spending/today')
+  const { data: totalSpending, refetch: refetchTotalSpending } = useApi('/experiments/spending/total')
+  const refetchRef = useRef(refetch)
+  refetchRef.current = refetch
+  const hasActiveRef = useRef(false)
 
-  // Poll when any run is running
+  const urlRunId = searchParams.get('run') ? parseInt(searchParams.get('run')) : null
+  const urlStageIndex = searchParams.get('stage') != null ? parseInt(searchParams.get('stage')) : null
+
+  const setUrlRun = useCallback((runId, stageIndex) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (runId != null) next.set('run', runId)
+      else next.delete('run')
+      if (stageIndex != null) next.set('stage', stageIndex)
+      else next.delete('stage')
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
+  // Track if any runs are active
   useEffect(() => {
-    if (!runs) return
-    const hasRunning = runs.some(r => r.status === 'running' || r.status === 'pending')
-    if (hasRunning && !pollRef.current) {
-      pollRef.current = setInterval(refetch, 2000)
-    } else if (!hasRunning && pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [runs, refetch])
+    hasActiveRef.current = runs?.some(r => r.status === 'running' || r.status === 'pending') || false
+  }, [runs])
+
+  // Poll every 3s only when there are active runs (silent — no loading flash)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (hasActiveRef.current) refetchRef.current(true)
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [])
 
   if (loading) return <div className="p-6 text-zinc-500 text-sm">Loading...</div>
 
@@ -128,7 +145,7 @@ export default function RunsView() {
       ) : (
         <div className="space-y-2">
           {runs.map(run => (
-            <RunRow key={run.id} run={run} />
+            <RunRow key={run.id} run={run} onDeleted={refetch} urlExpanded={urlRunId === run.id} urlStageIndex={urlRunId === run.id ? urlStageIndex : null} setUrlRun={setUrlRun} />
           ))}
         </div>
       )}
@@ -136,16 +153,72 @@ export default function RunsView() {
   )
 }
 
-function RunRow({ run }) {
-  const [expanded, setExpanded] = useState(false)
-  const [stageModal, setStageModal] = useState(null) // { runId, stageIndex }
+function RunRow({ run, onDeleted, urlExpanded, urlStageIndex, setUrlRun }) {
+  const [expanded, setExpanded] = useState(urlExpanded || false)
+  const [stageModal, setStageModal] = useState(urlStageIndex != null ? { runId: run.id, stageIndex: urlStageIndex } : null)
+  const [stopping, setStopping] = useState(false)
+
+  function toggleExpanded() {
+    const next = !expanded
+    setExpanded(next)
+    setUrlRun(next ? run.id : null, null)
+    if (!next) setStageModal(null)
+  }
+
+  function openStageModal(stageIndex) {
+    setStageModal({ runId: run.id, stageIndex })
+    setUrlRun(run.id, stageIndex)
+  }
+
+  function closeStageModal() {
+    setStageModal(null)
+    setUrlRun(expanded ? run.id : null, null)
+  }
+
+  const isActive = run.status === 'running' || run.status === 'pending'
+
+  async function handleStop(e) {
+    e.stopPropagation()
+    setStopping(true)
+    try {
+      await apiPost(`/experiments/${run.experiment_id}/abort`)
+    } catch {}
+  }
+
+  async function handleDelete(e) {
+    e.stopPropagation()
+    try {
+      await apiDelete(`/experiments/runs/${run.id}`)
+      onDeleted?.()
+    } catch {}
+  }
+
+  // Build per-stage status list for running/pending runs
+  const stageStatuses = (run.stageNames || []).map((name, i) => {
+    if (run.status === 'complete') return { name, status: 'complete' }
+    if (run.status === 'failed') {
+      if (i < run.completed_stages) return { name, status: 'complete' }
+      if (i === run.completed_stages) return { name, status: 'failed' }
+      return { name, status: 'waiting' }
+    }
+    // Check running stage first — its row may already exist in run_stage_outputs
+    if (run.currentStage != null && i === run.currentStage) {
+      return {
+        name, status: 'running',
+        segmentsDone: run.segmentsDone,
+        segmentsTotal: run.segmentsTotal,
+      }
+    }
+    if (i < run.completed_stages) return { name, status: 'complete' }
+    return { name, status: 'waiting' }
+  })
 
   return (
     <>
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
         {/* Summary row */}
         <button
-          onClick={() => setExpanded(!expanded)}
+          onClick={toggleExpanded}
           className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-zinc-800/50 transition-colors"
         >
           {expanded ? <ChevronDown size={14} className="text-zinc-500 shrink-0" /> : <ChevronRight size={14} className="text-zinc-500 shrink-0" />}
@@ -153,6 +226,7 @@ function RunRow({ run }) {
           <StatusBadge status={run.status} />
 
           <div className="min-w-0 flex-1">
+            <span className="text-[10px] text-zinc-600 mr-1.5 font-mono select-all">#{run.id}</span>
             <span className="text-sm font-medium truncate">
               {run.experiment_name?.startsWith('Auto:') ? run.experiment_name : run.strategy_name}
             </span>
@@ -192,6 +266,27 @@ function RunRow({ run }) {
           )}
           <span className="text-xs text-zinc-600 w-16 text-right shrink-0">{timeAgo(run.created_at)}</span>
 
+          {isActive && (
+            <button
+              onClick={handleStop}
+              disabled={stopping}
+              className="text-zinc-500 hover:text-red-400 shrink-0 p-0.5 rounded hover:bg-red-900/30 transition-colors disabled:opacity-50"
+              title="Stop run"
+            >
+              <Square size={12} fill="currentColor" />
+            </button>
+          )}
+
+          {!isActive && (
+            <button
+              onClick={handleDelete}
+              className="text-zinc-600 hover:text-red-400 shrink-0 p-0.5 rounded hover:bg-red-900/30 transition-colors"
+              title="Delete run"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+
           {run.group_id && (
             <Link
               to={`/editor/${run.group_id}/roughcut`}
@@ -204,8 +299,28 @@ function RunRow({ run }) {
           )}
         </button>
 
+        {/* Per-stage progress for active runs */}
+        {isActive && stageStatuses.length > 0 && (
+          <div className="px-4 pb-2 flex items-center gap-1 flex-wrap">
+            {stageStatuses.map((s, i) => (
+              <div key={i} className="flex items-center gap-1">
+                {i > 0 && <span className="text-zinc-700 text-[10px]">&rarr;</span>}
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                  s.status === 'complete' ? 'bg-emerald-900/40 text-emerald-400' :
+                  s.status === 'running' ? 'bg-blue-900/40 text-blue-400' :
+                  s.status === 'failed' ? 'bg-red-900/40 text-red-400' :
+                  'bg-zinc-800/50 text-zinc-600'
+                }`}>
+                  {s.name}
+                  {s.status === 'running' && s.segmentsTotal ? ` (${s.segmentsDone || 0}/${s.segmentsTotal})` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Expanded stage pipeline */}
-        {expanded && <ExpandedRun run={run} onViewStage={(stageIndex) => setStageModal({ runId: run.id, stageIndex })} />}
+        {expanded && <ExpandedRun run={run} onViewStage={openStageModal} onRestarted={onDeleted} />}
       </div>
 
       {/* Stage detail modal */}
@@ -213,15 +328,28 @@ function RunRow({ run }) {
         <StageDetailModal
           runId={stageModal.runId}
           stageIndex={stageModal.stageIndex}
-          onClose={() => setStageModal(null)}
+          onClose={closeStageModal}
         />
       )}
     </>
   )
 }
 
-function ExpandedRun({ run, onViewStage }) {
+function ExpandedRun({ run, onViewStage, onRestarted }) {
   const { data: detail, loading } = useApi(`/experiments/runs/${run.id}`)
+  const [openRawStage, setOpenRawStage] = useState(null)
+  const [restarting, setRestarting] = useState(false)
+
+  async function handleRestartFrom(stageIndex) {
+    setRestarting(true)
+    try {
+      await apiPost(`/experiments/runs/${run.id}/restart-from/${stageIndex}`)
+      onRestarted?.()
+    } catch (err) {
+      console.error('Restart failed:', err)
+      setRestarting(false)
+    }
+  }
 
   if (loading) return <div className="px-4 py-3 border-t border-zinc-800"><Loader2 size={14} className="animate-spin text-zinc-500" /></div>
   if (!detail) return null
@@ -256,13 +384,32 @@ function ExpandedRun({ run, onViewStage }) {
                 <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 min-w-[180px] max-w-[220px]">
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-xs font-medium truncate">{stage.stage_name}</span>
-                    <button
-                      onClick={() => onViewStage(stage.stage_index)}
-                      className="text-zinc-500 hover:text-zinc-300 shrink-0 ml-1"
-                      title="View stage details"
-                    >
-                      <Eye size={12} />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0 ml-1">
+                      <button
+                        onClick={() => setOpenRawStage(openRawStage === stage.stage_index ? null : stage.stage_index)}
+                        className={`hover:text-zinc-300 ${openRawStage === stage.stage_index ? 'text-blue-400' : 'text-zinc-500'}`}
+                        title="View raw input"
+                      >
+                        <MessageSquare size={12} />
+                      </button>
+                      <button
+                        onClick={() => onViewStage(stage.stage_index)}
+                        className="text-zinc-500 hover:text-zinc-300"
+                        title="View stage details"
+                      >
+                        <Eye size={12} />
+                      </button>
+                      {run.status !== 'running' && (
+                        <button
+                          onClick={() => handleRestartFrom(stage.stage_index)}
+                          disabled={restarting}
+                          className="text-zinc-600 hover:text-amber-400 disabled:opacity-50"
+                          title={`Re-run from ${stage.stage_name}`}
+                        >
+                          <RotateCcw size={12} />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-1 mb-1.5">
@@ -290,6 +437,36 @@ function ExpandedRun({ run, onViewStage }) {
           })}
         </div>
       )}
+
+      {/* Raw input panel for selected stage */}
+      {openRawStage != null && (() => {
+        const stage = stages.find(s => s.stage_index === openRawStage)
+        if (!stage) return null
+        return (
+          <div className="mt-3 border-t border-zinc-800 pt-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-zinc-400">Raw Input — {stage.stage_name}</span>
+              <button onClick={() => setOpenRawStage(null)} className="text-zinc-500 hover:text-zinc-300"><X size={12} /></button>
+            </div>
+            {stage.system_instruction_used && (
+              <div>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">System Instruction</span>
+                <pre className="text-[11px] text-zinc-300 bg-zinc-950 border border-zinc-800 rounded p-2 mt-1 overflow-auto max-h-[200px] whitespace-pre-wrap font-mono">
+                  {stage.system_instruction_used}
+                </pre>
+              </div>
+            )}
+            {stage.prompt_used && (
+              <div>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">User Prompt</span>
+                <pre className="text-[11px] text-zinc-300 bg-zinc-950 border border-zinc-800 rounded p-2 mt-1 overflow-auto max-h-[200px] whitespace-pre-wrap font-mono">
+                  {stage.prompt_used}
+                </pre>
+              </div>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 }
@@ -383,6 +560,8 @@ function StageDetailModal({ runId, stageIndex, onClose }) {
               segments={data.segments}
               selectedSegment={selectedSegment}
               onSelect={setSelectedSegment}
+              systemInstruction={data.systemInstruction}
+              rawStageConfig={data.rawStageConfig}
             />
           )}
         </div>
@@ -482,24 +661,48 @@ function RawTab({ data, copyText, copied }) {
   )
 }
 
-function SegmentsTab({ segments, selectedSegment, onSelect }) {
+function SegmentsTab({ segments, selectedSegment, onSelect, systemInstruction, rawStageConfig }) {
   if (selectedSegment !== null && segments[selectedSegment]) {
     const seg = segments[selectedSegment]
     return (
       <div>
         <button onClick={() => onSelect(null)} className="text-xs text-zinc-400 hover:text-zinc-200 mb-3">&larr; Back to segments list</button>
         <div className="grid grid-cols-2 gap-4">
-          <div>
-            <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">Segment Input</span>
-            <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[55vh] whitespace-pre-wrap font-mono">
-              {seg.input || seg.text || '(no input)'}
-            </pre>
+          <div className="space-y-3">
+            {rawStageConfig?.system_instruction && (
+              <div>
+                <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">Raw System Instruction <span className="normal-case text-zinc-600">(template)</span></span>
+                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[20vh] whitespace-pre-wrap font-mono">{rawStageConfig.system_instruction}</pre>
+              </div>
+            )}
+            {systemInstruction && (
+              <div>
+                <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">System Instruction Sent</span>
+                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[20vh] whitespace-pre-wrap font-mono">{systemInstruction}</pre>
+              </div>
+            )}
+            {seg.promptUsed && (
+              <div>
+                <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">User Prompt Sent</span>
+                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[30vh] whitespace-pre-wrap font-mono">{seg.promptUsed}</pre>
+              </div>
+            )}
           </div>
-          <div>
-            <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">Segment Output</span>
-            <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[55vh] whitespace-pre-wrap font-mono">
-              {seg.cleanedText || seg.output || '(no output)'}
-            </pre>
+          <div className="space-y-3">
+            <div>
+              <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">Segment Output</span>
+              <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[30vh] whitespace-pre-wrap font-mono">
+                {seg.cleanedText || seg.output || '(no output)'}
+              </pre>
+            </div>
+            {seg.llmResponseRaw && seg.llmResponseRaw !== (seg.cleanedText || seg.output) && (
+              <div>
+                <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">Raw LLM Response</span>
+                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[30vh] whitespace-pre-wrap font-mono">
+                  {seg.llmResponseRaw}
+                </pre>
+              </div>
+            )}
           </div>
         </div>
       </div>

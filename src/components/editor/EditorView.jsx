@@ -57,13 +57,56 @@ export default function EditorView() {
     })
   }, [groupDetail, id, dispatch])
 
-  // Load annotations from server
+  // Load annotations from server (or clear stale ones if deleted)
+  const defaultsAppliedRef = useRef(false)
   useEffect(() => {
-    if (!groupDetail?.annotations || !state.groupId) return
-    // Only set once — don't overwrite if already loaded
-    if (state.annotations) return
-    dispatch({ type: 'SET_ANNOTATIONS', payload: groupDetail.annotations })
-  }, [groupDetail, state.groupId, state.annotations, dispatch])
+    if (!state.groupId) return
+    if (!groupDetail) return
+
+    if (!groupDetail.annotations) {
+      // Annotations were deleted on server — clear stale annotation cuts from restored state
+      if (state.annotations) {
+        dispatch({ type: 'SET_ANNOTATIONS', payload: null })
+      }
+      if (state.cuts.some(c => c.id.startsWith('cut-ai-ann-'))) {
+        dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-ann-', cuts: [] } })
+        dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-bridge-', cuts: [] } })
+      }
+      return
+    }
+
+    if (!state.annotations) {
+      dispatch({ type: 'SET_ANNOTATIONS', payload: groupDetail.annotations })
+    }
+    // Auto-enable deletion categories once if none are enabled (first load)
+    if (!defaultsAppliedRef.current && groupDetail.annotations.items?.length > 0) {
+      const { false_starts, filler_words, meta_commentary } = state.aiCutsSelected || {}
+      if (!false_starts && !filler_words && !meta_commentary) {
+        applyConfigDefaults(groupDetail.rough_cut_config, dispatch)
+      }
+      defaultsAppliedRef.current = true
+    }
+  }, [groupDetail, state.groupId, state.annotations, state.cuts, state.aiCutsSelected, dispatch])
+
+  // On roughcut load, seek to the first uncut position (skip leading cuts)
+  const initialSeekDoneRef = useRef(false)
+  useEffect(() => {
+    if (activeTab !== 'roughcut' || initialSeekDoneRef.current) return
+    if (!state.cuts.length) return
+    // Find the first cut that starts at or near 0
+    const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
+    if (sorted[0].start > 0.5) return // no cut at the beginning, nothing to skip
+    // Walk through cuts starting at 0 to find where continuous coverage ends
+    let pos = 0
+    for (const cut of sorted) {
+      if (cut.start > pos + 0.05) break // gap found — this is where uncut content starts
+      pos = Math.max(pos, cut.end)
+    }
+    if (pos > 0.5) {
+      initialSeekDoneRef.current = true
+      dispatch({ type: 'SET_CURRENT_TIME', payload: pos })
+    }
+  }, [activeTab, state.cuts, dispatch])
 
   // Trigger main flow when switching to roughcut tab
   const flowTriggeredRef = useRef(false)
@@ -82,6 +125,12 @@ export default function EditorView() {
       try {
         const res = await fetch(`/api/videos/groups/${state.groupId}/run-main-flow`, { method: 'POST' })
         const data = await res.json()
+        if (!res.ok) {
+          if (data.error === 'too_many_failures') {
+            setFlowRunState({ status: 'blocked', message: data.message })
+          }
+          return
+        }
         if (data.already_exists) {
           // Auto-run already completed — refetch to load annotations
           await refetchDetail()
@@ -450,10 +499,8 @@ export default function EditorView() {
           // Find cuts that overlap the selection
           const overlapping = state.cuts.filter(c => c.start < endTime && c.end > startTime)
           if (overlapping.length > 0) {
-            // Selection is already cut — remove those cuts (toggle off)
-            for (const cut of overlapping) {
-              dispatch({ type: 'REMOVE_CUT', payload: cut.id })
-            }
+            // Selection is already cut — exclude just the selected range (split cuts around it)
+            dispatch({ type: 'EXCLUDE_FROM_CUT', payload: { wordStart: startTime, wordEnd: endTime } })
           } else {
             // Selection is not cut — create a cut
             dispatch({
@@ -653,10 +700,22 @@ function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
   }, [videoW])
 
   // Full-screen flow progress — replaces entire workspace
-  if (isRoughCut && (flowRunState?.status === 'running' || flowRunState?.status === 'error')) {
+  if (isRoughCut && (flowRunState?.status === 'running' || flowRunState?.status === 'error' || flowRunState?.status === 'blocked')) {
     return (
       <main className="flex-1 flex flex-col bg-surface-dim overflow-hidden">
-        <FlowProgressScreen progress={flowRunState.progress} initialTotalStages={flowRunState.totalStages} initialStageNames={flowRunState.stageNames} error={flowRunState.status === 'error'} onDismissError={() => setFlowRunState(null)} />
+        {flowRunState.status === 'blocked' ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center max-w-md space-y-3">
+              <div className="w-10 h-10 rounded-full bg-red-900/30 border border-red-800 flex items-center justify-center mx-auto">
+                <span className="text-red-400 text-lg">!</span>
+              </div>
+              <h3 className="text-sm font-medium text-zinc-200">Analysis failed</h3>
+              <p className="text-xs text-zinc-400">{flowRunState.message}</p>
+            </div>
+          </div>
+        ) : (
+          <FlowProgressScreen progress={flowRunState.progress} initialTotalStages={flowRunState.totalStages} initialStageNames={flowRunState.stageNames} error={flowRunState.status === 'error'} onDismissError={() => setFlowRunState(null)} />
+        )}
       </main>
     )
   }
@@ -759,17 +818,18 @@ function SyncingScreen({ groupId, status, onDone }) {
 }
 
 function applyConfigDefaults(config, dispatch) {
-  if (!config) return
+  // When no config exists, default all deletion categories ON — the LLM found
+  // things to cut, so they should be applied as cuts by default
   dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: {
-    false_starts: config.false_starts ?? false,
-    filler_words: config.filler_words ?? true,
-    meta_commentary: config.meta_commentary ?? false,
+    false_starts: config?.false_starts ?? true,
+    filler_words: config?.filler_words ?? true,
+    meta_commentary: config?.meta_commentary ?? true,
   }})
   dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: {
-    repetition: config.repetition ?? true,
-    lengthy: config.lengthy ?? false,
-    technical_unclear: config.technical_unclear ?? false,
-    irrelevance: config.irrelevance ?? false,
+    repetition: config?.repetition ?? true,
+    lengthy: config?.lengthy ?? false,
+    technical_unclear: config?.technical_unclear ?? false,
+    irrelevance: config?.irrelevance ?? false,
   }})
 }
 

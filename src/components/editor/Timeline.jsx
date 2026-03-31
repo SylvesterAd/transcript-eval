@@ -15,6 +15,23 @@ export default function Timeline() {
   const prevZoomRef = useRef(state.zoom)
   const zoomAnchorRef = useRef(null) // { time, screenX } — set by wheel, null for +/- buttons
 
+  // Merge overlapping cuts for display — prevents double overlays when
+  // silence cuts overlap with annotation cuts on the timeline
+  const mergedDisplayCuts = useMemo(() => {
+    if (!state.cuts.length) return []
+    const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
+    const merged = [{ ...sorted[0] }]
+    for (let i = 1; i < sorted.length; i++) {
+      const last = merged[merged.length - 1]
+      if (sorted[i].start <= last.end) {
+        last.end = Math.max(last.end, sorted[i].end)
+      } else {
+        merged.push({ ...sorted[i] })
+      }
+    }
+    return merged
+  }, [state.cuts])
+
   // Track horizontal scroll for virtualized tick rendering
   useEffect(() => {
     const el = scrollRef.current
@@ -472,7 +489,7 @@ export default function Timeline() {
                     </div>
                   </div>
                   <div className="flex-1 relative z-0">
-                    <CompositeFrameTrack segments={effectiveVideoSegments} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} />
+                    <CompositeFrameTrack segments={effectiveVideoSegments} zoom={state.zoom} cuts={mergedDisplayCuts} scrollRef={scrollRef} scrollX={scrollX} />
                   </div>
                 </div>
               </div>
@@ -513,7 +530,7 @@ export default function Timeline() {
                     </button>
                   </div>
                   <div className="flex-1 relative z-0">
-                    <CompositeAudioTrack segments={effectiveAudioSegments} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} showTranscript={state.compositeShowTranscript} />
+                    <CompositeAudioTrack segments={effectiveAudioSegments} zoom={state.zoom} cuts={mergedDisplayCuts} scrollRef={scrollRef} scrollX={scrollX} showTranscript={state.compositeShowTranscript} />
                   </div>
                 </div>
               </div>
@@ -586,7 +603,7 @@ export default function Timeline() {
                   <div className="flex-1 relative">
                     {isVideo
                       ? (isRoughCut
-                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={state.cuts} scrollRef={scrollRef} scrollX={scrollX} />
+                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={mergedDisplayCuts} scrollRef={scrollRef} scrollX={scrollX} />
                           : <VideoTrack track={track} zoom={state.zoom} />)
                       : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} scrollRef={scrollRef} scrollX={scrollX} />
                     }

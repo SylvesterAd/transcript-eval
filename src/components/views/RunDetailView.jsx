@@ -251,7 +251,7 @@ function aggregateIdentifications(stages, upToIndex) {
 function buildWordCategoryMap(rawText, identifications) {
   if (!rawText || !identifications.length) return new Map()
 
-  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+  const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]\s*/g
   const entries = []
   let match
   while ((match = tcRegex.exec(rawText)) !== null) {
@@ -335,14 +335,14 @@ function IdentificationPanel({ identifications, transcript }) {
   // Parse transcript into timecoded entries
   const entries = useMemo(() => {
     if (!transcript) return []
-    const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g
+    const tcRegex = /\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]\s*/g
     const result = []
     let match
     while ((match = tcRegex.exec(transcript)) !== null) {
       const start = match.index
       const textStart = match.index + match[0].length
       const remaining = transcript.slice(textStart)
-      const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/)
+      const nextTcMatch = remaining.match(/\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]/)
       const end = nextTcMatch ? textStart + nextTcMatch.index : transcript.length
       result.push({
         timecode: match[0].trim(),
@@ -486,14 +486,26 @@ function StageDetail({ stage, diff, human, raw, allStages, activeStageIndex }) {
 
       {tab === 'prompt' && (
         <div className="space-y-3">
+          {stage.rawStageConfig?.system_instruction && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-lg">
+              <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">Raw System Instruction <span className="text-zinc-600">(template)</span></div>
+              <pre className="p-4 text-xs whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-auto text-zinc-300">{stage.rawStageConfig.system_instruction}</pre>
+            </div>
+          )}
+          {stage.rawStageConfig?.prompt && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-lg">
+              <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">Raw User Prompt <span className="text-zinc-600">(template)</span></div>
+              <pre className="p-4 text-xs whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-auto text-zinc-300">{stage.rawStageConfig.prompt}</pre>
+            </div>
+          )}
           {stage.system_instruction_used && (
             <div className="bg-zinc-900 border border-zinc-800 rounded-lg">
-              <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">System Instruction</div>
+              <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">Rendered System Instruction</div>
               <pre className="p-4 text-xs whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-auto text-zinc-300">{stage.system_instruction_used}</pre>
             </div>
           )}
           <div className="bg-zinc-900 border border-zinc-800 rounded-lg">
-            <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">Prompt Used</div>
+            <div className="px-4 py-2 border-b border-zinc-800 text-sm text-zinc-400">Rendered Prompt</div>
             <pre className="p-4 text-xs whitespace-pre-wrap font-mono leading-relaxed max-h-64 overflow-auto text-zinc-300">{stage.prompt_used}</pre>
           </div>
         </div>

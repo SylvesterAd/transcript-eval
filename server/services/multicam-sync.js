@@ -548,11 +548,11 @@ function parseTimecodedBlocks(transcript) {
 
   const timestamps = []
   for (const block of blocks) {
-    const tcMatch = block.match(/^\[(\d{2}):(\d{2}):(\d{2})\]/)
+    const tcMatch = block.match(/^\[(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,2}))?\]/)
     if (!tcMatch) continue
-    const start = +tcMatch[1] * 3600 + +tcMatch[2] * 60 + +tcMatch[3]
+    const start = +tcMatch[1] * 3600 + +tcMatch[2] * 60 + +tcMatch[3] + (tcMatch[4] ? parseInt(tcMatch[4], 10) / 100 : 0)
     const words = block
-      .replace(/\[\d{2}:\d{2}:\d{2}\]/g, '')
+      .replace(/\[\d{2}:\d{2}:\d{2}(?:\.\d{1,2})?\]/g, '')
       .replace(/[.,!?;:'"()\-—]/g, '')
       .toLowerCase()
       .split(/\s+/)
@@ -865,10 +865,10 @@ function mergeMulticamTranscript(primary, others) {
 
 /** Extract the last timecode in a transcript as total seconds */
 function getLastTimecode(text) {
-  const matches = [...text.matchAll(/\[(\d{2}):(\d{2}):(\d{2})\]/g)]
+  const matches = [...text.matchAll(/\[(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,2}))?\]/g)]
   if (matches.length === 0) return 0
   const last = matches[matches.length - 1]
-  return +last[1] * 3600 + +last[2] * 60 + +last[3]
+  return +last[1] * 3600 + +last[2] * 60 + +last[3] + (last[4] ? parseInt(last[4], 10) / 100 : 0)
 }
 
 /** Strip timecodes and punctuation, return lowercase word array */
@@ -1094,11 +1094,12 @@ function cleanTranscript(text) {
 }
 
 function offsetTimecodes(text, secs) {
-  return text.replace(/\[(\d{2}):(\d{2}):(\d{2})\]/g, (_, h, m, s) => {
-    const total = +h * 3600 + +m * 60 + +s + secs
+  return text.replace(/\[(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,2}))?\]/g, (_, h, m, s, cs) => {
+    const total = +h * 3600 + +m * 60 + +s + (cs ? parseInt(cs, 10) / 100 : 0) + secs
     const hh = String(Math.floor(total / 3600)).padStart(2, '0')
     const mm = String(Math.floor((total % 3600) / 60)).padStart(2, '0')
-    const ss = String(Math.floor(total % 60)).padStart(2, '0')
-    return `[${hh}:${mm}:${ss}]`
+    const ss2 = String(Math.floor(total % 60)).padStart(2, '0')
+    const cc = Math.floor((total % 1) * 100)
+    return cc > 0 ? `[${hh}:${mm}:${ss2}.${String(cc).padStart(2, '0')}]` : `[${hh}:${mm}:${ss2}]`
   })
 }

@@ -1,9 +1,9 @@
 import { diffWords } from 'diff'
 
 // Regex for timecodes [00:01:23] or [01:23] and pause markers [2.3s]
-const TIMECODE_RE = /\[\d{1,2}:\d{2}(?::\d{2})?\]/g
+const TIMECODE_RE = /\[\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?\]/g
 const PAUSE_RE = /\[\d+\.?\d*s\]/g
-const SPECIAL_TOKEN_RE = /(\[\d{1,2}:\d{2}(?::\d{2})?\]|\[\d+\.?\d*s\])/g
+const SPECIAL_TOKEN_RE = /(\[\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?\]|\[\d+\.?\d*s\])/g
 
 /**
  * Normalize text for word-focused comparison:

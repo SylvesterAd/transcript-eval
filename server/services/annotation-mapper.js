@@ -2,15 +2,82 @@ import db from '../db.js'
 import { executeRun } from './llm-runner.js'
 
 /**
+ * Build merged word timestamps for a group, applying track offsets from editor state.
+ * Replicates the editor's mergedWords logic: longest audio track is primary,
+ * other tracks fill in time gaps not covered by the primary.
+ */
+export function getTimelineWordTimestamps(groupId) {
+  const group = db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
+  if (!group?.editor_state_json) return null
+
+  let edState
+  try { edState = JSON.parse(group.editor_state_json) } catch { return null }
+  const tracks = edState.tracks || []
+
+  // Find audio tracks, load their word timestamps from transcripts
+  const audioTracks = tracks
+    .filter(t => t.type === 'audio')
+    .map(t => {
+      const videoId = parseInt(t.id.replace('a-', ''))
+      if (isNaN(videoId)) return null
+      const transcript = db.prepare(
+        'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
+      ).get(videoId, 'raw')
+      let words = []
+      if (transcript?.word_timestamps_json) {
+        try { words = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+      }
+      return {
+        videoId,
+        offset: t.offset || 0,
+        duration: t.duration || 0,
+        timelineEnd: (t.offset || 0) + (t.duration || 0),
+        words,
+      }
+    })
+    .filter(t => t && t.words.length > 0)
+    .sort((a, b) => (b.timelineEnd - b.offset) - (a.timelineEnd - a.offset)) // longest first
+
+  if (!audioTracks.length) return null
+
+  const primary = audioTracks[0]
+  const merged = primary.words.map(w => ({
+    word: w.word,
+    start: w.start + primary.offset,
+    end: w.end + primary.offset,
+  }))
+
+  const coveredStart = primary.offset
+  const coveredEnd = primary.timelineEnd
+
+  for (let i = 1; i < audioTracks.length; i++) {
+    const t = audioTracks[i]
+    for (const w of t.words) {
+      const absStart = w.start + t.offset
+      if (absStart < coveredStart || absStart >= coveredEnd) {
+        merged.push({ word: w.word, start: absStart, end: w.end + t.offset })
+      }
+    }
+  }
+
+  merged.sort((a, b) => a.start - b.start)
+  return merged
+}
+
+/**
  * Convert timecode string "[HH:MM:SS]" or "[MM:SS]" to seconds.
  */
 function timecodeToSeconds(tc) {
-  const match = tc.match(/\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\]?/)
+  const match = tc.match(/\[?(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,2}))?)?\]?/)
   if (!match) return 0
+  let seconds = 0
   if (match[3] !== undefined) {
-    return parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3])
+    seconds = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3])
+  } else {
+    seconds = parseInt(match[1]) * 60 + parseInt(match[2])
   }
-  return parseInt(match[1]) * 60 + parseInt(match[2])
+  if (match[4]) seconds += parseInt(match[4], 10) / 100
+  return seconds
 }
 
 /**
@@ -21,78 +88,96 @@ function normalizeText(text) {
 }
 
 /**
- * Match an item's text to word timestamps, returning the time range.
+ * Build a positional index: timecode → word timestamp entries.
  *
- * @param {string|null} itemText - The text to find, or null for whole timecode segment
- * @param {number} timecodeSeconds - The timecode in seconds
- * @param {Array} wordTimestamps - Array of {word, start, end}
- * @returns {{startTime: number, endTime: number}|null}
+ * Walks the assembled transcript and merged word timestamps in parallel,
+ * matching each transcript word to its corresponding word timestamp entry
+ * by sequential position (not by time window).
+ *
+ * Returns: Array of { tc, tcSec, words: [{word, start, end}] }
  */
-function matchTextToWords(itemText, timecodeSeconds, wordTimestamps) {
-  if (!wordTimestamps?.length) return null
+function buildTimecodeWordIndex(assembledTranscript, wordTimestamps) {
+  if (!assembledTranscript || !wordTimestamps?.length) return []
 
-  // Find candidate words near the timecode
-  const windowStart = timecodeSeconds - 2
-  const windowEnd = timecodeSeconds + 30
-  const candidates = []
-  for (let i = 0; i < wordTimestamps.length; i++) {
-    if (wordTimestamps[i].start >= windowStart && wordTimestamps[i].start <= windowEnd) {
-      candidates.push({ ...wordTimestamps[i], idx: i })
+  // Parse transcript into timecoded entries
+  const entries = []
+  for (const line of assembledTranscript.split('\n')) {
+    const m = line.match(/^(\[[\d:\.]+\])\s*(.+)/)
+    if (m) {
+      const textWords = m[2].trim().split(/\s+/).filter(Boolean)
+      if (textWords.length > 0) {
+        entries.push({ tc: m[1], tcSec: timecodeToSeconds(m[1]), textWords })
+      }
     }
   }
-  if (candidates.length === 0) return null
 
-  if (itemText) {
-    // Normalize and tokenize the target text
-    const targetTokens = normalizeText(itemText).split(' ').filter(Boolean)
-    if (targetTokens.length === 0) return null
+  // Walk both lists in parallel — each transcript word maps to the next
+  // matching word in the timestamps. This ensures positional accuracy:
+  // "clap" in "Kayla's good clap again" stays separate from standalone "Clap."
+  const index = []
+  let wsPos = 0
 
-    // Find contiguous subsequence in candidates matching target tokens
-    for (let i = 0; i <= candidates.length - targetTokens.length; i++) {
-      let match = true
-      for (let j = 0; j < targetTokens.length; j++) {
-        const wordNorm = normalizeText(candidates[i + j].word)
-        if (wordNorm !== targetTokens[j]) {
-          match = false
+  for (const entry of entries) {
+    const matched = []
+
+    for (const word of entry.textWords) {
+      const norm = normalizeText(word)
+      if (!norm) continue
+
+      // Scan forward (limited) to find matching word
+      let found = false
+      const scanLimit = Math.min(wsPos + 40, wordTimestamps.length)
+      for (let j = wsPos; j < scanLimit; j++) {
+        const wNorm = normalizeText(wordTimestamps[j].word)
+        if (wNorm === norm || wNorm.startsWith(norm) || norm.startsWith(wNorm)) {
+          matched.push(wordTimestamps[j])
+          wsPos = j + 1
+          found = true
           break
         }
       }
-      if (match) {
-        return {
-          startTime: candidates[i].start,
-          endTime: candidates[i + targetTokens.length - 1].end,
-        }
-      }
+
+      // If not found in forward scan, the word might be missing from timestamps
+      // (e.g. formatting artifacts). Skip it — other words in the entry still match.
     }
 
-    // Fallback: try partial/fuzzy match with startsWith
-    for (let i = 0; i <= candidates.length - targetTokens.length; i++) {
-      let match = true
-      for (let j = 0; j < targetTokens.length; j++) {
-        const wordNorm = normalizeText(candidates[i + j].word)
-        if (!wordNorm.startsWith(targetTokens[j]) && !targetTokens[j].startsWith(wordNorm)) {
-          match = false
-          break
-        }
-      }
-      if (match) {
-        return {
-          startTime: candidates[i].start,
-          endTime: candidates[i + targetTokens.length - 1].end,
-        }
-      }
+    if (matched.length > 0) {
+      index.push({ tc: entry.tc, tcSec: entry.tcSec, words: matched })
     }
-
-    // Last resort: use first/last candidates as range
-    return null
   }
 
-  // No text specified — mark all words from timecode to next timecode (or +5s)
-  const endTime = Math.min(timecodeSeconds + 5, candidates[candidates.length - 1].end)
-  return {
-    startTime: candidates[0].start,
-    endTime,
+  return index
+}
+
+/**
+ * Find word timestamp entries for a given LLM timecode, using the positional index.
+ *
+ * Lookup strategy:
+ * 1. Exact timecode string match
+ * 2. Seconds-based match with tolerance (handles format differences like
+ *    [00:00:45] vs [00:00:45.95])
+ */
+function findWordsForTimecode(timecode, wordIndex) {
+  const tcNorm = timecode.startsWith('[') ? timecode : `[${timecode}]`
+  const tcSec = timecodeToSeconds(timecode)
+
+  // 1. Exact string match — may return multiple entries for duplicate timecodes
+  const exact = wordIndex.filter(e => e.tc === tcNorm)
+  if (exact.length > 0) return exact
+
+  // 2. Closest by seconds (within 1s tolerance)
+  let best = null
+  let bestDist = Infinity
+  for (const e of wordIndex) {
+    const dist = Math.abs(e.tcSec - tcSec)
+    if (dist < bestDist) {
+      bestDist = dist
+      best = e
+    }
   }
+  if (best && bestDist < 1.0) return [best]
+
+  return []
 }
 
 /**
@@ -120,11 +205,16 @@ function parseRawJson(raw) {
 /**
  * Build annotations from a completed experiment run.
  *
+ * Uses positional word matching: walks the assembled transcript and word
+ * timestamps in parallel to build an exact timecode→words index, then
+ * maps each LLM deletion/identify item to the correct words by timecode lookup.
+ *
  * @param {number} experimentRunId - The run to extract annotations from
- * @param {Array} wordTimestamps - Array of {word, start, end} from the primary transcript
+ * @param {Array} wordTimestamps - Array of {word, start, end} from the timeline
+ * @param {string} [assembledTranscript] - Assembled transcript for timecode→word mapping
  * @returns {Object} Annotations object ready to store as JSON
  */
-export function buildAnnotationsFromRun(experimentRunId, wordTimestamps) {
+export function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembledTranscript) {
   const run = db.prepare(`
     SELECT er.*, e.strategy_version_id, e.name AS experiment_name
     FROM experiment_runs er
@@ -140,6 +230,9 @@ export function buildAnnotationsFromRun(experimentRunId, wordTimestamps) {
   const stageOutputs = db.prepare(
     'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
   ).all(experimentRunId)
+
+  // Build positional word index from assembled transcript
+  const wordIndex = buildTimecodeWordIndex(assembledTranscript, wordTimestamps)
 
   const items = []
   let annId = 0
@@ -183,24 +276,63 @@ export function buildAnnotationsFromRun(experimentRunId, wordTimestamps) {
       rawItems = parseRawJson(stageOutput.llm_response_raw)
     }
 
-    // Map each raw item to word timestamps
+    // Derive category from stage config (identifyPreselect)
+    const preselect = stageConfig.identifyPreselect
+    const stageCategory = (preselect?.enabled && preselect?.categories?.length === 1)
+      ? preselect.categories[0]
+      : (preselect?.enabled && preselect?.categories?.length > 0)
+        ? preselect.categories[0]
+        : null
+
+    // Map each raw item to word timestamps via positional index
     for (const item of rawItems) {
       if (!item.timecode) continue
 
-      const tcSeconds = timecodeToSeconds(item.timecode)
-      const timeRange = matchTextToWords(item.text || null, tcSeconds, wordTimestamps)
-      if (!timeRange) continue
+      // Look up words at this timecode
+      const entries = findWordsForTimecode(item.timecode, wordIndex)
+      if (!entries.length) continue
+
+      // Collect all words from matching entries
+      let matchedWords = entries.flatMap(e => e.words)
+
+      // If LLM specified text, subset to matching words
+      if (item.text) {
+        const targetTokens = normalizeText(item.text).split(' ').filter(Boolean)
+        if (targetTokens.length > 0 && targetTokens.length <= matchedWords.length) {
+          for (let i = 0; i <= matchedWords.length - targetTokens.length; i++) {
+            let match = true
+            for (let j = 0; j < targetTokens.length; j++) {
+              const wNorm = normalizeText(matchedWords[i + j].word)
+              if (wNorm !== targetTokens[j] && !wNorm.startsWith(targetTokens[j]) && !targetTokens[j].startsWith(wNorm)) {
+                match = false
+                break
+              }
+            }
+            if (match) {
+              matchedWords = matchedWords.slice(i, i + targetTokens.length)
+              break
+            }
+          }
+        }
+      }
+
+      if (!matchedWords.length) continue
+
+      const startTime = matchedWords[0].start
+      // Handle 0-duration words (ElevenLabs sometimes returns start === end)
+      let endTime = matchedWords[matchedWords.length - 1].end
+      if (endTime <= startTime) endTime = startTime + 0.15
 
       annId++
       items.push({
         id: `ann-${annId}`,
         type: annotationType,
-        category: item.category || (annotationType === 'deletion' ? 'filler_words' : 'repetition'),
+        category: stageCategory || item.category || (annotationType === 'deletion' ? 'filler_words' : 'repetition'),
         reason: item.reason || '',
         text: item.text || '',
         timecode: item.timecode,
-        startTime: timeRange.startTime,
-        endTime: timeRange.endTime,
+        startTime,
+        endTime,
         stageName: stageOutput.stage_name,
         stageIndex: stageOutput.stage_index,
       })
@@ -276,23 +408,28 @@ export async function runMainFlowForGroup(groupId) {
     return
   }
 
-  // Get word timestamps for the video
-  const transcript = db.prepare(
-    'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
-  ).get(video.id, 'raw')
+  // Get merged word timestamps (all videos with track offsets)
+  let wordTimestamps = getTimelineWordTimestamps(groupId)
 
-  let wordTimestamps = []
-  if (transcript?.word_timestamps_json) {
-    try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+  // Fallback: single video if editor state not ready yet
+  if (!wordTimestamps?.length) {
+    const transcript = db.prepare(
+      'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
+    ).get(video.id, 'raw')
+    wordTimestamps = []
+    if (transcript?.word_timestamps_json) {
+      try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+    }
   }
 
   if (!wordTimestamps.length) {
-    console.log(`[main-flow] No word timestamps for video ${video.id}, skipping annotation mapping`)
+    console.log(`[main-flow] No word timestamps for group ${groupId}, skipping annotation mapping`)
     return
   }
 
-  // Build annotations
-  const annotations = buildAnnotationsFromRun(runId, wordTimestamps)
+  // Build annotations (pass assembled transcript for positional word matching)
+  const groupData = db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
+  const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
   console.log(`[main-flow] Built ${annotations.items.length} annotations for group ${groupId}`)
 
   // Store annotations

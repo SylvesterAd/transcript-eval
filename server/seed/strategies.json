@@ -1,0 +1,570 @@
+[
+  {
+    "id": 1,
+    "name": "Single-Stage Retake Deduplication",
+    "description": "This workflow uses a single advanced LLM stage to analyze the entire transcript, identify consecutive paragraphs that share the same meaning (retakes), and evaluate them. It uses Gemini 3.1 Pro's strong reasoning capabilities to filter out overexplained or messy takes, prioritizing later takes, and outputs the strictly cleaned text without any intermediary steps.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Identify and Clean Retakes",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "system_instruction": "You are a professional transcript editor specializing in retake selection and audio cleanup. Your job is to analyze transcripts, find repeated takes (consecutive paragraphs with the same meaning), evaluate them, and keep only the best take. Always preserve timecodes in [HH:MM:SS] format exactly where they belong. You must output ONLY the final cleaned transcript. Do not include any of your internal analysis, grouping notes, conversational filler, or commentary in your output.",
+            "prompt": "Analyze the transcript below and perform the following instructions:\n\n1. Identify whole paragraphs (usually >8 words) that convey the same or very similar meaning. Note that different paragraphs might have different word capitalization or punctuation.\n2. Group matching ones internally by their timecodes. These paragraphs usually go one by one, consecutively, without other topics in the middle.\n3. Evaluate the grouped paragraphs and delete the ones that are overexplaining, harder to understand, or just aren't that clean.\n4. Take into consideration that the later take usually wins (the speaker's final attempt is typically the intended one).\n5. Output ONLY the resulting transcript with the inferior takes removed. Keep all original timecodes intact.\n\nHere is the transcript:\n\n<transcript>",
+            "description": "Identifies consecutive repeated takes, evaluates them for clarity, and removes the inferior versions in a single pass."
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-18 17:31:13"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "False Start & Filler Word Cleaner",
+    "description": "This pipeline segments the transcript to handle longer files, then uses a parallel LLM stage to clean each segment. The LLM is specifically instructed to detect and remove false starts, speech loops, and filler words, while keeping the final take despite transcription inconsistencies. Finally, the cleaned segments are reassembled into a single seamless transcript.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Segment Transcript",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split into segments with overlapping context to ensure false starts crossing boundaries are caught.",
+            "actionParams": {
+              "minSeconds": 60,
+              "maxSeconds": 120,
+              "contextSeconds": 30
+            }
+          },
+          {
+            "name": "Clean False Starts & Fillers",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "system_instruction": "You are a highly skilled transcript editor. Your primary task is to clean raw transcripts by doing exactly two things: \n1. Identify and delete obvious false starts and speech loops (e.g., when a speaker stumbles and repeats a phrase to correct themselves). Always keep the final, successful take. Pay close attention: different attempts might have different word capitalization or punctuation due to transcription errors; if the underlying words mean the same thing and represent a loop, treat them as a false start and keep only the last take.\n2. Delete filler words (e.g., 'um', 'uh', 'you know', 'like', 'basically', 'I mean').\n\nRULES:\n- Preserve all original timecodes exactly as they appear in [HH:MM:SS] format.\n- Output ONLY the cleaned transcript text. Do not add conversational padding, explanations, or commentary.\n- Do not remove any content-bearing words or alter the speaker's core meaning.",
+            "prompt": "Process segment {{segment_number}} of {{total_segments}} by removing false starts, speech loops, and filler words:\n\n{{transcript}}",
+            "description": "Per-segment removal of false starts, loops, and filler words."
+          },
+          {
+            "name": "Reassemble",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin the cleaned segments into the final full transcript."
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-18 18:15:16"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "Full Clean, Deduplicate, and Contextual Meta-Removal",
+    "description": "This pipeline segments the transcript to clear filler words and false starts with Gemini 3 Flash. After reassembling, Gemini 3.1 Pro evaluates sequential paragraphs to deduplicate similar meanings, favoring the most articulate and latest take. Finally, two consecutive passes with Gemini 3.1 Pro focus on contextual understanding to broadly identify and remove meta-commentary. Crucially, every LLM stage strictly preserves original punctuation and capitalization.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Segment Transcript",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split transcript into overlapping segments for initial cleaning.",
+            "actionParams": {
+              "minSeconds": 40,
+              "maxSeconds": 80,
+              "contextSeconds": 30
+            }
+          },
+          {
+            "name": "Remove False Starts and Fillers",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "system_instruction": "You are a precise transcript editor. Your task is to clean the transcript according to strict steps.\n\nSTEP 1: Read the text.\nSTEP 2: Identify and delete all filler words (e.g., um, uh, like, you know).\nSTEP 3: Identify obvious false starts and loops. Note that different attempts might have different transcription artifacts (punctuation/capitalization), but if they mean the same thing, they are false starts.\nSTEP 4: Resolve false starts by ALWAYS keeping the final/last take of that section and deleting the earlier failed attempts.\nSTEP 5: Output ONLY the cleaned transcript text. Do not include any conversational filler or explanations of your edits.\n\nCRITICAL RULES:\n- DO NOT alter the punctuation or capitalization of the text you keep.\n- Always preserve timecodes in their exact original [HH:MM:SS] format.\n- Output ONLY the final cleaned transcript.",
+            "prompt": "Process segment {{segment_number}} of {{total_segments}}:\n\n{{transcript}}",
+            "description": "Per-segment removal of filler words and false starts, keeping the final take."
+          },
+          {
+            "name": "Reassemble Transcript",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin the initial cleaned segments into a full transcript."
+          },
+          {
+            "name": "Paragraph Deduplication",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "system_instruction": "You are an advanced semantic transcript editor. Your task is to deduplicate paragraphs.\n\nSTEP 1: Read the entire text.\nSTEP 2: Identify whole paragraphs (typically >8 words long).\nSTEP 3: Find consecutive/sequential paragraphs that have the same underlying meaning (multiple takes of the same point). Note that different takes might have different word capitalization or punctuation.\nSTEP 4: Evaluate these matching paragraphs. Determine the groups by their timecodes.\nSTEP 5: Delete the takes that are overexplaining, harder to understand, or simply not as clean. Keep the single best version. Take into consideration that the later takes usually win.\nSTEP 6: Output ONLY the cleaned transcript text.\n\nCRITICAL RULES:\n- DO NOT alter the punctuation or capitalization of the text you keep.\n- Always preserve timecodes in their exact original [HH:MM:SS] format.\n- Output ONLY the final cleaned transcript.",
+            "prompt": "Clean this transcript by deduplicating paragraphs:\n\n{{transcript}}",
+            "description": "Semantic evaluation of sequential paragraphs to keep only the best/latest take."
+          },
+          {
+            "name": "Meta-Commentary Removal (Pass 1)",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "system_instruction": "You are an expert transcript editor specializing in narrative continuity.\n\nSTEP 1: UNDERSTAND the full context of the script. Read the whole text to grasp the main topic, message, and intended audience so you know what belongs in the final product.\nSTEP 2: Identify all meta-commentary. \nWHAT IS META-COMMENTARY? Meta-commentary includes broadly any remarks made by the speaker about the recording process, the script, mistakes, technical setup, or instructions to the editor/crew. Examples include: 'Let me try that again', 'Cut that part', 'Is the mic on?', 'My throat is dry', 'Wait, let me look at my notes', or 'I should rephrase that'.\nSTEP 3: Delete all identified meta-commentary.\nSTEP 4: Output ONLY the cleaned transcript text.\n\nCRITICAL RULES:\n- DO NOT alter the punctuation or capitalization of the text you keep.\n- Always preserve timecodes in their exact original [HH:MM:SS] format.\n- Output ONLY the final cleaned transcript.",
+            "prompt": "Understand the context and remove meta-commentary from this transcript:\n\n{{transcript}}",
+            "description": "First contextual pass to understand the script and remove meta-commentary."
+          },
+          {
+            "name": "Meta-Commentary Removal (Pass 2)",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "system_instruction": "You are an expert transcript editor specializing in narrative continuity. This is a final polish pass.\n\nSTEP 1: UNDERSTAND the full context of the script. Grasp the main topic and message to distinguish the actual content from behind-the-scenes chatter.\nSTEP 2: Identify any remaining meta-commentary. \nWHAT IS META-COMMENTARY? Meta-commentary broadly includes any remarks by the speaker about the recording process, the script, mistakes, the camera/audio, or directions to the editor. Examples: 'Let me try that again', 'Cut that part out', 'Is the mic on?', 'Wait, let me look at my notes', 'I should rephrase that'.\nSTEP 3: Delete any lingering meta-commentary missed in previous passes.\nSTEP 4: Output ONLY the cleaned transcript text.\n\nCRITICAL RULES:\n- DO NOT alter the punctuation or capitalization of the text you keep.\n- Always preserve timecodes in their exact original [HH:MM:SS] format.\n- Output ONLY the final cleaned transcript.",
+            "prompt": "Do a final pass to understand context and remove any remaining meta-commentary:\n\n{{transcript}}",
+            "description": "Second contextual pass to ensure absolutely all meta-commentary is eliminated."
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-18 19:34:27"
+      }
+    ]
+  },
+  {
+    "id": 10,
+    "name": "Medium Segment Filler Deletion Flow",
+    "description": "This workflow splits the transcript into medium-sized segments with a 60-second overlap to ensure context is maintained. It then leverages Gemini 3 Flash in 'deletion' mode to process these segments in parallel, explicitly identifying filler words for surgical removal without rewriting the entire transcript. Finally, it reassembles the segments.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Segment Transcript",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split into medium segments with 60s overlap for parallel processing",
+            "actionParams": {
+              "minSeconds": 90,
+              "maxSeconds": 150,
+              "contextSeconds": 60
+            }
+          },
+          {
+            "name": "Targeted Filler Removal",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "output_mode": "deletion",
+            "system_instruction": "You are a precise transcript editor. Your exact and only task is to identify filler words (e.g., 'um', 'uh', 'like', 'you know', 'basically', 'I mean') to be deleted from the transcript. Do not delete content-bearing words. You must return a JSON array containing objects with 'timecode' and 'text' fields. The 'timecode' must match the segment's timestamp exactly, and the 'text' must contain the exact verbatim filler words to remove.",
+            "prompt": "Analyze segment {{segment_number}} of {{total_segments}} and return a JSON array of the exact filler words to delete:\n\n{{transcript}}",
+            "description": "Uses Gemini 3 Flash in deletion mode to remove filler words per segment"
+          },
+          {
+            "name": "Reassemble",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin cleaned segments into full transcript"
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-19 11:30:02"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "name": "Surgical Filler Deletion Flow",
+    "description": "This pipeline segments the transcript into medium-sized chunks with a large 60-second overlap to preserve extensive context. It then uses Gemini 3 Flash in parallel across the segments with 'deletion' mode to surgically identify and remove filler words (like 'um', 'uh', 'you know') by returning JSON deletion targets instead of rewriting the text. Finally, it reassembles the cleaned segments back into a single transcript.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Segment Transcript",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split into medium segments with 60 seconds of context for continuity",
+            "actionParams": {
+              "minSeconds": 60,
+              "maxSeconds": 120,
+              "contextSeconds": 60
+            }
+          },
+          {
+            "name": "Target Filler Words",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "output_mode": "deletion",
+            "description": "Identify specific filler words to delete from each segment",
+            "system_instruction": "You are an expert transcript editor. Your task is to identify filler words, stutters, false starts, and verbal tics (e.g., 'um', 'uh', 'like', 'you know', 'I mean') to be surgically removed. Because you are operating in deletion mode, you must output a JSON array where each object contains a 'timecode' and 'text' field. The 'text' field must contain ONLY the exact verbatim filler words to remove, not the surrounding context.",
+            "prompt": "Analyze segment {{segment_number}} of {{total_segments}}.\n\nReturn a JSON array of the exact filler words to delete. For example: [{\"timecode\": \"[00:01:23]\", \"text\": \"um, you know\"}].\n\nTranscript:\n{{transcript}}"
+          },
+          {
+            "name": "Reassemble Transcript",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin the cleaned segments into the final full transcript"
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-19 11:35:02"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "name": "Medium Segmentation with Deletion-Based Filler Removal",
+    "description": "Segments the transcript into medium chunks with an expanded 60-second context window. It then uses Gemini 3 Flash in 'deletion' mode to precisely identify filler words in parallel, returning a JSON array of words to remove, before reassembling the clean transcript.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Segment Transcript",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split into medium segments with extended 60s context",
+            "actionParams": {
+              "preset": "medium",
+              "minSeconds": 60,
+              "maxSeconds": 100,
+              "contextSeconds": 60
+            }
+          },
+          {
+            "name": "Identify Filler Words",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "output_mode": "deletion",
+            "system_instruction": "You are a transcript editor. You receive transcript segments in a special format: <context> sections contain surrounding text for reference \u2014 read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must analyze. YOUR TASK: Identify all filler words (e.g., um, uh, like, you know, basically, sort of, I mean) within the <segment> section. Since you are in deletion mode, you must output ONLY a valid JSON array identifying the exact text to DELETE by timecode. Every object in the array MUST have a 'timecode' field (e.g., '[00:01:23]') and a 'text' field (containing the exact verbatim filler words to remove). Do not output any markdown formatting, conversational text, or the full transcript\u2014only the JSON array.\n\n## Important\nYou receive transcript segments in a special format: <context> sections contain surrounding text for reference \u2014 read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the cleaned segment content, no ***** markers, no <context>, no <segment> tags.",
+            "prompt": "Process segment {{segment_number}} of {{total_segments}} and find all filler words to delete:\n\n{{transcript}}",
+            "description": "Finds filler words per segment and returns a deletion JSON array"
+          },
+          {
+            "name": "Reassemble",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin cleaned segments into full transcript"
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-19 11:38:09"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "name": "Advanced Semantic Deduplication and Deep Cleanup Pipeline",
+    "description": "Executes a multi-stage pipeline using deletion mode: 1) Whole-transcript semantic deduplication (Gemini 3.1 Pro). 2) Mid-size segmentation. 3) Filler word deletion (Gemini 3 Flash) with expanded definitions for ughm/aghms and context-aware rules for 'So'. 4) Reassembly and re-segmentation to long size with 60s context. 5) Deep cleanup deleting fillers, repetitive text, and false starts requiring full context comprehension. 6) Final reassembly. 7) Meta-commentary deletion pass.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Semantic Deduplication",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "output_mode": "deletion",
+            "system_instruction": "You are an advanced semantic transcript editor. Your task is to deduplicate paragraphs. STEP 1: Read the entire text. STEP 2: Identify whole paragraphs (typically >8 words long). STEP 3: Find consecutive/sequential paragraphs that have the same underlying meaning (multiple takes of the same point). Note that different takes might have different word capitalization or punctuation. STEP 4: Evaluate these matching paragraphs. Determine the groups by their timecodes. STEP 5: Output the takes that are overexplaining, harder to understand, or simply not as clean. Do not output the single best version. Take into consideration that the later takes usually win. STEP 6: Output ONLY the transcript text and timecodes that needs to be deleted. CRITICAL RULES: - DO NOT alter the punctuation or capitalization of the text you keep. - You can delete either whole text and timecode OR just part of the text in the timecode. - Always preserve timecodes in their exact original [HH:MM:SS] format.",
+            "prompt": "Find all duplicate takes and sequential matching paragraphs to delete:\n\n{{transcript}}",
+            "description": "Evaluate sequential paragraphs to keep only the best/latest take"
+          },
+          {
+            "name": "Segment Transcript (Medium)",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split into medium segments for parallel processing",
+            "actionParams": {
+              "preset": "medium",
+              "minSeconds": 60,
+              "maxSeconds": 100,
+              "contextSeconds": 30
+            }
+          },
+          {
+            "name": "Remove Filler Words",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "output_mode": "deletion",
+            "system_instruction": "You are a transcript editor. You receive transcript segments in a special format: <context> sections contain surrounding text for reference \u2014 read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the JSON array identifying text to delete from the <segment>, no ***** markers, no <context>, no <segment> tags. YOUR TASK: Identify filler words to delete. A filler word is an unnecessary word or sound that does not change the context. This includes sounds like 'um', 'uh', 'ughm', and 'aghms'. It also includes words that add no value, such as unnecessarily repeating words like 'New.'. Note that the word 'So' can sometimes act as a filler, BUT sometimes using 'So' is necessary for context\u2014evaluate carefully and do not delete it if it provides necessary transitional or structural meaning.\n\n## Important\nYou receive transcript segments in a special format: <context> sections contain surrounding text for reference \u2014 read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the cleaned segment content, no ***** markers, no <context>, no <segment> tags.",
+            "prompt": "Process segment {{segment_number}} of {{total_segments}} and identify fillers to delete:\n\n{{transcript}}",
+            "description": "Per-segment filler word deletion with context rules"
+          },
+          {
+            "name": "First Reassemble",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin segments to prepare for re-segmentation"
+          },
+          {
+            "name": "Segment Transcript (Long)",
+            "type": "programmatic",
+            "action": "segment",
+            "description": "Split into long segments with extended 60s context for deeper comprehension",
+            "actionParams": {
+              "preset": "long",
+              "minSeconds": 100,
+              "maxSeconds": 130,
+              "contextSeconds": 60
+            }
+          },
+          {
+            "name": "Remove Fillers, Duplicates, and False Starts",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "output_mode": "deletion",
+            "system_instruction": "You are a transcript editor. You receive transcript segments in a special format: <context> sections contain surrounding text for reference \u2014 read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the JSON array identifying text to delete from the <segment>, no ***** markers, no <context>, no <segment> tags. YOUR TASK: 1. Delete filler words (including 'ughm', 'aghms', and unnecessary words, remembering that 'So' is sometimes necessary for context). 2. MOST IMPORTANTLY, delete repetitive phrasing, duplicate thoughts, and false starts. To do this successfully, you must read through the whole text to deeply understand the underlying meaning and speaker's intent, then identify the specific false starts and duplicates, and finally output them for deletion.\n\n## Important\nYou receive transcript segments in a special format: <context> sections contain surrounding text for reference \u2014 read them to maintain continuity but do NOT modify or include in your output. The <segment> section between ***** markers is the ONLY part you must edit and return. Output ONLY the cleaned segment content, no ***** markers, no <context>, no <segment> tags.",
+            "prompt": "Process segment {{segment_number}} of {{total_segments}} and identify text to delete:\n\n{{transcript}}",
+            "description": "Deep deletion pass for false starts and duplicates"
+          },
+          {
+            "name": "Final Reassemble",
+            "type": "programmatic",
+            "action": "reassemble",
+            "description": "Rejoin cleaned segments into full transcript"
+          },
+          {
+            "name": "Delete Meta Commentary",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "output_mode": "deletion",
+            "system_instruction": "You are a transcript editor. YOUR TASK: Identify and delete meta-commentary. Meta-commentary refers to self-referential statements where the speaker discusses the act of recording, references the script, or breaks the fourth wall to talk about the content's structure rather than delivering the actual subject matter. To delete meta-commentary, analyze the speaker's intent to distinguish between actual topical content and structural housekeeping. EXCEPTIONS: You must leave intact any welcoming remarks, exactly one goodbye, and exactly one request for the audience to subscribe.",
+            "prompt": "Find all meta-commentary to delete, preserving the exceptions:\n\n{{transcript}}",
+            "description": "Identify and remove meta-commentary by timecode"
+          }
+        ],
+        "notes": "AI-generated workflow",
+        "created_at": "2026-03-19 12:01:51"
+      }
+    ]
+  },
+  {
+    "id": 16,
+    "name": "Delete Pargraphs",
+    "description": "The workflow uses the gemini-3.1-pro-preview model to analyze the entire transcript, identifying duplicate or near-duplicate paragraphs. It then outputs only the unique or relevant paragraphs, effectively deleting redundant sections.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Stage",
+            "type": "llm_question",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Transcript:\n\n{{transcript}}",
+            "system_instruction": "Your task is to identify main topic of the video transcription & Intros / Hooks in this transcription. Hook OR Intro is usually a longer sections but it has similar meaning and purpose. \nIf you don't find any similar Intros, output: \"No similar intros\".\n\nIf you find matching intros, output like this:\n- Main topic of the transcritpion: <short description>\n- Intro A #1 from <timecode> to <timecode>\n- Intro A #2 from <timecode> to <timecode>\n- Intro B #1 from <timecode> to <timecode>\n\n\n\n\nInstructions:\n1. Read the entire transcript from start to finish.\n2. Identify potential intros. \n3. Identify when each intro starts and when it ends;\n\n## Very important: Do not add any other commentary. Strictly follow output rules.",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            }
+          },
+          {
+            "name": "Stage 2",
+            "type": "llm",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Transcript:\n{{transcript}}",
+            "system_instruction": "You are an advanced transcript editor. Your task is to identify Meta commentary in the transcript and output only the parts that should be deleted.\n\n##\nPlease see the topic of the video to understand main context & where first intro starts. Usually you need to delete much of the Meta commentary before first intro: \n{{llm_answer}}\n\n\n##Important: Meta commentary is speech about the speech, recording, or editing process rather than the actual content meant for the audience. Meta commentary is not matching the main topic or main context of the transcriptionn. Meta commentary is also something that is completely irrelevant to the main script, like some remarks to a team of video makers, or like a joke said in the video shooting. Meta commentary is not related to the main script usually.\n##Important: however, if a person says \u201chello\u201d, \u201cwelcome\u201d, \u201cgoodbye\u201d etc. - it\u2019s not meta commentary, it\u2019s usually just the intended message to the audience. \n##Important: things like \u201cdon\u2019t forget to subscribe me\u201d OR some promotional transcript, is not a meta commentary either\n## Important: Almost always select the last paragraph as a good take unless the previous one was way clearer and cleaner. However, most of the time, people select the last take.\n\nInstructions:\n1. Read the entire transcript from start to finish.\n2. Identify potential Meta Commentary that matches criteria above.\n3. Decide if it\u2019s needs to be deleted.\n4. Output all Meta commentary that needs to be deleted following output instructions.\n\n## Very important: Do not add any other commentary. Strictly follow output rules.\n## Follow Output instructions below:\n\n## CRITICAL OUTPUT FORMAT \u2014 DELETION MODE\nYou are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.\n\nReturn ONLY a valid JSON array like this:\n```json\n[\n  {\"timecode\": \"[00:01:23]\", \"text\": \"Um, you know,\"},\n  {\"timecode\": \"[00:02:45]\"},\n  {\"timecode\": \"[00:03:10]\", \"text\": \"basically like\"}\n]\n```\n\nRules:\n- \"timecode\" (REQUIRED) \u2014 the exact timecode from the transcript (e.g., \"[00:01:23]\")\n- If \"text\" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)\n- If \"text\" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.\n- \"text\" must be a VERBATIM substring copied from the transcript\n- Return ONLY the JSON array \u2014 no commentary, no explanation, no markdown outside the JSON block\n- Be precise \u2014 the text must match EXACTLY what appears in the transcript\n\n## FOCUS\nFocus on finding: meta commentary (talking about the recording process, directing crew, discussing takes, behind-the-scenes remarks not meant for the final video).\nDo NOT include \"category\" or \"reason\" fields \u2014 just \"timecode\" and optionally \"text\".",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            },
+            "output_mode": "deletion",
+            "identifyPreselect": {
+              "enabled": true,
+              "categories": [
+                "meta_commentary"
+              ]
+            }
+          },
+          {
+            "name": "Stage 3",
+            "type": "programmatic",
+            "action": "segment",
+            "actionParams": {
+              "preset": "short",
+              "minSeconds": 40,
+              "maxSeconds": 60,
+              "contextSeconds": 80
+            },
+            "description": "Segment transcript"
+          },
+          {
+            "name": "Stage 4",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "prompt": "Transcript:\n{{transcript}}",
+            "system_instruction": "You are an advanced transcript editor. Your task is to identify False start and Duplicates in transcript. Output Duplicate and False starts that should be deleted.\n\n##Description: False starts are parts of the text WHERE same meaning was said later;\n### VERY IMPORTANT: False starts might be at the end of the timecode or sentence;\n## By default, part where it was said later should be left;  Meanwhile, Duplicate is a repeated take that expresses the same intended message as another take. \n\n## Example: This has false start: \"What I wanted to say, what I wanted to say is that we need more time.\u201d, you should output first false start:  \"What I wanted to say,\" ##\n## Important: False starts or Duplicates can have different words but actually intention and meaning is the same. \n# Example: \u201cThe main issue is the cost the main problem is the budget.\u201d - here we have to delete \"The main issue is the cost\" part; #\n\n##False starts OR Duplicates can be one word or full on sentences. False starts can be divided across the timecode.\n##Important: always leave last take of False start or Duplicate. \n##Very important: Sometimes last take is in the below <context> area, in such case, do not delete this false start.\n##Very important: however, you ARE ALLOWED TO DELETE False starts or Duplicates that were before **** mark OR before <context>. It means you can delete the context that was before segment.\n\nInstructions:\n1. Read the entire transcript from start to finish including the context.\n2. Identify potential False Start and Duplicates that matches criteria above.\n3. Decide if it\u2019s needs to be deleted.\n4. Output all False Start and Duplicates that needs to be deleted following output instructions.\n\n## Very important: Do not add any other commentary. Strictly follow output rules.\n## Follow Output instructions below:\n\n## SEGMENT BOUNDARY FORMAT\nThe transcript uses ***** markers and XML-style tags:\n- <context> sections = context awareness \n- <segment> section (between ***** markers) = text of segment\n\n## CRITICAL OUTPUT FORMAT \u2014 DELETION MODE\nYou are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.\n\nReturn ONLY a valid JSON array like this:\n```json\n[\n  {\"timecode\": \"[00:01:23]\", \"text\": \"Um, you know,\"},\n  {\"timecode\": \"[00:02:45]\"},\n  {\"timecode\": \"[00:02:45.80]\"},\n  {\"timecode\": \"[00:03:10.50]\", \"text\": \"basically like\"}\n]\n```\n\nRules:\n- \"timecode\" (REQUIRED) \u2014 the EXACT timecode copied from the transcript, including any sub-second precision (e.g., \"[00:01:23]\" or \"[00:01:23.50]\")\n- If \"text\" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)\n- If \"text\" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.\n- \"text\" must be a VERBATIM substring copied from the transcript\n- Return ONLY the JSON array \u2014 no commentary, no explanation, no markdown outside the JSON block\n- Be precise \u2014 timecodes and text must match EXACTLY what appears in the transcript\n\n## FOCUS\nFocus on finding: false starts (abandoned sentences, self-corrections, incomplete thoughts).\nDo NOT include \"category\" or \"reason\" fields \u2014 just \"timecode\" and optionally \"text\".",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            },
+            "output_mode": "deletion",
+            "identifyPreselect": {
+              "enabled": true,
+              "categories": [
+                "false_starts"
+              ]
+            }
+          },
+          {
+            "name": "Stage 5",
+            "type": "programmatic",
+            "action": "reassemble",
+            "actionParams": {
+              "preset": "short",
+              "minSeconds": 40,
+              "maxSeconds": 60,
+              "contextSeconds": 30
+            },
+            "description": "Segment transcript"
+          },
+          {
+            "name": "Stage 6",
+            "type": "programmatic",
+            "action": "segment",
+            "actionParams": {
+              "preset": "short",
+              "minSeconds": 40,
+              "maxSeconds": 60,
+              "contextSeconds": 20
+            },
+            "description": "Segment transcript"
+          },
+          {
+            "name": "Stage 7",
+            "type": "llm_parallel",
+            "model": "gemini-3-flash-preview",
+            "prompt": "Transcript:\n{{transcript}}",
+            "system_instruction": "You are an advanced transcript editor. Your task is to identify Fillers and output only the parts that should be deleted.\n\n##Important criteria: Fillers are verbal elements that do not add essential factual meaning to the sentence, but help the speaker manage thinking, hesitation, rhythm, turn-taking, emphasis, or social tone. There different filler types like Discourse markers (i.e.: \u201clike,\u201d \u201cyou know,\u201d \u201cwell,\u201d \u201cso\u201d) or Filled pauses (like \u201cum,\u201d \u201cuh,\u201d \u201cerm\u201d);\n## Important: Filler words can have different words but actually intention and meaning is the same. So if I say \"So. Ok. Now creation of this should...\" - then we have to cut everything and leave only part that starts from \"Now\u2026\"; \n## Important: Fillers can't change the meaning. For example, a filler \u201cSo, yeah, we can do that\u201d BUT word \"so\" here is not a filler because it would change the meaning \"We missed the deadline, so we lost the deal\u201d;\n## A filler is likely a filler if removing it does not materially change the core meaning of the sentence.\n## fillers can be both just words or multiple words; \n## fillers can be go one after one and they should be deleted all; they can start in the beggining of the sentence OR in the end of the sentence. Usually, they are not in the middle of the sentnce. \n## Very clear filler words like \"ugmh\" and \"aghm\" and \"um\" can appear in the middle of the sentence. They must be deleted;\n## IMPORTANT: delete all fillers from the start of the new timecode (sentence): \"So; Now; Well; Okay; OK; Right; Anyway; Actually; Basically; Honestly; Look; Listen; I mean; You know; Alright; Yeah; Yes; Uh; Um; Like;\"; HOWEVER, they should not change  the meaning.\n\nInstructions:\n1. Read the entire transcript from start to finish including the context.\n2. Identify potential Fillers that matches criteria above.\n3. Decide if it's needs to be deleted.\n4. Output all Fillers that needs to be deleted following output instructions.\n\n## Very important: Do not add any other commentary. Strictly follow output rules.\n## Follow Output instructions below:\n\n\n## SEGMENT BOUNDARY FORMAT\nThe transcript uses ***** markers and XML-style tags:\n- <context> sections = surrounding text for continuity \u2014 READ for context awareness but do NOT modify or include in output\n- <segment> section (between ***** markers) = ONLY text to process\n- Use <context> to maintain natural transitions, avoid abrupt starts/ends, and understand what comes before/after\n- Your JSON array must reference ONLY timecodes found within the <segment> section \u2014 ignore timecodes in <context>\n- Do NOT output markers, tags, or context text \u2014 output ONLY the JSON array as specified above\n\n## CRITICAL OUTPUT FORMAT \u2014 DELETION MODE\nYou are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.\n\nReturn ONLY a valid JSON array like this:\n```json\n[\n  {\"timecode\": \"[00:01:23]\", \"text\": \"Um, you know,\"},\n  {\"timecode\": \"[00:02:45]\"},\n  {\"timecode\": \"[00:02:45.80]\"},\n  {\"timecode\": \"[00:03:10.50]\", \"text\": \"basically like\"}\n]\n```\n\nRules:\n- \"timecode\" (REQUIRED) \u2014 the EXACT timecode copied from the transcript, including any sub-second precision (e.g., \"[00:01:23]\" or \"[00:01:23.50]\")\n- If \"text\" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)\n- If \"text\" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.\n- \"text\" must be a VERBATIM substring copied from the transcript\n- Return ONLY the JSON array \u2014 no commentary, no explanation, no markdown outside the JSON block\n- Be precise \u2014 timecodes and text must match EXACTLY what appears in the transcript\n\n## FOCUS\nFocus on finding: filler words (um, uh, you know, like, basically, I mean).\nDo NOT include \"category\" or \"reason\" fields \u2014 just \"timecode\" and optionally \"text\".",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            },
+            "output_mode": "deletion",
+            "identifyPreselect": {
+              "enabled": true,
+              "categories": [
+                "filler_words"
+              ]
+            }
+          },
+          {
+            "name": "Stage 8",
+            "type": "programmatic",
+            "action": "reassemble",
+            "actionParams": {
+              "preset": "short",
+              "minSeconds": 40,
+              "maxSeconds": 60,
+              "contextSeconds": 30
+            },
+            "description": "Segment transcript"
+          },
+          {
+            "name": "Identify Chapters & Beats",
+            "type": "llm_question",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Analyze this transcript and identify its chapters and beats.\n\n{{transcript}}",
+            "system_instruction": "You are a content structure analyst. Identify the natural chapters and beats in this transcript.\n\n## What is a Chapter?\nA chapter is a large section of the story with a clear purpose. It groups many smaller moments together into one meaningful phase.\nA chapter usually:\n- covers one stage of the journey\n- has its own goal or focus\n- ends when the story moves into a new phase\nExamples: \"Setup,\" \"Conflict,\" \"Turning Point,\" \"Resolution\"\nA chapter answers: \"What part of the story are we in?\"\n\n## What is a Beat?\nA beat is a small story moment where something changes. It is one unit of movement inside the story.\nExamples of beats:\n- a realization\n- a reaction\n- a decision\n- a reveal\n- a joke landing\n- a rise in tension\n- a shift in emotion\nA beat answers: \"What changes right now?\"\n\n## Relationship\nA chapter is made of many beats.\n- Chapter: a major section of the story with one main purpose.\n- Beat: a small moment inside the story where information, emotion, or direction changes.\n\n## Output format\nFor each chapter provide:\n- timecode_start: the [HH:MM:SS] timecode where the chapter begins\n- timecode_end: the [HH:MM:SS] timecode where the chapter ends\n- name: a concise chapter title\n- description: what this chapter covers\n- purpose: why this chapter exists in the content\n- beats: key moments within the chapter, each with:\n  - timecode: the [HH:MM:SS] timecode\n  - description: what happens at this beat\n  - purpose: why this beat matters\n\nReturn ONLY a JSON array:\n```json\n[\n  {\n    \"timecode_start\": \"[00:00:00]\",\n    \"timecode_end\": \"[00:05:30]\",\n    \"name\": \"Introduction\",\n    \"description\": \"Host introduces the topic and guests\",\n    \"purpose\": \"Set context for the discussion\",\n    \"beats\": [\n      { \"timecode\": \"[00:00:15]\", \"description\": \"Host greeting\", \"purpose\": \"Open the episode\" },\n      { \"timecode\": \"[00:02:00]\", \"description\": \"Guest introduction\", \"purpose\": \"Establish credibility\" }\n    ]\n  }\n]\n```",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            }
+          },
+          {
+            "name": "Segment by Chapters",
+            "type": "programmatic",
+            "action": "segment_by_chapters",
+            "actionParams": {
+              "contextSeconds": 0
+            },
+            "description": "Segment transcript by identified chapters"
+          },
+          {
+            "name": "Process Per Chapter",
+            "type": "llm_parallel",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Identify Repetition, Lengthy, Technical&Unclear OR Irrelevant parts in this Transcription: \n{{transcript}}",
+            "system_instruction": "#### You are an advanced transcript editor. Your task is to identify Repetition, Lengthy, Technical&Unclear OR Irrelevant parts of the transcription. \n\n## You are processing chapter \"{{chapter_name}}\".\n\nChapter context:\n- Description: {{chapter_description}}\n- Purpose: {{chapter_purpose}}\n- Key beats: {{chapter_beats}}\n\n####\n\n### full Description: Repetition\nRepetition is when the same idea, meaning, or instruction is said more than once in slightly different or identical wording, without adding new useful information. This includes duplicate examples, rephrased restatements, saying the conclusion twice, or repeating a point after it is already clear. Repetition increases length but does not improve understanding.\n\n## Repetition can use different words but still express the same idea.\nFor example: \u201cWe need to make this simple. It should be easy to understand. It must not be complicated.\u201d\nThese may use different wording, but they repeat the same core point and should be reduced to one clear version.\n\n## Repetition should be identified only when it does not add new meaning.\nFor example: \u201cThe user is upset. They are angry because the payment failed.\u201d\nThis is not pure repetition, because the second part adds the reason.\n\n## A phrase is likely repetition if removing it does not materially reduce the factual meaning or instruction.\nIf two nearby parts communicate the same message, keep only the strongest or clearest one.\n\n## Repetition can be word-level, phrase-level, sentence-level, or example-level.\nIt can appear as:\n- the same statement repeated twice,\n- two examples showing the exact same thing,\n- a point explained and then re-explained immediately,\n- a sentence that restates what the previous sentence already said.\n\n## Repetition often appears at the start or end of an explanation, but it can also appear in the middle.\nFor example: \u201cThis is very important. Really important. Extremely important.\u201d\nOnly one strong form is needed unless intensity itself is meaningful.\n\n## IMPORTANT: remove repeated ideas, duplicate examples, and restatements, but keep reinforcement if it adds function such as contrast, emphasis with purpose, or a new nuance.\n\n\n## full Description: Lengthy\nLengthy means the response takes more words than needed to communicate the point clearly. It includes over-explanation, too much setup, excessive hedging, unnecessary detail, long lead-ins, and explanations that continue after the main point is already understood. A lengthy response is not wrong, but it is inefficient and can make the message harder to follow.\n\n## Important: Lengthy content often contains useful words, but too many of them.\nThe problem is not necessarily incorrectness; the problem is that the same result could be achieved more directly.\n\n\n## A response is likely lengthy if the key answer could be understood with much less text and no loss of meaning.\nAsk: does this sentence help the user understand, decide, or act? If not, it is likely unnecessary.\n\n## Lengthy writing can include:\n-words that don\u2019t add any value and without it sentence would just be more robust\n- long introductions before the real answer,\n- too many qualifiers,\n- repeated caveats,\n- excessive background,\n- obvious explanations,\n- too many examples for a simple point.\n\n## Lengthy content is especially common around transitions and framing.\nFor example: \u201cIn order to give you the best possible answer, it is important to first consider\u2026\u201d\nOften this can be shortened or removed entirely.\n\n## IMPORTANT: shorten setup, trim extra explanation, reduce hedging, and remove detail that does not change the outcome; however, do not cut information that is needed for correctness, safety, or meaning.\n\n\n## full Description: Technical_unclear\nTechnical_unclear means the response is difficult to understand because it uses overly technical language, vague phrasing, abstract wording, unexplained jargon, or poor structure. The issue is not just that the content is advanced \u2014 it is that the explanation is not made clear for the intended reader. A technically unclear response may be correct, but the meaning is hard to extract.\n\n## Important: A response can be technical_unclear even if every sentence is individually valid.\nIf the reader cannot easily tell what is being said, what matters, or what to do next, the wording is too unclear.\n\n## Technical words are not automatically a problem.\nThey are a problem when they are unnecessary, undefined, stacked together, or used instead of a simpler explanation.\n\n\n## Technical_unclear language often includes:\n- jargon without explanation,\n- abstract nouns instead of concrete actions,\n- unclear references\n- compressed logic with missing steps\n- sentences that are grammatically correct but hard to parse AND not important for context\n\n\n\n\n## full Description: Irrelevance\nIrrelevance is any content that does not help answer the user\u2019s request or support the intended purpose of the message. This includes irrelevant jokes, tangents, side comments, off-topic examples, unnecessary personality, or a tone that does not match the situation. Irrelevant content may be interesting or entertaining, but it distracts from the main goal.\n\n\n## A part is likely irrelevant if removing it would make the answer more focused without losing needed meaning, evidence, or instruction.\nIf it does not help the user understand, decide, or act, it is probably irrelevant.\n\n## Irrelevance can appear as:\n- jokes that do not help,\n- side tangents,\n- extra commentary about style or personality,\n- unrelated comparisons,\n- decorative text with no function,\n- emotional tone that distracts from the request.\n\n## Irrelevant content often appears before the answer, after the answer, or between useful points.\nIt may interrupt the flow even if each sentence is understandable on its own.\n\n\n#### SEGMENT BOUNDARY FORMAT\nThe transcript uses ***** markers and XML-style tags:\n- <context> sections = surrounding text for continuity \u2014 READ for context awareness but do NOT modify or include in output\n- <segment> section (between ***** markers) = ONLY text to process\n- Use <context> to maintain natural transitions, avoid abrupt starts/ends, and understand what comes before/after\n- Your JSON array must reference ONLY timecodes found within the <segment> section \u2014 ignore timecodes in <context>\n- Do NOT output markers, tags, or context text \u2014 output ONLY the JSON array as specified above\n\n## CRITICAL OUTPUT FORMAT \u2014 IDENTIFY MODE\nYou are in IDENTIFY mode. Instead of editing the transcript, flag problematic segments.\n\nReturn ONLY a valid JSON array like this:\n```json\n[\n  {\"timecode\": \"[00:01:23]\", \"text\": \"Um, you know, basically\"},\n  {\"timecode\": \"[00:02:45.80]\"}\n]\n```\n\nRules:\n- \"timecode\" (REQUIRED) \u2014 the EXACT timecode copied from the transcript, including any sub-second precision (e.g., \"[00:01:23]\" or \"[00:01:23.50]\")\n- \"text\" (OPTIONAL) \u2014 the specific problematic text. If omitted, the entire segment is flagged\n- Return ONLY the JSON array \u2014 no commentary",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            },
+            "output_mode": "identify"
+          }
+        ],
+        "notes": "",
+        "created_at": "2026-03-19 14:52:51"
+      }
+    ]
+  },
+  {
+    "id": 22,
+    "name": "Delete Pargraphs (copy)",
+    "description": "The workflow uses the gemini-3.1-pro-preview model to analyze the entire transcript, identifying duplicate or near-duplicate paragraphs. It then outputs only the unique or relevant paragraphs, effectively deleting redundant sections.",
+    "versions": [
+      {
+        "version_number": 1,
+        "stages": [
+          {
+            "name": "Identify Intro Start",
+            "type": "llm_question",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Video's Transcript;\n{{transcript}}",
+            "system_instruction": "You are a video content analyst. Your task is to identify where the actual intro/hook of the video begins, skipping any pre-roll meta commentary.\n\n## Pre-roll vs Intro\n\n**Pre-roll meta commentary** is content at the very start of a video where the creator talks about the video itself rather than starting the actual content. \n\n**The intro/hook** is where the actual content begins \u2014 the creator starts telling the story, presenting the topic, or engaging the audience with the subject matter. This is often a hook, a question, a bold statement, or the opening of the narrative.\n\n## Instructions\n1. Read through the transcript and understand the full context of the video's transcript.\n2. Identify the exact timecode where the real intro/hook starts\n\n\nIf the video starts directly with content (no pre-roll), return the very first timecode.\n\n## Output format\nReturn ONLY valid JSON:\n```json\n{\"timecode\": \"[MM:SS]\", \"reason\": \"Brief explanation of why this is where the intro starts\"}\n```",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            }
+          },
+          {
+            "name": "Trim Pre-roll",
+            "type": "programmatic",
+            "action": "trim_before",
+            "output_mode": "deletion",
+            "identifyPreselect": {
+              "enabled": true,
+              "categories": [
+                "meta_commentary"
+              ]
+            },
+            "description": "Delete all transcript content before the identified intro timecode",
+            "system_instruction": "\n\n## CRITICAL OUTPUT FORMAT \u2014 DELETION MODE\nYou are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.\n\nReturn ONLY a valid JSON array like this:\n```json\n[\n  {\"timecode\": \"[00:01:23]\", \"text\": \"Um, you know,\"},\n  {\"timecode\": \"[00:02:45]\"},\n  {\"timecode\": \"[00:02:45.80]\"},\n  {\"timecode\": \"[00:03:10.50]\", \"text\": \"basically like\"}\n]\n```\n\nRules:\n- \"timecode\" (REQUIRED) \u2014 the EXACT timecode copied from the transcript, including any sub-second precision (e.g., \"[00:01:23]\" or \"[00:01:23.50]\")\n- If \"text\" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)\n- If \"text\" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.\n- \"text\" must be a VERBATIM substring copied from the transcript\n- Return ONLY the JSON array \u2014 no commentary, no explanation, no markdown outside the JSON block\n- Be precise \u2014 timecodes and text must match EXACTLY what appears in the transcript\n\n## FOCUS\nFocus on finding: meta commentary (talking about the recording process, directing crew, discussing takes, behind-the-scenes remarks not meant for the final video).\nDo NOT include \"category\" or \"reason\" fields \u2014 just \"timecode\" and optionally \"text\"."
+          },
+          {
+            "name": "Identify Chapters & Beats",
+            "type": "llm_question",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Analyze this transcript and identify its chapters and beats:\n\n{{transcript}}",
+            "system_instruction": "You are a content structure analyst. Identify the natural chapters and beats in this transcript.\n\n## What is a Chapter?\nA chapter is a large section of the story with a clear purpose. It groups many smaller moments together into one meaningful phase.\nA chapter usually:\n- covers one stage of the journey\n- has its own goal or focus\n- ends when the story moves into a new phase\nExamples: \"Setup,\" \"Conflict,\" \"Turning Point,\" \"Resolution\"\nA chapter answers: \"What part of the story are we in?\"\n\n## What is a Beat?\nA beat is a small story moment where something changes. It is one unit of movement inside the story.\nExamples of beats:\n- a realization\n- a reaction\n- a decision\n- a reveal\n- a joke landing\n- a rise in tension\n- a shift in emotion\nA beat answers: \"What changes right now?\"\n\n## Relationship\nA chapter is made of many beats.\n- Chapter: a major section of the story with one main purpose.\n- Beat: a small moment inside the story where information, emotion, or direction changes.\n\n## Output format\nFor each chapter provide:\n- timecode_start: the [HH:MM:SS] timecode where the chapter begins\n- timecode_end: the [HH:MM:SS] timecode where the chapter ends\n- name: a concise chapter title\n- description: what this chapter covers\n- purpose: why this chapter exists in the content\n- beats: key moments within the chapter, each with:\n  - timecode: the [HH:MM:SS] timecode\n  - description: what happens at this beat\n  - purpose: why this beat matters\n\nReturn ONLY a JSON array:\n```json\n[\n  {\n    \"timecode_start\": \"[00:00:00]\",\n    \"timecode_end\": \"[00:05:30]\",\n    \"name\": \"Introduction\",\n    \"description\": \"Host introduces the topic and guests\",\n    \"purpose\": \"Set context for the discussion\",\n    \"beats\": [\n      { \"timecode\": \"[00:00:15]\", \"description\": \"Host greeting\", \"purpose\": \"Open the episode\" },\n      { \"timecode\": \"[00:02:00]\", \"description\": \"Guest introduction\", \"purpose\": \"Establish credibility\" }\n    ]\n  }\n]\n```",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            }
+          },
+          {
+            "name": "Segment by Chapters",
+            "type": "programmatic",
+            "action": "segment_by_chapters",
+            "actionParams": {
+              "contextSeconds": 0
+            },
+            "description": "Segment transcript by identified chapters",
+            "system_instruction": ""
+          },
+          {
+            "name": "Process Per Chapter",
+            "type": "llm_parallel",
+            "model": "gemini-3.1-pro-preview",
+            "prompt": "Video Transcript:\n{{transcript}}",
+            "system_instruction": "You are an advanced video transcript editor. Your task is to identify and delete the Meta Commentary of the video's transcript. Meta commentary is some things said to video editing team OR camera man OR assistant during a shooting. Meta commentary is irrelevant to the Chapter Context and Beats. Meta commentary can appear anywhere, even in the middle of the sentence, you need to identify and delete all.\n\n###IMPORTANT CONTEXT THAT HELPS TO IDENTIFY META COMMENTARY:\n## You are processing chapter \"{{chapter_name}}\".\n\nChapter context:\n- Description: {{chapter_description}}\n- Purpose: {{chapter_purpose}}\n- Key beats: {{chapter_beats}}\n\n## CRITICAL OUTPUT FORMAT \u2014 DELETION MODE\nYou are in DELETION mode. Instead of returning a cleaned transcript, you must return a JSON array identifying what to DELETE.\n\nReturn ONLY a valid JSON array like this:\n```json\n[\n  {\"timecode\": \"[00:01:23]\", \"text\": \"Um, you know,\"},\n  {\"timecode\": \"[00:02:45]\"},\n  {\"timecode\": \"[00:02:45.80]\"},\n  {\"timecode\": \"[00:03:10.50]\", \"text\": \"basically like\"}\n]\n```\n\nRules:\n- \"timecode\" (REQUIRED) \u2014 the EXACT timecode copied from the transcript, including any sub-second precision (e.g., \"[00:01:23]\" or \"[00:01:23.50]\")\n- If \"text\" is OMITTED, the ENTIRE timecoded segment is deleted (timecode + all its text)\n- If \"text\" is provided, only those exact words are deleted from that segment. The timecode and remaining words are preserved.\n- \"text\" must be a VERBATIM substring copied from the transcript\n- Return ONLY the JSON array \u2014 no commentary, no explanation, no markdown outside the JSON block\n- Be precise \u2014 timecodes and text must match EXACTLY what appears in the transcript\n\n\n\n## FOCUS\nFocus on finding: meta commentary (talking about the recording process, directing crew, discussing takes, behind-the-scenes remarks not meant for the final video).\nDo NOT include \"category\" or \"reason\" fields \u2014 just \"timecode\" and optionally \"text\".",
+            "params": {
+              "temperature": 1,
+              "thinking_level": "MEDIUM"
+            },
+            "output_mode": "deletion",
+            "identifyPreselect": {
+              "enabled": true,
+              "categories": [
+                "meta_commentary"
+              ]
+            }
+          }
+        ],
+        "notes": "Duplicated from Delete Pargraphs",
+        "created_at": "2026-03-31 11:39:50"
+      }
+    ]
+  }
+]

@@ -21,18 +21,17 @@ export function useApi(path, deps = []) {
   const [loading, setLoading] = useState(!!path)
   const [error, setError] = useState(null)
 
-  const refetch = useCallback(() => {
+  const refetch = useCallback((silent) => {
     if (!path) { setLoading(false); return }
-    setLoading(true)
-    setError(null)
+    if (!silent) { setLoading(true); setError(null) }
     fetch(`${BASE}${path}`)
       .then(r => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
         return r.json()
       })
       .then(setData)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
+      .catch(e => { if (!silent) setError(e.message) })
+      .finally(() => { if (!silent) setLoading(false) })
   }, [path])
 
   useEffect(() => { refetch() }, [refetch, ...deps])

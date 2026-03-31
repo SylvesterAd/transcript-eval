@@ -11,6 +11,7 @@ import { requireAuth } from '../auth.js'
 import { transcribeVideo, findCutWords } from '../services/whisper.js'
 import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, concatenateVideos, extractEnergyEnvelope, extractWaveformPeaks, extractVideoFrames } from '../services/video-processor.js'
 import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
+import { runStageProgress } from '../services/llm-runner.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -563,7 +564,25 @@ router.post('/groups/:id/run-main-flow', async (req, res) => {
     return res.json({ already_exists: true })
   }
 
-  // Check if a run is already in progress for this group
+  // Clear old annotations so editor doesn't show stale results while new run is in progress
+  if (force && group.annotations_json) {
+    db.prepare('UPDATE video_groups SET annotations_json = NULL WHERE id = ?').run(groupId)
+  }
+
+  // Clean up stale pending Auto: runs for this group (older than 5 minutes)
+  db.prepare(`
+    UPDATE experiment_runs SET status = 'failed'
+    WHERE id IN (
+      SELECT er.id FROM experiment_runs er
+      JOIN experiments e ON e.id = er.experiment_id
+      WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
+        AND er.status = 'pending'
+        AND e.name LIKE 'Auto:%'
+        AND er.created_at < datetime('now', '-5 minutes')
+    )
+  `).run(groupId)
+
+  // Check if a run is actually in progress (running with live progress, or pending and very recent)
   const inProgressRun = db.prepare(`
     SELECT er.id AS runId, e.id AS experimentId FROM experiment_runs er
     JOIN experiments e ON e.id = er.experiment_id
@@ -573,18 +592,52 @@ router.post('/groups/:id/run-main-flow', async (req, res) => {
     ORDER BY er.id DESC LIMIT 1
   `).get(groupId)
   if (inProgressRun) {
-    // Return existing run for polling — don't create a new one
-    const version = db.prepare(`
-      SELECT sv.stages_json FROM experiments e
-      JOIN strategy_versions sv ON sv.id = e.strategy_version_id
-      WHERE e.id = ?
-    `).get(inProgressRun.experimentId)
-    let stageNames = []
-    try {
-      const stages = JSON.parse(version?.stages_json || '[]')
-      stageNames = stages.map((s, i) => s.name || `Stage ${i + 1}`)
-    } catch { /* ignore */ }
-    return res.json({ experimentId: inProgressRun.experimentId, runId: inProgressRun.runId, totalStages: stageNames.length, stageNames })
+    // Only trust this if it's actually running (has live progress) or was created recently
+    const hasLiveProgress = runStageProgress.has(inProgressRun.runId)
+    const run = db.prepare('SELECT created_at FROM experiment_runs WHERE id = ?').get(inProgressRun.runId)
+    const ageMs = Date.now() - new Date(run.created_at).getTime()
+    const isRecent = ageMs < 60000 // less than 1 minute old
+
+    if (hasLiveProgress || isRecent) {
+      const version = db.prepare(`
+        SELECT sv.stages_json FROM experiments e
+        JOIN strategy_versions sv ON sv.id = e.strategy_version_id
+        WHERE e.id = ?
+      `).get(inProgressRun.experimentId)
+      let stageNames = []
+      try {
+        const stages = JSON.parse(version?.stages_json || '[]')
+        stageNames = stages.map((s, i) => s.name || `Stage ${i + 1}`)
+      } catch { /* ignore */ }
+      return res.json({ experimentId: inProgressRun.experimentId, runId: inProgressRun.runId, totalStages: stageNames.length, stageNames })
+    }
+    // Stale pending run — mark as failed and continue to create a new one
+    db.prepare("UPDATE experiment_runs SET status = 'failed' WHERE id = ?").run(inProgressRun.runId)
+  }
+
+  // Check if too many failed runs — stop auto-creating after 2 failures
+  // But if annotations were already cleared (user deleted run), reset failed runs to allow retry
+  if (!group.annotations_json) {
+    db.prepare(`
+      UPDATE experiment_runs SET status = 'cancelled'
+      WHERE id IN (
+        SELECT er.id FROM experiment_runs er
+        JOIN experiments e ON e.id = er.experiment_id
+        WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
+          AND er.status = 'failed'
+          AND e.name LIKE 'Auto:%'
+      )
+    `).run(groupId)
+  }
+  const failedCount = db.prepare(`
+    SELECT COUNT(*) AS cnt FROM experiment_runs er
+    JOIN experiments e ON e.id = er.experiment_id
+    WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
+      AND er.status = 'failed'
+      AND e.name LIKE 'Auto:%'
+  `).get(groupId)
+  if (failedCount.cnt >= 2) {
+    return res.status(422).json({ error: 'too_many_failures', message: 'Auto-run failed multiple times. Please contact your admin to review and clear failed runs.' })
   }
 
   // Find is_main=1 strategy + latest version
@@ -634,44 +687,44 @@ router.post('/groups/:id/run-main-flow', async (req, res) => {
       try {
         const { executeRun } = await import('../services/llm-runner.js')
 
-        // On retry, create a new run record (the failed one stays as-is)
-        let currentRunId = runId
+        // On retry, reset the same run record instead of creating a new one
         if (attempt > 1) {
-          console.log(`[main-flow] Retry attempt ${attempt} for group ${groupId}`)
-          const retryResult = db.prepare(
-            'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, ?, ?)'
-          ).run(experimentId, video.id, attempt, 'pending')
-          currentRunId = Number(retryResult.lastInsertRowid)
+          console.log(`[main-flow] Retry attempt ${attempt} for group ${groupId} (run ${runId})`)
+          db.prepare("UPDATE experiment_runs SET status = 'pending', error_message = NULL WHERE id = ?").run(runId)
         }
 
-        await executeRun(currentRunId)
+        await executeRun(runId)
 
         // Check if run completed
-        const completedRun = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(currentRunId)
+        const completedRun = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(runId)
         if (completedRun.status !== 'complete' && completedRun.status !== 'partial') {
-          console.error(`[main-flow] Run ${currentRunId} ended with status: ${completedRun.status}`)
+          console.error(`[main-flow] Run ${runId} ended with status: ${completedRun.status}`)
           if (attempt < MAX_ATTEMPTS) continue // retry
           return
         }
 
-        // Success — build annotations
-        const transcript = db.prepare(
-          'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
-        ).get(video.id, 'raw')
+        // Success — build annotations using merged timeline word timestamps
+        const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await annotationMapper()
+        let wordTimestamps = getTimelineWordTimestamps(groupId)
 
-        let wordTimestamps = []
-        if (transcript?.word_timestamps_json) {
-          try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+        // Fallback: single video if editor state not available
+        if (!wordTimestamps?.length) {
+          const transcript = db.prepare(
+            'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
+          ).get(video.id, 'raw')
+          wordTimestamps = []
+          if (transcript?.word_timestamps_json) {
+            try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+          }
         }
 
-        if (!wordTimestamps.length) {
-          console.log(`[main-flow] No word timestamps for video ${video.id}, skipping annotation mapping`)
+        if (!wordTimestamps?.length) {
+          console.log(`[main-flow] No word timestamps for group ${groupId}, skipping annotation mapping`)
           return
         }
 
-        // Build annotations
-        const { buildAnnotationsFromRun } = await annotationMapper()
-        const annotations = buildAnnotationsFromRun(currentRunId, wordTimestamps)
+        const groupData = db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
+        const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
         console.log(`[main-flow] Built ${annotations.items.length} annotations for group ${groupId}`)
 
         // Store annotations

@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import db from '../db.js'
-import { executeRun, runStageProgress, abortedExperiments } from '../services/llm-runner.js'
+import { executeRun, runStageProgress, abortedExperiments, activeAbortControllers } from '../services/llm-runner.js'
 import { computeDiff, normalizeForDiff } from '../services/diff-engine.js'
 import { computeStability, computeExperimentStability } from '../services/stability.js'
 import { analyzeExperiment, analyzRunWithLLM, analyzeRunCustom } from '../services/llm-analyzer.js'
@@ -10,29 +10,33 @@ const router = Router()
 
 // All-time LLM spending summary (must be before /:id)
 router.get('/spending/total', (req, res) => {
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) AS runs,
+  const result = db.prepare(`
+    SELECT COUNT(*) AS entries,
       COALESCE(SUM(total_cost), 0) AS total_cost,
       COALESCE(SUM(total_tokens), 0) AS total_tokens
-    FROM experiment_runs
-    WHERE status IN ('complete', 'partial')
+    FROM spending_log
   `).get()
-  res.json(stats)
+  res.json({
+    runs: result.entries,
+    total_cost: result.total_cost,
+    total_tokens: result.total_tokens,
+  })
 })
 
 // Today's LLM spending summary (must be before /:id)
 router.get('/spending/today', (req, res) => {
   const today = new Date().toISOString().slice(0, 10)
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) AS runs,
+  const result = db.prepare(`
+    SELECT COUNT(*) AS entries,
       COALESCE(SUM(total_cost), 0) AS total_cost,
       COALESCE(SUM(total_tokens), 0) AS total_tokens
-    FROM experiment_runs
-    WHERE completed_at >= ? AND status IN ('complete', 'partial')
+    FROM spending_log WHERE created_at >= ?
   `).get(today)
-  res.json(stats)
+  res.json({
+    runs: result.entries,
+    total_cost: result.total_cost,
+    total_tokens: result.total_tokens,
+  })
 })
 
 // List all experiments
@@ -62,25 +66,42 @@ router.get('/runs', (req, res) => {
       e.name AS experiment_name,
       s.name AS strategy_name, sv.version_number,
       sv.stages_json,
-      (SELECT COUNT(*) FROM run_stage_outputs rso WHERE rso.experiment_run_id = er.id) AS completed_stages
+      (SELECT COUNT(*) FROM run_stage_outputs rso WHERE rso.experiment_run_id = er.id) AS completed_stages,
+      (SELECT COALESCE(SUM(rso.cost), 0) FROM run_stage_outputs rso WHERE rso.experiment_run_id = er.id) AS stages_cost,
+      (SELECT COALESCE(SUM(rso.tokens_in + rso.tokens_out), 0) FROM run_stage_outputs rso WHERE rso.experiment_run_id = er.id) AS stages_tokens,
+      (SELECT COALESCE(SUM(rso.runtime_ms), 0) FROM run_stage_outputs rso WHERE rso.experiment_run_id = er.id) AS stages_runtime_ms
     FROM experiment_runs er
-    JOIN videos v ON v.id = er.video_id
-    JOIN experiments e ON e.id = er.experiment_id
-    JOIN strategy_versions sv ON sv.id = e.strategy_version_id
-    JOIN strategies s ON s.id = sv.strategy_id
+    LEFT JOIN videos v ON v.id = er.video_id
+    LEFT JOIN experiments e ON e.id = er.experiment_id
+    LEFT JOIN strategy_versions sv ON sv.id = e.strategy_version_id
+    LEFT JOIN strategies s ON s.id = sv.strategy_id
     ORDER BY er.created_at DESC
     LIMIT 100
   `).all()
 
   for (const run of runs) {
-    // Parse stages_json to get total stage count
+    // Parse stages_json to get total stage count and names
     try {
       const stages = JSON.parse(run.stages_json)
       run.totalStages = Array.isArray(stages) ? stages.length : 0
+      run.stageNames = Array.isArray(stages) ? stages.map((s, i) => {
+        const custom = s.name || ''
+        if (!custom || /^Stage\s+\d+$/i.test(custom)) return `Stage ${i + 1}`
+        return `Stage ${i + 1}: ${custom}`
+      }) : []
     } catch {
       run.totalStages = 0
+      run.stageNames = []
     }
     delete run.stages_json
+
+    // Use stage-level costs when run totals are null (failed/running runs)
+    if (run.total_cost == null) run.total_cost = run.stages_cost
+    if (run.total_tokens == null) run.total_tokens = run.stages_tokens
+    if (run.total_runtime_ms == null) run.total_runtime_ms = run.stages_runtime_ms
+    delete run.stages_cost
+    delete run.stages_tokens
+    delete run.stages_runtime_ms
 
     // Attach live progress for running runs
     if (run.status === 'running') {
@@ -103,8 +124,10 @@ router.get('/runs', (req, res) => {
 // Get a single stage's input/output/human for the View modal
 router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
   const run = db.prepare(`
-    SELECT er.video_id, v.group_id FROM experiment_runs er
-    JOIN videos v ON v.id = er.video_id WHERE er.id = ?
+    SELECT er.video_id, v.group_id, e.strategy_version_id FROM experiment_runs er
+    JOIN videos v ON v.id = er.video_id
+    LEFT JOIN experiments e ON e.id = er.experiment_id
+    WHERE er.id = ?
   `).get(req.params.runId)
   if (!run) return res.status(404).json({ error: 'Run not found' })
 
@@ -154,6 +177,24 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
 
   const effectiveOutput = reconstructedOutput || stage.output_text
 
+  // Fetch raw strategy stage templates (before placeholder substitution)
+  let rawStageConfig = null
+  if (run.strategy_version_id) {
+    const sv = db.prepare('SELECT stages_json FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
+    if (sv?.stages_json) {
+      try {
+        const allStages = JSON.parse(sv.stages_json)
+        const stageIdx = parseInt(req.params.stageIndex)
+        if (allStages[stageIdx]) {
+          rawStageConfig = {
+            prompt: allStages[stageIdx].prompt || null,
+            system_instruction: allStages[stageIdx].system_instruction || null,
+          }
+        }
+      } catch {}
+    }
+  }
+
   res.json({
     input: stage.input_text,
     output: effectiveOutput,
@@ -172,6 +213,7 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
     segments,
     isParallel,
     llmResponseRaw: stage.llm_response_raw || null,
+    rawStageConfig,
   })
 })
 
@@ -181,10 +223,10 @@ router.get('/runs/:runId', (req, res) => {
     SELECT er.*, v.title AS video_title, e.name AS experiment_name,
       s.name AS strategy_name, sv.version_number
     FROM experiment_runs er
-    JOIN videos v ON v.id = er.video_id
-    JOIN experiments e ON e.id = er.experiment_id
-    JOIN strategy_versions sv ON sv.id = e.strategy_version_id
-    JOIN strategies s ON s.id = sv.strategy_id
+    LEFT JOIN videos v ON v.id = er.video_id
+    LEFT JOIN experiments e ON e.id = er.experiment_id
+    LEFT JOIN strategy_versions sv ON sv.id = e.strategy_version_id
+    LEFT JOIN strategies s ON s.id = sv.strategy_id
     WHERE er.id = ?
   `).get(req.params.runId)
   if (!run) return res.status(404).json({ error: 'Run not found' })
@@ -214,6 +256,19 @@ router.get('/runs/:runId', (req, res) => {
 
   const rawNormalized = normalizeForDiff(raw?.content)
   const humanNormalized = normalizeForDiff(human?.content)
+
+  // Attach raw strategy stage configs (before placeholder substitution)
+  let rawStageConfigs = null
+  if (run.strategy_version_id) {
+    const sv = db.prepare('SELECT stages_json FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
+    if (sv?.stages_json) {
+      try { rawStageConfigs = JSON.parse(sv.stages_json) } catch {}
+    }
+  }
+  for (const stage of stages) {
+    const cfg = rawStageConfigs?.[stage.stage_index]
+    stage.rawStageConfig = cfg ? { prompt: cfg.prompt || null, system_instruction: cfg.system_instruction || null } : null
+  }
 
   res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content, rawNormalized, humanNormalized })
 })
@@ -252,16 +307,66 @@ router.get('/runs/:runId/analysis', (req, res) => {
   res.json(analyses)
 })
 
+// Restart a run from a specific stage (keeps earlier stages, re-runs from stageIndex onward)
+router.post('/runs/:runId/restart-from/:stageIndex', requireAuth, async (req, res) => {
+  const runId = parseInt(req.params.runId)
+  const fromStage = parseInt(req.params.stageIndex)
+  const run = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(runId)
+  if (!run) return res.status(404).json({ error: 'Run not found' })
+  if (run.status === 'running') return res.status(400).json({ error: 'Run is already running' })
+
+  // Spending already saved to spending_log per-stage — no need to preserve here
+
+  // Delete stage outputs from this stage onward
+  const toDelete = db.prepare(
+    'SELECT id FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index >= ?'
+  ).all(runId, fromStage)
+  for (const rso of toDelete) {
+    db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id = ?').run(rso.id)
+    db.prepare('DELETE FROM metrics WHERE run_stage_output_id = ?').run(rso.id)
+  }
+  db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index >= ?').run(runId, fromStage)
+
+  // Reset run status
+  db.prepare("UPDATE experiment_runs SET status = 'pending', error_message = NULL WHERE id = ?").run(runId)
+
+  // Return immediately, execute in background
+  res.json({ restarting: true, fromStage })
+
+  try {
+    await executeRun(runId)
+  } catch (err) {
+    console.error(`[restart] Run ${runId} from stage ${fromStage} failed:`, err.message)
+  }
+})
+
 // Delete a single run
 router.delete('/runs/:runId', requireAuth, (req, res) => {
   const run = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(req.params.runId)
   if (!run) return res.status(404).json({ error: 'Run not found' })
+
+  // Spending already saved to spending_log per-stage during execution — no need to preserve here
+
+  // Clear annotations on the video group if this run produced them
+  if (run.video_id) {
+    const group = db.prepare('SELECT id FROM video_groups WHERE id IN (SELECT group_id FROM videos WHERE id = ?)').get(run.video_id)
+    if (group) {
+      db.prepare('UPDATE video_groups SET annotations_json = NULL WHERE id = ?').run(group.id)
+    }
+  }
 
   db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
   db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
   db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
   db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
   db.prepare('DELETE FROM experiment_runs WHERE id = ?').run(run.id)
+
+  // Delete the parent experiment if it has no remaining runs
+  const remaining = db.prepare('SELECT COUNT(*) AS cnt FROM experiment_runs WHERE experiment_id = ?').get(run.experiment_id)
+  if (remaining.cnt === 0) {
+    db.prepare('DELETE FROM experiments WHERE id = ?').run(run.experiment_id)
+  }
+
   res.json({ success: true })
 })
 
@@ -520,8 +625,21 @@ router.get('/:id/progress', (req, res) => {
 router.post('/:id/abort', requireAuth, (req, res) => {
   const expId = parseInt(req.params.id)
   abortedExperiments.add(expId)
-  // Also mark any pending runs as failed immediately
-  db.prepare("UPDATE experiment_runs SET status = 'failed' WHERE experiment_id = ? AND status = 'pending'").run(expId)
+
+  // Kill all in-flight LLM requests immediately
+  const controllers = activeAbortControllers.get(expId)
+  if (controllers) {
+    for (const c of controllers) c.abort()
+    activeAbortControllers.delete(expId)
+  }
+
+  // Mark pending and running runs as failed immediately
+  db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Stopped by admin' WHERE experiment_id = ? AND status IN ('pending', 'running')").run(expId)
+
+  // Clean up progress tracking
+  const runs = db.prepare('SELECT id FROM experiment_runs WHERE experiment_id = ?').all(expId)
+  for (const r of runs) runStageProgress.delete(r.id)
+
   res.json({ aborted: true })
 })
 
@@ -654,6 +772,7 @@ router.get('/:id/analysis', (req, res) => {
 
 // Delete experiment
 router.delete('/:id', requireAuth, (req, res) => {
+  // Spending already saved to spending_log per-stage — just clean up run data
   const runs = db.prepare('SELECT id FROM experiment_runs WHERE experiment_id = ?').all(req.params.id)
   for (const run of runs) {
     db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
