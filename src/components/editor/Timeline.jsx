@@ -15,38 +15,22 @@ export default function Timeline() {
   const prevZoomRef = useRef(state.zoom)
   const zoomAnchorRef = useRef(null) // { time, screenX } — set by wheel, null for +/- buttons
 
-  // Merge cuts for display — merge overlapping AND merge when no uncut words exist in the gap
+  // Merge overlapping cuts for display — prevents double overlays when
+  // silence cuts overlap with annotation cuts on the timeline
   const mergedDisplayCuts = useMemo(() => {
     if (!state.cuts.length) return []
-    // Build word list for gap checking
-    const primaryAudio = state.tracks
-      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
-      .sort((a, b) => b.duration - a.duration)[0]
-    const words = primaryAudio?.transcriptWords?.map(w => ({
-      start: w.start + (primaryAudio.offset || 0),
-      end: w.end + (primaryAudio.offset || 0),
-    })) || []
-
     const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
     for (let i = 1; i < sorted.length; i++) {
       const last = merged[merged.length - 1]
-      if (sorted[i].start <= last.end + 0.05) {
+      if (sorted[i].start <= last.end) {
         last.end = Math.max(last.end, sorted[i].end)
       } else {
-        const gapStart = last.end
-        const gapEnd = sorted[i].start
-        const hasWord = words.some(w => w.start >= gapStart - 0.05 && w.end <= gapEnd + 0.05)
-        if (!hasWord) {
-          last.end = Math.max(last.end, sorted[i].end)
-        } else {
-          merged.push({ ...sorted[i] })
-        }
+        merged.push({ ...sorted[i] })
       }
     }
-
     return merged
-  }, [state.cuts, state.tracks])
+  }, [state.cuts])
 
   // Track horizontal scroll for virtualized tick rendering
   useEffect(() => {
