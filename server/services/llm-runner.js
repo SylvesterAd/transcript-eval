@@ -45,6 +45,12 @@ export async function executeRun(experimentRunId) {
   const stages = JSON.parse(version.stages_json || '[]')
   if (stages.length === 0) throw new Error('No stages defined')
 
+  // Snapshot the stages config at run time so we can detect changes later
+  if (!run.stages_snapshot_json) {
+    db.prepare('UPDATE experiment_runs SET stages_snapshot_json = ? WHERE id = ?')
+      .run(version.stages_json, experimentRunId)
+  }
+
   // For grouped videos, use the combined/assembled transcript
   const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(run.video_id)
   let rawTranscript = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
@@ -121,9 +127,9 @@ export async function executeRun(experimentRunId) {
       // Rebuild segments for the next llm_parallel stage
       const params = lastStage.actionParams || {}
       segments = segmentTranscript(currentInput, {
-        minSeconds: params.minSeconds || 40,
-        maxSeconds: params.maxSeconds || 80,
-        contextSeconds: params.contextSeconds || 30,
+        minSeconds: params.minSeconds ?? 40,
+        maxSeconds: params.maxSeconds ?? 80,
+        contextSeconds: params.contextSeconds ?? 30,
       })
     } else if (lastType === 'programmatic' && lastStage?.action === 'segment_by_chapters') {
       // Rebuild chapter-based segments for the next llm_parallel stage
@@ -135,7 +141,7 @@ export async function executeRun(experimentRunId) {
       if (chaptersData) {
         const params = lastStage.actionParams || {}
         segments = segmentByChapters(currentInput, chaptersData, {
-          contextSeconds: params.contextSeconds || 30,
+          contextSeconds: params.contextSeconds ?? 30,
         })
       }
     }
@@ -157,7 +163,7 @@ export async function executeRun(experimentRunId) {
           }
           if (chaptersData) {
             segments = segmentByChapters(currentInput, chaptersData, {
-              contextSeconds: params.contextSeconds || 30,
+              contextSeconds: params.contextSeconds ?? 30,
             })
           }
         } else {
@@ -239,7 +245,7 @@ export async function executeRun(experimentRunId) {
             entries: s.entryCount,
             mainTextPreview: s.mainText.slice(0, 100) + '...',
           })))
-          promptUsed = `[Programmatic] Segmented transcript into ${segments.length} chunks (${params.minSeconds || 40}-${params.maxSeconds || 80}s, ${params.contextSeconds || 30}s context)`
+          promptUsed = `[Programmatic] Segmented transcript into ${segments.length} chunks (${params.minSeconds ?? 40}-${params.maxSeconds ?? 80}s, ${params.contextSeconds ?? 30}s context)`
           modelUsed = 'programmatic'
 
         } else if (action === 'reassemble') {
@@ -269,7 +275,7 @@ export async function executeRun(experimentRunId) {
             chapterName: s.chapterName,
             mainTextPreview: s.mainText.slice(0, 100) + '...',
           })))
-          promptUsed = `[Programmatic] Segmented transcript into ${segments.length} chapters (${params.contextSeconds || 30}s context)`
+          promptUsed = `[Programmatic] Segmented transcript into ${segments.length} chapters (${params.contextSeconds ?? 30}s context)`
           modelUsed = 'programmatic'
 
         } else if (action === 'trim_before') {
@@ -310,6 +316,71 @@ export async function executeRun(experimentRunId) {
           llmResponseRaw = JSON.stringify(deletionEntries)
           promptUsed = `[Programmatic] Trimmed ${deletionEntries.length} lines before ${trimTimecode}`
           modelUsed = 'programmatic'
+
+        } else if (action === 'trim_ranges') {
+          if (!llmAnswer) {
+            throw new Error('trim_ranges requires a preceding llm_question stage (no {{llm_answer}} found)')
+          }
+          // Parse duplicate analysis JSON
+          let duplicates = []
+          try {
+            const parsed = JSON.parse(llmAnswer.replace(/```(?:json)?\s*([\s\S]*?)```/, '$1').trim())
+            duplicates = parsed.duplicates || []
+          } catch {
+            throw new Error('trim_ranges: could not parse duplicates JSON from llm_answer')
+          }
+
+          if (duplicates.length === 0) {
+            stageOutput = currentInput
+            llmResponseRaw = '[]'
+            promptUsed = '[Programmatic] No duplicate sections found — nothing to trim'
+            modelUsed = 'programmatic'
+          } else {
+            // Collect time ranges to delete (false starts)
+            const ranges = []
+            for (const dup of duplicates) {
+              const fs = dup.false_start
+              if (fs.timecode_start && fs.timecode_end) {
+                ranges.push({
+                  start: timecodeToSeconds(fs.timecode_start),
+                  end: timecodeToSeconds(fs.timecode_end),
+                  reason: fs.reason || '',
+                })
+              } else if (fs.timecode) {
+                // Single beat — delete just that timecoded line
+                ranges.push({
+                  start: timecodeToSeconds(fs.timecode),
+                  end: timecodeToSeconds(fs.timecode) + 0.01, // mark as single-line
+                  singleLine: true,
+                  reason: fs.reason || '',
+                })
+              }
+            }
+
+            // Walk transcript lines, collect deletions
+            const deletionEntries = []
+            const keptLines = []
+            const lineRegex = /(\[[\d:\.]+\])\s*([\s\S]*?)(?=\n\[[\d:\.]+\]|$)/g
+            let lineMatch
+            while ((lineMatch = lineRegex.exec(currentInput)) !== null) {
+              const lineTC = lineMatch[1]
+              const lineText = lineMatch[2].trim()
+              const lineSec = timecodeToSeconds(lineTC)
+              const inRange = ranges.some(r =>
+                r.singleLine ? Math.abs(lineSec - r.start) < 0.5 : lineSec >= r.start && lineSec <= r.end
+              )
+              if (inRange) {
+                deletionEntries.push({ timecode: lineTC, text: `${lineTC} ${lineText}` })
+              } else {
+                keptLines.push(lineMatch[0])
+              }
+            }
+
+            stageOutput = keptLines.join('\n').trim() || currentInput
+            llmResponseRaw = JSON.stringify(deletionEntries)
+            promptUsed = `[Programmatic] Deleted ${deletionEntries.length} lines from ${ranges.length} false start range(s)`
+            modelUsed = 'programmatic'
+          }
 
         } else {
           stageOutput = currentInput
@@ -363,10 +434,10 @@ export async function executeRun(experimentRunId) {
             stage = { ...stage, system_instruction: augmentSystemForSegments(sysInstr, stage.output_mode) }
           }
 
-          // Process segments with staggered concurrency pool (max 3, 1s stagger)
-          // Saves each segment result to DB immediately so nothing is lost on crash/restart
-          const CONCURRENCY = 3
-          const STAGGER_MS = 1000
+          // Process segments with staggered concurrency pool
+          // No context = lighter calls, so increase concurrency and reduce stagger
+          const CONCURRENCY = hasContext ? 3 : 5
+          const STAGGER_MS = hasContext ? 1000 : 200
           let segmentsDone = 0
 
           // Check for partially completed segments from a previous attempt
@@ -656,7 +727,7 @@ export async function executeRun(experimentRunId) {
       }
 
       // Update currentInput for stages that produce cleaned text
-      if (stageType === 'programmatic' && (stage.action === 'reassemble' || stage.action === 'trim_before')) {
+      if (stageType === 'programmatic' && (stage.action === 'reassemble' || stage.action === 'trim_before' || stage.action === 'trim_ranges')) {
         currentInput = stageOutput
       } else if (stageType === 'llm') {
         currentInput = stageOutput

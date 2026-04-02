@@ -4,7 +4,7 @@ import { EditorContext } from './EditorView.jsx'
 const ANNOTATION_COLORS = {
   // Deletions — red spectrum (dark → light)
   false_starts:      { bg: 'rgba(220, 38, 38, 0.15)',  border: '#dc2626', label: 'False Starts' },
-  filler_words:      { bg: 'rgba(239, 68, 68, 0.15)',  border: '#ef4444', label: 'Filler Words' },
+  filler_words:      { bg: 'rgba(251, 146, 60, 0.15)',  border: '#fb923c', label: 'Filler Words' },
   meta_commentary:   { bg: 'rgba(251, 113, 133, 0.15)', border: '#fb7185', label: 'Meta Commentary' },
   // Identifications — purple/orange/warm
   repetition:        { bg: 'rgba(167, 139, 250, 0.20)', border: '#a78bfa', label: 'Repetition' },
@@ -57,6 +57,85 @@ export default function TranscriptEditor() {
     }
 
     words.sort((a, b) => a.start - b.start)
+
+    // Correct word start/end times using waveform data
+    // (transcription timestamps can be inaccurate — waveform shows where sound actually is)
+    const primaryTrack = primary.track
+    const peaks = primaryTrack?.waveformPeaks
+    if (peaks?.length) {
+      const PEAKS_PER_SEC = 100
+      const offset = primaryTrack.offset || 0
+      const timeToPeak = (t) => Math.round((t - offset) * PEAKS_PER_SEC)
+      const hasSound = (b) => {
+        if (b < 0 || b * 2 + 1 >= peaks.length) return false
+        const linear = Math.abs(peaks[b * 2 + 1]) / 128
+        if (linear <= 0) return false
+        const db = 20 * Math.log10(linear)
+        const scaled = db <= -60 ? 0 : (db - -60) / 60
+        return scaled >= 0.5 / 56
+      }
+
+      // First pass: correct suspiciously long word durations regardless of gap
+      // (ElevenLabs sometimes inflates end times, hiding silence inside a word)
+      for (let i = 0; i < words.length; i++) {
+        const duration = words[i].end - words[i].start
+        if (duration > 0.5) {
+          const wordEndBar = timeToPeak(words[i].end)
+          const wordStartBar = timeToPeak(words[i].start)
+          // Scan backward from word end to find where sound actually stops
+          let b = wordEndBar
+          while (b > wordStartBar && !hasSound(b)) b--
+          if (b > wordStartBar) {
+            words[i].end = Math.max(offset + (b + 1) / PEAKS_PER_SEC + 0.15, words[i].start + 0.15)
+          }
+        }
+      }
+
+      // Second pass: correct word boundaries at silence gaps
+      for (let i = 1; i < words.length; i++) {
+        const gap = words[i].start - words[i - 1].end
+        const nextStartBar = timeToPeak(words[i].start)
+
+        // Correct previous word's end time (only for larger gaps to avoid tight sequences)
+        if (gap > 0.75) {
+          const prevEndBar = timeToPeak(words[i - 1].end)
+          const prevStartBar = timeToPeak(words[i - 1].start)
+          if (hasSound(prevEndBar)) {
+            let b = prevEndBar
+            while (b < nextStartBar && hasSound(b)) b++
+            words[i - 1].end = Math.max(offset + b / PEAKS_PER_SEC + 0.15, words[i - 1].start + 0.15)
+          } else {
+            let b = prevEndBar
+            while (b > prevStartBar && !hasSound(b)) b--
+            if (b > prevStartBar) {
+              words[i - 1].end = Math.max(offset + (b + 1) / PEAKS_PER_SEC + 0.15, words[i - 1].start + 0.15)
+            }
+          }
+        }
+
+        // Correct next word's start time (for any gap > 0.3s — catches annotation boundaries)
+        if (gap > 0.3) {
+          const prevCorrectedEndBar = timeToPeak(words[i - 1].end)
+          if (hasSound(nextStartBar)) {
+            let b = nextStartBar
+            const scanLimit = Math.max(nextStartBar - 50, prevCorrectedEndBar)
+            while (b > scanLimit && hasSound(b)) b--
+            words[i].start = offset + (b + 1) / PEAKS_PER_SEC - 0.05 // 50ms before first bar
+          } else {
+            let b = nextStartBar
+            const limit = nextStartBar + 50
+            while (b < limit) {
+              if (hasSound(b) && hasSound(b + 1) && hasSound(b + 2)) {
+                words[i].start = offset + b / PEAKS_PER_SEC - 0.05 // 50ms before first bar
+                break
+              }
+              b++
+            }
+          }
+        }
+      }
+    }
+
     return words
   }, [state.tracks])
 
@@ -166,77 +245,15 @@ export default function TranscriptEditor() {
       return
     }
 
-    // Find primary audio track (longest — same logic as mergedWords)
-    const primaryTrack = state.tracks
-      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
-      .sort((a, b) => b.duration - a.duration)[0]
-    const peaks = primaryTrack?.waveformPeaks
-    const PEAKS_PER_SEC = 100 // 10ms per bar
-    const trackOffset = primaryTrack?.offset || 0
-
-    // Check if a waveform bar at peak index b has visible sound — same logScale
-    // as rough cut visualization (dB scaling, -60dB floor, barH >= 0.5 threshold)
-    const hasSound = (b) => {
-      if (!peaks || b < 0 || b * 2 + 1 >= peaks.length) return false
-      const linear = Math.abs(peaks[b * 2 + 1]) / 128
-      if (linear <= 0) return false
-      const db = 20 * Math.log10(linear)
-      const scaled = db <= -60 ? 0 : (db - -60) / 60
-      return scaled >= 0.5 / 56 // barH >= 0.5 at track height 56px
-    }
-
-    // Convert timeline time to peak index (local to track)
-    const timeToPeak = (t) => Math.round((t - trackOffset) * PEAKS_PER_SEC)
-
+    // Word timestamps are already corrected by waveform in mergedWords useMemo.
+    // Silence cuts simply span the gaps between corrected word boundaries.
     const cuts = []
     for (let i = 1; i < mergedWords.length; i++) {
       const gap = mergedWords[i].start - mergedWords[i - 1].end
       if (gap <= 0.75) continue
 
-      let cutStart = mergedWords[i - 1].end
-      let cutEnd = mergedWords[i].start - 0.2
-
-      if (peaks?.length) {
-        const prevEndBar = timeToPeak(mergedWords[i - 1].end)
-        const nextStartBar = timeToPeak(mergedWords[i].start)
-
-        // Cut START: check waveform at prev word's end time.
-        // If still sound → scan forward to where it goes silent.
-        // If already silent → scan backward to find where sound actually ended
-        //   (handles inflated transcript end times). Add 200ms after last sound.
-        if (hasSound(prevEndBar)) {
-          let b = prevEndBar
-          while (b < nextStartBar && hasSound(b)) b++
-          cutStart = trackOffset + b / PEAKS_PER_SEC + 0.1 // 100ms padding after last sound
-        } else {
-          const prevStartBar = timeToPeak(mergedWords[i - 1].start)
-          let b = prevEndBar
-          while (b > prevStartBar && !hasSound(b)) b--
-          if (b > prevStartBar) {
-            cutStart = trackOffset + (b + 1) / PEAKS_PER_SEC + 0.2
-          }
-        }
-
-        // Cut END: check waveform at next word's transcript start.
-        // If silent → scan right to find first real sound (3 consecutive bars).
-        // Cut ends 200ms before that sound.
-        // Cap scan at 500ms past transcript start — if no sound found, trust transcript.
-        if (!hasSound(nextStartBar)) {
-          let b = nextStartBar
-          const limit = nextStartBar + 50 // scan up to 500ms forward
-          let found = false
-          while (b < limit) {
-            if (hasSound(b) && hasSound(b + 1) && hasSound(b + 2)) {
-              cutEnd = trackOffset + b / PEAKS_PER_SEC - 0.2
-              found = true
-              break
-            }
-            b++
-          }
-          if (!found) cutEnd = mergedWords[i].start - 0.2
-        }
-        // else: sound already at transcript start → cutEnd stays at nextWord.start - 0.2
-      }
+      const cutStart = mergedWords[i - 1].end + 0.1
+      const cutEnd = mergedWords[i].start - 0.2
 
       if (cutEnd > cutStart + 0.1) {
         cuts.push({
@@ -272,7 +289,8 @@ export default function TranscriptEditor() {
       const hasUncutWord = mergedWords.some(w => {
         const wEnd = Math.max(w.end, w.start + 0.01) // handle 0-duration words
         if (w.start >= gapEnd || wEnd <= gapStart) return false
-        return !regions.some(r => w.start >= r.start && wEnd <= r.end)
+        // Word is "cut" if it overlaps any annotation region (with 50ms tolerance for timestamp mismatches)
+        return !regions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
       })
       const shouldMerge = !hasUncutWord
 
@@ -318,7 +336,52 @@ export default function TranscriptEditor() {
       }
     }
 
-    const finalCuts = splits.map((r, i) => ({
+    // Bridge adjacent annotation cuts when no uncut words exist in the gap
+    // (covers silence gaps between consecutive deleted sections)
+    const bridged = [{ ...splits[0] }]
+    for (let i = 1; i < splits.length; i++) {
+      const last = bridged[bridged.length - 1]
+      const gapStart = last.end
+      const gapEnd = splits[i].start
+      const hasUncutWordInGap = mergedWords.some(w => {
+        const wEnd = Math.max(w.end, w.start + 0.01)
+        if (w.start < gapStart || wEnd > gapEnd) return false
+        // Word is in the gap — but is it covered by an annotation region? (50ms tolerance)
+        const isCoveredByAnn = annotationRegions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
+        return !isCoveredByAnn
+      })
+      if (!hasUncutWordInGap) {
+        last.end = splits[i].end
+      } else {
+        bridged.push({ ...splits[i] })
+      }
+    }
+
+    // Extend annotation cut edges to fill wordless gaps (micro-gaps between
+    // annotation cuts and silence cuts). Only extend into gaps with no uncut words —
+    // never extend past the nearest uncut word boundary.
+    for (const region of bridged) {
+      // Extend end forward: stretch to next uncut word's start (fills gap after last deleted word)
+      const nextUncutWord = mergedWords.find(w => w.start >= region.end - 0.01 && !annotationRegions.some(r => w.start >= r.start - 0.05 && w.end <= r.end + 0.05))
+      if (nextUncutWord) {
+        // Only extend if there are no uncut words between region.end and nextUncutWord.start
+        const hasUncutBetween = mergedWords.some(w => {
+          if (w === nextUncutWord) return false
+          const wEnd = Math.max(w.end, w.start + 0.01)
+          return w.start >= region.end - 0.01 && wEnd <= nextUncutWord.start + 0.01 &&
+            !annotationRegions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
+        })
+        if (!hasUncutBetween) region.end = nextUncutWord.start
+      }
+      // Extend start backward: stretch to prev uncut word's end (fills gap before first deleted word)
+      const prevUncutWord = [...mergedWords].reverse().find(w => w.end <= region.start + 0.01 && !annotationRegions.some(r => w.start >= r.start - 0.05 && w.end <= r.end + 0.05))
+      if (prevUncutWord) {
+        // Don't extend past the previous uncut word — the cut should start AFTER it, not inside it
+        region.start = Math.max(region.start, prevUncutWord.end)
+      }
+    }
+
+    const finalCuts = bridged.map((r, i) => ({
       id: `cut-ai-ann-${i}`,
       start: r.start,
       end: r.end,
@@ -406,9 +469,10 @@ export default function TranscriptEditor() {
       if (minIdx >= 0 && maxIdx >= 0) {
         setSelStart(minIdx)
         setSelEnd(maxIdx)
+        const selectedItems = displayItems.slice(minIdx, maxIdx + 1).map(d => ({ start: d.start, end: d.end }))
         dispatch({
           type: 'SET_TRANSCRIPT_SELECTION',
-          payload: { startTime: displayItems[minIdx].start, endTime: displayItems[maxIdx].end },
+          payload: { startTime: displayItems[minIdx].start, endTime: displayItems[maxIdx].end, words: selectedItems },
         })
 
         // Single word tap — also seek
@@ -440,12 +504,29 @@ export default function TranscriptEditor() {
     return count
   }, [hasSelection, selMin, selMax, displayItems])
 
+  // Cmd+C / Ctrl+C — copy selected words to clipboard
+  useEffect(() => {
+    if (!hasSelection) return
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC') {
+        const text = displayItems.slice(selMin, selMax + 1)
+          .map(d => d.word)
+          .join(' ')
+        navigator.clipboard.writeText(text)
+        e.preventDefault()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [hasSelection, selMin, selMax, displayItems])
+
   // Toggle word exclusion from annotation cuts on right-click
   const handleContextMenu = useCallback((idx, e) => {
     e.preventDefault()
     const item = displayItems[idx]
     if (item.type !== 'word') return
     const wordEnd = Math.max(item.end, item.start + 0.01)
+    console.log(`[roughcut] Right-click exclude: "${item.word}" ${item.start.toFixed(2)}-${wordEnd.toFixed(2)}`)
     dispatch({ type: 'EXCLUDE_FROM_CUT', payload: { wordStart: item.start, wordEnd } })
   }, [displayItems, dispatch])
 
@@ -523,6 +604,17 @@ export default function TranscriptEditor() {
                   {label}
                 </button>
               ))}
+              {state.cutExclusions?.length > 0 && (
+                <>
+                  <div className="border-t border-white/10 my-1" />
+                  <button
+                    onClick={() => dispatch({ type: 'CLEAR_EXCLUSIONS' })}
+                    className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-red-400 hover:bg-red-500/10 transition-colors"
+                  >
+                    Reset exclusions ({state.cutExclusions.length})
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -612,7 +704,7 @@ export default function TranscriptEditor() {
                 className={`cursor-text px-[1px] py-[2px] inline ${
                   cut ? 'line-through text-on-surface-variant' : ''
                 } ${
-                  cut && !selected ? 'opacity-30' : ''
+                  cut && !selected ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
                 } ${
                   isCurrent && !cut && !bgColor ? 'bg-white/15' : ''
                 } ${

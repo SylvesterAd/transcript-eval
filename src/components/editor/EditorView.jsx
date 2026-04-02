@@ -75,7 +75,10 @@ export default function EditorView() {
       return
     }
 
-    if (!state.annotations) {
+    // Always sync annotations from server (picks up rebuilds after restart-from-stage)
+    const serverCount = groupDetail.annotations.items?.length || 0
+    const stateCount = state.annotations?.items?.length || 0
+    if (!state.annotations || serverCount !== stateCount) {
       dispatch({ type: 'SET_ANNOTATIONS', payload: groupDetail.annotations })
     }
     // Auto-enable deletion categories once if none are enabled (first load)
@@ -137,7 +140,7 @@ export default function EditorView() {
           return
         }
         if (data.experimentId) {
-          setFlowRunState({ experimentId: data.experimentId, runId: data.runId, status: 'running', progress: null, totalStages: data.totalStages || 0, stageNames: data.stageNames || [] })
+          setFlowRunState({ experimentId: data.experimentId, runId: data.runId, status: 'running', progress: null, totalStages: data.totalStages || 0, stageNames: data.stageNames || [], stageTypes: data.stageTypes || [] })
         }
       } catch (err) {
         console.error('[main-flow] Trigger failed:', err)
@@ -495,14 +498,27 @@ export default function EditorView() {
       } else if ((e.code === 'Backspace' || e.code === 'Delete') && state.activeTab === 'roughcut') {
         if (state.transcriptSelection) {
           e.preventDefault()
-          const { startTime, endTime } = state.transcriptSelection
-          // Find cuts that overlap the selection
-          const overlapping = state.cuts.filter(c => c.start < endTime && c.end > startTime)
-          if (overlapping.length > 0) {
-            // Selection is already cut — exclude just the selected range (split cuts around it)
+          const { startTime, endTime, words } = state.transcriptSelection
+          // Count cut vs uncut words/pauses in the selection
+          const items = words || []
+          let cutCount = 0
+          let uncutCount = 0
+          for (const w of items) {
+            const isCut = state.cuts.some(c => c.start <= w.start && c.end >= (w.end || w.start + 0.01))
+            if (isCut) cutCount++
+            else uncutCount++
+          }
+          // If no word info, fall back to overlap check
+          if (items.length === 0) {
+            const overlapping = state.cuts.filter(c => c.start < endTime && c.end > startTime)
+            if (overlapping.length > 0) cutCount = 1
+            else uncutCount = 1
+          }
+          const action = cutCount > uncutCount ? 'UNCUT' : 'CUT'
+          console.log(`[roughcut] Backspace: ${startTime.toFixed(2)}-${endTime.toFixed(2)} | items=${items.length} cut=${cutCount} uncut=${uncutCount} → ${action}`)
+          if (action === 'UNCUT') {
             dispatch({ type: 'EXCLUDE_FROM_CUT', payload: { wordStart: startTime, wordEnd: endTime } })
           } else {
-            // Selection is not cut — create a cut
             dispatch({
               type: 'ADD_CUT',
               payload: { id: `cut-${Date.now()}`, start: startTime, end: endTime, source: 'transcript' },
@@ -714,7 +730,7 @@ function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
             </div>
           </div>
         ) : (
-          <FlowProgressScreen progress={flowRunState.progress} initialTotalStages={flowRunState.totalStages} initialStageNames={flowRunState.stageNames} error={flowRunState.status === 'error'} onDismissError={() => setFlowRunState(null)} />
+          <FlowProgressScreen progress={flowRunState.progress} initialTotalStages={flowRunState.totalStages} initialStageNames={flowRunState.stageNames} initialStageTypes={flowRunState.stageTypes || []} error={flowRunState.status === 'error'} onDismissError={() => setFlowRunState(null)} />
         )}
       </main>
     )
@@ -833,14 +849,10 @@ function applyConfigDefaults(config, dispatch) {
   }})
 }
 
-function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageNames = [], error = false, onDismissError }) {
+function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageNames = [], initialStageTypes = [], error = false, onDismissError }) {
   const run = progress?.runs?.[0]
-  // Use live totalStages from poll if available, otherwise fall back to initial from endpoint
   const totalStages = run?.totalStages || initialTotalStages
-  // currentStage from runStageProgress (0-indexed). If not set yet, treat stage 0 as current
-  // (run is pending/starting). Only use -1 if we have no run data at all.
   const currentStage = run?.currentStage ?? (run ? 0 : -1)
-  const completedStages = run?.stages || []
 
   if (error) {
     const errorMsg = run?.errorMessage || 'Unknown error'
@@ -856,74 +868,70 @@ function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageName
     )
   }
 
+  // Compute weighted percentage
+  // llm_parallel = 10 weight (heavy), llm/llm_question = 3, programmatic = 1 (instant)
+  const WEIGHTS = { llm_parallel: 10, llm: 3, llm_question: 3, programmatic: 1 }
+  const stageWeights = Array.from({ length: totalStages }, (_, i) => WEIGHTS[initialStageTypes[i]] || 3)
+  const totalWeight = stageWeights.reduce((a, b) => a + b, 0) || 1
+
+  let completedWeight = 0
+  for (let i = 0; i < totalStages; i++) {
+    if (currentStage >= 0 && i < currentStage) {
+      completedWeight += stageWeights[i]
+    } else if (currentStage >= 0 && i === currentStage) {
+      // Partial progress within current stage
+      if (run?.segmentsTotal > 1) {
+        completedWeight += stageWeights[i] * ((run.segmentsDone || 0) / run.segmentsTotal)
+      }
+    }
+  }
+  const percent = Math.min(99, Math.round((completedWeight / totalWeight) * 100))
+
+  // Current stage name
+  const currentName = currentStage >= 0
+    ? (run?.stageName || initialStageNames[currentStage] || `Stage ${currentStage + 1}`)
+    : ''
+  const currentDetail = currentStage >= 0 && run?.segmentsTotal > 1
+    ? `${run.segmentsDone || 0}/${run.segmentsTotal} segments`
+    : ''
+
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-8">
-      {/* Spinner */}
-      <div className="relative">
-        <span className="material-symbols-outlined animate-spin text-5xl text-primary-fixed">progress_activity</span>
+    <div className="flex-1 flex flex-col items-center justify-center gap-6">
+      {/* Percentage */}
+      <div className="relative flex items-center justify-center">
+        <span className="text-6xl font-bold text-primary-fixed tabular-nums">{percent}</span>
+        <span className="text-2xl font-bold text-primary-fixed/50 ml-1">%</span>
       </div>
 
-      <h2 className="text-lg font-bold text-on-surface">Analyzing transcript...</h2>
+      {/* Progress bar */}
+      <div className="w-72 h-1.5 bg-white/5 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-primary-fixed rounded-full transition-all duration-700 ease-out"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
 
-      {/* Vertical stage list */}
-      {totalStages > 0 ? (
-        <div className="flex flex-col gap-2 w-80">
-          {Array.from({ length: totalStages }, (_, si) => {
-            const isDone = currentStage >= 0 && si < currentStage
-            const isCurrent = currentStage >= 0 && si === currentStage
-            const stageData = completedStages.find(s => s.stage_index === si)
-            // Best name: live stage name for current, DB stage_name for done, initial names as fallback
-            const stageName = isCurrent ? (run?.stageName || initialStageNames[si] || `Stage ${si + 1}`)
-              : isDone ? (stageData?.stage_name || initialStageNames[si] || `Stage ${si + 1}`)
-              : (initialStageNames[si] || `Stage ${si + 1}`)
-
-            let statusText
-            if (isDone) statusText = 'done'
-            else if (isCurrent) {
-              statusText = run?.segmentsTotal > 1
-                ? `analyzing (${run.segmentsDone || 0}/${run.segmentsTotal})`
-                : 'running...'
-            } else statusText = 'waiting'
-
-            return (
-              <div key={si} className={`flex items-center gap-3 rounded-lg px-4 py-2.5 transition-all ${
-                isCurrent ? 'bg-primary-fixed/5 border border-primary-fixed/20'
-                : isDone ? 'bg-white/[0.02] border border-transparent'
-                : 'border border-transparent opacity-40'
-              }`}>
-                <span className={`material-symbols-outlined text-[18px] shrink-0 ${
-                  isDone ? 'text-green-500' : isCurrent ? 'text-primary-fixed' : 'text-on-surface-variant/30'
-                }`} style={isDone ? { fontVariationSettings: '"FILL" 1' } : undefined}>
-                  {isDone ? 'check_circle' : isCurrent ? 'pending' : 'radio_button_unchecked'}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className={`text-xs font-medium truncate ${
-                    isCurrent ? 'text-on-surface' : isDone ? 'text-on-surface-variant' : 'text-on-surface-variant/50'
-                  }`}>
-                    Stage {si + 1}: {stageName}
-                  </div>
-                  <div className={`text-[10px] ${
-                    isCurrent ? 'text-primary-fixed/80' : isDone ? 'text-green-500/60' : 'text-on-surface-variant/30'
-                  }`}>
-                    {statusText}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      ) : (
-        <div className="flex gap-1.5 mt-2">
-          {[0, 1, 2, 3, 4].map(i => (
-            <div key={i} className="w-2 h-2 rounded-full bg-white/10 animate-pulse" style={{ animationDelay: `${i * 200}ms` }} />
-          ))}
-        </div>
-      )}
+      {/* Current stage info */}
+      <div className="text-center">
+        <div className="text-sm text-on-surface-variant">{currentName}</div>
+        {currentDetail && <div className="text-xs text-on-surface-variant/50 mt-0.5">{currentDetail}</div>}
+      </div>
     </div>
   )
 }
 
 function deriveFromTimeline(timeline, videos) {
+  // Single-video fallback: synthesize a timeline from the video list
+  if (!timeline?.tracks?.length && videos?.length) {
+    timeline = {
+      tracks: videos.map(v => ({
+        videoId: v.id,
+        title: v.title,
+        offset: 0,
+        duration: v.duration_seconds || 0,
+      })),
+    }
+  }
   if (!timeline?.tracks?.length) return { tracks: [], groups: {} }
   const GROUP_COLORS = ['#cefc00', '#c180ff', '#65fde6', '#ff7351', '#48e5d0', '#dbb4ff']
   const vTracks = []

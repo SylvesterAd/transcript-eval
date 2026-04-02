@@ -378,10 +378,21 @@ function ExpandedRun({ run, onViewStage, onRestarted }) {
             const isParallel = stage.prompt_used?.startsWith('[Parallel LLM]')
             const stageType = isParallel ? 'llm_parallel' : (stage.stage_name?.toLowerCase().includes('programmatic') ? 'programmatic' : 'llm')
 
+            const change = detail.stageChanges?.[stage.stage_index]
+            const changeStatus = change?.status
+            const changeBorder = changeStatus === 'changed' ? 'border-amber-600/60' : changeStatus === 'impacted' ? 'border-amber-800/40' : changeStatus === 'added' ? 'border-green-700/50' : changeStatus === 'removed' ? 'border-red-700/50' : 'border-zinc-800'
+
             return (
               <div key={stage.stage_index} className="flex items-start gap-2">
                 {i > 0 && <div className="text-zinc-700 mt-4 shrink-0">&rarr;</div>}
-                <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 min-w-[180px] max-w-[220px]">
+                <div className={`bg-zinc-900 border rounded-lg p-3 min-w-[180px] max-w-[220px] ${changeBorder}`}>
+                  {changeStatus && changeStatus !== 'unchanged' && (
+                    <div className={`text-[9px] font-bold uppercase tracking-wider mb-1 ${
+                      changeStatus === 'changed' ? 'text-amber-400' : changeStatus === 'impacted' ? 'text-amber-600' : changeStatus === 'added' ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {changeStatus === 'changed' ? 'Changed' : changeStatus === 'impacted' ? 'Might be impacted' : changeStatus === 'added' ? 'New stage' : 'Removed'}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-xs font-medium truncate">{stage.stage_name}</span>
                     <div className="flex items-center gap-1 shrink-0 ml-1">
@@ -435,6 +446,16 @@ function ExpandedRun({ run, onViewStage, onRestarted }) {
               </div>
             )
           })}
+          {/* Show new stages added in latest strategy version */}
+          {detail.stageChanges?.filter(c => c.status === 'added' && c.index >= stages.length).map(c => (
+            <div key={`new-${c.index}`} className="flex items-start gap-2">
+              <div className="text-zinc-700 mt-4 shrink-0">&rarr;</div>
+              <div className="bg-zinc-900 border border-green-700/50 border-dashed rounded-lg p-3 min-w-[180px] max-w-[220px] opacity-60">
+                <div className="text-[9px] font-bold uppercase tracking-wider mb-1 text-green-400">New stage</div>
+                <span className="text-xs text-zinc-500">Stage {c.index + 1}</span>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

@@ -98,6 +98,17 @@ export async function transcribeVideo(filePath, onProgress, signal) {
       .filter(w => w.type === 'word')
       .map(w => ({ word: w.text, start: w.start, end: w.end }))
 
+    // Fix duplicate timestamps: if a word has the same start as the previous,
+    // set its start/end to the average between the previous and next word
+    for (let i = 1; i < words.length; i++) {
+      if (words[i].start === words[i - 1].start) {
+        const prev = words[i - 1].end
+        const next = i + 1 < words.length ? words[i + 1].start : words[i].end + 0.3
+        words[i].start = (prev + next) / 2
+        words[i].end = Math.max(words[i].start + 0.01, next - 0.01)
+      }
+    }
+
     const text = response.text || ''
     const duration = words.length > 0 ? words[words.length - 1].end : 0
     const formatted = formatTranscript(words)

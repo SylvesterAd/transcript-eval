@@ -670,15 +670,18 @@ router.post('/groups/:id/run-main-flow', async (req, res) => {
 
   const runId = Number(runResult.lastInsertRowid)
 
-  // Parse stage names from the strategy version for immediate progress display
-  let stageNames = []
+  // Parse stage info from the strategy version for immediate progress display
+  let stageInfos = []
   try {
     const stages = JSON.parse(version.stages_json || '[]')
-    stageNames = stages.map((s, i) => s.name || `Stage ${i + 1}`)
+    stageInfos = stages.map((s, i) => ({
+      name: s.name || `Stage ${i + 1}`,
+      type: s.type || 'llm',
+    }))
   } catch { /* ignore */ }
 
   // Return IDs immediately for polling
-  res.json({ experimentId, runId, totalStages: stageNames.length, stageNames })
+  res.json({ experimentId, runId, totalStages: stageInfos.length, stageNames: stageInfos.map(s => s.name), stageTypes: stageInfos.map(s => s.type) })
 
   // Execute in background with 1 auto-retry on failure
   ;(async () => {

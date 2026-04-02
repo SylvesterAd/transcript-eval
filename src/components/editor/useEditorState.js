@@ -441,6 +441,8 @@ function reducer(state, action) {
       }
       return { ...state, cutExclusions: [...state.cutExclusions, { start: wordStart, end: wordEnd }], isDirty: true }
     }
+    case 'CLEAR_EXCLUSIONS':
+      return { ...state, cutExclusions: [], isDirty: true }
     case 'UPDATE_CUT':
       return { ...state, cuts: state.cuts.map(c => c.id === action.payload.id ? { ...c, ...action.payload.updates } : c), isDirty: true }
     case 'SET_AI_CUTS': {

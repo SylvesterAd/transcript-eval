@@ -221,7 +221,8 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
 router.get('/runs/:runId', (req, res) => {
   const run = db.prepare(`
     SELECT er.*, v.title AS video_title, e.name AS experiment_name,
-      s.name AS strategy_name, sv.version_number
+      s.name AS strategy_name, sv.version_number,
+      e.strategy_version_id, sv.strategy_id
     FROM experiment_runs er
     LEFT JOIN videos v ON v.id = er.video_id
     LEFT JOIN experiments e ON e.id = er.experiment_id
@@ -259,10 +260,11 @@ router.get('/runs/:runId', (req, res) => {
 
   // Attach raw strategy stage configs (before placeholder substitution)
   let rawStageConfigs = null
+  let runStagesJson = null
   if (run.strategy_version_id) {
     const sv = db.prepare('SELECT stages_json FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
     if (sv?.stages_json) {
-      try { rawStageConfigs = JSON.parse(sv.stages_json) } catch {}
+      try { rawStageConfigs = JSON.parse(sv.stages_json); runStagesJson = rawStageConfigs } catch {}
     }
   }
   for (const stage of stages) {
@@ -270,7 +272,46 @@ router.get('/runs/:runId', (req, res) => {
     stage.rawStageConfig = cfg ? { prompt: cfg.prompt || null, system_instruction: cfg.system_instruction || null } : null
   }
 
-  res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content, rawNormalized, humanNormalized })
+  // Compare run's stages snapshot with current latest version to detect changes
+  let stageChanges = null
+  if (run.strategy_id) {
+      const latest = db.prepare('SELECT stages_json FROM strategy_versions WHERE strategy_id = ? ORDER BY id DESC LIMIT 1').get(run.strategy_id)
+      const snapshotJson = run.stages_snapshot_json
+      if (latest?.stages_json && snapshotJson) {
+        try {
+          const latestStages = JSON.parse(latest.stages_json)
+          const snapshotStages = JSON.parse(snapshotJson)
+          const maxLen = Math.max(snapshotStages.length, latestStages.length)
+          const stageOutputIndices = new Set(stages.map(s => s.stage_index))
+          stageChanges = []
+          let firstChanged = -1
+          for (let i = 0; i < maxLen; i++) {
+            const a = JSON.stringify(snapshotStages[i] || null)
+            const b = JSON.stringify(latestStages[i] || null)
+            const changed = a !== b
+            const wasRun = stageOutputIndices.has(i)
+            if (changed && !wasRun && firstChanged === -1) firstChanged = i
+            let status
+            if (wasRun) {
+              status = 'unchanged'
+            } else if (!snapshotStages[i]) {
+              status = 'added'
+            } else if (!latestStages[i]) {
+              status = 'removed'
+            } else if (changed) {
+              status = 'changed'
+            } else if (firstChanged >= 0) {
+              status = 'impacted'
+            } else {
+              status = 'unchanged'
+            }
+            stageChanges.push({ index: i, status })
+          }
+        } catch {}
+      }
+  }
+
+  res.json({ ...run, stages, metrics, stageDiffs, scoreBreakdown, raw: raw?.content, human: human?.content, rawNormalized, humanNormalized, stageChanges })
 })
 
 // Analyze a run (deterministic or LLM-powered)
@@ -335,6 +376,32 @@ router.post('/runs/:runId/restart-from/:stageIndex', requireAuth, async (req, re
 
   try {
     await executeRun(runId)
+    // Rebuild annotations after successful run
+    const completedRun = db.prepare('SELECT status, video_id FROM experiment_runs WHERE id = ?').get(runId)
+    if (completedRun?.status === 'complete' || completedRun?.status === 'partial') {
+      const video = db.prepare('SELECT group_id FROM videos WHERE id = ?').get(completedRun.video_id)
+      if (video?.group_id) {
+        try {
+          const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await import('../services/annotation-mapper.js')
+          let wordTimestamps = getTimelineWordTimestamps(video.group_id)
+          if (!wordTimestamps?.length) {
+            const transcript = db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(completedRun.video_id)
+            if (transcript?.word_timestamps_json) {
+              try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch {}
+            }
+          }
+          if (wordTimestamps?.length) {
+            const groupData = db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(video.group_id)
+            const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
+            db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
+              .run(JSON.stringify(annotations), video.group_id)
+            console.log(`[restart] Rebuilt ${annotations.items.length} annotations for group ${video.group_id}`)
+          }
+        } catch (annErr) {
+          console.error(`[restart] Annotation rebuild failed:`, annErr.message)
+        }
+      }
+    }
   } catch (err) {
     console.error(`[restart] Run ${runId} from stage ${fromStage} failed:`, err.message)
   }

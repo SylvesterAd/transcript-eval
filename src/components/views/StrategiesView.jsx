@@ -236,6 +236,97 @@ Return ONLY valid JSON:
   },
 ]
 
+const DEDUP_CHAPTERS_PIPELINE = [
+  {
+    name: 'Find Duplicate Sections',
+    type: 'llm_question',
+    model: 'gemini-3.1-pro-preview',
+    prompt: `{{transcript}}`,
+    system_instruction: `You are a video content analyst. Your job has two parts:
+
+## Part 1: Build the Chapter & Beat Structure
+
+Analyze the transcript and break it down into chapters and beats.
+
+**Chapter** = a major section of the video with one clear purpose (e.g., "Introduction", "Skill #1", "Conclusion"). A chapter has a start timecode and an end timecode.
+
+**Beat** = a small moment inside a chapter where something specific happens — a statement, a reaction, a key point, a transition. Each beat has a timecode.
+
+List ALL chapters and ALL beats. Include everything — even if something appears to be a retake or false start, list it as its own chapter/beat.
+
+## Part 2: Compare Chapters & Beats Against Each Other
+
+Now look at your chapter list: are there two chapters that serve the **same purpose**? For example, two "Introduction" chapters, or two chapters both covering "Skill #1". Video creators often redo sections — the first attempt is a false start, the last attempt is the keeper.
+
+Then look at your beat list within and across chapters: are there two beats that make the **same point** at different timecodes? For example, the same hook statement delivered twice, or the same key insight repeated.
+
+For each match:
+- The **earlier** occurrence = false start (to be deleted)
+- The **later** occurrence = keeper (to be kept)
+
+Only flag genuine retakes of the same content. Two chapters on different skills are NOT duplicates. A point expanded upon later is NOT a duplicate.
+
+**Critical check**: removing the false start must NOT damage the story structure. The keeper version must fully replace the false start — after deletion, the video's narrative should flow naturally with no missing information, context, or transitions. If deleting the earlier version would leave a gap in the story, it is NOT a false start.
+
+## Output format
+Return ONLY valid JSON:
+\`\`\`json
+{
+  "chapters": [
+    {
+      "timecode_start": "[00:00:00]",
+      "timecode_end": "[00:05:30]",
+      "name": "Introduction",
+      "description": "Host introduces the topic",
+      "beats": [
+        { "timecode": "[00:00:15]", "description": "Opening hook" }
+      ]
+    }
+  ],
+  "duplicates": [
+    {
+      "type": "chapter",
+      "false_start": {
+        "timecode_start": "[00:00:30]",
+        "timecode_end": "[00:01:15]",
+        "name": "Introduction (take 1)",
+        "reason": "Same intro as chapter at [00:01:20] — first attempt"
+      },
+      "keeper": {
+        "timecode_start": "[00:01:20]",
+        "timecode_end": "[00:02:00]",
+        "name": "Introduction (take 2)"
+      }
+    },
+    {
+      "type": "beat",
+      "false_start": {
+        "timecode": "[00:03:15]",
+        "description": "These are the five communication skills...",
+        "reason": "Same statement repeated at [00:03:45] more cleanly"
+      },
+      "keeper": {
+        "timecode": "[00:03:45]",
+        "description": "These are the five communication skills..."
+      }
+    }
+  ]
+}
+\`\`\`
+
+If no duplicate chapters or beats are found, return chapters with \`"duplicates": []\`.`,
+    params: { temperature: 1, thinking_level: 'MEDIUM' },
+  },
+  {
+    name: 'Delete False Start Sections',
+    type: 'programmatic',
+    action: 'trim_ranges',
+    output_mode: 'deletion',
+    identifyPreselect: { enabled: true, categories: ['false_starts'] },
+    description: 'Delete transcript content identified as false start duplicates',
+  },
+]
+
 const TEMPLATE_VARS = [
   { tag: '<transcript>', desc: 'Full transcript text' },
   { tag: '{{transcript}}', desc: 'Full transcript (mustache)' },
@@ -579,6 +670,8 @@ function StageEditor({ strategyId, editingVersion, onSaved, onCancel }) {
             className="flex items-center gap-1 text-xs text-teal-500/70 hover:text-teal-400 transition-colors">
             <Plus size={12} /> Chapters Pipeline
           </button>
+          <button type="button" onClick={stageOps.addDedupChaptersPipeline}
+            className="flex items-center gap-1 text-xs text-orange-500/70 hover:text-orange-400 px-2 py-1 rounded transition-colors"><Plus size={12} /> Dedup Chapters</button>
           <button type="button" onClick={stageOps.addIntroTrimPipeline}
             className="flex items-center gap-1 text-xs text-cyan-500/70 hover:text-cyan-400 transition-colors">
             <Plus size={12} /> Intro Trim
@@ -827,7 +920,9 @@ function CreateStrategyForm({ onCreated }) {
             <button type="button" onClick={() => addStage('llm_question')} className="flex items-center gap-1 text-xs text-pink-500/70 hover:text-pink-400 transition-colors"><Plus size={12} /> Add Question</button>
             <button type="button" onClick={() => addStage('programmatic')} className="flex items-center gap-1 text-xs text-amber-500/70 hover:text-amber-400 transition-colors"><Plus size={12} /> Add Segment Step</button>
             <button type="button" onClick={stageOps.addChaptersPipeline} className="flex items-center gap-1 text-xs text-teal-500/70 hover:text-teal-400 transition-colors"><Plus size={12} /> Chapters Pipeline</button>
-            <button type="button" onClick={stageOps.addIntroTrimPipeline} className="flex items-center gap-1 text-xs text-cyan-500/70 hover:text-cyan-400 transition-colors"><Plus size={12} /> Intro Trim</button>
+            <button type="button" onClick={stageOps.addDedupChaptersPipeline}
+            className="flex items-center gap-1 text-xs text-orange-500/70 hover:text-orange-400 px-2 py-1 rounded transition-colors"><Plus size={12} /> Dedup Chapters</button>
+          <button type="button" onClick={stageOps.addIntroTrimPipeline} className="flex items-center gap-1 text-xs text-cyan-500/70 hover:text-cyan-400 transition-colors"><Plus size={12} /> Intro Trim</button>
           </div>
 
           <button type="submit" disabled={creating || !name.trim()}
@@ -935,12 +1030,29 @@ function makeStageOps(stages, setStages) {
       return u
     })
   }
-  return { addStage, addChaptersPipeline, insertChaptersPipeline, addIntroTrimPipeline, insertIntroTrimPipeline, insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType }
+  function addDedupChaptersPipeline() {
+    setStages(prev => [...prev, ...DEDUP_CHAPTERS_PIPELINE.map((s, i) => ({
+      ...s,
+      name: s.name || `Stage ${prev.length + i + 1}`,
+    }))])
+  }
+  function insertDedupChaptersPipeline(atIndex) {
+    setStages(prev => {
+      const arr = [...prev]
+      const pipeline = DEDUP_CHAPTERS_PIPELINE.map((s, i) => ({
+        ...s,
+        name: s.name || `Stage ${atIndex + i + 1}`,
+      }))
+      arr.splice(atIndex, 0, ...pipeline)
+      return arr
+    })
+  }
+  return { addStage, addChaptersPipeline, insertChaptersPipeline, addIntroTrimPipeline, insertIntroTrimPipeline, addDedupChaptersPipeline, insertDedupChaptersPipeline, insertStage, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType }
 }
 
 /** Shared stage list with insert buttons, temperature, and thinking */
 function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
-  const { insertStage, insertChaptersPipeline, insertIntroTrimPipeline, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType } = stageOps
+  const { insertStage, insertChaptersPipeline, insertIntroTrimPipeline, insertDedupChaptersPipeline, removeStage, moveStage, updateStage, updateParams, duplicateStage, changeType } = stageOps
 
   return (
     <div>
@@ -960,6 +1072,10 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                 <button type="button" onClick={() => insertChaptersPipeline(i)}
                   className="text-xs text-teal-500/70 hover:text-teal-400 hover:bg-zinc-700 border border-dashed border-teal-700/50 rounded px-3 py-1 transition-colors">
                   + Chapters Pipeline
+                </button>
+                <button type="button" onClick={() => insertDedupChaptersPipeline(i)}
+                  className="text-xs text-orange-500/70 hover:text-orange-400 hover:bg-zinc-700 border border-dashed border-orange-700/50 rounded px-3 py-1 transition-colors">
+                  + Dedup Chapters
                 </button>
                 <button type="button" onClick={() => insertIntroTrimPipeline(i)}
                   className="text-xs text-cyan-500/70 hover:text-cyan-400 hover:bg-zinc-700 border border-dashed border-cyan-700/50 rounded px-3 py-1 transition-colors">
