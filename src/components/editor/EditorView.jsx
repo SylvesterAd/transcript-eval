@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useApi } from '../../hooks/useApi.js'
 import useEditorState from './useEditorState.js'
@@ -95,15 +95,12 @@ export default function EditorView() {
   const initialSeekDoneRef = useRef(false)
   useEffect(() => {
     if (activeTab !== 'roughcut' || initialSeekDoneRef.current) return
-    if (!state.cuts.length) return
-    // Find the first cut that starts at or near 0
-    const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
-    if (sorted[0].start > 0.5) return // no cut at the beginning, nothing to skip
-    // Walk through cuts starting at 0 to find where continuous coverage ends
+    if (!skipRegions.length) return
+    if (skipRegions[0].start > 0.5) return
     let pos = 0
-    for (const cut of sorted) {
-      if (cut.start > pos + 0.05) break // gap found — this is where uncut content starts
-      pos = Math.max(pos, cut.end)
+    for (const region of skipRegions) {
+      if (region.start > pos + 0.05) break
+      pos = Math.max(pos, region.end)
     }
     if (pos > 0.5) {
       initialSeekDoneRef.current = true
@@ -203,6 +200,95 @@ export default function EditorView() {
     dispatch({ type: 'SET_WORD_TIMESTAMPS', payload: { wordTimestamps } })
   }, [wordTimestamps, state.groupId, state.tracks, dispatch])
 
+  // Build refined skip regions for playback (same merge + waveform logic as Timeline's mergedDisplayCuts)
+  const skipRegions = useMemo(() => {
+    if (state.activeTab !== 'roughcut' || !state.cuts.length) return []
+    const primaryAudio = state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    const words = primaryAudio?.transcriptWords?.map(w => ({
+      start: w.start + (primaryAudio.offset || 0),
+      end: w.end + (primaryAudio.offset || 0),
+    })) || []
+    const peaks = primaryAudio?.waveformPeaks
+    const offset = primaryAudio?.offset || 0
+
+    const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
+    const merged = [{ ...sorted[0] }]
+    for (let i = 1; i < sorted.length; i++) {
+      const last = merged[merged.length - 1]
+      if (sorted[i].start <= last.end + 0.05) {
+        last.end = Math.max(last.end, sorted[i].end)
+      } else {
+        const hasWord = words.some(w => w.start >= last.end - 0.05 && w.end <= sorted[i].start + 0.05)
+        if (!hasWord) {
+          last.end = Math.max(last.end, sorted[i].end)
+        } else {
+          merged.push({ ...sorted[i] })
+        }
+      }
+    }
+
+    if (peaks?.length) {
+      const PEAKS_PER_SEC = 100
+      const timeToPeak = (t) => Math.round((t - offset) * PEAKS_PER_SEC)
+      const hasSound = (b) => {
+        if (b < 0 || b * 2 + 1 >= peaks.length) return false
+        const linear = Math.abs(peaks[b * 2 + 1]) / 128
+        if (linear <= 0) return false
+        return (20 * Math.log10(linear) + 60) / 60 >= 0.5 / 56
+      }
+      for (const region of merged) {
+        const prevWord = [...words].reverse().find(w => w.end <= region.start + 0.05 &&
+          !merged.some(c => w.start >= c.start - 0.05 && w.end <= c.end + 0.05))
+        if (prevWord) {
+          const origStart = region.start
+          const wordEndBar = timeToPeak(prevWord.end)
+          const wordStartBar = timeToPeak(prevWord.start)
+          if (hasSound(wordEndBar)) {
+            let b = wordEndBar
+            const maxBar = timeToPeak(origStart)
+            while (b < maxBar && hasSound(b)) b++
+            region.start = Math.min(origStart, offset + b / PEAKS_PER_SEC + 0.1)
+          } else {
+            let b = wordEndBar
+            while (b > wordStartBar && !hasSound(b)) b--
+            if (hasSound(b)) region.start = Math.min(origStart, offset + (b + 1) / PEAKS_PER_SEC + 0.15)
+          }
+        }
+        const nextWord = words.find(w => w.start >= region.end - 0.05 &&
+          !merged.some(c => w.start >= c.start - 0.05 && w.end <= c.end + 0.05))
+        if (nextWord) {
+          const origEnd = region.end
+          const wordStartBar = timeToPeak(nextWord.start)
+          if (hasSound(wordStartBar)) {
+            let b = wordStartBar
+            const scanLimit = wordStartBar - 50
+            while (b > scanLimit) {
+              if (!hasSound(b) && !hasSound(b - 1) && !hasSound(b - 2)) break
+              b--
+            }
+            region.end = Math.max(origEnd, offset + (b + 1) / PEAKS_PER_SEC - 0.05)
+          } else {
+            let b = wordStartBar
+            const limit = wordStartBar + 50
+            while (b < limit) {
+              if (hasSound(b) && hasSound(b + 1) && hasSound(b + 2)) {
+                region.end = Math.max(origEnd, offset + b / PEAKS_PER_SEC - 0.05)
+                break
+              }
+              b++
+            }
+          }
+        }
+        if (region.end <= region.start) region.end = region.start + 0.01
+      }
+    }
+    return merged
+  }, [state.activeTab, state.cuts, state.tracks])
+  const skipRegionsRef = useRef(skipRegions)
+  skipRegionsRef.current = skipRegions
+
   // Playback engine (rAF loop) — media-driven clock
   // Uses the master video element's currentTime as the time source instead of
   // performance.now(). This avoids constant seeking when audio output is buffered
@@ -259,15 +345,16 @@ export default function EditorView() {
       return
     }
 
-    // Skip cut regions in rough cut mode
-    if (state.activeTab === 'roughcut' && state.cuts.length > 0) {
+    // Skip cut regions in rough cut mode (using waveform-refined regions)
+    const regions = skipRegionsRef.current
+    if (state.activeTab === 'roughcut' && regions.length > 0) {
       const preSkipTime = newTime
       let skipping = true
       while (skipping) {
         skipping = false
-        for (const cut of state.cuts) {
-          if (newTime >= cut.start && newTime < cut.end) {
-            newTime = cut.end
+        for (const region of regions) {
+          if (newTime >= region.start && newTime < region.end) {
+            newTime = region.end
             skipping = true
             break
           }
@@ -504,7 +591,8 @@ export default function EditorView() {
           let cutCount = 0
           let uncutCount = 0
           for (const w of items) {
-            const isCut = state.cuts.some(c => c.start <= w.start && c.end >= (w.end || w.start + 0.01))
+            const wEnd = w.end || w.start + 0.01
+            const isCut = state.cuts.some(c => w.start < c.end && wEnd > c.start)
             if (isCut) cutCount++
             else uncutCount++
           }
@@ -518,7 +606,21 @@ export default function EditorView() {
           console.log(`[roughcut] Backspace: ${startTime.toFixed(2)}-${endTime.toFixed(2)} | items=${items.length} cut=${cutCount} uncut=${uncutCount} → ${action}`)
           if (action === 'UNCUT') {
             dispatch({ type: 'EXCLUDE_FROM_CUT', payload: { wordStart: startTime, wordEnd: endTime } })
+            // Also remove any manual cuts that overlap the selection
+            const withoutManual = state.cuts.filter(c => c.source === 'transcript' && startTime < c.end && endTime > c.start ? false : true)
+            if (withoutManual.length !== state.cuts.length) {
+              for (const c of state.cuts) {
+                if (c.source === 'transcript' && startTime < c.end && endTime > c.start) {
+                  dispatch({ type: 'REMOVE_CUT', payload: c.id })
+                }
+              }
+            }
           } else {
+            // Remove any exclusions that overlap the selection (re-enables annotation cuts)
+            const remaining = state.cutExclusions.filter(e => !(startTime < e.end + 0.01 && endTime > e.start - 0.01))
+            if (remaining.length !== state.cutExclusions.length) {
+              dispatch({ type: 'SET_EXCLUSIONS', payload: remaining })
+            }
             dispatch({
               type: 'ADD_CUT',
               payload: { id: `cut-${Date.now()}`, start: startTime, end: endTime, source: 'transcript' },

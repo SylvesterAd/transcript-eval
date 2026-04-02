@@ -443,6 +443,8 @@ function reducer(state, action) {
     }
     case 'CLEAR_EXCLUSIONS':
       return { ...state, cutExclusions: [], isDirty: true }
+    case 'SET_EXCLUSIONS':
+      return { ...state, cutExclusions: action.payload, isDirty: true }
     case 'UPDATE_CUT':
       return { ...state, cuts: state.cuts.map(c => c.id === action.payload.id ? { ...c, ...action.payload.updates } : c), isDirty: true }
     case 'SET_AI_CUTS': {

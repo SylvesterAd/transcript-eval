@@ -207,17 +207,33 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
   const containerRef = useRef(null)
 
   // Cut edge drag handler
-  const handleEdgeDrag = useCallback((cutId, edge, e) => {
+  const handleEdgeDrag = useCallback((mergedStart, mergedEnd, edge, e) => {
     e.preventDefault()
     e.stopPropagation()
     const startX = e.clientX
-    const cut = state.cuts.find(c => c.id === cutId)
+    const overlapping = state.cuts
+      .filter(c => c.start < mergedEnd + 0.05 && c.end > mergedStart - 0.05)
+      .sort((a, b) => a.start - b.start)
+    const cut = edge === 'left' ? overlapping[0] : overlapping[overlapping.length - 1]
     if (!cut) return
-    const startVal = edge === 'left' ? cut.start : cut.end
+    const isManual = cut.source === 'transcript' || cut.source === 'split'
+    const startVal = edge === 'left' ? mergedStart : mergedEnd
+    let manualCreated = false
+    const manualId = `cut-edge-${mergedStart.toFixed(2)}`
     const onMove = (ev) => {
       const dx = ev.clientX - startX
       const newVal = Math.max(0, startVal + dx / zoom)
-      dispatch({ type: 'UPDATE_CUT', payload: { id: cutId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      if (isManual) {
+        dispatch({ type: 'UPDATE_CUT', payload: { id: cut.id, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      } else if (manualCreated) {
+        dispatch({ type: 'UPDATE_CUT', payload: { id: manualId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      } else {
+        const newCut = edge === 'left'
+          ? { id: manualId, start: newVal, end: mergedStart, source: 'transcript' }
+          : { id: manualId, start: mergedEnd, end: newVal, source: 'transcript' }
+        dispatch({ type: 'ADD_CUT', payload: newCut })
+        manualCreated = true
+      }
     }
     const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
     window.addEventListener('mousemove', onMove)
@@ -482,8 +498,8 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
             <div className="absolute left-0 top-0 h-full bg-black/70 rounded-r-md" style={{ width: `${R}px` }} />
             <div className="absolute top-0 h-full bg-black/70" style={{ left: `${R}px`, width: `${gapWidth}px` }} />
             <div className="absolute right-0 top-0 h-full bg-black/70 rounded-l-md" style={{ width: `${R}px` }} />
-            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)} />
-            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)} />
+            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.start, cut.end, 'left', e)} />
+            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.start, cut.end, 'right', e)} />
           </div>
         )
       })}
@@ -542,17 +558,33 @@ export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX, 
   const containerRef = useRef(null)
 
   // Cut edge drag handler
-  const handleEdgeDrag = useCallback((cutId, edge, e) => {
+  const handleEdgeDrag = useCallback((mergedStart, mergedEnd, edge, e) => {
     e.preventDefault()
     e.stopPropagation()
     const startX = e.clientX
-    const cut = state.cuts.find(c => c.id === cutId)
+    const overlapping = state.cuts
+      .filter(c => c.start < mergedEnd + 0.05 && c.end > mergedStart - 0.05)
+      .sort((a, b) => a.start - b.start)
+    const cut = edge === 'left' ? overlapping[0] : overlapping[overlapping.length - 1]
     if (!cut) return
-    const startVal = edge === 'left' ? cut.start : cut.end
+    const isManual = cut.source === 'transcript' || cut.source === 'split'
+    const startVal = edge === 'left' ? mergedStart : mergedEnd
+    let manualCreated = false
+    const manualId = `cut-edge-${mergedStart.toFixed(2)}`
     const onMove = (ev) => {
       const dx = ev.clientX - startX
       const newVal = Math.max(0, startVal + dx / zoom)
-      dispatch({ type: 'UPDATE_CUT', payload: { id: cutId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      if (isManual) {
+        dispatch({ type: 'UPDATE_CUT', payload: { id: cut.id, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      } else if (manualCreated) {
+        dispatch({ type: 'UPDATE_CUT', payload: { id: manualId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      } else {
+        const newCut = edge === 'left'
+          ? { id: manualId, start: newVal, end: mergedStart, source: 'transcript' }
+          : { id: manualId, start: mergedEnd, end: newVal, source: 'transcript' }
+        dispatch({ type: 'ADD_CUT', payload: newCut })
+        manualCreated = true
+      }
     }
     const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
     window.addEventListener('mousemove', onMove)
@@ -811,8 +843,8 @@ export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX, 
             <div className="absolute left-0 top-0 h-full bg-black/70 rounded-r-md" style={{ width: `${R}px` }} />
             <div className="absolute top-0 h-full bg-black/70" style={{ left: `${R}px`, width: `${gapWidth}px` }} />
             <div className="absolute right-0 top-0 h-full bg-black/70 rounded-l-md" style={{ width: `${R}px` }} />
-            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'left', e)} />
-            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.id, 'right', e)} />
+            <div className="absolute left-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.start, cut.end, 'left', e)} />
+            <div className="absolute right-0 top-0 h-full cursor-col-resize hover:bg-primary-fixed/20 transition-colors z-20" style={{ width: `${R + 4}px` }} onMouseDown={(e) => handleEdgeDrag(cut.start, cut.end, 'right', e)} />
           </div>
         )
       })}

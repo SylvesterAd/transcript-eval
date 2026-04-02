@@ -117,9 +117,13 @@ export default function TranscriptEditor() {
         if (gap > 0.3) {
           const prevCorrectedEndBar = timeToPeak(words[i - 1].end)
           if (hasSound(nextStartBar)) {
+            // Scan backward to find 3 consecutive silent bars (ignores noise spikes)
             let b = nextStartBar
             const scanLimit = Math.max(nextStartBar - 50, prevCorrectedEndBar)
-            while (b > scanLimit && hasSound(b)) b--
+            while (b > scanLimit) {
+              if (!hasSound(b) && !hasSound(b - 1) && !hasSound(b - 2)) break
+              b--
+            }
             words[i].start = offset + (b + 1) / PEAKS_PER_SEC - 0.05 // 50ms before first bar
           } else {
             let b = nextStartBar
@@ -209,6 +213,51 @@ export default function TranscriptEditor() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  // Check if a filler word has a silence gap (3 consecutive 0-bars) after it — safe to cut
+  const fillerHasSilence = useMemo(() => {
+    const primaryAudio = state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    const peaks = primaryAudio?.waveformPeaks
+    if (!peaks?.length) return () => true // no waveform = assume safe
+    const trackOffset = primaryAudio.offset || 0
+    const PEAKS_PER_SEC = 100
+    const timeToPeak = (t) => Math.round((t - trackOffset) * PEAKS_PER_SEC)
+    const hasSound = (b) => {
+      if (b < 0 || b * 2 + 1 >= peaks.length) return false
+      const linear = Math.abs(peaks[b * 2 + 1]) / 128
+      if (linear <= 0) return false
+      return (20 * Math.log10(linear) + 60) / 60 >= 0.5 / 56
+    }
+    return (ann) => {
+      // Scan backward from filler start, look for 3 consecutive silent bars within 500ms
+      const startBar = timeToPeak(ann.startTime)
+      const limitBack = startBar - 50
+      for (let b = startBar; b > limitBack; b--) {
+        if (!hasSound(b) && !hasSound(b - 1) && !hasSound(b - 2)) return true
+      }
+      // Also scan forward from filler end
+      const endBar = timeToPeak(ann.endTime)
+      const limitFwd = endBar + 50
+      for (let b = endBar; b < limitFwd; b++) {
+        if (!hasSound(b) && !hasSound(b + 1) && !hasSound(b + 2)) return true
+      }
+      return false
+    }
+  }, [state.tracks])
+
+  // Set of filler annotation IDs that have NO silence gap (show as yellow, not cut)
+  const unsafeFillerIds = useMemo(() => {
+    if (!state.annotations?.items?.length || !cutsSelected.filler_words) return new Set()
+    const ids = new Set()
+    for (const ann of state.annotations.items) {
+      if (ann.type === 'deletion' && ann.category === 'filler_words') {
+        if (!fillerHasSilence(ann)) ids.add(ann.id)
+      }
+    }
+    return ids
+  }, [state.annotations, cutsSelected.filler_words, fillerHasSilence])
+
   // Merged annotation cut regions (used by both silence and annotation cut effects)
   const annotationRegions = useMemo(() => {
     if (!state.annotations?.items?.length) return []
@@ -217,6 +266,8 @@ export default function TranscriptEditor() {
       if (!cutsSelected[category]) continue
       for (const ann of state.annotations.items) {
         if (ann.type === 'deletion' && ann.category === category) {
+          // Skip filler words without silence gap — they get yellow highlight instead
+          if (category === 'filler_words' && unsafeFillerIds.has(ann.id)) continue
           allCuts.push({ start: ann.startTime, end: ann.endTime })
         }
       }
@@ -689,10 +740,15 @@ export default function TranscriptEditor() {
             const primaryAnn = hasAnn ? anns[0] : null
             const annColors = primaryAnn ? ANNOTATION_COLORS[primaryAnn.category] : null
 
+            // Check if this word is an unsafe filler (no silence gap — yellow highlight, not cut)
+            const isUnsafeFiller = hasAnn && anns.some(a => unsafeFillerIds.has(a.id))
+
             // Determine background color
             let bgColor = undefined
             if (selected) {
               bgColor = 'rgba(206, 252, 0, 0.3)'
+            } else if (isUnsafeFiller && !isGap) {
+              bgColor = 'rgba(250, 204, 21, 0.25)' // yellow for unsafe fillers
             } else if (annColors && !isGap) {
               bgColor = annColors.bg
             }
@@ -702,9 +758,9 @@ export default function TranscriptEditor() {
                 key={`${item.start}-${idx}`}
                 ref={el => itemRefs.current[idx] = el}
                 className={`cursor-text px-[1px] py-[2px] inline ${
-                  cut ? 'line-through text-on-surface-variant' : ''
+                  cut && !isUnsafeFiller ? 'line-through text-on-surface-variant' : ''
                 } ${
-                  cut && !selected ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
+                  cut && !isUnsafeFiller && !selected ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
                 } ${
                   isCurrent && !cut && !bgColor ? 'bg-white/15' : ''
                 } ${
