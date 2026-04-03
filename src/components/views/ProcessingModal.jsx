@@ -16,8 +16,24 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     setFiles(prev => {
       const updated = prev.map(f => {
         const live = liveFiles.find(lf => lf.id === f.id)
-        if (live && (live.progress !== f.progress || live.status !== f.status)) {
-          return { ...f, progress: live.progress, status: live.status, serverId: live.serverId || f.serverId, error: live.error || f.error }
+        if (live && (live.progress !== f.progress || live.status !== f.status || live.loaded !== f.loaded)) {
+          // Compute speed from byte-level progress (TUS onProgress sends loaded/total)
+          if (live.loaded != null && live.loaded > 0) {
+            const prev_s = speedRef.current[f.id]
+            const now = Date.now()
+            if (prev_s && prev_s.lastLoaded < live.loaded) {
+              const dt = (now - prev_s.lastTime) / 1000
+              if (dt > 0.3) {
+                const speed = (live.loaded - prev_s.lastLoaded) / dt
+                const remaining = (live.total || 0) - live.loaded
+                const eta = speed > 0 ? remaining / speed : 0
+                speedRef.current[f.id] = { lastLoaded: live.loaded, lastTime: now, speed, eta }
+              }
+            } else if (!prev_s) {
+              speedRef.current[f.id] = { lastLoaded: live.loaded, lastTime: now, speed: 0, eta: 0 }
+            }
+          }
+          return { ...f, progress: live.progress, loaded: live.loaded, total: live.total, status: live.status, serverId: live.serverId || f.serverId, error: live.error || f.error }
         }
         return f
       })

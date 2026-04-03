@@ -94,8 +94,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
             if (pct !== lastPct) {
               lastPct = pct
               console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
-              setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct } : f))
             }
+            setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct, loaded: bytesUploaded, total: bytesTotal } : f))
           },
           onSuccess: () => resolve(),
           onShouldRetry: () => true,
