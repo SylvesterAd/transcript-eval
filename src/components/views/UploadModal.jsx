@@ -85,10 +85,10 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         let lastPct = -1
         const upload = new tus.Upload(entry.file, {
           uploadUrl: cfUploadUrl,
-          headers: { 'Tus-Resumable': '1.0.0' },
-          retryDelays: [0, 1000, 3000, 5000],
+          retryDelays: [0, 3000, 5000, 10000, 20000],
           removeFingerprintOnSuccess: true,
-          chunkSize: 10 * 1024 * 1024, // 10MB chunks
+          storeFingerprintForResuming: false, // Fresh upload each time, no stale resume attempts
+          chunkSize: 50 * 1024 * 1024, // 50MB — Cloudflare recommended for reliable connections
           onError: (err) => reject(new Error(err.message || 'Upload failed')),
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
