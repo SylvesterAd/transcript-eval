@@ -56,6 +56,25 @@ function handleUpload(fieldConfig) {
 
 const router = Router()
 
+// ── Startup: re-queue transcriptions that were interrupted by server restart ──
+;(async () => {
+  try {
+    const stuck = await db.prepare(
+      "SELECT id, title FROM videos WHERE transcription_status IN ('waiting_for_cloudflare', 'downloading', 'extracting_audio', 'transcribing', 'processing') AND transcription_status != 'done'"
+    ).all()
+    if (stuck.length > 0) {
+      console.log(`[transcribe] Re-queuing ${stuck.length} interrupted transcription(s)`)
+      for (const v of stuck) {
+        await db.prepare("UPDATE videos SET transcription_status = NULL WHERE id = ?").run(v.id)
+        // Delay slightly to let server finish booting
+        setTimeout(() => startBackgroundTranscription(v.id), 3000)
+      }
+    }
+  } catch (err) {
+    console.error('[transcribe] Startup cleanup failed:', err.message)
+  }
+})()
+
 // ── Transcription queue with concurrency control ────────────────────────
 const TRANSCRIPTION_CONCURRENCY = 3
 const transcriptionQueue = []     // [{ videoId, resolve }]
