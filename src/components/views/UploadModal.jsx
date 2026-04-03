@@ -79,33 +79,39 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       const cfStreamUid = cfData.uid
       console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
 
-      // 2. Upload to Cloudflare Stream via TUS
-      console.log(`[upload] TUS URL: ${cfUploadUrl}`)
-      await new Promise((resolve, reject) => {
-        let lastPct = -1
-        const upload = new tus.Upload(entry.file, {
-          uploadUrl: cfUploadUrl,
-          headers: { 'Cache-Control': 'no-store' },
-          retryDelays: [0, 3000, 5000, 10000, 20000],
-          removeFingerprintOnSuccess: true,
-          storeFingerprintForResuming: false,
-          chunkSize: 50 * 1024 * 1024,
-          onBeforeRequest: (req) => { console.log(`[upload] TUS ${req._method} → ${req._url}`) },
-          onAfterResponse: (req, res) => { console.log(`[upload] TUS response: ${res.getStatus()} offset=${res.getHeader('Upload-Offset')}`) },
-          onError: (err) => reject(new Error(err.message || 'Upload failed')),
-          onProgress: (bytesUploaded, bytesTotal) => {
-            const pct = Math.round((bytesUploaded / bytesTotal) * 100)
-            if (pct !== lastPct) {
-              lastPct = pct
-              console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
-            }
-            setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct, loaded: bytesUploaded, total: bytesTotal } : f))
+      // 2. Upload to Cloudflare Stream via TUS PATCH (direct, no tus-js-client)
+      // tus-js-client sends HEAD requests that Cloudflare blocks with CORS.
+      // Manual PATCH avoids this — just send chunks with offset headers.
+      console.log(`[upload] TUS PATCH direct to: ${cfUploadUrl}`)
+      const CHUNK = 50 * 1024 * 1024 // 50MB — CF recommended
+      const totalSize = entry.file.size
+      let offset = 0
+
+      while (offset < totalSize) {
+        const end = Math.min(offset + CHUNK, totalSize)
+        const chunk = entry.file.slice(offset, end)
+
+        const res = await fetch(cfUploadUrl, {
+          method: 'PATCH',
+          headers: {
+            'Tus-Resumable': '1.0.0',
+            'Upload-Offset': String(offset),
+            'Content-Type': 'application/offset+octet-stream',
           },
-          onSuccess: () => resolve(),
-          onShouldRetry: () => true,
+          body: chunk,
         })
-        upload.start()
-      })
+
+        if (!res.ok && res.status !== 204) {
+          throw new Error(`Upload chunk failed: ${res.status} ${await res.text().catch(() => '')}`)
+        }
+
+        const newOffset = res.headers.get('Upload-Offset')
+        offset = newOffset ? parseInt(newOffset) : end
+
+        const pct = Math.round((offset / totalSize) * 100)
+        console.log(`[upload] ${entry.name}: ${pct}% (${(offset/1024/1024).toFixed(1)}/${(totalSize/1024/1024).toFixed(1)} MB)`)
+        setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct, loaded: offset, total: totalSize } : f))
+      }
 
       // 3. Register with backend (Cloudflare only — no Supabase URL)
       setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: 100 } : f))
