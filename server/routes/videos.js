@@ -181,7 +181,21 @@ async function runTranscription(videoId, signal) {
   let actualPath
   let tempTranscribeFile = false
   if (downloadUrl.startsWith('http')) {
-    actualPath = await downloadToTemp(downloadUrl, `transcribe-${video.id}-${Date.now()}.mp4`)
+    // Retry download with delay — CF MP4 may need a few seconds after enableMp4Downloads
+    let lastErr
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        actualPath = await downloadToTemp(downloadUrl, `transcribe-${video.id}-${Date.now()}.mp4`)
+        break
+      } catch (err) {
+        lastErr = err
+        if (attempt < 5 && video.cf_stream_uid) {
+          console.log(`[transcribe] Video ${videoId} download attempt ${attempt} failed (${err.message}), retrying in 5s...`)
+          await new Promise(r => setTimeout(r, 5000))
+        }
+      }
+    }
+    if (!actualPath) throw lastErr
     tempTranscribeFile = true
   } else {
     actualPath = join(__dirname, '..', '..', downloadUrl)
