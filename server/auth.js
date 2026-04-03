@@ -51,6 +51,12 @@ export async function attachAuth(req, _res, next) {
   next()
 }
 
+const ADMIN_EMAILS = ['silvestras.stonk@gmail.com']
+
+export function isAdmin(req) {
+  return req.auth?.email && ADMIN_EMAILS.includes(req.auth.email.toLowerCase())
+}
+
 export function requireAuth(req, res, next) {
   if (!hasServerAuthConfig) {
     return res.status(503).json({ error: 'Server auth is not configured' })
