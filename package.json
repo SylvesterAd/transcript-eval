@@ -8,7 +8,7 @@
     "dev:client": "vite",
     "dev:server": "node --env-file=.env --watch server/index.js",
     "start": "node server/index.js",
-    "build": "vite build",
+    "build": "if [ \"$RAILWAY_ENVIRONMENT\" ]; then echo 'Railway: skip frontend build'; else vite build; fi",
     "seed": "node server/seed/import-benchmark.js",
     "seed:strategies": "node server/seed/create-strategies.js"
   },
