@@ -3,3 +3,4 @@ aptPkgs = ["ffmpeg"]
 
 [start]
 cmd = "node server/index.js"
+
