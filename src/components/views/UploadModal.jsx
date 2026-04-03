@@ -72,6 +72,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
     const bucket = 'videos'
 
     try {
+      console.log(`[upload] uploadFileWithProgress called for ${entry.name}, gid=${gid}`)
       // Upload via TUS (resumable upload protocol) — supports files up to 5GB on Pro
       const session = (await supabase.auth.getSession()).data.session
       const token = session?.access_token
@@ -113,11 +114,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
         // Store abort function for cancellation
         setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, tusUpload: upload } : f))
 
-        // Check for previous upload to resume
-        upload.findPreviousUploads().then(prev => {
-          if (prev.length) upload.resumeFromPreviousUpload(prev[0])
-          upload.start()
-        })
+        console.log(`[upload] Starting TUS upload for ${entry.name} (${(entry.file.size/1024/1024).toFixed(1)}MB)`)
+        upload.start()
       })
 
       // Get public URL
