@@ -15,26 +15,29 @@ export async function getTimelineWordTimestamps(groupId) {
   const tracks = edState.tracks || []
 
   // Find audio tracks, load their word timestamps from transcripts
-  const audioTracks = tracks
-    .filter(t => t.type === 'audio')
-    .map(t => {
-      const videoId = parseInt(t.id.replace('a-', ''))
-      if (isNaN(videoId)) return null
-      const transcript = await db.prepare(
-        'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
-      ).get(videoId, 'raw')
-      let words = []
-      if (transcript?.word_timestamps_json) {
-        try { words = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
-      }
-      return {
-        videoId,
-        offset: t.offset || 0,
-        duration: t.duration || 0,
-        timelineEnd: (t.offset || 0) + (t.duration || 0),
-        words,
-      }
-    })
+  const audioTracksRaw = await Promise.all(
+    tracks
+      .filter(t => t.type === 'audio')
+      .map(async t => {
+        const videoId = parseInt(t.id.replace('a-', ''))
+        if (isNaN(videoId)) return null
+        const transcript = await db.prepare(
+          'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
+        ).get(videoId, 'raw')
+        let words = []
+        if (transcript?.word_timestamps_json) {
+          try { words = JSON.parse(transcript.word_timestamps_json) } catch { /* ignore */ }
+        }
+        return {
+          videoId,
+          offset: t.offset || 0,
+          duration: t.duration || 0,
+          timelineEnd: (t.offset || 0) + (t.duration || 0),
+          words,
+        }
+      })
+  )
+  const audioTracks = audioTracksRaw
     .filter(t => t && t.words.length > 0)
     .sort((a, b) => (b.timelineEnd - b.offset) - (a.timelineEnd - a.offset)) // longest first
 
