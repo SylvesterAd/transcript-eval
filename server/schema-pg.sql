@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
   total_cost REAL,
   total_runtime_ms INTEGER,
   error_message TEXT,
+  stages_snapshot_json TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   completed_at TIMESTAMPTZ
 );
