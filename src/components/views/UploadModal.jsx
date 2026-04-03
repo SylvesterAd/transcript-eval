@@ -90,15 +90,24 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
             cacheControl: '3600',
           },
           chunkSize: 6 * 1024 * 1024, // 6MB chunks
+          parallelUploads: 1, // one chunk at a time to avoid rate limits
           onError: (err) => {
-            console.error('[upload] TUS error:', err)
+            console.error('[upload] TUS error for', entry.name, ':', err)
             reject(new Error(err.message || 'Upload failed'))
           },
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
+            console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
             setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
           },
-          onSuccess: () => resolve(),
+          onSuccess: () => {
+            console.log(`[upload] ${entry.name}: complete`)
+            resolve()
+          },
+          onShouldRetry: (err) => {
+            console.warn(`[upload] ${entry.name}: retrying after error`, err)
+            return true
+          },
         })
 
         // Store abort function for cancellation
@@ -173,9 +182,12 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
     }
 
     setFiles(prev => [...prev, ...entries])
-    for (const entry of entries) {
-      if (entry.status === 'uploading') startUpload(entry)
-    }
+    // Upload files sequentially to avoid overwhelming Supabase
+    ;(async () => {
+      for (const entry of entries) {
+        if (entry.status === 'uploading') await startUpload(entry)
+      }
+    })()
   }, [startUpload])
 
   const handleUrlFetch = useCallback(async (urlValue, type) => {
