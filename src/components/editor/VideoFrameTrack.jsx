@@ -8,12 +8,15 @@ const FRAME_W = 142
 const FRAME_INTERVAL = 1 // server extracts 1 frame per second
 
 /**
- * Build the URL for a pre-extracted frame.
- * Uses Supabase Storage public URL if VITE_SUPABASE_URL is set,
- * otherwise falls back to local /uploads/frames/ path.
+ * Build the URL for a frame thumbnail.
+ * Prefers Cloudflare Stream thumbnails (auto-generated, no extraction needed).
+ * Falls back to pre-extracted frames in Supabase Storage or local.
  */
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
-function frameUrl(videoId, time) {
+function frameUrl(videoId, time, cfStreamUid) {
+  if (cfStreamUid) {
+    return `https://videodelivery.net/${cfStreamUid}/thumbnails/thumbnail.jpg?time=${Math.round(time)}s&width=160&height=90`
+  }
   const path = `${videoId}/${Math.round(time)}.jpg`
   if (SUPABASE_URL) return `${SUPABASE_URL}/storage/v1/object/public/frames/${path}`
   return `/uploads/frames/${path}`
@@ -41,7 +44,7 @@ export default function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX 
     const start = Math.max(0, Math.floor(vStart / displayInterval) * displayInterval)
     for (let t = start; t < Math.min(track.duration, vEnd); t += displayInterval) {
       const nearest = Math.round(t / FRAME_INTERVAL) * FRAME_INTERVAL
-      slots.push({ time: t, x: t * zoom, src: frameUrl(track.videoId, nearest) })
+      slots.push({ time: t, x: t * zoom, src: frameUrl(track.videoId, nearest, track.cfStreamUid) })
     }
     return slots
   }, [track.filePath, track.videoId, scrollX, left, buffer, zoom, labelW, viewW, displayInterval, track.duration])
@@ -248,7 +251,7 @@ export function CompositeFrameTrack({ segments, zoom, cuts, scrollRef, scrollX }
           // Local time in the source video file
           const videoLocalTime = (seg.start + t) - seg.offset
           const nearest = Math.round(videoLocalTime / FRAME_INTERVAL) * FRAME_INTERVAL
-          slots.push({ t, x: t * zoom, src: frameUrl(seg.videoId, nearest) })
+          slots.push({ t, x: t * zoom, src: frameUrl(seg.videoId, nearest, seg.cfStreamUid) })
         }
 
         return (

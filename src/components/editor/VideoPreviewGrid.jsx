@@ -44,7 +44,9 @@ function VideoCell({ track, num, videoRefs, currentTime, state }) {
     return () => { delete videoRefs.current[track.videoId] }
   }, [track.videoId, videoRefs])
 
-  const src = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
+  const cfMp4 = track.cfStreamUid ? `https://videodelivery.net/${track.cfStreamUid}/downloads/default.mp4` : null
+  const directSrc = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
+  const src = cfMp4 || directSrc
 
   return (
     <div className="relative bg-surface-container-low rounded-lg overflow-hidden border border-white/5 group">

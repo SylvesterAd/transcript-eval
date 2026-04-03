@@ -21,6 +21,7 @@ export async function createDirectUpload(maxDurationSeconds = 21600) {
     body: JSON.stringify({
       maxDurationSeconds,
       requireSignedURLs: false,
+      mp4Support: { enabled: true, quality: 'high' },
     }),
   })
   const data = await res.json()
@@ -44,10 +45,11 @@ export async function getStreamStatus(uid) {
   return {
     uid: r.uid,
     status: r.status?.state || 'unknown', // queued, inprogress, ready, error
-    playbackId: r.uid, // Cloudflare uses uid as playback ID
+    playbackId: r.uid,
     duration: r.duration || null,
     thumbnail: r.thumbnail || null,
     playbackUrl: r.playback?.hls || null,
+    mp4Url: r.playback?.dash?.replace('/manifest/video.mpd', '/downloads/default.mp4') || null,
     ready: r.readyToStream || false,
   }
 }
@@ -85,4 +87,11 @@ export function hlsUrl(uid) {
  */
 export function thumbnailUrl(uid, timeSec = 2) {
   return `https://videodelivery.net/${uid}/thumbnails/thumbnail.jpg?time=${timeSec}s&width=320`
+}
+
+/**
+ * Build MP4 download URL (frame-accurate, faststart).
+ */
+export function mp4Url(uid) {
+  return `https://videodelivery.net/${uid}/downloads/default.mp4`
 }
