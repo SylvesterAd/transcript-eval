@@ -90,6 +90,7 @@ export async function waitForStreamReady(uid, timeoutMs = 600000, signal) {
     const status = await getStreamStatus(uid)
     if (!status) throw new Error(`Stream ${uid} not found`)
 
+    console.log(`[cf-stream] waitForStreamReady ${uid}: status=${status.status} ready=${status.ready}`)
     if (status.ready) return status
     if (status.status === 'error') throw new Error(`Stream ${uid} transcoding failed`)
 
