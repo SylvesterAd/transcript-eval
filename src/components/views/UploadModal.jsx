@@ -67,35 +67,33 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
 
     const ext = '.' + entry.file.name.split('.').pop().toLowerCase()
     const storageName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`
-    const bucket = entry.type === 'video' ? 'videos' : 'videos' // scripts also go to videos bucket
+    const bucket = 'videos'
 
     try {
-      // Upload directly to Supabase Storage using XHR for progress tracking
+      // Upload directly to Supabase Storage REST API with XHR for progress tracking
       const session = (await supabase.auth.getSession()).data.session
       const token = session?.access_token
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 
-      const xhr = new XMLHttpRequest()
-      const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${storageName}`
-      xhr.open('POST', uploadUrl)
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-      xhr.setRequestHeader('x-upsert', 'false')
-
       await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${supabaseUrl}/storage/v1/object/${bucket}/${storageName}`)
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+        xhr.setRequestHeader('x-upsert', 'false')
+
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
             const pct = Math.round((e.loaded / e.total) * 100)
             setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
           }
         }
-
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) resolve()
-          else reject(new Error(`Storage upload failed: ${xhr.status} ${xhr.responseText?.slice(0, 200)}`))
+          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText?.slice(0, 200)}`))
         }
         xhr.onerror = () => reject(new Error('Network error during upload'))
         xhr.ontimeout = () => reject(new Error('Upload timed out'))
-        xhr.timeout = 7200000 // 2 hours for large files
+        xhr.timeout = 0 // no timeout for large files
 
         setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, xhr } : f))
         xhr.send(entry.file)
