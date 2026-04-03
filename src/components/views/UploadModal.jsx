@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { X, Loader2, RotateCcw } from 'lucide-react'
 import { apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
 const SCRIPT_EXTS = ['.docx', '.pdf', '.txt']
@@ -55,16 +58,22 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
     return groupPromiseRef.current
   }, [])
 
-  const uploadFileWithProgress = useCallback((entry, gid) => {
+  const uploadFileWithProgress = useCallback(async (entry, gid) => {
     const formData = new FormData()
     formData.append(entry.type === 'video' ? 'video' : 'script', entry.file)
     formData.append('title', entry.name)
     if (gid) formData.append('group_id', gid)
 
-    const url = entry.type === 'video' ? '/api/videos/upload' : '/api/videos/upload-script'
+    const url = entry.type === 'video' ? `${API_BASE}/videos/upload` : `${API_BASE}/videos/upload-script`
 
     const xhr = new XMLHttpRequest()
     xhr.open('POST', url)
+
+    // Add auth token
+    const session = supabase ? (await supabase.auth.getSession()).data.session : null
+    if (session?.access_token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`)
+    }
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {

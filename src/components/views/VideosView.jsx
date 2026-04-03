@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { useApi } from '../../hooks/useApi.js'
+import { useApi, apiPost } from '../../hooks/useApi.js'
 import { Eye, Upload, Loader2, Film, FileVideo, ArrowUp, ArrowDown, X, Link2, Trash2, ChevronDown, ChevronRight, Camera, Star } from 'lucide-react'
 
 export default function VideosView() {
@@ -582,39 +582,21 @@ function VideoUploadPanel({ onDone, videos }) {
     try {
       if (mode === 'youtube') {
         if (!youtubeUrl.trim()) throw new Error('Please enter a YouTube URL')
-        const res = await fetch('/api/videos/import-youtube', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        data = await apiPost('/videos/import-youtube', {
             url: youtubeUrl.trim(),
             title: title || undefined,
             video_type: videoType,
             link_video_id: linkVideoId || undefined,
           })
-        })
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'YouTube import failed' }))
-          throw new Error(err.error)
-        }
-        data = await res.json()
       } else if (mode === 'local') {
         if (!localPath.trim()) throw new Error('Please enter a file path')
-        const res = await fetch('/api/videos/import-local', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        data = await apiPost('/videos/import-local', {
             file_path: localPath.trim(),
             title: title || undefined,
             video_type: videoType,
             link_video_id: linkVideoId || undefined,
             auto_transcribe: false,
           })
-        })
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'Import failed' }))
-          throw new Error(err.error)
-        }
-        data = await res.json()
       } else {
         if (files.length === 0) throw new Error('No files selected')
 

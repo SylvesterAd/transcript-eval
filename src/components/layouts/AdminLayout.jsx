@@ -3,6 +3,9 @@ import { Outlet, NavLink } from 'react-router-dom'
 import { Database, Video, FlaskConical, LayoutDashboard, DollarSign, Play } from 'lucide-react'
 import { useRole } from '../../contexts/RoleContext.jsx'
 import AuthDropdown from '../auth/AuthDropdown.jsx'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 const navItems = [
   { to: '/admin', icon: LayoutDashboard, label: 'Dashboard' },
@@ -18,9 +21,14 @@ export default function AdminLayout() {
   const [totalSpending, setTotalSpending] = useState(null)
 
   useEffect(() => {
-    const fetchSpending = () => {
-      fetch('/api/experiments/spending/today').then(r => r.json()).then(setSpending).catch(() => {})
-      fetch('/api/experiments/spending/total').then(r => r.json()).then(setTotalSpending).catch(() => {})
+    const fetchSpending = async () => {
+      const headers = {}
+      if (supabase) {
+        const { data } = await supabase.auth.getSession()
+        if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+      }
+      fetch(`${API_BASE}/experiments/spending/today`, { headers }).then(r => r.json()).then(setSpending).catch(() => {})
+      fetch(`${API_BASE}/experiments/spending/total`, { headers }).then(r => r.json()).then(setTotalSpending).catch(() => {})
     }
     fetchSpending()
     const interval = setInterval(fetchSpending, 30000)
