@@ -132,20 +132,12 @@ export async function downloadToTemp(url, filename) {
   const response = await fetch(url)
   if (!response.ok) throw new Error(`Download failed: ${response.status}`)
 
-  // Stream to disk instead of buffering entire file in memory
+  // Stream to disk using pipeline (handles backpressure correctly)
+  const { Readable } = await import('stream')
+  const { pipeline } = await import('stream/promises')
   const { createWriteStream: cws } = await import('fs')
-  const fileStream = cws(tempPath)
-  const reader = response.body.getReader()
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      fileStream.write(value)
-    }
-  } finally {
-    fileStream.end()
-    await new Promise(resolve => fileStream.on('finish', resolve))
-  }
+  const nodeStream = Readable.fromWeb(response.body)
+  await pipeline(nodeStream, cws(tempPath))
   return tempPath
 }
 
