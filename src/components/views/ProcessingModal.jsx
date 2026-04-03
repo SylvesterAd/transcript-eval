@@ -17,14 +17,16 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
       const updated = prev.map(f => {
         const live = liveFiles.find(lf => lf.id === f.id)
         if (live && (live.progress !== f.progress || live.status !== f.status || live.loaded !== f.loaded)) {
-          // Compute speed from byte-level progress (TUS onProgress sends loaded/total)
+          // Compute speed with exponential moving average (smooths TUS chunk gaps)
           if (live.loaded != null && live.loaded > 0) {
             const prev_s = speedRef.current[f.id]
             const now = Date.now()
             if (prev_s && prev_s.lastLoaded < live.loaded) {
               const dt = (now - prev_s.lastTime) / 1000
-              if (dt > 0.3) {
-                const speed = (live.loaded - prev_s.lastLoaded) / dt
+              if (dt > 0.5) {
+                const instantSpeed = (live.loaded - prev_s.lastLoaded) / dt
+                // Smooth: 70% previous average + 30% new sample
+                const speed = prev_s.speed > 0 ? prev_s.speed * 0.7 + instantSpeed * 0.3 : instantSpeed
                 const remaining = (live.total || 0) - live.loaded
                 const eta = speed > 0 ? remaining / speed : 0
                 speedRef.current[f.id] = { lastLoaded: live.loaded, lastTime: now, speed, eta }
