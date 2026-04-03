@@ -21,7 +21,6 @@ export async function createDirectUpload(maxDurationSeconds = 21600) {
     body: JSON.stringify({
       maxDurationSeconds,
       requireSignedURLs: false,
-      mp4Support: { enabled: true, quality: 'high' },
     }),
   })
   const data = await res.json()
@@ -30,6 +29,22 @@ export async function createDirectUpload(maxDurationSeconds = 21600) {
   return {
     uid: data.result.uid,
     tusUploadUrl: data.result.uploadURL,
+  }
+}
+
+/**
+ * Enable MP4 downloads for a stream (must be called after upload, before downloading).
+ */
+export async function enableMp4Downloads(uid) {
+  const res = await fetch(`${CF_API}/${uid}/downloads`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ default: { status: 'ready' } }),
+  })
+  const data = await res.json()
+  if (!data.success) {
+    // May already be enabled — not a fatal error
+    console.warn(`[cf-stream] Enable MP4 downloads for ${uid}:`, data.errors)
   }
 }
 
@@ -55,6 +70,29 @@ export async function getStreamStatus(uid) {
 }
 
 /**
+ * Poll until the stream is ready for playback/download.
+ * Returns the stream status once ready, or throws on timeout/error.
+ */
+export async function waitForStreamReady(uid, timeoutMs = 600000, signal) {
+  const start = Date.now()
+  const pollInterval = 5000
+
+  while (Date.now() - start < timeoutMs) {
+    if (signal?.aborted) throw new Error('Aborted')
+
+    const status = await getStreamStatus(uid)
+    if (!status) throw new Error(`Stream ${uid} not found`)
+
+    if (status.ready) return status
+    if (status.status === 'error') throw new Error(`Stream ${uid} transcoding failed`)
+
+    await new Promise(r => setTimeout(r, pollInterval))
+  }
+
+  throw new Error(`Timed out waiting for stream ${uid} to be ready (${Math.round(timeoutMs / 1000)}s)`)
+}
+
+/**
  * Delete a stream.
  */
 export async function deleteStream(uid) {
@@ -62,17 +100,6 @@ export async function deleteStream(uid) {
   const res = await fetch(`${CF_API}/${uid}`, { method: 'DELETE', headers: headers() })
   const data = await res.json()
   if (!data.success) console.error(`[cf-stream] Delete failed for ${uid}:`, data.errors)
-}
-
-/**
- * Get the customer subdomain for playback URLs.
- */
-let _customerSubdomain = null
-export async function getCustomerSubdomain() {
-  if (_customerSubdomain) return _customerSubdomain
-  // Fetch any stream to discover the subdomain, or use the standard format
-  _customerSubdomain = `customer-${CF_ACCOUNT_ID.slice(0, 8)}`
-  return _customerSubdomain
 }
 
 /**

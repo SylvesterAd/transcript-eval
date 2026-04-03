@@ -13,7 +13,7 @@ import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, con
 import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
 import { runStageProgress } from '../services/llm-runner.js'
 import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TEMP_DIR as STORAGE_TEMP_DIR } from '../services/storage.js'
-import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled } from '../services/cloudflare-stream.js'
+import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled, waitForStreamReady, enableMp4Downloads, mp4Url as cfMp4Url, thumbnailUrl as cfThumbnailUrl } from '../services/cloudflare-stream.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -129,8 +129,8 @@ async function runTranscription(videoId, signal) {
     console.error(`[transcribe] Video ${videoId} not found in DB — skipping`)
     return
   }
-  if (!video.file_path) {
-    console.error(`[transcribe] Video ${videoId} has no file_path — skipping`)
+  if (!video.file_path && !video.cf_stream_uid) {
+    console.error(`[transcribe] Video ${videoId} has no file_path or cf_stream_uid — skipping`)
     await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
       .run('failed', 'No file path — video may not have uploaded correctly', videoId)
     return
@@ -142,15 +142,30 @@ async function runTranscription(videoId, signal) {
     return
   }
 
-  // file_path may be a Supabase URL or a local /uploads/... path
+  // Wait for Cloudflare Stream to finish transcoding if needed
+  if (video.cf_stream_uid) {
+    await db.prepare('UPDATE videos SET transcription_status = ? WHERE id = ?').run('waiting_for_cloudflare', videoId)
+    console.log(`[transcribe] Video ${videoId} waiting for CF stream ${video.cf_stream_uid}...`)
+    try {
+      await waitForStreamReady(video.cf_stream_uid, 600000, signal)
+      await enableMp4Downloads(video.cf_stream_uid)
+    } catch (err) {
+      await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
+        .run('failed', `Cloudflare Stream not ready: ${err.message}`, videoId)
+      return
+    }
+  }
+
+  // Resolve download URL: prefer CF MP4, fall back to file_path
+  const downloadUrl = video.cf_stream_uid ? cfMp4Url(video.cf_stream_uid) : video.file_path
+
   let actualPath
   let tempTranscribeFile = false
-  if (video.file_path.startsWith('http')) {
-    // Download from Supabase to temp for FFmpeg/whisper processing
-    actualPath = await downloadToTemp(video.file_path, `transcribe-${video.id}-${Date.now()}.mp4`)
+  if (downloadUrl.startsWith('http')) {
+    actualPath = await downloadToTemp(downloadUrl, `transcribe-${video.id}-${Date.now()}.mp4`)
     tempTranscribeFile = true
   } else {
-    actualPath = join(__dirname, '..', '..', video.file_path)
+    actualPath = join(__dirname, '..', '..', downloadUrl)
   }
   const transcriptType = video.video_type === 'human_edited' ? 'human_edited' : 'raw'
 
@@ -1086,15 +1101,40 @@ router.get('/:id', requireAuth, async (req, res) => {
 // Background: extract thumbnail, duration, media info from a video URL
 async function processVideoMetadata(videoId) {
   const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
-  if (!video?.file_path) return
+  if (!video?.file_path && !video?.cf_stream_uid) return
 
+  // Cloudflare Stream path: get metadata from CF API (no FFmpeg needed)
+  if (video.cf_stream_uid) {
+    try {
+      console.log(`[register] Waiting for CF stream ${video.cf_stream_uid} to be ready...`)
+      const status = await waitForStreamReady(video.cf_stream_uid)
+      await enableMp4Downloads(video.cf_stream_uid)
+      const thumbnail = cfThumbnailUrl(video.cf_stream_uid)
+      const duration = status.duration ? Math.round(status.duration) : null
+
+      await db.prepare(
+        'UPDATE videos SET thumbnail_path = ?, duration_seconds = ?, media_info_json = ? WHERE id = ?'
+      ).run(thumbnail, duration, JSON.stringify({ source: 'cloudflare', uid: video.cf_stream_uid }), videoId)
+
+      // Update file_path to CF MP4 URL now that it's ready
+      if (!video.file_path || video.file_path.includes('videodelivery.net')) {
+        await db.prepare('UPDATE videos SET file_path = ? WHERE id = ?').run(cfMp4Url(video.cf_stream_uid), videoId)
+      }
+
+      console.log(`[register] Metadata from CF for video ${videoId}: duration=${duration}s`)
+    } catch (err) {
+      console.error(`[register] CF metadata failed for video ${videoId}:`, err.message)
+    }
+    return
+  }
+
+  // Legacy path: download file and extract metadata with FFmpeg
   let tempPath = null
   try {
     tempPath = await downloadToTemp(video.file_path, `meta-${videoId}-${Date.now()}.mp4`)
     const hasFfmpeg = await checkFfmpeg()
     if (!hasFfmpeg) return
 
-    // Thumbnail
     const thumbFilename = `thumb-${videoId}-${Date.now()}.jpg`
     const localThumbPath = await extractThumbnail(tempPath, thumbFilename)
     let thumbnailUrl = null
@@ -1103,11 +1143,9 @@ async function processVideoMetadata(videoId) {
       try { unlinkSync(localThumbPath) } catch {}
     }
 
-    // Duration + media info
     const duration = await getVideoDuration(tempPath)
     const mediaInfo = await getVideoMediaInfo(tempPath)
 
-    // Update DB
     await db.prepare(
       'UPDATE videos SET thumbnail_path = ?, duration_seconds = ?, media_info_json = ? WHERE id = ?'
     ).run(thumbnailUrl, duration, mediaInfo ? JSON.stringify(mediaInfo) : null, videoId)
@@ -1138,8 +1176,10 @@ router.post('/register', requireAuth, async (req, res) => {
   try {
     const { file_url, filename, title, group_id, video_type = 'raw', file_size, link_video_id, cf_stream_uid } = req.body
 
-    if (!file_url) return res.status(400).json({ error: 'file_url is required' })
+    if (!file_url && !cf_stream_uid) return res.status(400).json({ error: 'file_url or cf_stream_uid is required' })
 
+    // For CF-only uploads, derive file_path from the CF MP4 URL
+    const effectiveFileUrl = file_url || (cf_stream_uid ? cfMp4Url(cf_stream_uid) : null)
     const videoName = title || filename || 'Untitled'
 
     // Create or use group
@@ -1162,7 +1202,7 @@ router.post('/register', requireAuth, async (req, res) => {
     // Insert video record (metadata will be filled in background)
     const result = await db.prepare(
       'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json, cf_stream_uid) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(videoName, file_url, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null, cf_stream_uid || null)
+    ).run(videoName, effectiveFileUrl, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null, cf_stream_uid || null)
 
     const videoId = result.lastInsertRowid
     console.log(`[register] Video registered: id=${videoId}, title="${videoName}", cf_stream=${cf_stream_uid || 'none'}`)

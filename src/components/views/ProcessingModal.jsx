@@ -285,7 +285,7 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   const allTranscriptionsComplete = completedFiles.length > 0 && completedFiles.every(
     f => f.transcriptionStatus === 'done' || f.transcriptionStatus === 'failed'
   )
-  const activelyTranscribing = completedFiles.filter(f => ['downloading', 'extracting_audio', 'transcribing', 'processing'].includes(f.transcriptionStatus) || f.transcriptionStatus?.startsWith('transcribing chunk')).length
+  const activelyTranscribing = completedFiles.filter(f => ['waiting_for_cloudflare', 'downloading', 'extracting_audio', 'transcribing', 'processing'].includes(f.transcriptionStatus) || f.transcriptionStatus?.startsWith('transcribing chunk')).length
   const transcribedCount = completedFiles.filter(f => f.transcriptionStatus === 'done' || f.transcriptionStatus === 'failed').length
   const queuedCount = completedFiles.filter(f => !f.transcriptionStatus || f.transcriptionStatus === 'pending').length
   const uploadingCount = files.filter(f => f.status === 'uploading').length
@@ -313,7 +313,8 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
       if (f.transcriptionStatus === 'done') return 'complete'
       if (f.transcriptionStatus === 'failed') return 'error'
       // Actively transcribing stages from server
-      if (f.transcriptionStatus === 'downloading' || f.transcriptionStatus === 'extracting_audio'
+      if (f.transcriptionStatus === 'waiting_for_cloudflare'
+        || f.transcriptionStatus === 'downloading' || f.transcriptionStatus === 'extracting_audio'
         || f.transcriptionStatus === 'transcribing' || f.transcriptionStatus === 'aligning'
         || f.transcriptionStatus === 'processing'
         || f.transcriptionStatus?.startsWith('transcribing chunk')) return 'transcribing'
@@ -491,12 +492,14 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
       : stage === 'transcribing' ? 'Transcribing'
       : stage === 'aligning' ? 'Aligning timestamps'
       : stage === 'processing' ? 'Processing results'
+      : stage === 'waiting_for_cloudflare' ? 'Processing video...'
       : (stage === 'downloading' || stage === 'extracting_audio') ? 'Preparing audio'
       : 'Starting...'
     const stageProgress = (stage === 'transcribing' || stage?.startsWith('transcribing chunk')) ? '60%'
       : stage === 'aligning' ? '80%'
       : stage === 'processing' ? '90%'
       : (stage === 'downloading' || stage === 'extracting_audio') ? '40%'
+      : stage === 'waiting_for_cloudflare' ? '15%'
       : '20%'
     return (
       <div className="bg-surface-container-low/50 border border-white/5 rounded-2xl p-5" style={{ boxShadow: 'inset 0 0 12px rgba(193,128,255,0.1)' }}>

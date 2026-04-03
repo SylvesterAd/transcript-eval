@@ -69,42 +69,24 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
   }, [])
 
   const uploadFileWithProgress = useCallback(async (entry, gid) => {
-    if (!supabase) {
-      setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, status: 'error', error: 'Supabase not configured' } : f))
-      return
-    }
-
-    const ext = '.' + entry.file.name.split('.').pop().toLowerCase()
-    const storageName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`
-    const bucket = 'videos'
-
     try {
       console.log(`[upload] uploadFileWithProgress called for ${entry.name}, gid=${gid}`)
-      const session = (await supabase.auth.getSession()).data.session
-      const token = session?.access_token
       const entryId = entry.id
 
-      // 1. Get Cloudflare Stream direct-upload URL (if available)
-      let cfUploadUrl = null, cfStreamUid = null
-      try {
-        const cfData = await apiPost('/videos/stream/create-upload', { maxDurationSeconds: 21600 })
-        cfUploadUrl = cfData.tusUploadUrl
-        cfStreamUid = cfData.uid
-        console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
-      } catch (e) {
-        console.warn(`[upload] Cloudflare Stream not available, using Supabase only:`, e.message)
-      }
+      // 1. Get Cloudflare Stream direct-upload URL
+      const cfData = await apiPost('/videos/stream/create-upload', { maxDurationSeconds: 21600 })
+      const cfUploadUrl = cfData.tusUploadUrl
+      const cfStreamUid = cfData.uid
+      console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
 
-      // 2. Upload to Cloudflare Stream (primary, with progress) + Supabase Storage (parallel, for transcription)
-      const tusUpload = (endpoint, headers, metadata) => new Promise((resolve, reject) => {
+      // 2. Upload to Cloudflare Stream via TUS (single upload — no Supabase)
+      await new Promise((resolve, reject) => {
         let lastPct = -1
         const upload = new tus.Upload(entry.file, {
-          endpoint,
+          endpoint: cfUploadUrl,
           retryDelays: [0, 1000, 3000, 5000],
-          headers,
           uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
-          metadata,
           chunkSize: 6 * 1024 * 1024,
           onError: (err) => reject(new Error(err.message || 'Upload failed')),
           onProgress: (bytesUploaded, bytesTotal) => {
@@ -118,36 +100,13 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
           onSuccess: () => resolve(),
           onShouldRetry: () => true,
         })
-        console.log(`[upload] Starting TUS upload for ${entry.name} to ${endpoint.includes('cloudflare') ? 'Cloudflare' : 'Supabase'}`)
         upload.start()
       })
 
-      // Supabase upload (for source/transcription)
-      const supabaseUpload = tusUpload(
-        `${SUPABASE_URL}/storage/v1/upload/resumable`,
-        { authorization: `Bearer ${token}`, 'x-upsert': 'true' },
-        { bucketName: bucket, objectName: storageName, contentType: entry.file.type || 'application/octet-stream', cacheControl: '3600' }
-      )
-
-      if (cfUploadUrl) {
-        // Upload to both in parallel — Cloudflare drives the progress bar
-        const cfUpload = tusUpload(cfUploadUrl, {}, {})
-        // Cloudflare upload shows progress; Supabase runs silently in parallel
-        await Promise.all([cfUpload, supabaseUpload.catch(e => console.warn('[upload] Supabase parallel upload failed:', e.message))])
-      } else {
-        // Supabase only
-        await supabaseUpload
-      }
-
-      // Get Supabase public URL
-      const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(storageName)
-      const fileUrl = urlData.publicUrl
-
-      // Tell backend to register the video
+      // 3. Register with backend (Cloudflare only — no Supabase URL)
       setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: 100 } : f))
 
       const result = await apiPost('/videos/register', {
-        file_url: fileUrl,
         filename: entry.file.name,
         title: entry.name,
         group_id: gid,
@@ -160,7 +119,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         f.id === entry.id ? { ...f, status: 'complete', progress: 100, serverId: result.videoId } : f
       ))
     } catch (err) {
-      console.error('[upload] Direct upload failed:', err)
+      console.error('[upload] Upload failed:', err)
       setFiles(prev => prev.map(f =>
         f.id === entry.id ? { ...f, status: 'error', error: err.message || 'Upload failed' } : f
       ))
