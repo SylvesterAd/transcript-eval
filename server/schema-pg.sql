@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS video_groups (
   classification_json TEXT,
   parent_group_id INTEGER REFERENCES video_groups(id),
   annotations_json TEXT,
+  user_id TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS experiments (
   name TEXT NOT NULL,
   notes TEXT,
   video_ids_json TEXT,
+  user_id TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

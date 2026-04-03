@@ -367,7 +367,13 @@ export async function buildAnnotationsFromRun(experimentRunId, wordTimestamps, a
 /**
  * Auto-run the main flow for a video group after transcription completes.
  */
-export async function runMainFlowForGroup(groupId) {
+export async function runMainFlowForGroup(groupId, userId) {
+  // Resolve userId from group if not provided
+  if (!userId) {
+    const grp = await db.prepare('SELECT user_id FROM video_groups WHERE id = ?').get(groupId)
+    userId = grp?.user_id
+  }
+
   // Find main strategy
   const mainStrategy = await db.prepare('SELECT * FROM strategies WHERE is_main = 1').get()
   if (!mainStrategy) {
@@ -400,8 +406,8 @@ export async function runMainFlowForGroup(groupId) {
 
   // Create experiment + run
   const expResult = await db.prepare(
-    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json) VALUES (?, ?, ?, ?)'
-  ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]))
+    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json, user_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]), userId)
 
   const runResult = await db.prepare(
     'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, 1, ?)'

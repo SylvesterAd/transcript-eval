@@ -24,7 +24,9 @@ export function useApi(path, deps = []) {
   const refetch = useCallback((silent) => {
     if (!path) { setLoading(false); return }
     if (!silent) { setLoading(true); setError(null) }
-    fetch(`${BASE}${path}`)
+    getAuthHeaders().then(headers =>
+      fetch(`${BASE}${path}`, { headers })
+    )
       .then(r => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
         return r.json()

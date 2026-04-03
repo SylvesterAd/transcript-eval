@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { createHash } from 'crypto'
 import db from '../db.js'
+import { requireAuth } from '../auth.js'
 import { computeDiff, extractDeletions, extractAdditions, calculateSimilarity, fullComparison } from '../services/diff-engine.js'
 import { classifyDeletions, reasonStats } from '../services/classifier.js'
 import { scoreOutput } from '../services/scorer.js'
@@ -40,7 +41,7 @@ async function getCachedDiff(type, rawContent, humanContent) {
  * GET /api/diffs/video/:videoId/raw-vs-human
  * Compare raw transcript vs human-edited for a benchmark video.
  */
-router.get('/video/:videoId/raw-vs-human', async (req, res) => {
+router.get('/video/:videoId/raw-vs-human', requireAuth, async (req, res) => {
   const { videoId } = req.params
   const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
   if (!video) return res.status(404).json({ error: 'Video not found' })
@@ -85,7 +86,7 @@ router.get('/video/:videoId/raw-vs-human', async (req, res) => {
  * POST /api/diffs/compare
  * Compare any two texts. Body: { textA, textB, rawText? }
  */
-router.post('/compare', async (req, res) => {
+router.post('/compare', requireAuth, async (req, res) => {
   const { textA, textB, rawText } = req.body
   if (!textA || !textB) return res.status(400).json({ error: 'textA and textB are required' })
 
@@ -96,7 +97,7 @@ router.post('/compare', async (req, res) => {
  * POST /api/diffs/score
  * Score a workflow output. Body: { raw, humanEdited, current }
  */
-router.post('/score', (req, res) => {
+router.post('/score', requireAuth, (req, res) => {
   const { raw, humanEdited, current } = req.body
   if (!raw || !humanEdited || !current) {
     return res.status(400).json({ error: 'raw, humanEdited, and current are required' })
@@ -110,7 +111,7 @@ router.post('/score', (req, res) => {
  * GET /api/diffs/video/:videoId/full
  * Full analysis of raw vs human for a benchmark video, including scoring preview.
  */
-router.get('/video/:videoId/full', async (req, res) => {
+router.get('/video/:videoId/full', requireAuth, async (req, res) => {
   const { videoId } = req.params
   const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
   const raw = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
@@ -141,7 +142,7 @@ export async function invalidateDiffCache() {
   await db.prepare('DELETE FROM diff_cache').run()
 }
 
-router.post('/clear-cache', async (req, res) => {
+router.post('/clear-cache', requireAuth, async (req, res) => {
   await invalidateDiffCache()
   res.json({ ok: true })
 })

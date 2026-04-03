@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import db from '../db.js'
+import { requireAuth } from '../auth.js'
 
 const router = Router()
 
@@ -7,7 +8,7 @@ const router = Router()
  * GET /api/rankings
  * Cross-strategy comparison: all experiments ranked by average score.
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const rankings = await db.prepare(`
     SELECT e.id AS experiment_id, e.name AS experiment_name,
       s.name AS strategy_name, sv.version_number,
@@ -47,7 +48,7 @@ router.get('/', async (req, res) => {
  * GET /api/rankings/video/:videoId
  * Compare all experiments for a single video.
  */
-router.get('/video/:videoId', async (req, res) => {
+router.get('/video/:videoId', requireAuth, async (req, res) => {
   const { videoId } = req.params
   const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
   if (!video) return res.status(404).json({ error: 'Video not found' })
@@ -104,7 +105,7 @@ router.get('/video/:videoId', async (req, res) => {
  * GET /api/rankings/stages
  * Cross-strategy stage-by-stage comparison.
  */
-router.get('/stages', async (req, res) => {
+router.get('/stages', requireAuth, async (req, res) => {
   const stageData = await db.prepare(`
     SELECT e.id AS experiment_id, e.name AS experiment_name,
       s.name AS strategy_name, sv.version_number,

@@ -6,7 +6,7 @@ import { requireAuth } from '../auth.js'
 const router = Router()
 
 // List all strategies with latest version info
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const strategies = await db.prepare(`
     SELECT s.*, s.is_main,
       (SELECT MAX(sv.version_number) FROM strategy_versions sv WHERE sv.strategy_id = s.id) AS latest_version,
@@ -23,7 +23,7 @@ router.get('/', async (req, res) => {
 })
 
 // Get strategy with all versions
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
@@ -68,7 +68,7 @@ router.post('/:id/versions', requireAuth, async (req, res) => {
 })
 
 // Get specific version
-router.get('/:id/versions/:versionId', async (req, res) => {
+router.get('/:id/versions/:versionId', requireAuth, async (req, res) => {
   const version = await db.prepare(
     'SELECT * FROM strategy_versions WHERE id = ? AND strategy_id = ?'
   ).get(req.params.versionId, req.params.id)
@@ -508,7 +508,7 @@ Do NOT include any text outside the JSON code block. Do NOT use markdown heading
 })
 
 // Set strategy as main flow
-router.put('/:id/set-main', async (req, res) => {
+router.put('/:id/set-main', requireAuth, async (req, res) => {
   const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
