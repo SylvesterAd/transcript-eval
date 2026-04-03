@@ -27,7 +27,6 @@ export async function initBuckets() {
   for (const name of BUCKETS) {
     const { error } = await supabase.storage.createBucket(name, {
       public: true,
-      fileSizeLimit: 50 * 1024 * 1024, // 50MB (Supabase free tier limit)
     })
     if (error && !error.message.includes('already exists')) {
       console.error(`[storage] Error creating bucket "${name}":`, error.message)
