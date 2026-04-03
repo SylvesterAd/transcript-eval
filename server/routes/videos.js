@@ -7,7 +7,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
 import db from '../db.js'
-import { requireAuth } from '../auth.js'
+import { requireAuth, isAdmin } from '../auth.js'
 import { transcribeVideo, findCutWords } from '../services/whisper.js'
 import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, concatenateVideos, extractEnergyEnvelope, extractWaveformPeaks, extractVideoFrames } from '../services/video-processor.js'
 import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
@@ -353,9 +353,9 @@ router.get('/', requireAuth, async (req, res) => {
     FROM videos v
     LEFT JOIN video_groups vg ON vg.id = v.group_id
     LEFT JOIN video_groups parent ON parent.id = vg.parent_group_id
-    WHERE vg.user_id = ?
+    ${isAdmin(req) ? '' : 'WHERE vg.user_id = ?'}
     ORDER BY v.created_at DESC
-  `).all(req.auth.userId)
+  `).all(...(isAdmin(req) ? [] : [req.auth.userId]))
   // Remap group_id to parent for project list
   for (const v of videos) {
     if (v.effective_group_id) {
@@ -371,15 +371,15 @@ router.get('/groups', requireAuth, async (req, res) => {
     SELECT vg.*,
       (SELECT COUNT(*) FROM videos v WHERE v.group_id = vg.id) AS video_count
     FROM video_groups vg
-    WHERE vg.user_id = ? AND (vg.assembly_status IS NULL OR vg.assembly_status != 'deleting')
+    WHERE ${isAdmin(req) ? '' : 'vg.user_id = ? AND'} (vg.assembly_status IS NULL OR vg.assembly_status != 'deleting')
     ORDER BY vg.created_at DESC
-  `).all(req.auth.userId)
+  `).all(...(isAdmin(req) ? [] : [req.auth.userId]))
   res.json(groups)
 })
 
 // Get group detail with assembled transcript
 router.get('/groups/:id/detail', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const videos = await db.prepare('SELECT id, title, video_type, duration_seconds, transcription_status, transcription_error, thumbnail_path, file_path, frames_status FROM videos WHERE group_id = ?').all(req.params.id)
   let relatedGroups = []
@@ -402,14 +402,14 @@ router.get('/groups/:id/detail', requireAuth, async (req, res) => {
 
 // Poll assembly status (lightweight — no JSON parsing)
 router.get('/groups/:id/status', requireAuth, async (req, res) => {
-  const row = await db.prepare('SELECT assembly_status, assembly_error FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const row = await db.prepare(`SELECT assembly_status, assembly_error FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!row) return res.status(404).json({ error: 'Group not found' })
   res.json({ assembly_status: row.assembly_status, assembly_error: row.assembly_error })
 })
 
 // Get classification data + videos with media info
 router.get('/groups/:id/classification', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id, name, assembly_status, assembly_error, classification_json FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id, name, assembly_status, assembly_error, classification_json FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   // If confirmed, videos live in sub-groups — gather them all
@@ -464,7 +464,7 @@ router.get('/groups/:id/classification', requireAuth, async (req, res) => {
 // Re-run Gemini classification (gathers split videos back from sub-groups first)
 router.post('/groups/:id/reclassify', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(groupId, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   // Gather videos back from child sub-groups
@@ -483,7 +483,7 @@ router.post('/groups/:id/reclassify', requireAuth, async (req, res) => {
 
 // Save modified grouping from user
 router.post('/groups/:id/update-classification', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id, classification_json FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id, classification_json FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   const { groups } = req.body
@@ -505,7 +505,7 @@ router.post('/groups/:id/update-classification', requireAuth, async (req, res) =
 // Confirm classification → split groups + start sync
 router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(groupId, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   const { groups } = req.body
@@ -542,7 +542,7 @@ router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) 
 
 // Save editor state for a group
 router.put('/groups/:id/editor-state', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const { editor_state } = req.body
   await db.prepare('UPDATE video_groups SET editor_state_json = ? WHERE id = ?')
@@ -552,7 +552,7 @@ router.put('/groups/:id/editor-state', requireAuth, async (req, res) => {
 
 // Beacon endpoint for auto-save on unmount/tab close (sendBeacon sends POST with text/plain)
 router.post('/groups/:id/editor-state-beacon', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   // sendBeacon may send as text/plain — parse manually if needed
   let body = req.body
@@ -569,7 +569,7 @@ router.post('/groups/:id/editor-state-beacon', requireAuth, async (req, res) => 
 
 // Extract frames for all videos in a group (for existing projects without frames)
 router.post('/groups/:id/extract-frames', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const videos = await db.prepare('SELECT id, file_path, frames_status FROM videos WHERE group_id = ?').all(req.params.id)
   let started = 0
@@ -586,7 +586,7 @@ router.post('/groups/:id/extract-frames', requireAuth, async (req, res) => {
 router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
   const force = req.query.force === 'true'
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(groupId, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   // Check if annotations already exist
@@ -777,7 +777,7 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
 // Rebuild annotations from existing run (re-maps without re-running LLMs)
 router.post('/groups/:id/rebuild-annotations', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(groupId, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   let annotations
@@ -803,7 +803,7 @@ router.post('/groups/:id/rebuild-annotations', requireAuth, async (req, res) => 
 
 // Get word timestamps for all videos in a group
 router.get('/groups/:id/word-timestamps', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const rows = await db.prepare(`
     SELECT t.video_id, t.word_timestamps_json
@@ -820,7 +820,7 @@ router.get('/groups/:id/word-timestamps', requireAuth, async (req, res) => {
 
 // Get timeline JSON for a group
 router.get('/groups/:id/timeline', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT timeline_json FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT timeline_json FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   if (!group.timeline_json) return res.status(404).json({ error: 'No timeline yet' })
   res.json(JSON.parse(group.timeline_json))
@@ -828,7 +828,7 @@ router.get('/groups/:id/timeline', requireAuth, async (req, res) => {
 
 // Regenerate waveform peaks for all tracks in a group's timeline
 router.post('/groups/:id/regenerate-waveforms', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT timeline_json FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT timeline_json FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   if (!group.timeline_json) return res.status(404).json({ error: 'No timeline yet' })
 
@@ -874,7 +874,7 @@ router.post('/groups/:id/regenerate-waveforms', requireAuth, async (req, res) =>
 
 // Cancel all transcriptions for a group
 router.post('/groups/:id/cancel-transcriptions', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const result = await cancelGroupTranscriptions(parseInt(req.params.id))
   res.json(result)
@@ -882,7 +882,7 @@ router.post('/groups/:id/cancel-transcriptions', requireAuth, async (req, res) =
 
 // Batch-start transcription for all untranscribed videos in a group (up to 3 concurrent)
 router.post('/groups/:id/transcribe', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   // Find all videos that need transcription (not done, not currently active)
@@ -908,7 +908,7 @@ router.post('/groups/:id/transcribe', requireAuth, async (req, res) => {
 })
 
 router.post('/groups/:id/rebuild-timeline', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   const videos = await db.prepare(`
@@ -986,8 +986,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     SELECT v.*, vg.name AS group_name
     FROM videos v
     LEFT JOIN video_groups vg ON vg.id = v.group_id
-    WHERE v.id = ? AND vg.user_id = ?
-  `).get(req.params.id, req.auth.userId)
+    WHERE v.id = ? ${isAdmin(req) ? '' : 'AND vg.user_id = ?'}
+  `).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!video) return res.status(404).json({ error: 'Video not found' })
 
   const transcriptsRaw = await db.prepare('SELECT * FROM transcripts WHERE video_id = ?').all(req.params.id)
@@ -1606,7 +1606,7 @@ router.post('/import-youtube', requireAuth, async (req, res) => {
 
 // Transcribe a video using Whisper (non-blocking — runs in background)
 router.post('/:id/transcribe', requireAuth, async (req, res) => {
-  const video = await db.prepare('SELECT * FROM videos v WHERE v.id = ? AND v.group_id IN (SELECT id FROM video_groups WHERE user_id = ?)').get(req.params.id, req.auth.userId)
+  const video = await db.prepare(`SELECT * FROM videos v WHERE v.id = ? ${isAdmin(req) ? '' : 'AND v.group_id IN (SELECT id FROM video_groups WHERE user_id = ?)'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!video) return res.status(404).json({ error: 'Video not found' })
   if (!video.file_path) return res.status(400).json({ error: 'No video file associated with this video' })
 
@@ -1779,7 +1779,7 @@ router.post('/groups', requireAuth, async (req, res) => {
 // Update video group
 router.put('/groups/:id', requireAuth, async (req, res) => {
   const { rough_cut_config_json } = req.body
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   await db.prepare('UPDATE video_groups SET rough_cut_config_json = ? WHERE id = ?')
     .run(JSON.stringify(rough_cut_config_json), req.params.id)
@@ -1789,7 +1789,7 @@ router.put('/groups/:id', requireAuth, async (req, res) => {
 
 // Start assembly for a group (called from SyncOptionsModal after user picks sync mode)
 router.post('/groups/:id/start-assembly', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   const { sync_mode } = req.body
@@ -1820,8 +1820,8 @@ router.post('/groups/:id/start-assembly', requireAuth, async (req, res) => {
 router.put('/:id', requireAuth, async (req, res) => {
   const { title, youtube_url, duration_seconds, metadata, video_type, group_id } = req.body
   await db.prepare(
-    'UPDATE videos SET title = ?, youtube_url = ?, duration_seconds = ?, metadata_json = ?, video_type = COALESCE(?, video_type), group_id = ? WHERE id = ? AND group_id IN (SELECT id FROM video_groups WHERE user_id = ?)'
-  ).run(title, youtube_url || null, duration_seconds || null, JSON.stringify(metadata || {}), video_type || null, group_id ?? null, req.params.id, req.auth.userId)
+    `UPDATE videos SET title = ?, youtube_url = ?, duration_seconds = ?, metadata_json = ?, video_type = COALESCE(?, video_type), group_id = ? WHERE id = ? ${isAdmin(req) ? '' : 'AND group_id IN (SELECT id FROM video_groups WHERE user_id = ?)'}`
+  ).run(title, youtube_url || null, duration_seconds || null, JSON.stringify(metadata || {}), video_type || null, group_id ?? null, req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
 
   const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id)
   res.json(video)
@@ -1862,7 +1862,7 @@ async function purgeGroup(groupId) {
 }
 
 router.delete('/groups/:id', requireAuth, async (req, res) => {
-  const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
+  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   // Soft-hide immediately: set a deleted marker so it disappears from lists
@@ -1880,7 +1880,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
   const id = req.params.id
 
   // Get video info before deleting (to clean up files + empty groups after)
-  const video = await db.prepare('SELECT group_id, file_path, thumbnail_path FROM videos WHERE id = ? AND group_id IN (SELECT id FROM video_groups WHERE user_id = ?)').get(id, req.auth.userId)
+  const video = await db.prepare(`SELECT group_id, file_path, thumbnail_path FROM videos WHERE id = ? ${isAdmin(req) ? '' : 'AND group_id IN (SELECT id FROM video_groups WHERE user_id = ?)'}`).get(id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!video) return res.status(404).json({ error: 'Video not found' })
   const groupId = video?.group_id
 
@@ -1940,7 +1940,7 @@ router.put('/:id/transcript/:type', requireAuth, async (req, res) => {
   }
   if (!content) return res.status(400).json({ error: 'Content is required' })
 
-  const video = await db.prepare('SELECT * FROM videos v WHERE v.id = ? AND v.group_id IN (SELECT id FROM video_groups WHERE user_id = ?)').get(id, req.auth.userId)
+  const video = await db.prepare(`SELECT * FROM videos v WHERE v.id = ? ${isAdmin(req) ? '' : 'AND v.group_id IN (SELECT id FROM video_groups WHERE user_id = ?)'}`).get(id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!video) return res.status(404).json({ error: 'Video not found' })
 
   await db.prepare(`
@@ -1957,7 +1957,7 @@ router.put('/:id/transcript/:type', requireAuth, async (req, res) => {
 
 // Get transcript comparison (raw vs human)
 router.get('/:id/comparison', requireAuth, async (req, res) => {
-  const video = await db.prepare('SELECT * FROM videos v WHERE v.id = ? AND v.group_id IN (SELECT id FROM video_groups WHERE user_id = ?)').get(req.params.id, req.auth.userId)
+  const video = await db.prepare(`SELECT * FROM videos v WHERE v.id = ? ${isAdmin(req) ? '' : 'AND v.group_id IN (SELECT id FROM video_groups WHERE user_id = ?)'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!video) return res.status(404).json({ error: 'Video not found' })
 
   const raw = await db.prepare("SELECT * FROM transcripts WHERE video_id = ? AND type = 'raw'").get(req.params.id)
