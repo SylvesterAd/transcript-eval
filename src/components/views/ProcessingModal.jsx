@@ -17,22 +17,27 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
       const updated = prev.map(f => {
         const live = liveFiles.find(lf => lf.id === f.id)
         if (live && (live.progress !== f.progress || live.status !== f.status || live.loaded !== f.loaded)) {
-          // Compute speed with exponential moving average (smooths TUS chunk gaps)
+          // Compute average speed over a 5-second window
           if (live.loaded != null && live.loaded > 0) {
-            const prev_s = speedRef.current[f.id]
+            const s = speedRef.current[f.id]
             const now = Date.now()
-            if (prev_s && prev_s.lastLoaded < live.loaded) {
-              const dt = (now - prev_s.lastTime) / 1000
+            if (s) {
+              // Push sample into ring buffer
+              s.samples.push({ loaded: live.loaded, time: now })
+              // Drop samples older than 5s
+              const cutoff = now - 5000
+              while (s.samples.length > 1 && s.samples[0].time < cutoff) s.samples.shift()
+              // Compute average over the window
+              const first = s.samples[0]
+              const dt = (now - first.time) / 1000
               if (dt > 0.5) {
-                const instantSpeed = (live.loaded - prev_s.lastLoaded) / dt
-                // Smooth: 70% previous average + 30% new sample
-                const speed = prev_s.speed > 0 ? prev_s.speed * 0.7 + instantSpeed * 0.3 : instantSpeed
+                const speed = (live.loaded - first.loaded) / dt
                 const remaining = (live.total || 0) - live.loaded
-                const eta = speed > 0 ? remaining / speed : 0
-                speedRef.current[f.id] = { lastLoaded: live.loaded, lastTime: now, speed, eta }
+                s.speed = speed
+                s.eta = speed > 0 ? remaining / speed : 0
               }
-            } else if (!prev_s) {
-              speedRef.current[f.id] = { lastLoaded: live.loaded, lastTime: now, speed: 0, eta: 0 }
+            } else {
+              speedRef.current[f.id] = { samples: [{ loaded: live.loaded, time: now }], speed: 0, eta: 0 }
             }
           }
           return { ...f, progress: live.progress, loaded: live.loaded, total: live.total, status: live.status, serverId: live.serverId || f.serverId, error: live.error || f.error }
