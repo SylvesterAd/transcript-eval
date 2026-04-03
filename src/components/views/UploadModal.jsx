@@ -128,7 +128,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
   const startUpload = useCallback(async (entry) => {
     try {
       const gid = await ensureGroup()
-      uploadFileWithProgress(entry, gid)
+      await uploadFileWithProgress(entry, gid)
     } catch (err) {
       setFiles(prev => prev.map(f =>
         f.id === entry.id ? { ...f, status: 'error', error: err.message || 'Failed to create project' } : f
