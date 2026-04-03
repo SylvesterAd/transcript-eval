@@ -82,16 +82,21 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       const authToken = session?.access_token
 
       await new Promise((resolve, reject) => {
+        const backendOrigin = API_BASE.startsWith('http') ? new URL(API_BASE).origin : window.location.origin
         const upload = new tus.Upload(entry.file, {
           endpoint: `${API_BASE}/videos/stream/tus-create`,
-          headers: {
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-          },
           chunkSize: 50 * 1024 * 1024, // 50MB — CF recommended
           retryDelays: [0, 3000, 5000, 10000, 20000],
           removeFingerprintOnSuccess: true,
           storeFingerprintForResuming: false,
           metadata: { name: entry.file.name, filetype: entry.file.type || 'video/mp4' },
+          onBeforeRequest: (req) => {
+            // Only send Authorization to our backend, not to Cloudflare
+            const url = req.getURL ? req.getURL() : req._url || ''
+            if (authToken && url.startsWith(backendOrigin)) {
+              req.setHeader('Authorization', `Bearer ${authToken}`)
+            }
+          },
           onError: (err) => reject(new Error(err.message || 'Upload failed')),
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
