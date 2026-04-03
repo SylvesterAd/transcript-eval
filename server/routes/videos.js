@@ -1852,6 +1852,8 @@ async function purgeGroup(groupId) {
       try { rmSync(join(__dirname, '..', '..', 'uploads', 'frames', String(v.id)), { recursive: true }) } catch {}
       if (v.cf_stream_uid) await deleteStream(v.cf_stream_uid).catch(() => {})
     }
+    // Delete child groups (sub-groups created during classification)
+    await db.prepare('UPDATE video_groups SET parent_group_id = NULL WHERE parent_group_id = ?').run(groupId)
     await db.prepare('DELETE FROM video_groups WHERE id = ?').run(groupId)
     console.log(`[delete] Group ${groupId} purged (${videos.length} videos)`)
   } catch (err) {
