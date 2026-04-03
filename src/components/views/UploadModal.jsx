@@ -80,7 +80,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
         const upload = new tus.Upload(entry.file, {
           endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`,
           retryDelays: [0, 1000, 3000, 5000],
-          headers: { authorization: `Bearer ${token}`, 'x-upsert': 'false' },
+          headers: { authorization: `Bearer ${token}`, 'x-upsert': 'true' },
           uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
           metadata: {
