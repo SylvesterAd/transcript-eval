@@ -166,6 +166,10 @@ export default function EditorView() {
     const interval = setInterval(async () => {
       try {
         const res = await authFetch(`/experiments/${flowRunState.experimentId}/progress`)
+        if (!res.ok) {
+          console.error('[flow-progress] Poll failed:', res.status, await res.text().catch(() => ''))
+          return
+        }
         const data = await res.json()
         const run = data.runs?.[0]
         if (run?.status === 'complete' || run?.status === 'partial') {
@@ -178,7 +182,7 @@ export default function EditorView() {
         } else {
           setFlowRunState(prev => ({ ...prev, progress: data }))
         }
-      } catch {}
+      } catch (err) { console.error('[flow-progress] Poll error:', err) }
     }, 2500)
     return () => clearInterval(interval)
   }, [flowRunState?.experimentId, flowRunState?.status, refetchDetail])
@@ -998,7 +1002,9 @@ function applyConfigDefaults(config, dispatch) {
 function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageNames = [], initialStageTypes = [], error = false, onDismissError }) {
   const run = progress?.runs?.[0]
   const totalStages = run?.totalStages || initialTotalStages
-  const currentStage = run?.currentStage ?? (run ? 0 : -1)
+  // Use in-memory live progress, or fall back to DB completed stages count
+  const dbCompletedStages = run?.stages?.length || 0
+  const currentStage = run?.currentStage ?? (dbCompletedStages > 0 ? dbCompletedStages : (run ? 0 : -1))
 
   if (error) {
     const errorMsg = run?.errorMessage || 'Unknown error'
