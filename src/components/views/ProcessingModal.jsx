@@ -125,8 +125,9 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   }, []) // Only on mount
 
   // Transcription starts automatically per-video when /register is called
-  // This batch trigger is a fallback for any videos that missed it
+  // This batch trigger is a fallback for any videos that missed auto-start
   const allUploadsFinished = files.length > 0 && files.every(f => f.status === 'complete' || f.status === 'error')
+  const classificationTriggeredRef = useRef(false)
   useEffect(() => {
     if (!allUploadsFinished) return
     if (batchTriggeredRef.current) return
@@ -289,6 +290,14 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   const queuedCount = completedFiles.filter(f => !f.transcriptionStatus || f.transcriptionStatus === 'pending').length
   const uploadingCount = files.filter(f => f.status === 'uploading').length
   const totalFiles = files.filter(f => f.status !== 'error').length
+
+  // Trigger classification once all transcriptions complete
+  useEffect(() => {
+    if (!allTranscriptionsComplete || classificationTriggeredRef.current) return
+    classificationTriggeredRef.current = true
+    console.log('[processing] All transcriptions done, triggering classification')
+    apiPost(`/videos/groups/${groupIdRef.current}/reclassify`, {}).catch(() => {})
+  }, [allTranscriptionsComplete])
 
   // Estimate total remaining time
   const totalEta = files.reduce((sum, f) => {

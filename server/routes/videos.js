@@ -194,25 +194,9 @@ async function runTranscription(videoId, signal) {
       .run('done', videoId)
     console.log(`[transcribe] Video ${videoId} DONE: ${result.words?.length} words`)
 
-    // Check if this completes a multicam group that needs assembly
-    if (video.group_id) {
-      const group = await db.prepare('SELECT * FROM video_groups WHERE id = ?').get(video.group_id)
-      const skipStatuses = ['classifying', 'classified', 'confirmed', 'done']
-      if (group && !skipStatuses.includes(group.assembly_status)) {
-        const pending = await db.prepare(`
-          SELECT COUNT(*) as cnt FROM videos
-          WHERE group_id = ? AND video_type = 'raw'
-          AND (transcription_status IS NULL OR transcription_status NOT IN ('done', 'failed'))
-        `).get(video.group_id)
-        if (pending.cnt === 0) {
-          console.log(`[transcribe] All videos in group ${video.group_id} done, starting classification`)
-          classifyVideosForReview(video.group_id)
-          annotationMapper().then(m => m.runMainFlowForGroup(video.group_id)).catch(err => {
-            console.error(`[main-flow] Group ${video.group_id} failed:`, err.message)
-          })
-        }
-      }
-    }
+    // Note: classification is triggered by the frontend (ProcessingModal)
+    // after ALL uploads + transcriptions complete, not per-video here.
+    // This avoids race conditions with parallel uploads.
 
     // Clean up temp file if we downloaded from Supabase
     if (tempTranscribeFile) { try { unlinkSync(actualPath) } catch {} }
