@@ -172,6 +172,7 @@ export default function EditorView() {
         }
         const data = await res.json()
         const run = data.runs?.[0]
+        console.log('[flow-progress] poll:', { status: run?.status, currentStage: run?.currentStage, totalStages: run?.totalStages, stagesLen: run?.stages?.length, segDone: run?.segmentsDone, segTotal: run?.segmentsTotal })
         if (run?.status === 'complete' || run?.status === 'partial') {
           clearInterval(interval)
           setFlowRunState(prev => ({ ...prev, status: 'complete', progress: data }))
