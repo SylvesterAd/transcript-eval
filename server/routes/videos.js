@@ -614,7 +614,7 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
 
   // Check if a run is actually in progress (running with live progress, or pending and very recent)
   const inProgressRun = await db.prepare(`
-    SELECT er.id AS runId, e.id AS experimentId FROM experiment_runs er
+    SELECT er.id AS run_id, e.id AS experiment_id FROM experiment_runs er
     JOIN experiments e ON e.id = er.experiment_id
     WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
       AND er.status IN ('pending', 'running')
@@ -623,9 +623,9 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
   `).get(groupId)
   if (inProgressRun) {
     // Only trust this if it's actually running (has live progress) or was created recently
-    const hasLiveProgress = runStageProgress.has(inProgressRun.runId)
-    const run = await db.prepare('SELECT created_at FROM experiment_runs WHERE id = ?').get(inProgressRun.runId)
-    const ageMs = Date.now() - new Date(run.created_at).getTime()
+    const hasLiveProgress = runStageProgress.has(inProgressRun.run_id)
+    const run = await db.prepare('SELECT created_at FROM experiment_runs WHERE id = ?').get(inProgressRun.run_id)
+    const ageMs = run ? Date.now() - new Date(run.created_at).getTime() : 999999
     const isRecent = ageMs < 60000 // less than 1 minute old
 
     if (hasLiveProgress || isRecent) {
@@ -633,16 +633,16 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
         SELECT sv.stages_json FROM experiments e
         JOIN strategy_versions sv ON sv.id = e.strategy_version_id
         WHERE e.id = ?
-      `).get(inProgressRun.experimentId)
+      `).get(inProgressRun.experiment_id)
       let stageNames = []
       try {
         const stages = JSON.parse(version?.stages_json || '[]')
         stageNames = stages.map((s, i) => s.name || `Stage ${i + 1}`)
       } catch { /* ignore */ }
-      return res.json({ experimentId: inProgressRun.experimentId, runId: inProgressRun.runId, totalStages: stageNames.length, stageNames })
+      return res.json({ experimentId: inProgressRun.experiment_id, runId: inProgressRun.run_id, totalStages: stageNames.length, stageNames })
     }
     // Stale pending run — mark as failed and continue to create a new one
-    await db.prepare("UPDATE experiment_runs SET status = 'failed' WHERE id = ?").run(inProgressRun.runId)
+    await db.prepare("UPDATE experiment_runs SET status = 'failed' WHERE id = ?").run(inProgressRun.run_id)
   }
 
   // Check if too many failed runs — stop auto-creating after 2 failures
@@ -690,8 +690,8 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
 
   // Create experiment + run records
   const expResult = await db.prepare(
-    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json) VALUES (?, ?, ?, ?)'
-  ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]))
+    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json, user_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]), req.auth.userId)
 
   const experimentId = Number(expResult.lastInsertRowid)
   const runResult = await db.prepare(
