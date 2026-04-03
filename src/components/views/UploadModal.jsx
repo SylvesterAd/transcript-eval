@@ -87,7 +87,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
           retryDelays: [0, 1000, 3000, 5000],
           uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
-          chunkSize: 6 * 1024 * 1024,
+          chunkSize: 50 * 1024 * 1024, // 50MB chunks — fewer round trips for large files
           onError: (err) => reject(new Error(err.message || 'Upload failed')),
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
