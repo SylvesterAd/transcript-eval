@@ -1,12 +1,23 @@
 import { useContext, useState, useCallback } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 
 async function pollUntilDone(groupId, signal) {
   while (!signal.aborted) {
     await new Promise(r => setTimeout(r, 1500))
     if (signal.aborted) return null
-    const res = await fetch(`/api/videos/groups/${groupId}/status`)
+    const res = await authFetch(`/videos/groups/${groupId}/status`)
     const { assembly_status, assembly_error } = await res.json()
     if (assembly_status === 'done') return 'done'
     if (assembly_status === 'error') throw new Error(assembly_error || 'Sync failed')

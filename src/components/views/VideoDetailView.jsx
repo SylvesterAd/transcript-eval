@@ -1,8 +1,19 @@
 import { useParams, Link } from 'react-router-dom'
 import { useState } from 'react'
-import { useApi } from '../../hooks/useApi.js'
+import { useApi, apiPut, apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
 import DiffPanel from '../shared/DiffPanel.jsx'
 import { Upload, Loader2 } from 'lucide-react'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 import { expandText } from '../../lib/textExpander.js'
 import { detectRepeatedTakes } from '../../lib/repeatedTakes.js'
 
@@ -2837,16 +2848,12 @@ function AddFootagePanel({ currentVideo, canAddRaw, canAddHuman, defaultType, on
   async function linkGroup(newVideoData) {
     // If the current video had no group, update it to join the new group
     if (!currentVideo.group_id && newVideoData.video?.group_id) {
-      await fetch(`/api/videos/${currentVideo.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await apiPut(`/videos/${currentVideo.id}`, {
           title: currentVideo.title,
           video_type: currentVideo.video_type,
           group_id: newVideoData.video.group_id,
           duration_seconds: currentVideo.duration_seconds,
         })
-      })
     }
   }
 
@@ -2858,21 +2865,12 @@ function AddFootagePanel({ currentVideo, canAddRaw, canAddHuman, defaultType, on
     try {
       if (mode === 'youtube') {
         if (!youtubeUrl.trim()) return
-        const res = await fetch('/api/videos/import-youtube', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const data = await apiPost('/videos/import-youtube', {
             url: youtubeUrl.trim(),
             title: title || undefined,
             video_type: videoType,
             link_video_id: currentVideo.id,
           })
-        })
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'YouTube import failed' }))
-          throw new Error(err.error)
-        }
-        const data = await res.json()
         setUploadResult(data)
         await linkGroup(data)
       } else {
@@ -2887,7 +2885,7 @@ function AddFootagePanel({ currentVideo, canAddRaw, canAddHuman, defaultType, on
           formData.append('group_name', currentVideo.title)
         }
 
-        const res = await fetch('/api/videos/upload', { method: 'POST', body: formData })
+        const res = await authFetch('/videos/upload', { method: 'POST', body: formData })
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: 'Upload failed' }))
           throw new Error(err.error)

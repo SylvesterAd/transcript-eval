@@ -1,7 +1,18 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useApi } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
 import { Trophy } from 'lucide-react'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 
 export default function DashboardView() {
   const { data: videos, loading: vLoading } = useApi('/videos')
@@ -14,7 +25,7 @@ export default function DashboardView() {
   useEffect(() => {
     if (!videos || videos.length === 0) return
     for (const v of videos) {
-      fetch(`/api/diffs/video/${v.id}/raw-vs-human`)
+      authFetch(`/diffs/video/${v.id}/raw-vs-human`)
         .then(r => r.json())
         .then(d => setVideoDiffs(prev => ({ ...prev, [v.id]: d })))
         .catch(() => {})

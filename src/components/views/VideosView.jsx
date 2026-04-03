@@ -1,7 +1,18 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { useApi, apiPost } from '../../hooks/useApi.js'
+import { useApi, apiPost, apiDelete } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
 import { Eye, Upload, Loader2, Film, FileVideo, ArrowUp, ArrowDown, X, Link2, Trash2, ChevronDown, ChevronRight, Camera, Star } from 'lucide-react'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 
 export default function VideosView() {
   const { data: videos, loading, refetch } = useApi('/videos')
@@ -99,7 +110,7 @@ function GroupCard({ groupId, group, onRefresh }) {
   // Load detail when expanding or when assembly completes
   useEffect(() => {
     if ((expanded || status === 'done') && !detail) {
-      fetch(`/api/videos/groups/${groupId}/detail`)
+      authFetch(`/videos/groups/${groupId}/detail`)
         .then(r => r.json())
         .then(setDetail)
         .catch(() => {})
@@ -175,8 +186,8 @@ function GroupCard({ groupId, group, onRefresh }) {
           e.stopPropagation()
           if (!confirm(`Delete "${group.name}" and all ${group.videos.length} videos in it?`)) return
           try {
-            const res = await fetch(`/api/videos/groups/${groupId}`, { method: 'DELETE' })
-            if (res.ok) onRefresh()
+            await apiDelete(`/videos/groups/${groupId}`)
+            onRefresh()
           } catch {}
         }}
           className="flex items-center gap-1 text-sm text-zinc-500 hover:text-red-400 transition-colors px-2 py-1.5 rounded hover:bg-zinc-800 shrink-0">
@@ -398,11 +409,7 @@ function VideoRow({ video: v, onRefresh }) {
     e.stopPropagation()
     setTError(null)
     try {
-      const res = await fetch(`/api/videos/${v.id}/transcribe`, { method: 'POST' })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Failed' }))
-        throw new Error(err.error)
-      }
+      await apiPost(`/videos/${v.id}/transcribe`)
       if (onRefresh) onRefresh()
     } catch (err) {
       setTError(err.message)
@@ -414,8 +421,7 @@ function VideoRow({ video: v, onRefresh }) {
     e.stopPropagation()
     if (!confirm(`Delete "${v.title}"? This will remove the video and all its transcripts.`)) return
     try {
-      const res = await fetch(`/api/videos/${v.id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('Delete failed')
+      await apiDelete(`/videos/${v.id}`)
       if (onRefresh) onRefresh()
     } catch {}
   }
@@ -649,7 +655,7 @@ function VideoUploadPanel({ onDone, videos }) {
     let consecutiveErrors = 0
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/videos/${videoId}`)
+        const res = await authFetch(`/videos/${videoId}`)
         if (!res.ok) {
           consecutiveErrors++
           if (consecutiveErrors >= 5) {
@@ -692,7 +698,7 @@ function VideoUploadPanel({ onDone, videos }) {
     let consecutiveErrors = 0
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/videos/groups/${groupId}/detail`)
+        const res = await authFetch(`/videos/groups/${groupId}/detail`)
         if (!res.ok) {
           consecutiveErrors++
           if (consecutiveErrors >= 5) {
@@ -750,7 +756,7 @@ function VideoUploadPanel({ onDone, videos }) {
     setStep('transcribing')
     setTranscriptionStatus('pending')
     try {
-      await fetch(`/api/videos/${uploadResult.videoId}/transcribe`, { method: 'POST' })
+      await apiPost(`/videos/${uploadResult.videoId}/transcribe`)
       startPolling(uploadResult.videoId)
     } catch (err) {
       setError(err.message)

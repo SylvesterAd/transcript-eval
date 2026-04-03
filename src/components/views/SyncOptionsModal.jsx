@@ -1,5 +1,16 @@
 import { useState, useEffect } from 'react'
 import { apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 
 export default function SyncOptionsModal({ groupId, onBack, onComplete }) {
   const [syncMode, setSyncMode] = useState('sync')
@@ -7,7 +18,7 @@ export default function SyncOptionsModal({ groupId, onBack, onComplete }) {
   const [groupName, setGroupName] = useState('')
 
   useEffect(() => {
-    fetch(`/api/videos/groups/${groupId}/detail`)
+    authFetch(`/videos/groups/${groupId}/detail`)
       .then(r => r.json())
       .then(data => setGroupName(data.name || ''))
       .catch(() => {})

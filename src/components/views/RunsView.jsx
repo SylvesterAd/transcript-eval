@@ -1,7 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useApi, apiDelete, apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
 import { ChevronDown, ChevronRight, ExternalLink, Eye, Loader2, X, Cpu, Layers, MessageSquare, MessageCircleQuestion, Sparkles, Copy, Check, Square, Trash2, RotateCcw } from 'lucide-react'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 
 function StatusBadge({ status }) {
   const styles = {
@@ -501,7 +512,7 @@ function StageDetailModal({ runId, stageIndex, onClose }) {
   const [selectedSegment, setSelectedSegment] = useState(null)
 
   useEffect(() => {
-    fetch(`/api/experiments/runs/${runId}/stages/${stageIndex}?_t=${Date.now()}`)
+    authFetch(`/experiments/runs/${runId}/stages/${stageIndex}?_t=${Date.now()}`)
       .then(r => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
         return r.json()

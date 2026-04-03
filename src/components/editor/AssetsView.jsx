@@ -1,6 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useApi, apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 
 export default function AssetsView() {
   const { id } = useParams()
@@ -22,7 +33,7 @@ export default function AssetsView() {
     if (!data || data.group?.assembly_status !== 'classifying') return
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/videos/groups/${id}/status`)
+        const res = await authFetch(`/videos/groups/${id}/status`)
         const json = await res.json()
         if (json.assembly_status === 'classified' || json.assembly_status === 'done' || json.assembly_status === 'classification_failed') {
           clearInterval(interval)

@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useApi, apiPost, apiDelete } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 import { previewAugmentedSystem, updateSegmentRulesInSystem, stripSegmentRules } from '../../lib/promptPreview.js'
 import { Brain, Play, Plus, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, BarChart3, Trash2, Bot, Layers, Cpu, Sparkles, MessageSquare, MessageCircleQuestion, Check, RotateCcw, Send, ArrowUp, ArrowDown, X, Copy } from 'lucide-react'
 
@@ -151,7 +162,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch, viewModal, 
     if (pollRef.current) return
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/experiments/${experiment.id}/progress`)
+        const res = await authFetch(`/experiments/${experiment.id}/progress`)
         const prog = await res.json()
         setProgress(prog)
         if (!prog.active) {
@@ -171,7 +182,7 @@ function ExperimentCard({ experiment, expanded, onToggle, onRefetch, viewModal, 
   }, [])
 
   useEffect(() => {
-    fetch(`/api/experiments/${experiment.id}/progress`)
+    authFetch(`/experiments/${experiment.id}/progress`)
       .then(r => r.json())
       .then(prog => {
         setProgress(prog)
@@ -559,7 +570,7 @@ function StageViewModal({ runId, stageIndex, onClose }) {
   const [selectedSegment, setSelectedSegment] = useState(null) // null = list, index = detail
 
   useEffect(() => {
-    fetch(`/api/experiments/runs/${runId}/stages/${stageIndex}?_t=${Date.now()}`)
+    authFetch(`/experiments/runs/${runId}/stages/${stageIndex}?_t=${Date.now()}`)
       .then(r => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
         return r.json()
@@ -1131,7 +1142,7 @@ function CreateExperimentForm({ onCreated }) {
 
   async function loadStrategy(strategyId) {
     if (!strategyId) { setSelectedStrategy(null); return }
-    const res = await fetch(`/api/strategies/${strategyId}`)
+    const res = await authFetch(`/strategies/${strategyId}`)
     const data = await res.json()
     setSelectedStrategy(data)
     if (data.versions?.length > 0) {
