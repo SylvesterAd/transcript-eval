@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
 const MAX_SIZE = 50 * 1024 * 1024 * 1024
@@ -139,7 +142,12 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     let consecutiveErrors = 0
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/videos/groups/${groupIdRef.current}/detail`)
+        const headers = {}
+        if (supabase) {
+          const { data } = await supabase.auth.getSession()
+          if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+        }
+        const res = await fetch(`${API_BASE}/videos/groups/${groupIdRef.current}/detail`, { headers })
         if (!res.ok) {
           consecutiveErrors++
           if (consecutiveErrors >= 5) clearInterval(pollRef.current)
