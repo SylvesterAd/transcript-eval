@@ -34,6 +34,13 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
+// Global error handler — catches unhandled errors in async route handlers
+app.use((err, req, res, _next) => {
+  console.error(`[error] ${req.method} ${req.path}:`, err.message || err)
+  if (!res.headersSent) {
+    res.status(500).json({ error: err.message || 'Internal server error' })
+  }
+})
 
 app.listen(PORT, async () => {
   console.log(`Transcript Eval API running on http://localhost:${PORT}`)

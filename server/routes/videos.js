@@ -1056,6 +1056,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 // Upload video file + transcribe
 router.post('/upload', requireAuth, handleUpload('video'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No video file uploaded' })
+  try {
   console.log(`[upload] File received: ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)} MB)`)
 
   const { title, video_type = 'raw', group_id, group_name, link_video_id } = req.body
@@ -1127,6 +1128,10 @@ router.post('/upload', requireAuth, handleUpload('video'), async (req, res) => {
     videoId,
     video: await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId),
   })
+  } catch (err) {
+    console.error('[upload] Error:', err)
+    res.status(500).json({ error: err.message || 'Upload failed' })
+  }
 })
 
 // Upload multiple files — raw footage: individual transcription + multicam analysis; other: concatenate
