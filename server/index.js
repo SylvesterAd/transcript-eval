@@ -17,7 +17,12 @@ const PORT = process.env.PORT || 3001
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',')
   : undefined
-app.use(cors(allowedOrigins ? { origin: allowedOrigins } : undefined))
+app.use(cors({
+  origin: allowedOrigins || true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.text({ limit: '10mb' })) // for sendBeacon (text/plain)
 app.use(attachAuth)
