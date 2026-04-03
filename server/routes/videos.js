@@ -386,7 +386,7 @@ router.get('/groups', requireAuth, async (req, res) => {
     SELECT vg.*,
       (SELECT COUNT(*) FROM videos v WHERE v.group_id = vg.id) AS video_count
     FROM video_groups vg
-    WHERE vg.user_id = ?
+    WHERE vg.user_id = ? AND (vg.assembly_status IS NULL OR vg.assembly_status != 'deleting')
     ORDER BY vg.created_at DESC
   `).all(req.auth.userId)
   res.json(groups)
@@ -1833,46 +1833,48 @@ router.put('/:id', requireAuth, async (req, res) => {
 })
 
 // Delete a group and all its videos (and all related experiment data)
+// Background worker: actually delete group data + storage files
+async function purgeGroup(groupId) {
+  try {
+    const videos = await db.prepare('SELECT id, file_path, thumbnail_path FROM videos WHERE group_id = ?').all(groupId)
+    for (const v of videos) {
+      const runs = await db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)
+      for (const run of runs) {
+        await db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
+        await db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
+        await db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
+        await db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
+      }
+      await db.prepare('DELETE FROM experiment_runs WHERE video_id = ?').run(v.id)
+      await db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(v.id)
+      await db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(v.id)
+      await db.prepare('DELETE FROM videos WHERE id = ?').run(v.id)
+      if (v.file_path?.startsWith('http')) { await deleteByUrl(v.file_path).catch(() => {}) }
+      else if (v.file_path) { try { unlinkSync(join(__dirname, '..', '..', v.file_path)) } catch {} }
+      if (v.thumbnail_path?.startsWith('http')) { await deleteByUrl(v.thumbnail_path).catch(() => {}) }
+      else if (v.thumbnail_path) { try { unlinkSync(join(__dirname, '..', '..', v.thumbnail_path)) } catch {} }
+      await deleteFolder('frames', String(v.id)).catch(() => {})
+      try { rmSync(join(__dirname, '..', '..', 'uploads', 'frames', String(v.id)), { recursive: true }) } catch {}
+    }
+    await db.prepare('DELETE FROM video_groups WHERE id = ?').run(groupId)
+    console.log(`[delete] Group ${groupId} purged (${videos.length} videos)`)
+  } catch (err) {
+    console.error(`[delete] Purge failed for group ${groupId}:`, err.message)
+  }
+}
+
 router.delete('/groups/:id', requireAuth, async (req, res) => {
   const group = await db.prepare('SELECT id FROM video_groups WHERE id = ? AND user_id = ?').get(req.params.id, req.auth.userId)
   if (!group) return res.status(404).json({ error: 'Group not found' })
-  const videos = await db.prepare('SELECT id, file_path, thumbnail_path FROM videos WHERE group_id = ?').all(req.params.id)
-  for (const v of videos) {
-    const runs = await db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)
-    for (const run of runs) {
-      await db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
-      await db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
-      await db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
-      await db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
-    }
-    await db.prepare('DELETE FROM experiment_runs WHERE video_id = ?').run(v.id)
-    await db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(v.id)
-    await db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(v.id)
-    await db.prepare('DELETE FROM videos WHERE id = ?').run(v.id)
-    // Delete video file, thumbnail, and extracted frames from storage
-    if (v.file_path) {
-      if (v.file_path.startsWith('http')) {
-        await deleteByUrl(v.file_path)
-      } else {
-        const baseDir = join(__dirname, '..', '..')
-        try { unlinkSync(join(baseDir, v.file_path)) } catch {}
-      }
-    }
-    if (v.thumbnail_path) {
-      if (v.thumbnail_path.startsWith('http')) {
-        await deleteByUrl(v.thumbnail_path)
-      } else {
-        const baseDir = join(__dirname, '..', '..')
-        try { unlinkSync(join(baseDir, v.thumbnail_path)) } catch {}
-      }
-    }
-    // Delete frames from Supabase and local
-    await deleteFolder('frames', String(v.id))
-    const framesDir = join(__dirname, '..', '..', 'uploads', 'frames', String(v.id))
-    try { rmSync(framesDir, { recursive: true }) } catch {}
-  }
-  await db.prepare('DELETE FROM video_groups WHERE id = ?').run(req.params.id)
+
+  // Soft-hide immediately: set a deleted marker so it disappears from lists
+  await db.prepare("UPDATE video_groups SET name = name || ' [deleting]', assembly_status = 'deleting' WHERE id = ?").run(req.params.id)
+
+  // Respond instantly
   res.json({ success: true })
+
+  // Purge in background
+  purgeGroup(req.params.id)
 })
 
 // Delete video (and all related experiment data)

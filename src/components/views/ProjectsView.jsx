@@ -81,12 +81,9 @@ export default function ProjectsView() {
   const handleDelete = async (e, project) => {
     e.stopPropagation()
     if (!confirm(`Delete "${project.name}"? This will remove all videos and transcripts permanently.`)) return
-    try {
-      await apiDelete(`/videos/groups/${project.id}`)
-      refetch()
-    } catch (err) {
-      alert('Failed to delete project: ' + err.message)
-    }
+    // Remove from UI immediately
+    refetch(true) // silent refetch to update without loading state
+    apiDelete(`/videos/groups/${project.id}`).then(() => refetch(true)).catch(() => refetch())
   }
 
   if (loading) {
