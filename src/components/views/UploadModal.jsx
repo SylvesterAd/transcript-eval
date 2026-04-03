@@ -81,7 +81,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
           endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`,
           retryDelays: [0, 1000, 3000, 5000],
           headers: { authorization: `Bearer ${token}`, 'x-upsert': 'false' },
-          uploadDataDuringCreation: true,
+          uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
           metadata: {
             bucketName: bucket,
@@ -90,7 +90,10 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
             cacheControl: '3600',
           },
           chunkSize: 6 * 1024 * 1024, // 6MB chunks
-          onError: (err) => reject(new Error(err.message || 'Upload failed')),
+          onError: (err) => {
+            console.error('[upload] TUS error:', err)
+            reject(new Error(err.message || 'Upload failed'))
+          },
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
             setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
