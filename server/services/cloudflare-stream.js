@@ -14,7 +14,7 @@ export function isEnabled() {
  * Create a direct-upload URL for TUS uploads from the browser.
  * Returns { uid, tusUploadUrl }
  */
-export async function createDirectUpload(maxDurationSeconds = 21600) {
+export async function createDirectUpload(uploadLength, maxDurationSeconds = 21600) {
   // Cloudflare direct_user=true requires TUS protocol headers, not JSON body
   const metadata = `maxDurationSeconds ${Buffer.from(String(maxDurationSeconds)).toString('base64')}`
   const res = await fetch(`${CF_API}?direct_user=true`, {
@@ -22,7 +22,7 @@ export async function createDirectUpload(maxDurationSeconds = 21600) {
     headers: {
       Authorization: `Bearer ${CF_API_TOKEN}`,
       'Tus-Resumable': '1.0.0',
-      'Upload-Length': '0',
+      'Upload-Length': String(uploadLength),
       'Upload-Metadata': metadata,
     },
   })

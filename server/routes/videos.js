@@ -1162,8 +1162,9 @@ async function processVideoMetadata(videoId) {
 router.post('/stream/create-upload', requireAuth, async (req, res) => {
   try {
     if (!cfStreamEnabled()) return res.status(400).json({ error: 'Cloudflare Stream not configured' })
-    const { maxDurationSeconds } = req.body
-    const result = await createDirectUpload(maxDurationSeconds || 21600)
+    const { maxDurationSeconds, file_size } = req.body
+    if (!file_size) return res.status(400).json({ error: 'file_size is required' })
+    const result = await createDirectUpload(file_size, maxDurationSeconds || 21600)
     res.json(result)
   } catch (err) {
     console.error('[cf-stream] Create upload error:', err.message)

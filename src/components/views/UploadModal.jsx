@@ -74,7 +74,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       const entryId = entry.id
 
       // 1. Get Cloudflare Stream direct-upload URL
-      const cfData = await apiPost('/videos/stream/create-upload', { maxDurationSeconds: 21600 })
+      const cfData = await apiPost('/videos/stream/create-upload', { maxDurationSeconds: 21600, file_size: entry.file.size })
       const cfUploadUrl = cfData.tusUploadUrl
       const cfStreamUid = cfData.uid
       console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
