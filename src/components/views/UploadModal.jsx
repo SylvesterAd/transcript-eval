@@ -83,9 +83,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       await new Promise((resolve, reject) => {
         let lastPct = -1
         const upload = new tus.Upload(entry.file, {
-          endpoint: cfUploadUrl,
+          uploadUrl: cfUploadUrl, // Direct PATCH to existing CF upload (not endpoint which POSTs to create)
           retryDelays: [0, 1000, 3000, 5000],
-          uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
           chunkSize: 50 * 1024 * 1024, // 50MB chunks — fewer round trips for large files
           onError: (err) => reject(new Error(err.message || 'Upload failed')),
