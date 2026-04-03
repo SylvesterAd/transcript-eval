@@ -1124,13 +1124,10 @@ router.post('/register', requireAuth, async (req, res) => {
     const videoId = result.lastInsertRowid
     console.log(`[register] Video registered: id=${videoId}, title="${videoName}", url=${file_url}`)
 
-    // Background: extract metadata, thumbnail, then transcribe + frames
-    processVideoMetadata(videoId).then(() => {
-      startBackgroundTranscription(videoId)
-      startBackgroundFrameExtraction(videoId)
-    }).catch(err => {
-      console.error(`[register] Background processing failed for video ${videoId}:`, err.message)
-    })
+    // Background: all run in parallel — don't wait for metadata before transcribing
+    processVideoMetadata(videoId).catch(err => console.error(`[register] Metadata failed for video ${videoId}:`, err.message))
+    startBackgroundTranscription(videoId)
+    startBackgroundFrameExtraction(videoId)
 
     res.status(201).json({
       videoId,

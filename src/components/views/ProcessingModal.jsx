@@ -124,14 +124,11 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // Only on mount
 
-  // Batch-trigger transcription once all uploads are done
+  // Transcription starts automatically per-video when /register is called
+  // This batch trigger is a fallback for any videos that missed it
   const allUploadsFinished = files.length > 0 && files.every(f => f.status === 'complete' || f.status === 'error')
   useEffect(() => {
-    if (!allUploadsFinished) {
-      // New uploads in progress — allow re-trigger when they finish
-      batchTriggeredRef.current = false
-      return
-    }
+    if (!allUploadsFinished) return
     if (batchTriggeredRef.current) return
     batchTriggeredRef.current = true
     apiPost(`/videos/groups/${groupIdRef.current}/transcribe`, {}).catch(() => {})
