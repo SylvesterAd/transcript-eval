@@ -2,8 +2,10 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { X, Loader2, RotateCcw } from 'lucide-react'
 import { apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
+import * as tus from 'tus-js-client'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
 const SCRIPT_EXTS = ['.docx', '.pdf', '.txt']
@@ -70,33 +72,40 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
     const bucket = 'videos'
 
     try {
-      // Upload directly to Supabase Storage REST API with XHR for progress tracking
+      // Upload via TUS (resumable upload protocol) — supports files up to 5GB on Pro
       const session = (await supabase.auth.getSession()).data.session
       const token = session?.access_token
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 
       await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${supabaseUrl}/storage/v1/object/${bucket}/${storageName}`)
-        xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-        xhr.setRequestHeader('x-upsert', 'false')
-
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const pct = Math.round((e.loaded / e.total) * 100)
+        const upload = new tus.Upload(entry.file, {
+          endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`,
+          retryDelays: [0, 1000, 3000, 5000],
+          headers: { authorization: `Bearer ${token}`, 'x-upsert': 'false' },
+          uploadDataDuringCreation: true,
+          removeFingerprintOnSuccess: true,
+          metadata: {
+            bucketName: bucket,
+            objectName: storageName,
+            contentType: entry.file.type || 'application/octet-stream',
+            cacheControl: '3600',
+          },
+          chunkSize: 6 * 1024 * 1024, // 6MB chunks
+          onError: (err) => reject(new Error(err.message || 'Upload failed')),
+          onProgress: (bytesUploaded, bytesTotal) => {
+            const pct = Math.round((bytesUploaded / bytesTotal) * 100)
             setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
-          }
-        }
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve()
-          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText?.slice(0, 200)}`))
-        }
-        xhr.onerror = () => reject(new Error('Network error during upload'))
-        xhr.ontimeout = () => reject(new Error('Upload timed out'))
-        xhr.timeout = 0 // no timeout for large files
+          },
+          onSuccess: () => resolve(),
+        })
 
-        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, xhr } : f))
-        xhr.send(entry.file)
+        // Store abort function for cancellation
+        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, tusUpload: upload } : f))
+
+        // Check for previous upload to resume
+        upload.findPreviousUploads().then(prev => {
+          if (prev.length) upload.resumeFromPreviousUpload(prev[0])
+          upload.start()
+        })
       })
 
       // Get public URL

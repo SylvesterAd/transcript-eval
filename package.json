@@ -32,6 +32,7 @@
     "sql.js": "^1.11.0",
     "styled-components": "^6.3.12",
     "tone": "^15.1.22",
+    "tus-js-client": "^4.3.1",
     "undici": "^7.24.4",
     "waveform-data": "^4.5.2"
   },
