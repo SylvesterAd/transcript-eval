@@ -76,8 +76,10 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
       // Upload via TUS (resumable upload protocol) — supports files up to 5GB on Pro
       const session = (await supabase.auth.getSession()).data.session
       const token = session?.access_token
+      const entryId = entry.id // capture for closure
 
       await new Promise((resolve, reject) => {
+        let lastPctUpdate = -1
         const upload = new tus.Upload(entry.file, {
           endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`,
           retryDelays: [0, 1000, 3000, 5000],
@@ -91,15 +93,22 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
             cacheControl: '3600',
           },
           chunkSize: 6 * 1024 * 1024, // 6MB chunks
-          parallelUploads: 1, // one chunk at a time to avoid rate limits
           onError: (err) => {
             console.error('[upload] TUS error for', entry.name, ':', err)
             reject(new Error(err.message || 'Upload failed'))
           },
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
-            console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
-            setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
+            // Only update UI every 1% to avoid React batching issues
+            if (pct !== lastPctUpdate) {
+              lastPctUpdate = pct
+              console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
+              // Force synchronous state update
+              setFiles(prev => {
+                const next = prev.map(f => f.id === entryId ? { ...f, progress: pct } : f)
+                return next
+              })
+            }
           },
           onSuccess: () => {
             console.log(`[upload] ${entry.name}: complete`)
@@ -110,9 +119,6 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
             return true
           },
         })
-
-        // Store abort function for cancellation
-        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, tusUpload: upload } : f))
 
         console.log(`[upload] Starting TUS upload for ${entry.name} (${(entry.file.size/1024/1024).toFixed(1)}MB)`)
         upload.start()
