@@ -717,13 +717,21 @@ router.get('/:id/progress', requireAuth, async (req, res) => {
 
   // Per-run detail with stage progress
   const runs = await db.prepare(`
-    SELECT er.id AS runId, er.status, er.total_score, er.run_number,
-      v.title AS videoTitle, er.error_message AS errorMessage
+    SELECT er.id, er.status, er.total_score, er.run_number,
+      v.title, er.error_message
     FROM experiment_runs er
     JOIN videos v ON v.id = er.video_id
     WHERE er.experiment_id = ?
     ORDER BY er.id
   `).all(expId)
+
+  // Map to camelCase for frontend compatibility
+  for (const run of runs) {
+    run.runId = run.id
+    run.videoTitle = run.title
+    run.errorMessage = run.error_message
+    run.runNumber = run.run_number
+  }
 
   // Attach live stage progress for running runs
   for (const run of runs) {

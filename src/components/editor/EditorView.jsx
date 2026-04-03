@@ -1008,7 +1008,7 @@ function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageName
   const currentStage = run?.currentStage ?? (dbCompletedStages > 0 ? dbCompletedStages : (run ? 0 : -1))
 
   if (error) {
-    const errorMsg = run?.errorMessage || 'Unknown error'
+    const errorMsg = run?.error_message || run?.errorMessage || 'Unknown error'
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-6">
         <span className="material-symbols-outlined text-5xl text-red-400">error</span>
