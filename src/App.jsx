@@ -1,4 +1,4 @@
-import { Component } from 'react'
+import { Component, useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useRole } from './contexts/RoleContext.jsx'
 import AdminLayout from './components/layouts/AdminLayout.jsx'
@@ -32,8 +32,137 @@ class ErrorBoundary extends Component {
   }
 }
 
+function AuthGate() {
+  const { authEnabled, isAuthenticated, loading, signInWithPassword, signUp } = useRole()
+  const [mode, setMode] = useState('signin') // signin | signup | forgot
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-400">
+        Loading...
+      </div>
+    )
+  }
+
+  if (!authEnabled) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-amber-300 text-sm">
+        Auth not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.
+      </div>
+    )
+  }
+
+  if (isAuthenticated) return null
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    setSubmitting(true)
+    setError('')
+    setMessage('')
+    try {
+      if (mode === 'signin') {
+        await signInWithPassword({ email, password })
+      } else if (mode === 'signup') {
+        const result = await signUp({ email, password })
+        if (!result.session) {
+          setMessage('Account created. Check your email to confirm.')
+          setSubmitting(false)
+          return
+        }
+      } else if (mode === 'forgot') {
+        const { supabase } = await import('./lib/supabaseClient.js')
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin,
+        })
+        if (resetError) throw resetError
+        setMessage('Password reset email sent. Check your inbox.')
+        setSubmitting(false)
+        return
+      }
+    } catch (err) {
+      setError(err.message || 'Authentication failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-zinc-950 px-4">
+      <div className="w-full max-w-sm">
+        <h1 className="mb-1 text-center text-xl font-semibold text-zinc-100">
+          {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
+        </h1>
+        <p className="mb-6 text-center text-sm text-zinc-500">
+          {mode === 'forgot' ? 'Enter your email to receive a reset link' : 'Transcript Eval'}
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            required
+            className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+          />
+          {mode !== 'forgot' && (
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+              minLength={6}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+            />
+          )}
+
+          {error && <p className="text-sm text-red-400">{error}</p>}
+          {message && <p className="text-sm text-green-400">{message}</p>}
+
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full rounded-lg bg-zinc-100 py-2.5 text-sm font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+          >
+            {submitting ? 'Working...' : mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset link'}
+          </button>
+        </form>
+
+        <div className="mt-4 flex flex-col items-center gap-2 text-sm text-zinc-500">
+          {mode === 'signin' && (
+            <>
+              <button onClick={() => { setMode('forgot'); setError(''); setMessage('') }} className="hover:text-zinc-300">Forgot password?</button>
+              <button onClick={() => { setMode('signup'); setError(''); setMessage('') }} className="hover:text-zinc-300">Create an account</button>
+            </>
+          )}
+          {mode === 'signup' && (
+            <button onClick={() => { setMode('signin'); setError(''); setMessage('') }} className="hover:text-zinc-300">Already have an account? Sign in</button>
+          )}
+          {mode === 'forgot' && (
+            <button onClick={() => { setMode('signin'); setError(''); setMessage('') }} className="hover:text-zinc-300">Back to sign in</button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
-  const { role } = useRole()
+  const { role, isAuthenticated, loading, authEnabled } = useRole()
+
+  // Gate: show login when auth is enabled and user is not authenticated
+  if (authEnabled && !isAuthenticated && !loading) {
+    return <AuthGate />
+  }
+  if (loading) {
+    return <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-400">Loading...</div>
+  }
 
   return (
     <Routes>
