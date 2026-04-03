@@ -45,7 +45,7 @@ export { buildTimeline as buildTimelineForGroup }
  * Uses Gemini to propose groupings, stores in classification_json.
  */
 export async function classifyVideosForReview(groupId) {
-  const videos = db.prepare(`
+  const videos = await db.prepare(`
     SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
     FROM videos v
     LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
@@ -54,7 +54,7 @@ export async function classifyVideosForReview(groupId) {
   `).all(groupId)
 
   if (videos.length === 0) {
-    return updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
+    return await updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
   }
 
   // Single video or no API key — auto-classify as one MAIN group
@@ -63,13 +63,13 @@ export async function classifyVideosForReview(groupId) {
       groups: [{ name: 'MAIN', videoIds: videos.map(v => v.id) }],
       gemini: null,
     }
-    db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
+    await db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
       .run(JSON.stringify(classification), 'classified', groupId)
     console.log(`[classify] Group ${groupId}: auto-classified ${videos.length} video(s) as MAIN`)
     return
   }
 
-  updateStatus(groupId, 'classifying')
+  await updateStatus(groupId, 'classifying')
 
   const previews = videos.map(v => {
     const text = (v.transcript || '')
@@ -128,7 +128,7 @@ ${previews}`
 
           if (valid) {
             const classification = { groups: parsed.groups, gemini: geminiData }
-            db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
+            await db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
               .run(JSON.stringify(classification), 'classified', groupId)
             console.log(`[classify] Group ${groupId}: ${parsed.groups.length} groups — ${parsed.groups.map(g => `${g.name}(${g.videoIds.length})`).join(', ')}`)
             return
@@ -151,12 +151,12 @@ ${previews}`
 
   // Both attempts failed — set error status so user sees it
   console.error(`[classify] Group ${groupId} classification failed after ${MAX_RETRIES} attempts: ${lastError}`)
-  db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
+  await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
     .run('classification_failed', `Classification failed: ${lastError}`, groupId)
 }
 
 export async function analyzeMulticam(groupId, options = {}) {
-  let videos = db.prepare(`
+  let videos = await db.prepare(`
     SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
     FROM videos v
     LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
@@ -165,17 +165,17 @@ export async function analyzeMulticam(groupId, options = {}) {
   `).all(groupId)
 
   if (videos.length === 0) {
-    return updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
+    return await updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
   }
 
   if (videos.length === 1) {
-    return updateStatus(groupId, 'done', null, videos[0].transcript, JSON.stringify({
+    return await updateStatus(groupId, 'done', null, videos[0].transcript, JSON.stringify({
       segments: [{ videoIds: [videos[0].id], primaryVideoId: videos[0].id, primaryTitle: videos[0].title, isMulticam: false }],
     }))
   }
 
   // Resolve sync mode from options or DB
-  const groupRow = db.prepare('SELECT sync_mode FROM video_groups WHERE id = ?').get(groupId)
+  const groupRow = await db.prepare('SELECT sync_mode FROM video_groups WHERE id = ?').get(groupId)
   const syncMode = options.syncMode || groupRow?.sync_mode || 'sync'
 
   // No-sync path: skip classification/overlap/clustering/timeline, go straight to ordering
@@ -195,14 +195,14 @@ export async function analyzeMulticam(groupId, options = {}) {
       let ordered = segments
       let geminiData = null
       if (segments.length > 1) {
-        updateStatus(groupId, 'ordering')
+        await updateStatus(groupId, 'ordering')
         console.log(`[multicam] Ordering ${segments.length} segments with Gemini (no-sync)...`)
         const result = await orderWithGemini(segments)
         ordered = result.ordered
         geminiData = result.gemini
       }
 
-      updateStatus(groupId, 'assembling')
+      await updateStatus(groupId, 'assembling')
       const assembled = assemble(ordered)
 
       const details = {
@@ -218,27 +218,27 @@ export async function analyzeMulticam(groupId, options = {}) {
         })),
       }
 
-      updateStatus(groupId, 'done', null, assembled, JSON.stringify(details))
+      await updateStatus(groupId, 'done', null, assembled, JSON.stringify(details))
       console.log(`[multicam] Group ${groupId} done (no-sync): ${ordered.length} segments assembled`)
     } catch (err) {
       const reason = err.message || String(err)
       console.error(`[multicam] Group ${groupId} failed (no-sync):`, reason)
-      updateStatus(groupId, 'failed', `Assembly error: ${reason}`)
+      await updateStatus(groupId, 'failed', `Assembly error: ${reason}`)
     }
     return
   }
 
   // Classification step: separate off-topic videos into their own groups
-  const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(groupId)
+  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ?').get(groupId)
   const shouldClassify = videos.length > 2 && !group.upload_batch_id && !options.skipClassification
 
   if (shouldClassify) {
-    updateStatus(groupId, 'classifying')
+    await updateStatus(groupId, 'classifying')
     try {
       const classResult = await classifyContextWithGemini(videos)
       if (classResult.groups.length > 1) {
         const batchId = Date.now() + '-' + Math.random().toString(36).slice(2)
-        db.prepare('UPDATE video_groups SET upload_batch_id = ? WHERE id = ?').run(batchId, groupId)
+        await db.prepare('UPDATE video_groups SET upload_batch_id = ? WHERE id = ?').run(batchId, groupId)
 
         // Largest cluster stays in current group
         const sorted = [...classResult.groups].sort((a, b) => b.length - a.length)
@@ -250,13 +250,13 @@ export async function analyzeMulticam(groupId, options = {}) {
           const clusterVideoIds = cluster
           const newGroupName = `${group.name} (separated)`
           const details = { classification: classResult.gemini, clusterIndex: ci }
-          const r = db.prepare(
+          const r = await db.prepare(
             'INSERT INTO video_groups (name, assembly_status, upload_batch_id, assembly_details_json) VALUES (?, ?, ?, ?)'
           ).run(newGroupName, 'transcribing', batchId, JSON.stringify(details))
           const newGroupId = r.lastInsertRowid
 
           for (const videoId of clusterVideoIds) {
-            db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(newGroupId, videoId)
+            await db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(newGroupId, videoId)
           }
 
           console.log(`[multicam] Separated ${clusterVideoIds.length} videos into new group ${newGroupId}`)
@@ -265,7 +265,7 @@ export async function analyzeMulticam(groupId, options = {}) {
         }
 
         // Re-query videos for current group (some were moved out)
-        videos = db.prepare(`
+        videos = await db.prepare(`
           SELECT v.id, v.title, v.duration_seconds, t.content AS transcript
           FROM videos v
           LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
@@ -274,10 +274,10 @@ export async function analyzeMulticam(groupId, options = {}) {
         `).all(groupId)
 
         if (videos.length === 0) {
-          return updateStatus(groupId, 'failed', 'No videos remain after classification split')
+          return await updateStatus(groupId, 'failed', 'No videos remain after classification split')
         }
         if (videos.length === 1) {
-          return updateStatus(groupId, 'done', null, videos[0].transcript, JSON.stringify({
+          return await updateStatus(groupId, 'done', null, videos[0].transcript, JSON.stringify({
             segments: [{ videoIds: [videos[0].id], primaryVideoId: videos[0].id, primaryTitle: videos[0].title, isMulticam: false }],
           }))
         }
@@ -288,7 +288,7 @@ export async function analyzeMulticam(groupId, options = {}) {
     }
   }
 
-  updateStatus(groupId, 'syncing')
+  await updateStatus(groupId, 'syncing')
 
   try {
     // Extract normalized words from each transcript
@@ -339,7 +339,7 @@ export async function analyzeMulticam(groupId, options = {}) {
     let timeline = { version: 1, generatedAt: new Date().toISOString(), totalDuration: 0, tracks: [] }
 
     if (multicamClusters.length > 0) {
-      updateStatus(groupId, 'building_timeline')
+      await updateStatus(groupId, 'building_timeline')
       console.log(`[multicam] Building timeline for ${multicamClusters.length} multicam cluster(s)...`)
       try {
         timeline = await buildTimeline(groupId, multicamClusters, items)
@@ -363,7 +363,7 @@ export async function analyzeMulticam(groupId, options = {}) {
     }
 
     // Extract high-res waveform peaks for all timeline tracks
-    const videoRows = db.prepare('SELECT id, file_path FROM videos WHERE group_id = ?').all(groupId)
+    const videoRows = await db.prepare('SELECT id, file_path FROM videos WHERE group_id = ?').all(groupId)
     const fileMap = Object.fromEntries(videoRows.map(v => [v.id, v.file_path]))
     for (const track of timeline.tracks) {
       if (track.waveformPeaks?.length) continue // already extracted inside buildTimeline
@@ -382,7 +382,7 @@ export async function analyzeMulticam(groupId, options = {}) {
     let ordered = segments
     let geminiData = null
     if (segments.length > 1) {
-      updateStatus(groupId, 'ordering')
+      await updateStatus(groupId, 'ordering')
       console.log(`[multicam] Ordering ${segments.length} segments with Gemini...`)
       const result = await orderWithGemini(segments)
       ordered = result.ordered
@@ -425,12 +425,12 @@ export async function analyzeMulticam(groupId, options = {}) {
 
     // Save timeline (after ordering + absolute offsets applied)
     // Clear editor_state_json again in case auto-save raced during sync
-    db.prepare('UPDATE video_groups SET timeline_json = ?, editor_state_json = NULL WHERE id = ?')
+    await db.prepare('UPDATE video_groups SET timeline_json = ?, editor_state_json = NULL WHERE id = ?')
       .run(JSON.stringify(timeline), groupId)
     console.log(`[multicam] Timeline saved: ${timeline.tracks.length} tracks, ${timeline.totalDuration.toFixed(1)}s total`)
 
     // Assemble final transcript — resets all timecodes to be continuous
-    updateStatus(groupId, 'assembling')
+    await updateStatus(groupId, 'assembling')
     const assembled = assemble(ordered)
 
     const details = {
@@ -447,7 +447,7 @@ export async function analyzeMulticam(groupId, options = {}) {
       })),
     }
 
-    updateStatus(groupId, 'done', null, assembled, JSON.stringify(details))
+    await updateStatus(groupId, 'done', null, assembled, JSON.stringify(details))
     console.log(`[multicam] Group ${groupId} done: ${ordered.length} segments assembled`)
   } catch (err) {
     const reason = err.message || String(err)
@@ -455,7 +455,7 @@ export async function analyzeMulticam(groupId, options = {}) {
       : reason.includes('GOOGLE_API_KEY') ? 'Google API key not configured'
       : `Multicam analysis error: ${reason}`
     console.error(`[multicam] Group ${groupId} failed:`, detail)
-    updateStatus(groupId, 'failed', detail)
+    await updateStatus(groupId, 'failed', detail)
   }
 }
 
@@ -645,7 +645,7 @@ async function buildTimeline(groupId, multicamClusters, items) {
     // Fetch word timestamps for all cluster videos
     const timestampCache = new Map()
     for (const v of vids) {
-      const row = db.prepare(
+      const row = await db.prepare(
         "SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'"
       ).get(v.id)
       let ts = null
@@ -774,12 +774,12 @@ async function buildTimeline(groupId, multicamClusters, items) {
   }
 }
 
-function updateStatus(groupId, status, error = null, transcript = null, details = null) {
+async function updateStatus(groupId, status, error = null, transcript = null, details = null) {
   if (transcript !== null) {
-    db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ?, assembled_transcript = ?, assembly_details_json = ? WHERE id = ?')
+    await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ?, assembled_transcript = ?, assembly_details_json = ? WHERE id = ?')
       .run(status, error, transcript, details, groupId)
   } else {
-    db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
+    await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
       .run(status, error, groupId)
   }
 }

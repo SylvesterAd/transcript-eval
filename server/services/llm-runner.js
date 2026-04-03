@@ -24,7 +24,7 @@ export const abortedExperiments = new Set()
 export const activeAbortControllers = new Map()
 
 // ── Startup cleanup: mark orphaned "running" runs as failed ─────────────
-const orphaned = db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Server restarted while run was in progress' WHERE status = 'running'").run()
+const orphaned = await db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Server restarted while run was in progress' WHERE status = 'running'").run()
 if (orphaned.changes > 0) console.log(`[llm-runner] Cleaned up ${orphaned.changes} orphaned running run(s)`)
 
 /**
@@ -32,7 +32,7 @@ if (orphaned.changes > 0) console.log(`[llm-runner] Cleaned up ${orphaned.change
  * Supports stage types: "llm" (default), "programmatic", "llm_parallel", "llm_question"
  */
 export async function executeRun(experimentRunId) {
-  const run = db.prepare(`
+  const run = await db.prepare(`
     SELECT er.*, e.strategy_version_id, v.id AS vid
     FROM experiment_runs er
     JOIN experiments e ON e.id = er.experiment_id
@@ -42,7 +42,7 @@ export async function executeRun(experimentRunId) {
 
   if (!run) throw new Error('Run not found')
 
-  const version = db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
+  const version = await db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
   if (!version) throw new Error('Strategy version not found')
 
   const stages = JSON.parse(version.stages_json || '[]')
@@ -50,18 +50,18 @@ export async function executeRun(experimentRunId) {
 
   // Snapshot the stages config at run time so we can detect changes later
   if (!run.stages_snapshot_json) {
-    db.prepare('UPDATE experiment_runs SET stages_snapshot_json = ? WHERE id = ?')
+    await db.prepare('UPDATE experiment_runs SET stages_snapshot_json = ? WHERE id = ?')
       .run(version.stages_json, experimentRunId)
   }
 
   // For grouped videos, use the combined/assembled transcript
-  const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(run.video_id)
-  let rawTranscript = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
-  let humanTranscript = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(run.video_id)
+  const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(run.video_id)
+  let rawTranscript = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
+  let humanTranscript = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(run.video_id)
 
   if (video?.group_id) {
     // Use assembled transcript from the group as raw source
-    const group = db.prepare('SELECT assembled_transcript, assembly_status FROM video_groups WHERE id = ?').get(video.group_id)
+    const group = await db.prepare('SELECT assembled_transcript, assembly_status FROM video_groups WHERE id = ?').get(video.group_id)
     if (group?.assembled_transcript && group.assembly_status === 'done') {
       const cleaned = group.assembled_transcript
         .replace(/\[Source:[^\]]*\]\n*/g, '')
@@ -72,7 +72,7 @@ export async function executeRun(experimentRunId) {
     }
     // Look for human_edited across sibling videos in the group
     if (!humanTranscript) {
-      humanTranscript = db.prepare(`
+      humanTranscript = await db.prepare(`
         SELECT t.content FROM transcripts t
         JOIN videos v ON v.id = t.video_id
         WHERE v.group_id = ? AND t.type = 'human_edited'
@@ -83,7 +83,7 @@ export async function executeRun(experimentRunId) {
 
   if (!rawTranscript) throw new Error('Raw transcript not found')
 
-  db.prepare("UPDATE experiment_runs SET status = 'running' WHERE id = ?").run(experimentRunId)
+  await db.prepare("UPDATE experiment_runs SET status = 'running' WHERE id = ?").run(experimentRunId)
 
   const raw = rawTranscript.content
   const human = humanTranscript?.content || null
@@ -105,7 +105,7 @@ export async function executeRun(experimentRunId) {
   let totalCost = 0
 
   // Check for previously completed stages (resume support)
-  const completedStages = db.prepare(
+  const completedStages = await db.prepare(
     'SELECT stage_index, output_text, stage_name FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
   ).all(experimentRunId)
   let resumeFrom = 0
@@ -205,7 +205,7 @@ export async function executeRun(experimentRunId) {
 
       // Abort check
       if (abortedExperiments.has(run.experiment_id)) {
-        db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Aborted by user' WHERE id = ?").run(experimentRunId)
+        await db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Aborted by user' WHERE id = ?").run(experimentRunId)
         runStageProgress.delete(experimentRunId)
         throw new Error('Aborted')
       }
@@ -444,7 +444,7 @@ export async function executeRun(experimentRunId) {
           let segmentsDone = 0
 
           // Check for partially completed segments from a previous attempt
-          const existingStage = db.prepare(
+          const existingStage = await db.prepare(
             'SELECT id, output_text FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index = ?'
           ).get(experimentRunId, i)
 
@@ -470,7 +470,7 @@ export async function executeRun(experimentRunId) {
 
           if (!stageRowId) {
             // Create stage output record upfront so we can update it incrementally
-            const inserted = db.prepare(`
+            const inserted = await db.prepare(`
               INSERT INTO run_stage_outputs (experiment_run_id, stage_index, stage_name, input_text, output_text,
                 prompt_used, system_instruction_used, model, params_json, tokens_in, tokens_out, cost, runtime_ms)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)
@@ -556,7 +556,7 @@ export async function executeRun(experimentRunId) {
 
               // Save to DB immediately after each segment
               const currentOutput = JSON.stringify(partialResults.filter(r => r !== null))
-              db.prepare('UPDATE run_stage_outputs SET output_text = ?, tokens_in = ?, tokens_out = ?, cost = ? WHERE id = ?')
+              await db.prepare('UPDATE run_stage_outputs SET output_text = ?, tokens_in = ?, tokens_out = ?, cost = ? WHERE id = ?')
                 .run(currentOutput.slice(0, 500000), tokensIn, tokensOut, stageCost, stageRowId)
 
               const p = runStageProgress.get(experimentRunId)
@@ -575,9 +575,9 @@ export async function executeRun(experimentRunId) {
           if (aborted) {
             // Save whatever we have so far before marking failed
             const currentOutput = JSON.stringify(partialResults.filter(r => r !== null))
-            db.prepare('UPDATE run_stage_outputs SET output_text = ?, runtime_ms = ? WHERE id = ?')
+            await db.prepare('UPDATE run_stage_outputs SET output_text = ?, runtime_ms = ? WHERE id = ?')
               .run(currentOutput.slice(0, 500000), Date.now() - stageStart, stageRowId)
-            db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Aborted by user' WHERE id = ?").run(experimentRunId)
+            await db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Aborted by user' WHERE id = ?").run(experimentRunId)
             runStageProgress.delete(experimentRunId)
             throw new Error('Aborted')
           }
@@ -608,7 +608,7 @@ export async function executeRun(experimentRunId) {
             promptUsed: partialResults[idx]?.promptUsed || '',
           })))
           // Update the existing row instead of inserting a new one
-          db.prepare(`UPDATE run_stage_outputs SET output_text = ?, prompt_used = ?, tokens_in = ?, tokens_out = ?, cost = ?, runtime_ms = ? WHERE id = ?`)
+          await db.prepare(`UPDATE run_stage_outputs SET output_text = ?, prompt_used = ?, tokens_in = ?, tokens_out = ?, cost = ?, runtime_ms = ? WHERE id = ?`)
             .run(stageOutput.slice(0, 500000),
               `[Parallel LLM] Processed ${segments.length} segments (3x concurrent) with: ${(stage.prompt || '').slice(0, 200)}...`,
               tokensIn, tokensOut, stageCost, Date.now() - stageStart, stageRowId)
@@ -626,7 +626,7 @@ export async function executeRun(experimentRunId) {
         modelUsed = stage.model || 'claude-sonnet-4-20250514'
 
         // Check for cached answer from a previous run (same video + same stage config)
-        const cachedAnswer = db.prepare(`
+        const cachedAnswer = await db.prepare(`
           SELECT rso.output_text, rso.tokens_in, rso.tokens_out, rso.cost
           FROM run_stage_outputs rso
           JOIN experiment_runs er ON er.id = rso.experiment_run_id
@@ -702,12 +702,12 @@ export async function executeRun(experimentRunId) {
       let stageOutputId
       if (promptUsed === '__already_saved__') {
         // llm_parallel already saved its row; find its ID
-        const existing = db.prepare(
+        const existing = await db.prepare(
           'SELECT id FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index = ?'
         ).get(experimentRunId, i)
         stageOutputId = existing?.id
       } else {
-        const stageResult = db.prepare(`
+        const stageResult = await db.prepare(`
           INSERT INTO run_stage_outputs (experiment_run_id, stage_index, stage_name, input_text, output_text,
             prompt_used, system_instruction_used, model, params_json, tokens_in, tokens_out, cost, runtime_ms, llm_response_raw)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -729,7 +729,7 @@ export async function executeRun(experimentRunId) {
 
       // Persist spending immediately — survives run deletion or restart-from-stage
       if (stageCost > 0 || tokensIn + tokensOut > 0) {
-        db.prepare(
+        await db.prepare(
           'INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)'
         ).run(stageCost, tokensIn + tokensOut, Date.now() - stageStart, `run #${experimentRunId} stage ${i}`, new Date().toISOString())
       }
@@ -747,7 +747,7 @@ export async function executeRun(experimentRunId) {
       // Compute metrics for stages that produce text output (requires human transcript)
       if (human && (stageType === 'llm' || (stageType === 'programmatic' && stage.action === 'reassemble')
           || (stageType === 'llm_parallel' && (!segments || segments.length === 0)))) {
-        computeAndStoreMetrics(stageOutputId, experimentRunId, i, raw, human, currentInput, run.video_id)
+        await computeAndStoreMetrics(stageOutputId, experimentRunId, i, raw, human, currentInput, run.video_id)
       }
 
       // Mark stage done
@@ -759,9 +759,9 @@ export async function executeRun(experimentRunId) {
     const finalScore = human ? scoreOutput(raw, human, currentInput) : null
     const totalRuntime = Date.now() - startTime
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE experiment_runs SET status = 'complete', total_score = ?, score_breakdown_json = ?,
-        total_tokens = ?, total_cost = ?, total_runtime_ms = ?, completed_at = datetime('now')
+        total_tokens = ?, total_cost = ?, total_runtime_ms = ?, completed_at = NOW()
       WHERE id = ?
     `).run(
       finalScore?.totalScore ?? null, finalScore ? JSON.stringify(finalScore) : null,
@@ -773,7 +773,7 @@ export async function executeRun(experimentRunId) {
     return { success: true, score: finalScore, runtime: totalRuntime }
   } catch (err) {
     runStageProgress.delete(experimentRunId)
-    db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = ? WHERE id = ?").run(err.message || String(err), experimentRunId)
+    await db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = ? WHERE id = ?").run(err.message || String(err), experimentRunId)
     throw err
   }
 }
@@ -1081,7 +1081,7 @@ The transcript uses ***** markers and XML-style tags:
 - Output ONLY the processed <segment> content — no markers, no tags, no context text`
 }
 
-function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex, raw, human, current, videoId) {
+async function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex, raw, human, current, videoId) {
   const humanVsCurrent = calculateSimilarity(human, current)
   const rawVsCurrent = calculateSimilarity(raw, current)
   const rawVsHuman = calculateSimilarity(raw, human)
@@ -1090,7 +1090,7 @@ function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex, raw,
 
   let delta = null
   if (stageIndex > 0) {
-    const prevMetric = db.prepare(`
+    const prevMetric = await db.prepare(`
       SELECT m.diff_percent FROM metrics m
       JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
       WHERE rso.experiment_run_id = ? AND rso.stage_index = ? AND m.comparison_type = 'human_vs_current'
@@ -1107,7 +1107,7 @@ function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex, raw,
   ]
 
   for (const comp of comparisons) {
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO metrics (run_stage_output_id, comparison_type, diff_percent, similarity_percent,
         delta_vs_previous_stage, timecode_preservation_score, pause_marker_preservation_score, formatting_score)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1125,7 +1125,7 @@ function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex, raw,
   const classified = classifyDeletions(deletions)
 
   for (const d of classified) {
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO deletion_annotations (run_stage_output_id, video_id, comparison_type, deleted_text,
         position_start, position_end, reason)
       VALUES (?, ?, ?, ?, ?, ?, ?)

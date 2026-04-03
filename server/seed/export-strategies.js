@@ -5,8 +5,9 @@ import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-const strategies = db.prepare('SELECT * FROM strategies ORDER BY id').all()
-const versions = db.prepare('SELECT * FROM strategy_versions ORDER BY strategy_id, version_number').all()
+;(async () => {
+const strategies = await db.prepare('SELECT * FROM strategies ORDER BY id').all()
+const versions = await db.prepare('SELECT * FROM strategy_versions ORDER BY strategy_id, version_number').all()
 
 const exported = strategies.map(s => ({
   id: s.id,
@@ -26,3 +27,4 @@ const exported = strategies.map(s => ({
 const outPath = join(__dirname, 'strategies.json')
 writeFileSync(outPath, JSON.stringify(exported, null, 2))
 console.log(`Exported ${exported.length} strategies (${versions.length} versions) to ${outPath}`)
+})()

@@ -8,7 +8,7 @@ const BENCHMARK_DIR = join(__dirname, '..', '..', 'data', 'benchmark')
 
 // Check if benchmark JSON files exist — if so, import them
 // Otherwise, seed with sample placeholder data
-function seedFromFiles() {
+async function seedFromFiles() {
   const files = ['video1.json', 'video2.json', 'video3.json', 'video4.json']
   let imported = 0
 
@@ -17,38 +17,38 @@ function seedFromFiles() {
     if (!existsSync(path)) continue
 
     const data = JSON.parse(readFileSync(path, 'utf-8'))
-    importVideo(data)
+    await importVideo(data)
     imported++
   }
 
   return imported
 }
 
-function importVideo(data) {
-  const existing = db.prepare('SELECT id FROM videos WHERE title = ?').get(data.title)
+async function importVideo(data) {
+  const existing = await db.prepare('SELECT id FROM videos WHERE title = ?').get(data.title)
   if (existing) {
     console.log(`  Skipping "${data.title}" — already exists`)
     return
   }
 
-  const result = db.prepare(
+  const result = await db.prepare(
     'INSERT INTO videos (title, youtube_url, duration_seconds, metadata_json) VALUES (?, ?, ?, ?)'
   ).run(data.title, data.youtube_url || null, data.duration_seconds || null, JSON.stringify(data.metadata || {}))
 
   const videoId = result.lastInsertRowid
 
   if (data.raw_transcript) {
-    db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'raw', data.raw_transcript)
+    await db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'raw', data.raw_transcript)
   }
 
   if (data.human_edited_transcript) {
-    db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'human_edited', data.human_edited_transcript)
+    await db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'human_edited', data.human_edited_transcript)
   }
 
   console.log(`  Imported "${data.title}" (id: ${videoId})`)
 }
 
-function seedPlaceholders() {
+async function seedPlaceholders() {
   const placeholders = [
     {
       title: 'Benchmark Video 1 — AI Technology Overview',
@@ -163,31 +163,33 @@ function seedPlaceholders() {
   ]
 
   for (const v of placeholders) {
-    const result = db.prepare(
+    const result = await db.prepare(
       'INSERT INTO videos (title, youtube_url, duration_seconds, metadata_json) VALUES (?, ?, ?, ?)'
     ).run(v.title, v.youtube_url, v.duration_seconds, JSON.stringify(v.metadata))
     const videoId = result.lastInsertRowid
-    db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'raw', v.raw_transcript)
-    db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'human_edited', v.human_edited_transcript)
+    await db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'raw', v.raw_transcript)
+    await db.prepare('INSERT INTO transcripts (video_id, type, content) VALUES (?, ?, ?)').run(videoId, 'human_edited', v.human_edited_transcript)
     console.log(`  Seeded "${v.title}" (id: ${videoId})`)
   }
 }
 
 // Main
+;(async () => {
 console.log('Importing benchmark data...')
 
-const existingCount = db.prepare('SELECT COUNT(*) AS count FROM videos').get().count
+const existingCount = (await db.prepare('SELECT COUNT(*) AS count FROM videos').get()).count
 if (existingCount > 0) {
   console.log(`Database already has ${existingCount} videos. Skipping seed.`)
   console.log('To re-seed, delete data/eval.db and run again.')
   process.exit(0)
 }
 
-const imported = seedFromFiles()
+const imported = await seedFromFiles()
 if (imported === 0) {
   console.log('No benchmark JSON files found in data/benchmark/. Using placeholder data...')
-  seedPlaceholders()
+  await seedPlaceholders()
 }
 
-const finalCount = db.prepare('SELECT COUNT(*) AS count FROM videos').get().count
+const finalCount = (await db.prepare('SELECT COUNT(*) AS count FROM videos').get()).count
 console.log(`Done. ${finalCount} benchmark videos in database.`)
+})()

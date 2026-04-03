@@ -10,7 +10,7 @@ import db from '../db.js'
  * Analyze a single run: what changed at each stage, what went well/badly.
  */
 export async function analyzeRun(experimentRunId) {
-  const run = db.prepare(`
+  const run = await db.prepare(`
     SELECT er.*, v.title AS video_title, e.name AS experiment_name,
       s.name AS strategy_name, sv.version_number
     FROM experiment_runs er
@@ -23,11 +23,11 @@ export async function analyzeRun(experimentRunId) {
 
   if (!run || run.status !== 'complete') return null
 
-  const stages = db.prepare(
+  const stages = await db.prepare(
     'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
   ).all(experimentRunId)
 
-  const metrics = db.prepare(`
+  const metrics = await db.prepare(`
     SELECT m.*, rso.stage_index, rso.stage_name FROM metrics m
     JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
     WHERE rso.experiment_run_id = ? AND m.comparison_type = 'human_vs_current'
@@ -46,30 +46,30 @@ export async function analyzeRun(experimentRunId) {
 
   // Store stage-level analyses
   for (let i = 0; i < stageAnalyses.length; i++) {
-    const existing = db.prepare(
+    const existing = await db.prepare(
       'SELECT id FROM analysis_records WHERE experiment_run_id = ? AND run_stage_output_id = ? AND analysis_type = ?'
     ).get(experimentRunId, stages[i].id, 'stage')
 
     if (existing) {
-      db.prepare('UPDATE analysis_records SET content = ? WHERE id = ?')
+      await db.prepare('UPDATE analysis_records SET content = ? WHERE id = ?')
         .run(stageAnalyses[i], existing.id)
     } else {
-      db.prepare(
+      await db.prepare(
         'INSERT INTO analysis_records (experiment_run_id, run_stage_output_id, analysis_type, content) VALUES (?, ?, ?, ?)'
       ).run(experimentRunId, stages[i].id, 'stage', stageAnalyses[i])
     }
   }
 
   // Store cross-stage analysis
-  const existingCross = db.prepare(
+  const existingCross = await db.prepare(
     'SELECT id FROM analysis_records WHERE experiment_run_id = ? AND analysis_type = ?'
   ).get(experimentRunId, 'cross_stage')
 
   if (existingCross) {
-    db.prepare('UPDATE analysis_records SET content = ? WHERE id = ?')
+    await db.prepare('UPDATE analysis_records SET content = ? WHERE id = ?')
       .run(overallAnalysis, existingCross.id)
   } else {
-    db.prepare(
+    await db.prepare(
       'INSERT INTO analysis_records (experiment_run_id, analysis_type, content) VALUES (?, ?, ?)'
     ).run(experimentRunId, 'cross_stage', overallAnalysis)
   }
@@ -81,7 +81,7 @@ export async function analyzeRun(experimentRunId) {
  * Analyze an experiment across all videos — cross-video summary.
  */
 export async function analyzeExperiment(experimentId) {
-  const runs = db.prepare(`
+  const runs = await db.prepare(`
     SELECT er.*, v.title AS video_title
     FROM experiment_runs er
     JOIN videos v ON v.id = er.video_id
@@ -150,17 +150,17 @@ export async function analyzeExperiment(experimentId) {
   analysis += `**Avg runtime**: ${(avgRuntime / 1000).toFixed(1)}s\n`
 
   // Store analysis
-  const existing = db.prepare(
-    'SELECT id FROM analysis_records WHERE experiment_run_id IS NULL AND analysis_type = ? AND content LIKE ?'
+  const existing = await db.prepare(
+    'SELECT id FROM analysis_records WHERE experiment_run_id IS NULL AND analysis_type = ? AND content ILIKE ?'
   ).get('cross_video', `%experiment_id:${experimentId}%`)
 
   const taggedContent = `<!-- experiment_id:${experimentId} -->\n${analysis}`
 
   if (existing) {
-    db.prepare('UPDATE analysis_records SET content = ? WHERE id = ?')
+    await db.prepare('UPDATE analysis_records SET content = ? WHERE id = ?')
       .run(taggedContent, existing.id)
   } else {
-    db.prepare(
+    await db.prepare(
       'INSERT INTO analysis_records (analysis_type, content) VALUES (?, ?)'
     ).run('cross_video', taggedContent)
   }
@@ -178,7 +178,7 @@ export async function analyzRunWithLLM(experimentRunId) {
     return analyzeRun(experimentRunId)
   }
 
-  const run = db.prepare(`
+  const run = await db.prepare(`
     SELECT er.*, v.title AS video_title, e.name AS experiment_name
     FROM experiment_runs er
     JOIN videos v ON v.id = er.video_id
@@ -188,11 +188,11 @@ export async function analyzRunWithLLM(experimentRunId) {
 
   if (!run || run.status !== 'complete') return null
 
-  const stages = db.prepare(
+  const stages = await db.prepare(
     'SELECT stage_index, stage_name, model, tokens_in, tokens_out, runtime_ms FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
   ).all(experimentRunId)
 
-  const metrics = db.prepare(`
+  const metrics = await db.prepare(`
     SELECT m.similarity_percent, m.diff_percent, m.delta_vs_previous_stage, rso.stage_name
     FROM metrics m
     JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
@@ -234,15 +234,15 @@ What worked well? What could be improved? Any patterns?`
     const analysis = data.content?.[0]?.text || ''
 
     // Store LLM analysis
-    const existing = db.prepare(
+    const existing = await db.prepare(
       'SELECT id FROM analysis_records WHERE experiment_run_id = ? AND analysis_type = ?'
     ).get(experimentRunId, 'cross_stage')
 
     if (existing) {
-      db.prepare('UPDATE analysis_records SET content = ?, model_used = ? WHERE id = ?')
+      await db.prepare('UPDATE analysis_records SET content = ?, model_used = ? WHERE id = ?')
         .run(analysis, 'claude-haiku-4-5-20251001', existing.id)
     } else {
-      db.prepare(
+      await db.prepare(
         'INSERT INTO analysis_records (experiment_run_id, analysis_type, content, model_used) VALUES (?, ?, ?, ?)'
       ).run(experimentRunId, 'cross_stage', analysis, 'claude-haiku-4-5-20251001')
     }
@@ -263,7 +263,7 @@ export async function analyzeRunCustom(experimentRunId, { systemPrompt, userProm
   const apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || process.env.GOOGLE_API_KEY
   if (!apiKey) throw new Error('No API key configured for analysis')
 
-  const run = db.prepare(`
+  const run = await db.prepare(`
     SELECT er.*, v.title AS video_title, e.name AS experiment_name,
       s.name AS strategy_name, sv.version_number, sv.stages_json
     FROM experiment_runs er
@@ -276,11 +276,11 @@ export async function analyzeRunCustom(experimentRunId, { systemPrompt, userProm
 
   if (!run || run.status !== 'complete') return null
 
-  const stageOutputs = db.prepare(
+  const stageOutputs = await db.prepare(
     'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
   ).all(experimentRunId)
 
-  const metrics = db.prepare(`
+  const metrics = await db.prepare(`
     SELECT m.*, rso.stage_index, rso.stage_name FROM metrics m
     JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
     WHERE rso.experiment_run_id = ? AND m.comparison_type = 'human_vs_current'
@@ -314,7 +314,7 @@ export async function analyzeRunCustom(experimentRunId, { systemPrompt, userProm
     .replace(/<workflow><\/workflow>/g, workflowContext)
 
   if (includeRawTranscript) {
-    const rawTranscript = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
+    const rawTranscript = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(run.video_id)
     if (rawTranscript) {
       finalPrompt = finalPrompt
         .replace(/\{\{raw_transcript\}\}/g, rawTranscript.content)
@@ -363,15 +363,15 @@ export async function analyzeRunCustom(experimentRunId, { systemPrompt, userProm
   }
 
   // Store
-  const existing = db.prepare(
+  const existing = await db.prepare(
     'SELECT id FROM analysis_records WHERE experiment_run_id = ? AND analysis_type = ?'
   ).get(experimentRunId, 'cross_stage')
 
   if (existing) {
-    db.prepare('UPDATE analysis_records SET content = ?, model_used = ? WHERE id = ?')
+    await db.prepare('UPDATE analysis_records SET content = ?, model_used = ? WHERE id = ?')
       .run(analysisText, model, existing.id)
   } else {
-    db.prepare(
+    await db.prepare(
       'INSERT INTO analysis_records (experiment_run_id, analysis_type, content, model_used) VALUES (?, ?, ?, ?)'
     ).run(experimentRunId, 'cross_stage', analysisText, model)
   }

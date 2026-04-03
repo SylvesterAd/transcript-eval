@@ -6,8 +6,8 @@ import { requireAuth } from '../auth.js'
 const router = Router()
 
 // List all strategies with latest version info
-router.get('/', (req, res) => {
-  const strategies = db.prepare(`
+router.get('/', async (req, res) => {
+  const strategies = await db.prepare(`
     SELECT s.*, s.is_main,
       (SELECT MAX(sv.version_number) FROM strategy_versions sv WHERE sv.strategy_id = s.id) AS latest_version,
       (SELECT COUNT(*) FROM strategy_versions sv WHERE sv.strategy_id = s.id) AS version_count,
@@ -23,11 +23,11 @@ router.get('/', (req, res) => {
 })
 
 // Get strategy with all versions
-router.get('/:id', (req, res) => {
-  const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+router.get('/:id', async (req, res) => {
+  const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
-  const versions = db.prepare(
+  const versions = await db.prepare(
     'SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY version_number DESC'
   ).all(req.params.id)
 
@@ -35,41 +35,41 @@ router.get('/:id', (req, res) => {
 })
 
 // Create strategy
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   const { name, description } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
 
-  const result = db.prepare(
+  const result = await db.prepare(
     'INSERT INTO strategies (name, description) VALUES (?, ?)'
   ).run(name, description || null)
 
-  const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(result.lastInsertRowid)
+  const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(result.lastInsertRowid)
   res.status(201).json(strategy)
 })
 
 // Create strategy version
-router.post('/:id/versions', requireAuth, (req, res) => {
+router.post('/:id/versions', requireAuth, async (req, res) => {
   const { stages, notes } = req.body
-  const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+  const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
-  const latest = db.prepare(
+  const latest = await db.prepare(
     'SELECT MAX(version_number) AS max_v FROM strategy_versions WHERE strategy_id = ?'
   ).get(req.params.id)
 
   const nextVersion = (latest.max_v || 0) + 1
 
-  const result = db.prepare(
+  const result = await db.prepare(
     'INSERT INTO strategy_versions (strategy_id, version_number, stages_json, notes) VALUES (?, ?, ?, ?)'
   ).run(req.params.id, nextVersion, JSON.stringify(stages || []), notes || null)
 
-  const version = db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(result.lastInsertRowid)
+  const version = await db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(result.lastInsertRowid)
   res.status(201).json(version)
 })
 
 // Get specific version
-router.get('/:id/versions/:versionId', (req, res) => {
-  const version = db.prepare(
+router.get('/:id/versions/:versionId', async (req, res) => {
+  const version = await db.prepare(
     'SELECT * FROM strategy_versions WHERE id = ? AND strategy_id = ?'
   ).get(req.params.versionId, req.params.id)
   if (!version) return res.status(404).json({ error: 'Version not found' })
@@ -77,9 +77,9 @@ router.get('/:id/versions/:versionId', (req, res) => {
 })
 
 // Update strategy version
-router.put('/:id/versions/:versionId', requireAuth, (req, res) => {
+router.put('/:id/versions/:versionId', requireAuth, async (req, res) => {
   const { stages, notes } = req.body
-  const version = db.prepare(
+  const version = await db.prepare(
     'SELECT * FROM strategy_versions WHERE id = ? AND strategy_id = ?'
   ).get(req.params.versionId, req.params.id)
   if (!version) return res.status(404).json({ error: 'Version not found' })
@@ -87,7 +87,7 @@ router.put('/:id/versions/:versionId', requireAuth, (req, res) => {
   const oldStages = JSON.parse(version.stages_json || '[]')
   const newStages = stages || []
 
-  db.prepare(
+  await db.prepare(
     'UPDATE strategy_versions SET stages_json = ?, notes = ? WHERE id = ?'
   ).run(JSON.stringify(newStages), notes !== undefined ? notes : version.notes, req.params.versionId)
 
@@ -101,16 +101,16 @@ router.put('/:id/versions/:versionId', requireAuth, (req, res) => {
     }
   }
 
-  const updated = db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(req.params.versionId)
+  const updated = await db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(req.params.versionId)
   res.json({ ...updated, invalidated })
 })
 
 // Generate short LLM description for a strategy
 router.post('/:id/summarize', requireAuth, async (req, res) => {
-  const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+  const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
-  const version = db.prepare(
+  const version = await db.prepare(
     'SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY version_number DESC LIMIT 1'
   ).get(req.params.id)
 
@@ -153,7 +153,7 @@ ${stageDescriptions}`
     const summary = data.choices?.[0]?.message?.content?.trim() || ''
 
     // Save to strategy description
-    db.prepare('UPDATE strategies SET description = ? WHERE id = ?').run(summary, strategy.id)
+    await db.prepare('UPDATE strategies SET description = ? WHERE id = ?').run(summary, strategy.id)
 
     res.json({ summary })
   } catch (err) {
@@ -508,21 +508,21 @@ Do NOT include any text outside the JSON code block. Do NOT use markdown heading
 })
 
 // Set strategy as main flow
-router.put('/:id/set-main', (req, res) => {
-  const strategy = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+router.put('/:id/set-main', async (req, res) => {
+  const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
 
-  db.prepare('UPDATE strategies SET is_main = 0').run()
-  db.prepare('UPDATE strategies SET is_main = 1 WHERE id = ?').run(req.params.id)
+  await db.prepare('UPDATE strategies SET is_main = 0').run()
+  await db.prepare('UPDATE strategies SET is_main = 1 WHERE id = ?').run(req.params.id)
 
-  const updated = db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
+  const updated = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(req.params.id)
   res.json(updated)
 })
 
 // Delete strategy
-router.delete('/:id', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM strategy_versions WHERE strategy_id = ?').run(req.params.id)
-  db.prepare('DELETE FROM strategies WHERE id = ?').run(req.params.id)
+router.delete('/:id', requireAuth, async (req, res) => {
+  await db.prepare('DELETE FROM strategy_versions WHERE strategy_id = ?').run(req.params.id)
+  await db.prepare('DELETE FROM strategies WHERE id = ?').run(req.params.id)
   res.json({ success: true })
 })
 

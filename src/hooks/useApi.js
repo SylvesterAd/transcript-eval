@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 
-const BASE = '/api'
+const BASE = import.meta.env.VITE_API_URL || '/api'
 
 async function getAuthHeaders(extraHeaders = {}) {
   if (!supabase) return extraHeaders

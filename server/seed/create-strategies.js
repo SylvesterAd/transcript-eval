@@ -1,12 +1,13 @@
 import db from '../db.js'
 
+;(async () => {
 console.log('Creating strategies...')
 
 // Strategy 1: Segmented Multi-Pass Cleaning
-const s1 = db.prepare("SELECT id FROM strategies WHERE name = 'Segmented Multi-Pass Cleaning'").get()
+const s1 = await db.prepare("SELECT id FROM strategies WHERE name = 'Segmented Multi-Pass Cleaning'").get()
 let strategy1Id
 if (!s1) {
-  const r = db.prepare("INSERT INTO strategies (name, description) VALUES (?, ?)").run(
+  const r = await db.prepare("INSERT INTO strategies (name, description) VALUES (?, ?)").run(
     'Segmented Multi-Pass Cleaning',
     'Production workflow: segment transcript into 40-80s chunks, clean fillers per-segment, then run full-text passes for false starts and meta commentary.'
   )
@@ -16,7 +17,7 @@ if (!s1) {
 }
 
 // Check if version already exists
-const sv1 = db.prepare("SELECT id FROM strategy_versions WHERE strategy_id = ? AND version_number = 1").get(strategy1Id)
+const sv1 = await db.prepare("SELECT id FROM strategy_versions WHERE strategy_id = ? AND version_number = 1").get(strategy1Id)
 if (!sv1) {
   const stages = [
     {
@@ -142,7 +143,7 @@ Rules:
     },
   ]
 
-  db.prepare("INSERT INTO strategy_versions (strategy_id, version_number, stages_json, notes) VALUES (?, ?, ?, ?)").run(
+  await db.prepare("INSERT INTO strategy_versions (strategy_id, version_number, stages_json, notes) VALUES (?, ?, ?, ?)").run(
     strategy1Id, 1, JSON.stringify(stages),
     'Production workflow: segment → parallel filler clean → reassemble → 2x false start passes → 2x meta commentary passes'
   )
@@ -150,10 +151,10 @@ Rules:
 }
 
 // Strategy 2: Simple Full-Text Cleaning (for UX comparison)
-const s2 = db.prepare("SELECT id FROM strategies WHERE name = 'Simple Full-Text Clean'").get()
+const s2 = await db.prepare("SELECT id FROM strategies WHERE name = 'Simple Full-Text Clean'").get()
 let strategy2Id
 if (!s2) {
-  const r = db.prepare("INSERT INTO strategies (name, description) VALUES (?, ?)").run(
+  const r = await db.prepare("INSERT INTO strategies (name, description) VALUES (?, ?)").run(
     'Simple Full-Text Clean',
     'Baseline single-pass approach: send entire transcript through one LLM call to clean everything at once.'
   )
@@ -162,7 +163,7 @@ if (!s2) {
   strategy2Id = s2.id
 }
 
-const sv2 = db.prepare("SELECT id FROM strategy_versions WHERE strategy_id = ? AND version_number = 1").get(strategy2Id)
+const sv2 = await db.prepare("SELECT id FROM strategy_versions WHERE strategy_id = ? AND version_number = 1").get(strategy2Id)
 if (!sv2) {
   const stages = [
     {
@@ -190,7 +191,7 @@ Rules:
     },
   ]
 
-  db.prepare("INSERT INTO strategy_versions (strategy_id, version_number, stages_json, notes) VALUES (?, ?, ?, ?)").run(
+  await db.prepare("INSERT INTO strategy_versions (strategy_id, version_number, stages_json, notes) VALUES (?, ?, ?, ?)").run(
     strategy2Id, 1, JSON.stringify(stages),
     'Baseline: single LLM pass to clean everything at once'
   )
@@ -198,3 +199,4 @@ Rules:
 }
 
 console.log('Strategies created successfully.')
+})()

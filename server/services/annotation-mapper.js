@@ -6,8 +6,8 @@ import { executeRun } from './llm-runner.js'
  * Replicates the editor's mergedWords logic: longest audio track is primary,
  * other tracks fill in time gaps not covered by the primary.
  */
-export function getTimelineWordTimestamps(groupId) {
-  const group = db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
+export async function getTimelineWordTimestamps(groupId) {
+  const group = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
   if (!group?.editor_state_json) return null
 
   let edState
@@ -20,7 +20,7 @@ export function getTimelineWordTimestamps(groupId) {
     .map(t => {
       const videoId = parseInt(t.id.replace('a-', ''))
       if (isNaN(videoId)) return null
-      const transcript = db.prepare(
+      const transcript = await db.prepare(
         'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
       ).get(videoId, 'raw')
       let words = []
@@ -223,8 +223,8 @@ function parseRawJson(raw) {
  * @param {string} [assembledTranscript] - Assembled transcript for timecode→word mapping
  * @returns {Object} Annotations object ready to store as JSON
  */
-export function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembledTranscript) {
-  const run = db.prepare(`
+export async function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembledTranscript) {
+  const run = await db.prepare(`
     SELECT er.*, e.strategy_version_id, e.name AS experiment_name
     FROM experiment_runs er
     JOIN experiments e ON e.id = er.experiment_id
@@ -232,11 +232,11 @@ export function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembl
   `).get(experimentRunId)
   if (!run) throw new Error(`Run ${experimentRunId} not found`)
 
-  const version = db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
+  const version = await db.prepare('SELECT * FROM strategy_versions WHERE id = ?').get(run.strategy_version_id)
   if (!version) throw new Error('Strategy version not found')
 
   const stages = JSON.parse(version.stages_json || '[]')
-  const stageOutputs = db.prepare(
+  const stageOutputs = await db.prepare(
     'SELECT * FROM run_stage_outputs WHERE experiment_run_id = ? ORDER BY stage_index'
   ).all(experimentRunId)
 
@@ -350,7 +350,7 @@ export function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembl
     }
   }
 
-  const strategy = db.prepare(`
+  const strategy = await db.prepare(`
     SELECT s.name FROM strategies s
     JOIN strategy_versions sv ON sv.strategy_id = s.id
     WHERE sv.id = ?
@@ -369,14 +369,14 @@ export function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembl
  */
 export async function runMainFlowForGroup(groupId) {
   // Find main strategy
-  const mainStrategy = db.prepare('SELECT * FROM strategies WHERE is_main = 1').get()
+  const mainStrategy = await db.prepare('SELECT * FROM strategies WHERE is_main = 1').get()
   if (!mainStrategy) {
     console.log(`[main-flow] No main strategy set, skipping for group ${groupId}`)
     return
   }
 
   // Get latest version
-  const version = db.prepare(
+  const version = await db.prepare(
     'SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY version_number DESC LIMIT 1'
   ).get(mainStrategy.id)
   if (!version) {
@@ -385,7 +385,7 @@ export async function runMainFlowForGroup(groupId) {
   }
 
   // Find the group's primary video (first raw video with a transcript)
-  const video = db.prepare(`
+  const video = await db.prepare(`
     SELECT v.* FROM videos v
     JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
     WHERE v.group_id = ? AND v.video_type = 'raw'
@@ -399,11 +399,11 @@ export async function runMainFlowForGroup(groupId) {
   console.log(`[main-flow] Running "${mainStrategy.name}" v${version.version_number} for group ${groupId} (video ${video.id})`)
 
   // Create experiment + run
-  const expResult = db.prepare(
+  const expResult = await db.prepare(
     'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json) VALUES (?, ?, ?, ?)'
   ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]))
 
-  const runResult = db.prepare(
+  const runResult = await db.prepare(
     'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, 1, ?)'
   ).run(Number(expResult.lastInsertRowid), video.id, 'pending')
 
@@ -413,18 +413,18 @@ export async function runMainFlowForGroup(groupId) {
   await executeRun(runId)
 
   // Check if run completed
-  const completedRun = db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(runId)
+  const completedRun = await db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(runId)
   if (completedRun.status !== 'complete' && completedRun.status !== 'partial') {
     console.error(`[main-flow] Run ${runId} ended with status: ${completedRun.status}`)
     return
   }
 
   // Get merged word timestamps (all videos with track offsets)
-  let wordTimestamps = getTimelineWordTimestamps(groupId)
+  let wordTimestamps = await getTimelineWordTimestamps(groupId)
 
   // Fallback: single video if editor state not ready yet
   if (!wordTimestamps?.length) {
-    const transcript = db.prepare(
+    const transcript = await db.prepare(
       'SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = ?'
     ).get(video.id, 'raw')
     wordTimestamps = []
@@ -439,11 +439,11 @@ export async function runMainFlowForGroup(groupId) {
   }
 
   // Build annotations (pass assembled transcript for positional word matching)
-  const groupData = db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
-  const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
+  const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
+  const annotations = await buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
   console.log(`[main-flow] Built ${annotations.items.length} annotations for group ${groupId}`)
 
   // Store annotations
-  db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
+  await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
     .run(JSON.stringify(annotations), groupId)
 }

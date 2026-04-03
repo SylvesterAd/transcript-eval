@@ -7,6 +7,7 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:client": "vite",
     "dev:server": "node --env-file=.env --watch server/index.js",
+    "start": "node server/index.js",
     "build": "vite build",
     "seed": "node server/seed/import-benchmark.js",
     "seed:strategies": "node server/seed/create-strategies.js"
@@ -24,6 +25,7 @@
     "lucide-react": "^0.577.0",
     "multer": "^2.1.1",
     "openai": "^6.29.0",
+    "pg": "^8.20.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-router-dom": "^7.6.0",

@@ -14,9 +14,9 @@ function cacheKey(type, textA, textB) {
 }
 
 /** Get cached diff result or compute, cache, and return */
-function getCachedDiff(type, rawContent, humanContent) {
+async function getCachedDiff(type, rawContent, humanContent) {
   const key = cacheKey(type, rawContent, humanContent)
-  const cached = db.prepare('SELECT result_json FROM diff_cache WHERE cache_key = ?').get(key)
+  const cached = await db.prepare('SELECT result_json FROM diff_cache WHERE cache_key = ?').get(key)
   if (cached) return JSON.parse(cached.result_json)
 
   const comparison = fullComparison(rawContent, humanContent)
@@ -32,7 +32,7 @@ function getCachedDiff(type, rawContent, humanContent) {
     reasonStats: reasonStats(classified)
   }
 
-  db.prepare('INSERT OR REPLACE INTO diff_cache (cache_key, result_json) VALUES (?, ?)').run(key, JSON.stringify(result))
+  await db.prepare('INSERT INTO diff_cache (cache_key, result_json) VALUES (?, ?) ON CONFLICT (cache_key) DO UPDATE SET result_json = EXCLUDED.result_json').run(key, JSON.stringify(result))
   return result
 }
 
@@ -40,23 +40,23 @@ function getCachedDiff(type, rawContent, humanContent) {
  * GET /api/diffs/video/:videoId/raw-vs-human
  * Compare raw transcript vs human-edited for a benchmark video.
  */
-router.get('/video/:videoId/raw-vs-human', (req, res) => {
+router.get('/video/:videoId/raw-vs-human', async (req, res) => {
   const { videoId } = req.params
-  const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
+  const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
   if (!video) return res.status(404).json({ error: 'Video not found' })
 
   // Look for transcripts on this video first
-  let raw = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
-  let human = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(videoId)
+  let raw = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
+  let human = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(videoId)
 
   // For grouped videos, also check group assembled transcript and sibling transcripts
   if (video.group_id) {
     if (!raw) {
-      const group = db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ? AND assembly_status = ?').get(video.group_id, 'done')
+      const group = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ? AND assembly_status = ?').get(video.group_id, 'done')
       if (group?.assembled_transcript) raw = { content: group.assembled_transcript }
     }
     if (!human) {
-      const sibHuman = db.prepare(`
+      const sibHuman = await db.prepare(`
         SELECT t.content FROM transcripts t
         JOIN videos v ON v.id = t.video_id
         WHERE v.group_id = ? AND v.id != ? AND t.type = 'human_edited'
@@ -65,7 +65,7 @@ router.get('/video/:videoId/raw-vs-human', (req, res) => {
       if (sibHuman) human = sibHuman
     }
     if (!raw) {
-      const sibRaw = db.prepare(`
+      const sibRaw = await db.prepare(`
         SELECT t.content FROM transcripts t
         JOIN videos v ON v.id = t.video_id
         WHERE v.group_id = ? AND t.type = 'raw'
@@ -78,18 +78,18 @@ router.get('/video/:videoId/raw-vs-human', (req, res) => {
 
   if (!raw || !human) return res.status(404).json({ error: 'Transcripts not found' })
 
-  res.json(getCachedDiff('raw_vs_human', raw.content, human.content))
+  res.json(await getCachedDiff('raw_vs_human', raw.content, human.content))
 })
 
 /**
  * POST /api/diffs/compare
  * Compare any two texts. Body: { textA, textB, rawText? }
  */
-router.post('/compare', (req, res) => {
+router.post('/compare', async (req, res) => {
   const { textA, textB, rawText } = req.body
   if (!textA || !textB) return res.status(400).json({ error: 'textA and textB are required' })
 
-  res.json(getCachedDiff('compare', textA, textB))
+  res.json(await getCachedDiff('compare', textA, textB))
 })
 
 /**
@@ -110,15 +110,15 @@ router.post('/score', (req, res) => {
  * GET /api/diffs/video/:videoId/full
  * Full analysis of raw vs human for a benchmark video, including scoring preview.
  */
-router.get('/video/:videoId/full', (req, res) => {
+router.get('/video/:videoId/full', async (req, res) => {
   const { videoId } = req.params
-  const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
-  const raw = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
-  const human = db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(videoId)
+  const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
+  const raw = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
+  const human = await db.prepare("SELECT content FROM transcripts WHERE video_id = ? AND type = 'human_edited'").get(videoId)
 
   if (!video || !raw || !human) return res.status(404).json({ error: 'Video or transcripts not found' })
 
-  const result = getCachedDiff('full', raw.content, human.content)
+  const result = await getCachedDiff('full', raw.content, human.content)
 
   res.json({
     video,
@@ -137,12 +137,12 @@ router.get('/video/:videoId/full', (req, res) => {
 })
 
 /** Invalidate cache for a video (call when transcripts change) */
-export function invalidateDiffCache() {
-  db.prepare('DELETE FROM diff_cache').run()
+export async function invalidateDiffCache() {
+  await db.prepare('DELETE FROM diff_cache').run()
 }
 
-router.post('/clear-cache', (req, res) => {
-  invalidateDiffCache()
+router.post('/clear-cache', async (req, res) => {
+  await invalidateDiffCache()
   res.json({ ok: true })
 })
 

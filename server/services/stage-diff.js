@@ -42,47 +42,47 @@ export function findFirstChangedIndex(oldStages, newStages) {
  * Invalidate run stage outputs for all experiments using a given strategy version.
  * Deletes stage outputs from `fromIndex` onward and marks runs as 'partial' or 'pending'.
  */
-export function invalidateFromIndex(db, versionId, fromIndex, totalNewStages) {
-  const experiments = db.prepare(
+export async function invalidateFromIndex(db, versionId, fromIndex, totalNewStages) {
+  const experiments = await db.prepare(
     'SELECT id FROM experiments WHERE strategy_version_id = ?'
   ).all(versionId)
 
   let invalidated = 0
   for (const exp of experiments) {
-    const runs = db.prepare(
+    const runs = await db.prepare(
       "SELECT id FROM experiment_runs WHERE experiment_id = ? AND status IN ('complete', 'partial')"
     ).all(exp.id)
 
     for (const run of runs) {
       // Delete metrics and annotations for affected stages
-      db.prepare(`
+      await db.prepare(`
         DELETE FROM metrics WHERE run_stage_output_id IN (
           SELECT id FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index >= ?
         )
       `).run(run.id, fromIndex)
 
-      db.prepare(`
+      await db.prepare(`
         DELETE FROM deletion_annotations WHERE run_stage_output_id IN (
           SELECT id FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index >= ?
         )
       `).run(run.id, fromIndex)
 
       // Delete stage outputs from changed index onward
-      const deleted = db.prepare(
+      const deleted = await db.prepare(
         'DELETE FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index >= ?'
       ).run(run.id, fromIndex)
 
       // Check how many stages remain
-      const remaining = db.prepare(
+      const remaining = await db.prepare(
         'SELECT COUNT(*) as cnt FROM run_stage_outputs WHERE experiment_run_id = ?'
       ).get(run.id)
 
       if (remaining.cnt === 0) {
-        db.prepare(
+        await db.prepare(
           "UPDATE experiment_runs SET status = 'pending', total_score = NULL, score_breakdown_json = NULL, total_tokens = NULL, total_cost = NULL, total_runtime_ms = NULL, completed_at = NULL WHERE id = ?"
         ).run(run.id)
       } else {
-        db.prepare(
+        await db.prepare(
           "UPDATE experiment_runs SET status = 'partial', total_score = NULL, score_breakdown_json = NULL, completed_at = NULL WHERE id = ?"
         ).run(run.id)
       }

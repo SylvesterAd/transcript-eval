@@ -5,8 +5,8 @@ import { calculateSimilarity } from './diff-engine.js'
  * Compute stability metrics for repeated runs of an experiment on a specific video.
  * Requires at least 2 runs to be meaningful.
  */
-export function computeStability(experimentId, videoId) {
-  const runs = db.prepare(`
+export async function computeStability(experimentId, videoId) {
+  const runs = await db.prepare(`
     SELECT er.*, rso_final.output_text AS final_output
     FROM experiment_runs er
     LEFT JOIN run_stage_outputs rso_final ON rso_final.experiment_run_id = er.id
@@ -42,14 +42,15 @@ export function computeStability(experimentId, videoId) {
   const textStats = computeStats(simValues)
 
   // Per-stage variance
-  const stageCount = db.prepare(`
+  const stageCountRow = await db.prepare(`
     SELECT MAX(stage_index) AS max_stage FROM run_stage_outputs
     WHERE experiment_run_id IN (SELECT id FROM experiment_runs WHERE experiment_id = ? AND video_id = ? AND status = 'complete')
-  `).get(experimentId, videoId)?.max_stage ?? 0
+  `).get(experimentId, videoId)
+  const stageCount = stageCountRow?.max_stage ?? 0
 
   const stageVariance = []
   for (let s = 0; s <= stageCount; s++) {
-    const stageMetrics = db.prepare(`
+    const stageMetrics = await db.prepare(`
       SELECT m.similarity_percent, m.diff_percent
       FROM metrics m
       JOIN run_stage_outputs rso ON rso.id = m.run_stage_output_id
@@ -91,22 +92,23 @@ export function computeStability(experimentId, videoId) {
 /**
  * Compute stability across all videos for an experiment.
  */
-export function computeExperimentStability(experimentId) {
-  const videos = db.prepare('SELECT DISTINCT video_id FROM experiment_runs WHERE experiment_id = ?').all(experimentId)
+export async function computeExperimentStability(experimentId) {
+  const videos = await db.prepare('SELECT DISTINCT video_id FROM experiment_runs WHERE experiment_id = ?').all(experimentId)
 
   const perVideo = {}
   for (const { video_id } of videos) {
-    const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(video_id)
+    const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(video_id)
     perVideo[video_id] = {
       video,
-      stability: computeStability(experimentId, video_id)
+      stability: await computeStability(experimentId, video_id)
     }
   }
 
   // Overall stats
-  const allScores = db.prepare(
+  const allScoresRows = await db.prepare(
     'SELECT total_score FROM experiment_runs WHERE experiment_id = ? AND status = ? AND total_score IS NOT NULL'
-  ).all(experimentId, 'complete').map(r => r.total_score)
+  ).all(experimentId, 'complete')
+  const allScores = allScoresRows.map(r => r.total_score)
 
   return {
     overall: computeStats(allScores),
