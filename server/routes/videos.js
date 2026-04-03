@@ -739,7 +739,7 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
 
         // Success — build annotations using merged timeline word timestamps
         const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await annotationMapper()
-        let wordTimestamps = getTimelineWordTimestamps(groupId)
+        let wordTimestamps = await getTimelineWordTimestamps(groupId)
 
         // Fallback: single video if editor state not available
         if (!wordTimestamps?.length) {
@@ -758,7 +758,7 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
         }
 
         const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
-        const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
+        const annotations = await buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
         console.log(`[main-flow] Built ${annotations.items.length} annotations for group ${groupId}`)
 
         // Store annotations
@@ -786,7 +786,7 @@ router.post('/groups/:id/rebuild-annotations', requireAuth, async (req, res) => 
   if (!annotations?.flowRunId) return res.status(400).json({ error: 'No existing annotations to rebuild' })
 
   const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await annotationMapper()
-  let wordTimestamps = getTimelineWordTimestamps(groupId)
+  let wordTimestamps = await getTimelineWordTimestamps(groupId)
   if (!wordTimestamps?.length) {
     const video = await db.prepare("SELECT v.id FROM videos v JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw' WHERE v.group_id = ? ORDER BY v.id LIMIT 1").get(groupId)
     if (video) {
@@ -797,7 +797,7 @@ router.post('/groups/:id/rebuild-annotations', requireAuth, async (req, res) => 
   if (!wordTimestamps?.length) return res.status(400).json({ error: 'No word timestamps' })
 
   const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
-  const rebuilt = buildAnnotationsFromRun(annotations.flowRunId, wordTimestamps, groupData?.assembled_transcript)
+  const rebuilt = await buildAnnotationsFromRun(annotations.flowRunId, wordTimestamps, groupData?.assembled_transcript)
   await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?').run(JSON.stringify(rebuilt), groupId)
   res.json({ success: true, items: rebuilt.items.length })
 })
