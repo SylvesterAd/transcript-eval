@@ -3,6 +3,8 @@ import { extractEnergyEnvelope, extractWaveformPeaks } from './video-processor.j
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { execFile } from 'child_process'
+import { downloadToTemp } from './storage.js'
+import { unlinkSync } from 'fs'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
@@ -370,7 +372,9 @@ export async function analyzeMulticam(groupId, options = {}) {
       const filePath = fileMap[track.videoId]
       if (!filePath) continue
       try {
-        const { peaks, durationSeconds } = await extractWaveformPeaks(join(__dirname, '..', '..', filePath))
+        const localPath = await downloadToTemp(filePath, `waveform-${track.videoId}-${Date.now()}`)
+        const { peaks, durationSeconds } = await extractWaveformPeaks(localPath)
+        if (localPath.includes('/temp/')) try { unlinkSync(localPath) } catch {}
         track.waveformPeaks = peaks
         if (durationSeconds) track.duration = durationSeconds
       } catch (err) {
@@ -664,7 +668,7 @@ async function buildTimeline(groupId, multicamClusters, items) {
       const batch = allVids.slice(i, i + FFMPEG_CONCURRENCY)
       const results = await Promise.all(batch.map(async (v) => {
         if (!v.file_path) return { id: v.id, envelope: null, peaks: null, duration: v.duration_seconds || 0 }
-        const actualPath = join(__dirname, '..', '..', v.file_path)
+        const actualPath = await downloadToTemp(v.file_path, `multicam-${v.id}-${Date.now()}`)
         try {
           console.log(`[multicam] Extracting audio data for "${v.title}"...`)
           const [envResult, peaksResult] = await Promise.all([
@@ -674,6 +678,7 @@ async function buildTimeline(groupId, multicamClusters, items) {
               return null
             }),
           ])
+          if (actualPath.includes('/temp/')) try { unlinkSync(actualPath) } catch {}
           return {
             id: v.id,
             envelope: envResult.envelope,
@@ -681,6 +686,7 @@ async function buildTimeline(groupId, multicamClusters, items) {
             duration: peaksResult?.durationSeconds || envResult.durationSeconds,
           }
         } catch (err) {
+          if (actualPath.includes('/temp/')) try { unlinkSync(actualPath) } catch {}
           console.error(`[multicam] Audio extraction failed for "${v.title}":`, err.message)
           return { id: v.id, envelope: null, peaks: null, duration: v.duration_seconds || 0 }
         }
@@ -726,9 +732,11 @@ async function buildTimeline(groupId, multicamClusters, items) {
       let audalignResult = null
 
       if (primary.file_path && sec.file_path && transcriptResult.confidence > 0) {
-        const primaryPath = join(__dirname, '..', '..', primary.file_path)
-        const secPath = join(__dirname, '..', '..', sec.file_path)
+        const primaryPath = await downloadToTemp(primary.file_path, `align-pri-${primary.id}-${Date.now()}`)
+        const secPath = await downloadToTemp(sec.file_path, `align-sec-${sec.id}-${Date.now()}`)
         audalignResult = await refineWithAudalign(primaryPath, secPath, transcriptResult.offsetSeconds, 10)
+        if (primaryPath.includes('/temp/')) try { unlinkSync(primaryPath) } catch {}
+        if (secPath.includes('/temp/')) try { unlinkSync(secPath) } catch {}
         console.log(`[multicam] Audalign for "${sec.title}": ${audalignResult.offset.toFixed(6)}s (correction: ${(audalignResult.correction || 0).toFixed(6)}s, confidence: ${audalignResult.confidence}, method: ${audalignResult.method})`)
 
         if (audalignResult.method === 'audalign_correlation' && audalignResult.confidence > 0) {

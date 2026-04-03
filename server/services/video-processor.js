@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url'
 
 const execFileAsync = promisify(execFile)
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const THUMBNAILS_DIR = join(__dirname, '..', '..', 'uploads', 'thumbnails')
+const THUMBNAILS_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 const FRAMES_DIR = join(__dirname, '..', '..', 'uploads', 'frames')
 const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(TEMP_DIR, { recursive: true })

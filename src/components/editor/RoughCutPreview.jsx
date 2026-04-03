@@ -104,7 +104,7 @@ function PreviewVideo({ track, videoRefs, visible }) {
     return () => { delete videoRefs.current[track.videoId] }
   }, [track.videoId, videoRefs])
 
-  const src = track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
+  const src = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
   if (!src) return null
 
   return (

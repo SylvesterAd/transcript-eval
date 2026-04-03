@@ -8,6 +8,7 @@ import experimentsRouter from './routes/experiments.js'
 import diffsRouter from './routes/diffs.js'
 import rankingsRouter from './routes/rankings.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
+import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -20,6 +21,7 @@ app.use(cors(allowedOrigins ? { origin: allowedOrigins } : undefined))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.text({ limit: '10mb' })) // for sendBeacon (text/plain)
 app.use(attachAuth)
+// Serve local uploads as fallback when Supabase Storage is disabled
 app.use('/uploads', express.static(join(__dirname, '..', 'uploads')))
 
 app.use('/api/videos', videosRouter)
@@ -33,7 +35,10 @@ app.get('/api/health', (req, res) => {
 })
 
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Transcript Eval API running on http://localhost:${PORT}`)
   console.log(`[auth] ${hasServerAuthConfig ? 'Supabase JWT verification enabled' : 'Supabase JWT verification disabled'}`)
+  if (storageEnabled()) {
+    await initBuckets()
+  }
 })

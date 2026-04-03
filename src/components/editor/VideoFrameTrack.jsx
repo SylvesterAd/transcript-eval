@@ -8,11 +8,15 @@ const FRAME_W = 142
 const FRAME_INTERVAL = 1 // server extracts 1 frame per second
 
 /**
- * Build the server URL for a pre-extracted frame.
- * Frames live at /uploads/frames/{videoId}/{second}.jpg
+ * Build the URL for a pre-extracted frame.
+ * Uses Supabase Storage public URL if VITE_SUPABASE_URL is set,
+ * otherwise falls back to local /uploads/frames/ path.
  */
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 function frameUrl(videoId, time) {
-  return `/uploads/frames/${videoId}/${Math.round(time)}.jpg`
+  const path = `${videoId}/${Math.round(time)}.jpg`
+  if (SUPABASE_URL) return `${SUPABASE_URL}/storage/v1/object/public/frames/${path}`
+  return `/uploads/frames/${path}`
 }
 
 export default function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {

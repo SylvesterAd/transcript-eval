@@ -12,17 +12,20 @@ import { transcribeVideo, findCutWords } from '../services/whisper.js'
 import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, concatenateVideos, extractEnergyEnvelope, extractWaveformPeaks, extractVideoFrames } from '../services/video-processor.js'
 import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
 import { runStageProgress } from '../services/llm-runner.js'
+import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TEMP_DIR as STORAGE_TEMP_DIR } from '../services/storage.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const UPLOADS_DIR = join(__dirname, '..', '..', 'uploads', 'videos')
 const THUMBNAILS_DIR = join(__dirname, '..', '..', 'uploads', 'thumbnails')
+const TEMP_UPLOAD_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(UPLOADS_DIR, { recursive: true })
 mkdirSync(THUMBNAILS_DIR, { recursive: true })
+mkdirSync(TEMP_UPLOAD_DIR, { recursive: true })
 
 const storage = multer.diskStorage({
-  destination: UPLOADS_DIR,
+  destination: TEMP_UPLOAD_DIR,
   filename(req, file, cb) {
     const unique = Date.now() + '-' + Math.round(Math.random() * 1E6)
     cb(null, unique + extname(file.originalname))
@@ -138,7 +141,16 @@ async function runTranscription(videoId, signal) {
     return
   }
 
-  const actualPath = join(__dirname, '..', '..', video.file_path)
+  // file_path may be a Supabase URL or a local /uploads/... path
+  let actualPath
+  let tempTranscribeFile = false
+  if (video.file_path.startsWith('http')) {
+    // Download from Supabase to temp for FFmpeg/whisper processing
+    actualPath = await downloadToTemp(video.file_path, `transcribe-${video.id}-${Date.now()}.mp4`)
+    tempTranscribeFile = true
+  } else {
+    actualPath = join(__dirname, '..', '..', video.file_path)
+  }
   const transcriptType = video.video_type === 'human_edited' ? 'human_edited' : 'raw'
 
   console.log(`[transcribe] Video ${videoId} starting: ${video.title} (${actualPath})`)
@@ -201,7 +213,12 @@ async function runTranscription(videoId, signal) {
         }
       }
     }
+
+    // Clean up temp file if we downloaded from Supabase
+    if (tempTranscribeFile) { try { unlinkSync(actualPath) } catch {} }
   } catch (err) {
+    // Clean up temp file if we downloaded from Supabase
+    if (tempTranscribeFile) { try { unlinkSync(actualPath) } catch {} }
     // Don't mark as failed if cancelled — cancelGroupTranscriptions handles cleanup
     if (signal?.aborted || err.message === 'Transcription cancelled') {
       console.log(`[transcribe] Video ${videoId} cancelled`)
@@ -299,14 +316,40 @@ async function startBackgroundFrameExtraction(videoId) {
   if (!video?.file_path) return
   if (video.frames_status === 'done') return
 
-  const actualPath = join(__dirname, '..', '..', video.file_path)
+  // file_path may be a Supabase URL or local path
+  let actualPath
+  let tempFrameFile = false
+  if (video.file_path.startsWith('http')) {
+    try {
+      actualPath = await downloadToTemp(video.file_path, `frames-${video.id}-${Date.now()}.mp4`)
+      tempFrameFile = true
+    } catch (e) {
+      console.error(`[frames] Failed to download video ${videoId} for frame extraction:`, e.message)
+      await db.prepare('UPDATE videos SET frames_status = ? WHERE id = ?').run('failed', videoId)
+      return
+    }
+  } else {
+    actualPath = join(__dirname, '..', '..', video.file_path)
+  }
   await db.prepare('UPDATE videos SET frames_status = ? WHERE id = ?').run('extracting', videoId)
 
   extractVideoFrames(actualPath, videoId)
     .then(async (count) => {
+      // Upload extracted frames to Supabase Storage
+      const localFramesDir = join(__dirname, '..', '..', 'uploads', 'frames', String(videoId))
+      try {
+        await uploadFrames(videoId, localFramesDir)
+        // Clean up local frames after upload
+        try { rmSync(localFramesDir, { recursive: true, force: true }) } catch {}
+      } catch (e) {
+        console.error(`[frames] Supabase upload failed for video ${videoId}:`, e.message)
+      }
+      // Clean up temp video file
+      if (tempFrameFile) { try { unlinkSync(actualPath) } catch {} }
       await db.prepare('UPDATE videos SET frames_status = ? WHERE id = ?').run(count > 0 ? 'done' : 'failed', videoId)
     })
     .catch(async (e) => {
+      if (tempFrameFile) { try { unlinkSync(actualPath) } catch {} }
       console.error(`[frames] Background extraction failed for video ${videoId}:`, e.message)
       await db.prepare('UPDATE videos SET frames_status = ? WHERE id = ?').run('failed', videoId)
     })
@@ -807,10 +850,22 @@ router.post('/groups/:id/regenerate-waveforms', async (req, res) => {
   const fileMap = Object.fromEntries(videos.map(v => [v.id, v.file_path]))
 
   let updated = 0
+  const tempFiles = []
   for (const track of timeline.tracks) {
     const filePath = fileMap[track.videoId]
     if (!filePath) continue
-    const fullPath = join(__dirname, '..', '..', filePath)
+    let fullPath
+    if (filePath.startsWith('http')) {
+      try {
+        fullPath = await downloadToTemp(filePath, `waveform-${track.videoId}-${Date.now()}.mp4`)
+        tempFiles.push(fullPath)
+      } catch (e) {
+        console.error(`[waveform] Failed to download video ${track.videoId}:`, e.message)
+        continue
+      }
+    } else {
+      fullPath = join(__dirname, '..', '..', filePath)
+    }
     try {
       console.log(`[waveform] Extracting peaks for video ${track.videoId}...`)
       const { peaks, durationSeconds } = await extractWaveformPeaks(fullPath)
@@ -821,6 +876,8 @@ router.post('/groups/:id/regenerate-waveforms', async (req, res) => {
       console.error(`[waveform] Failed for video ${track.videoId}:`, err.message)
     }
   }
+  // Clean up temp files
+  for (const tf of tempFiles) { try { unlinkSync(tf) } catch {} }
 
   await db.prepare('UPDATE video_groups SET timeline_json = ? WHERE id = ?')
     .run(JSON.stringify(timeline), req.params.id)
@@ -1025,14 +1082,16 @@ router.post('/upload', handleUpload('video'), async (req, res) => {
     }
   }
 
-  // Extract thumbnail
+  // Extract thumbnail (to local THUMBNAILS_DIR first)
   let thumbnailPath = null
+  let localThumbPath = null
   const hasFfmpeg = await checkFfmpeg()
   if (hasFfmpeg) {
     const thumbFilename = req.file.filename.replace(extname(req.file.filename), '.jpg')
-    thumbnailPath = await extractThumbnail(filePath, thumbFilename)
-    if (thumbnailPath) {
-      thumbnailPath = `/uploads/thumbnails/${thumbFilename}`
+    localThumbPath = await extractThumbnail(filePath, thumbFilename)
+    if (localThumbPath) {
+      // Upload thumbnail to Supabase Storage
+      thumbnailPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
     }
   }
 
@@ -1044,12 +1103,19 @@ router.post('/upload', handleUpload('video'), async (req, res) => {
     mediaInfo = await getVideoMediaInfo(filePath)
   }
 
+  // Upload video to Supabase Storage
+  const videoUrl = await uploadFile('videos', req.file.filename, filePath)
+
   // Insert video record
   const result = await db.prepare(
     'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(videoName, `/uploads/videos/${req.file.filename}`, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
+  ).run(videoName, videoUrl, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
   const videoId = result.lastInsertRowid
+
+  // Clean up local temp files
+  try { unlinkSync(filePath) } catch {}
+  if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
 
   // Auto-start background transcription + frame extraction
   startBackgroundTranscription(videoId)
@@ -1101,10 +1167,13 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
       const vidName = file.originalname.replace(/\.[^.]+$/, '')
 
       let thumbPath = null
+      let localThumbPath = null
       if (hasFfmpeg) {
         const thumbFilename = file.filename.replace(extname(file.filename), '.jpg')
-        thumbPath = await extractThumbnail(file.path, thumbFilename)
-        if (thumbPath) thumbPath = `/uploads/thumbnails/${thumbFilename}`
+        localThumbPath = await extractThumbnail(file.path, thumbFilename)
+        if (localThumbPath) {
+          thumbPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+        }
       }
 
       let duration = null
@@ -1114,11 +1183,18 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
         mediaInfo = await getVideoMediaInfo(file.path)
       }
 
+      // Upload video to Supabase Storage
+      const videoUrl = await uploadFile('videos', file.filename, file.path)
+
       const r = await db.prepare(
         'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(vidName, `/uploads/videos/${file.filename}`, thumbPath, 'raw', groupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
+      ).run(vidName, videoUrl, thumbPath, 'raw', groupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
       videoIds.push(r.lastInsertRowid)
+
+      // Clean up local temp files
+      try { unlinkSync(file.path) } catch {}
+      if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
     }
 
     // Start background transcription + frame extraction for each
@@ -1151,7 +1227,7 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
     }
 
     const baseName = Date.now() + '-combined'
-    const outputPath = join(UPLOADS_DIR, baseName + '.mp4')
+    const outputPath = join(TEMP_UPLOAD_DIR, baseName + '.mp4')
 
     try {
       const actualPath = await concatenateVideos(orderedFiles.map(f => f.path), outputPath)
@@ -1182,10 +1258,13 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
   }
 
   let thumbnailPath = null
+  let localThumbPath = null
   if (hasFfmpeg) {
     const thumbFilename = finalFilename.replace(extname(finalFilename), '.jpg')
-    thumbnailPath = await extractThumbnail(finalFilePath, thumbFilename)
-    if (thumbnailPath) thumbnailPath = `/uploads/thumbnails/${thumbFilename}`
+    localThumbPath = await extractThumbnail(finalFilePath, thumbFilename)
+    if (localThumbPath) {
+      thumbnailPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+    }
   }
 
   let duration = null
@@ -1195,11 +1274,19 @@ router.post('/upload-multiple', handleUpload({ name: 'videos', maxCount: 20 }), 
     mediaInfo = await getVideoMediaInfo(finalFilePath)
   }
 
+  // Upload video to Supabase Storage
+  const videoUrl = await uploadFile('videos', finalFilename, finalFilePath)
+
   const result = await db.prepare(
     'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(videoName, `/uploads/videos/${finalFilename}`, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
+  ).run(videoName, videoUrl, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
   const videoId = result.lastInsertRowid
+
+  // Clean up local temp files
+  try { unlinkSync(finalFilePath) } catch {}
+  if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
+
   startBackgroundTranscription(videoId)
   startBackgroundFrameExtraction(videoId)
 
@@ -1221,7 +1308,7 @@ router.post('/import-local', async (req, res) => {
 
   const ext = extname(file_path)
   const filename = Date.now() + '-' + Math.round(Math.random() * 1E6) + ext
-  const destPath = join(UPLOADS_DIR, filename)
+  const destPath = join(TEMP_UPLOAD_DIR, filename)
 
   try {
     copyFileSync(file_path, destPath)
@@ -1249,11 +1336,14 @@ router.post('/import-local', async (req, res) => {
 
   // Extract thumbnail
   let thumbnailPath = null
+  let localThumbPath = null
   const hasFfmpeg = await checkFfmpeg()
   if (hasFfmpeg) {
     const thumbFilename = filename.replace(ext, '.jpg')
-    thumbnailPath = await extractThumbnail(destPath, thumbFilename)
-    if (thumbnailPath) thumbnailPath = `/uploads/thumbnails/${thumbFilename}`
+    localThumbPath = await extractThumbnail(destPath, thumbFilename)
+    if (localThumbPath) {
+      thumbnailPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+    }
   }
 
   let duration = null
@@ -1263,12 +1353,19 @@ router.post('/import-local', async (req, res) => {
     mediaInfo = await getVideoMediaInfo(destPath)
   }
 
+  // Upload video to Supabase Storage
+  const videoUrl = await uploadFile('videos', filename, destPath)
+
   const result = await db.prepare(
     'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(videoName, `/uploads/videos/${filename}`, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
+  ).run(videoName, videoUrl, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
 
   const videoId = result.lastInsertRowid
   console.log(`[import-local] Video created: id=${videoId}, title="${videoName}", type=${video_type}, duration=${duration}s`)
+
+  // Clean up local temp files
+  try { unlinkSync(destPath) } catch {}
+  if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
 
   // Auto-start background transcription + frame extraction
   if (auto_transcribe !== false) {
@@ -1294,8 +1391,8 @@ router.post('/import-youtube', async (req, res) => {
   }
 
   const fileId = Date.now() + '-' + Math.round(Math.random() * 1E6)
-  const mp3Path = join(UPLOADS_DIR, `${fileId}.mp3`)
-  const thumbPath = join(THUMBNAILS_DIR, `${fileId}.jpg`)
+  const mp3Path = join(TEMP_UPLOAD_DIR, `${fileId}.mp3`)
+  const thumbPath = join(TEMP_UPLOAD_DIR, `${fileId}.jpg`)
 
   try {
     // Get video info first (title, duration)
@@ -1325,7 +1422,7 @@ router.post('/import-youtube', async (req, res) => {
     if (!actualMp3 || !existsSync(actualMp3)) {
       // Check for file with the id prefix
       const { readdirSync } = await import('fs')
-      const found = readdirSync(UPLOADS_DIR).find(f => f.startsWith(fileId) && (f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus') || f.endsWith('.webm')))
+      const found = readdirSync(TEMP_UPLOAD_DIR).find(f => f.startsWith(fileId) && (f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus') || f.endsWith('.webm')))
       if (!found) throw new Error('Audio download completed but file not found')
       // If not mp3, it's fine — Whisper handles multiple formats
     }
@@ -1338,14 +1435,14 @@ router.post('/import-youtube', async (req, res) => {
       await execFileAsync('yt-dlp', [
         '--write-thumbnail', '--skip-download',
         '--convert-thumbnails', 'jpg',
-        '-o', join(THUMBNAILS_DIR, fileId),
+        '-o', join(TEMP_UPLOAD_DIR, fileId),
         url
       ], { timeout: 30000 })
 
       // yt-dlp saves as fileId.jpg
       if (!existsSync(thumbPath)) {
         // Try with .webp extension and convert
-        const webpPath = join(THUMBNAILS_DIR, `${fileId}.webp`)
+        const webpPath = join(TEMP_UPLOAD_DIR, `${fileId}.webp`)
         if (existsSync(webpPath)) {
           try {
             await execFileAsync('ffmpeg', ['-i', webpPath, '-y', thumbPath], { timeout: 10000 })
@@ -1358,6 +1455,13 @@ router.post('/import-youtube', async (req, res) => {
     }
 
     const hasThumbnail = existsSync(thumbPath)
+
+    // Upload to Supabase Storage
+    const videoUrl = await uploadFile('videos', `${fileId}.mp3`, mp3Path)
+    let thumbnailUrl = null
+    if (hasThumbnail) {
+      thumbnailUrl = await uploadFile('thumbnails', `${fileId}.jpg`, thumbPath)
+    }
 
     // Handle group linking
     let finalGroupId = null
@@ -1378,8 +1482,8 @@ router.post('/import-youtube', async (req, res) => {
       'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, youtube_url) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(
       videoTitle,
-      `/uploads/videos/${fileId}.mp3`,
-      hasThumbnail ? `/uploads/thumbnails/${fileId}.jpg` : null,
+      videoUrl,
+      thumbnailUrl,
       video_type,
       finalGroupId,
       duration,
@@ -1388,6 +1492,10 @@ router.post('/import-youtube', async (req, res) => {
 
     const videoId = result.lastInsertRowid
     console.log(`[youtube] Video created: id=${videoId}`)
+
+    // Clean up local temp files
+    try { unlinkSync(mp3Path) } catch {}
+    if (hasThumbnail) { try { unlinkSync(thumbPath) } catch {} }
 
     // Auto-start background transcription + frame extraction
     startBackgroundTranscription(videoId)
@@ -1442,9 +1550,15 @@ router.post('/upload-script', handleUpload('script'), async (req, res) => {
   const scriptName = title || req.file.originalname.replace(extname(req.file.originalname), '')
   const finalGroupId = group_id ? parseInt(group_id) : null
 
+  // Upload script to Supabase Storage
+  const scriptUrl = await uploadFile('videos', req.file.filename, req.file.path)
+
   const result = await db.prepare(
     'INSERT INTO videos (title, file_path, video_type, group_id, media_type) VALUES (?, ?, ?, ?, ?)'
-  ).run(scriptName, `/uploads/videos/${req.file.filename}`, 'raw', finalGroupId, 'script')
+  ).run(scriptName, scriptUrl, 'raw', finalGroupId, 'script')
+
+  // Clean up local temp file
+  try { unlinkSync(req.file.path) } catch {}
 
   const videoId = result.lastInsertRowid
   res.status(201).json({
@@ -1482,7 +1596,7 @@ router.post('/import-url', requireAuth, async (req, res) => {
     }
 
     const filename = `${fileId}${ext}`
-    const destPath = join(UPLOADS_DIR, filename)
+    const destPath = join(TEMP_UPLOAD_DIR, filename)
 
     // Stream to disk
     const fileStream = createWriteStream(destPath)
@@ -1509,30 +1623,47 @@ router.post('/import-url', requireAuth, async (req, res) => {
     if (mediaType === 'video') {
       // Extract thumbnail + duration + media info
       let thumbnailPath = null
+      let localThumbPath = null
       let duration = null
       let mediaInfo = null
       const hasFfmpeg = await checkFfmpeg()
       if (hasFfmpeg) {
         const thumbFilename = filename.replace(ext, '.jpg')
-        thumbnailPath = await extractThumbnail(destPath, thumbFilename)
-        if (thumbnailPath) thumbnailPath = `/uploads/thumbnails/${thumbFilename}`
+        localThumbPath = await extractThumbnail(destPath, thumbFilename)
+        if (localThumbPath) {
+          thumbnailPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+        }
         duration = await getVideoDuration(destPath)
         mediaInfo = await getVideoMediaInfo(destPath)
       }
 
+      // Upload video to Supabase Storage
+      const videoUrl = await uploadFile('videos', filename, destPath)
+
       const result = await db.prepare(
         'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_type, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(finalTitle, `/uploads/videos/${filename}`, thumbnailPath, 'raw', finalGroupId, duration, 'video', mediaInfo ? JSON.stringify(mediaInfo) : null)
+      ).run(finalTitle, videoUrl, thumbnailPath, 'raw', finalGroupId, duration, 'video', mediaInfo ? JSON.stringify(mediaInfo) : null)
 
       const videoId = result.lastInsertRowid
+
+      // Clean up local temp files
+      try { unlinkSync(destPath) } catch {}
+      if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
+
       startBackgroundTranscription(videoId)
       startBackgroundFrameExtraction(videoId)
 
       res.status(201).json({ videoId, title: finalTitle, media_type: 'video' })
     } else {
+      // Upload script to Supabase Storage
+      const scriptUrl = await uploadFile('videos', filename, destPath)
+
       const result = await db.prepare(
         'INSERT INTO videos (title, file_path, video_type, group_id, media_type) VALUES (?, ?, ?, ?, ?)'
-      ).run(finalTitle, `/uploads/videos/${filename}`, 'raw', finalGroupId, 'script')
+      ).run(finalTitle, scriptUrl, 'raw', finalGroupId, 'script')
+
+      // Clean up local temp file
+      try { unlinkSync(destPath) } catch {}
 
       res.status(201).json({ videoId: result.lastInsertRowid, title: finalTitle, media_type: 'script' })
     }
@@ -1620,11 +1751,26 @@ router.delete('/groups/:id', requireAuth, async (req, res) => {
     await db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(v.id)
     await db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(v.id)
     await db.prepare('DELETE FROM videos WHERE id = ?').run(v.id)
-    // Delete video file, thumbnail, and extracted frames from disk
-    const baseDir = join(__dirname, '..', '..')
-    if (v.file_path) try { unlinkSync(join(baseDir, v.file_path)) } catch {}
-    if (v.thumbnail_path) try { unlinkSync(join(baseDir, v.thumbnail_path)) } catch {}
-    const framesDir = join(baseDir, 'uploads', 'frames', String(v.id))
+    // Delete video file, thumbnail, and extracted frames from storage
+    if (v.file_path) {
+      if (v.file_path.startsWith('http')) {
+        await deleteByUrl(v.file_path)
+      } else {
+        const baseDir = join(__dirname, '..', '..')
+        try { unlinkSync(join(baseDir, v.file_path)) } catch {}
+      }
+    }
+    if (v.thumbnail_path) {
+      if (v.thumbnail_path.startsWith('http')) {
+        await deleteByUrl(v.thumbnail_path)
+      } else {
+        const baseDir = join(__dirname, '..', '..')
+        try { unlinkSync(join(baseDir, v.thumbnail_path)) } catch {}
+      }
+    }
+    // Delete frames from Supabase and local
+    await deleteFolder('frames', String(v.id))
+    const framesDir = join(__dirname, '..', '..', 'uploads', 'frames', String(v.id))
     try { rmSync(framesDir, { recursive: true }) } catch {}
   }
   await db.prepare('DELETE FROM video_groups WHERE id = ?').run(req.params.id)
@@ -1652,11 +1798,26 @@ router.delete('/:id', async (req, res) => {
   await db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(id)
   await db.prepare('DELETE FROM videos WHERE id = ?').run(id)
 
-  // Delete video file, thumbnail, and extracted frames from disk
-  const baseDir = join(__dirname, '..', '..')
-  if (video?.file_path) try { unlinkSync(join(baseDir, video.file_path)) } catch {}
-  if (video?.thumbnail_path) try { unlinkSync(join(baseDir, video.thumbnail_path)) } catch {}
-  const framesDir = join(baseDir, 'uploads', 'frames', String(id))
+  // Delete video file, thumbnail, and extracted frames from storage
+  if (video?.file_path) {
+    if (video.file_path.startsWith('http')) {
+      await deleteByUrl(video.file_path)
+    } else {
+      const baseDir = join(__dirname, '..', '..')
+      try { unlinkSync(join(baseDir, video.file_path)) } catch {}
+    }
+  }
+  if (video?.thumbnail_path) {
+    if (video.thumbnail_path.startsWith('http')) {
+      await deleteByUrl(video.thumbnail_path)
+    } else {
+      const baseDir = join(__dirname, '..', '..')
+      try { unlinkSync(join(baseDir, video.thumbnail_path)) } catch {}
+    }
+  }
+  // Delete frames from Supabase and local
+  await deleteFolder('frames', String(id))
+  const framesDir = join(__dirname, '..', '..', 'uploads', 'frames', String(id))
   try { rmSync(framesDir, { recursive: true }) } catch {}
 
   // Clean up empty group if this was the last video in it
