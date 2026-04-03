@@ -696,7 +696,10 @@ router.post('/:id/execute', requireAuth, async (req, res) => {
 router.get('/:id/progress', requireAuth, async (req, res) => {
   const expId = parseInt(req.params.id)
   const ownerCheck = await db.prepare(`SELECT id FROM experiments WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(expId, ...(isAdmin(req) ? [] : [req.auth.userId]))
-  if (!ownerCheck) return res.status(404).json({ error: 'Experiment not found' })
+  if (!ownerCheck) {
+    console.warn(`[progress] 404 for exp ${expId}, userId=${req.auth.userId}, email=${req.auth.email}, isAdmin=${isAdmin(req)}`)
+    return res.status(404).json({ error: 'Experiment not found' })
+  }
   const tracker = activeExecutions.get(expId)
 
   // DB-level status summary

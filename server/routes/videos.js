@@ -586,6 +586,7 @@ router.post('/groups/:id/extract-frames', requireAuth, async (req, res) => {
 router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
   const force = req.query.force === 'true'
+  console.log(`[run-main-flow] group=${groupId} userId=${req.auth.userId} email=${req.auth.email} isAdmin=${isAdmin(req)}`)
   const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
