@@ -35,8 +35,11 @@ app.use('/api/experiments', experimentsRouter)
 app.use('/api/diffs', diffsRouter)
 app.use('/api/rankings', rankingsRouter)
 
+const APP_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'dev'
+const DEPLOY_TIME = new Date().toISOString()
+
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+  res.json({ status: 'ok', version: APP_VERSION, deployed: DEPLOY_TIME, timestamp: new Date().toISOString() })
 })
 
 // Global error handler — catches unhandled errors in async route handlers

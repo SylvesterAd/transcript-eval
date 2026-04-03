@@ -19,18 +19,24 @@ export default function AdminLayout() {
   const { isAuthenticated, role, userDisplayName } = useRole()
   const [spending, setSpending] = useState(null)
   const [totalSpending, setTotalSpending] = useState(null)
+  const [backendVersion, setBackendVersion] = useState(null)
 
   useEffect(() => {
-    const fetchSpending = async () => {
+    const getHeaders = async () => {
       const headers = {}
       if (supabase) {
         const { data } = await supabase.auth.getSession()
         if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
       }
+      return headers
+    }
+    const fetchSpending = async () => {
+      const headers = await getHeaders()
       fetch(`${API_BASE}/experiments/spending/today`, { headers }).then(r => r.json()).then(setSpending).catch(() => {})
       fetch(`${API_BASE}/experiments/spending/total`, { headers }).then(r => r.json()).then(setTotalSpending).catch(() => {})
     }
     fetchSpending()
+    fetch(`${API_BASE}/health`).then(r => r.json()).then(setBackendVersion).catch(() => {})
     const interval = setInterval(fetchSpending, 30000)
     return () => clearInterval(interval)
   }, [])
@@ -92,6 +98,11 @@ export default function AdminLayout() {
                 </div>
               </>
             )}
+          </div>
+        )}
+        {backendVersion && (
+          <div className="px-3 pb-2 text-[10px] text-zinc-600 font-mono">
+            FE: {typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '?'} &middot; API: {backendVersion.version} &middot; {backendVersion.deployed ? new Date(backendVersion.deployed).toLocaleDateString() : ''}
           </div>
         )}
       </nav>
