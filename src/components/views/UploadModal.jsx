@@ -60,63 +60,72 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
   }, [])
 
   const uploadFileWithProgress = useCallback(async (entry, gid) => {
-    const formData = new FormData()
-    formData.append(entry.type === 'video' ? 'video' : 'script', entry.file)
-    formData.append('title', entry.name)
-    if (gid) formData.append('group_id', gid)
-
-    const url = entry.type === 'video' ? `${API_BASE}/videos/upload` : `${API_BASE}/videos/upload-script`
-
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', url)
-
-    // Add auth token
-    const session = supabase ? (await supabase.auth.getSession()).data.session : null
-    if (session?.access_token) {
-      xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`)
+    if (!supabase) {
+      setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, status: 'error', error: 'Supabase not configured' } : f))
+      return
     }
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100)
-        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
-      }
-    }
+    const ext = '.' + entry.file.name.split('.').pop().toLowerCase()
+    const storageName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`
+    const bucket = entry.type === 'video' ? 'videos' : 'videos' // scripts also go to videos bucket
 
-    xhr.onload = () => {
-      try {
-        const data = JSON.parse(xhr.responseText)
-        if (xhr.status >= 200 && xhr.status < 300) {
-          setFiles(prev => prev.map(f =>
-            f.id === entry.id ? { ...f, status: 'complete', progress: 100, serverId: data.videoId } : f
-          ))
-        } else {
-          setFiles(prev => prev.map(f =>
-            f.id === entry.id ? { ...f, status: 'error', error: data.error || `Server error: ${xhr.statusText}` } : f
-          ))
+    try {
+      // Upload directly to Supabase Storage using XHR for progress tracking
+      const session = (await supabase.auth.getSession()).data.session
+      const token = session?.access_token
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+
+      const xhr = new XMLHttpRequest()
+      const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${storageName}`
+      xhr.open('POST', uploadUrl)
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+      xhr.setRequestHeader('x-upsert', 'false')
+
+      await new Promise((resolve, reject) => {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100)
+            setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: pct } : f))
+          }
         }
-      } catch {
-        setFiles(prev => prev.map(f =>
-          f.id === entry.id ? { ...f, status: 'error', error: `Server error: ${xhr.statusText}` } : f
-        ))
-      }
-    }
 
-    xhr.onerror = () => {
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve()
+          else reject(new Error(`Storage upload failed: ${xhr.status} ${xhr.responseText?.slice(0, 200)}`))
+        }
+        xhr.onerror = () => reject(new Error('Network error during upload'))
+        xhr.ontimeout = () => reject(new Error('Upload timed out'))
+        xhr.timeout = 7200000 // 2 hours for large files
+
+        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, xhr } : f))
+        xhr.send(entry.file)
+      })
+
+      // Get public URL
+      const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(storageName)
+      const fileUrl = urlData.publicUrl
+
+      // Tell backend to register the video
+      setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: 100 } : f))
+
+      const result = await apiPost('/videos/register', {
+        file_url: fileUrl,
+        filename: entry.file.name,
+        title: entry.name,
+        group_id: gid,
+        video_type: 'raw',
+        file_size: entry.file.size,
+      })
+
       setFiles(prev => prev.map(f =>
-        f.id === entry.id ? { ...f, status: 'error', error: 'Network error: connection lost during upload' } : f
+        f.id === entry.id ? { ...f, status: 'complete', progress: 100, serverId: result.videoId } : f
+      ))
+    } catch (err) {
+      console.error('[upload] Direct upload failed:', err)
+      setFiles(prev => prev.map(f =>
+        f.id === entry.id ? { ...f, status: 'error', error: err.message || 'Upload failed' } : f
       ))
     }
-
-    xhr.ontimeout = () => {
-      setFiles(prev => prev.map(f =>
-        f.id === entry.id ? { ...f, status: 'error', error: 'Upload timed out' } : f
-      ))
-    }
-
-    xhr.timeout = 3600000
-    setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, xhr } : f))
-    xhr.send(formData)
   }, [])
 
   const startUpload = useCallback(async (entry) => {

@@ -1053,7 +1053,94 @@ router.get('/:id', requireAuth, async (req, res) => {
   res.json({ ...video, transcripts, groupVideos, groupTranscript, siblingTranscripts })
 })
 
-// Upload video file + transcribe
+// Background: extract thumbnail, duration, media info from a video URL
+async function processVideoMetadata(videoId) {
+  const video = await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId)
+  if (!video?.file_path) return
+
+  let tempPath = null
+  try {
+    tempPath = await downloadToTemp(video.file_path, `meta-${videoId}-${Date.now()}.mp4`)
+    const hasFfmpeg = await checkFfmpeg()
+    if (!hasFfmpeg) return
+
+    // Thumbnail
+    const thumbFilename = `thumb-${videoId}-${Date.now()}.jpg`
+    const localThumbPath = await extractThumbnail(tempPath, thumbFilename)
+    let thumbnailUrl = null
+    if (localThumbPath) {
+      thumbnailUrl = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+      try { unlinkSync(localThumbPath) } catch {}
+    }
+
+    // Duration + media info
+    const duration = await getVideoDuration(tempPath)
+    const mediaInfo = await getVideoMediaInfo(tempPath)
+
+    // Update DB
+    await db.prepare(
+      'UPDATE videos SET thumbnail_path = ?, duration_seconds = ?, media_info_json = ? WHERE id = ?'
+    ).run(thumbnailUrl, duration, mediaInfo ? JSON.stringify(mediaInfo) : null, videoId)
+
+    console.log(`[register] Metadata extracted for video ${videoId}: duration=${duration}s`)
+  } catch (err) {
+    console.error(`[register] Metadata extraction failed for video ${videoId}:`, err.message)
+  } finally {
+    if (tempPath?.includes('/temp/')) { try { unlinkSync(tempPath) } catch {} }
+  }
+}
+
+// Register a video already uploaded to Supabase Storage (direct browser upload)
+router.post('/register', requireAuth, async (req, res) => {
+  try {
+    const { file_url, filename, title, group_id, video_type = 'raw', file_size, link_video_id } = req.body
+
+    if (!file_url) return res.status(400).json({ error: 'file_url is required' })
+
+    const videoName = title || filename || 'Untitled'
+
+    // Create or use group
+    let finalGroupId = group_id ? parseInt(group_id) : null
+
+    // Link to existing video
+    if (!finalGroupId && link_video_id) {
+      const linkedVideo = await db.prepare('SELECT * FROM videos WHERE id = ?').get(parseInt(link_video_id))
+      if (linkedVideo) {
+        if (linkedVideo.group_id) {
+          finalGroupId = linkedVideo.group_id
+        } else {
+          const groupResult = await db.prepare('INSERT INTO video_groups (name, user_id) VALUES (?, ?)').run(linkedVideo.title || videoName, req.auth.userId)
+          finalGroupId = groupResult.lastInsertRowid
+          await db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(finalGroupId, linkedVideo.id)
+        }
+      }
+    }
+
+    // Insert video record (metadata will be filled in background)
+    const result = await db.prepare(
+      'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json) VALUES (?, ?, ?, ?, ?)'
+    ).run(videoName, file_url, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null)
+
+    const videoId = result.lastInsertRowid
+    console.log(`[register] Video registered: id=${videoId}, title="${videoName}", url=${file_url}`)
+
+    // Background: extract metadata, thumbnail, then transcribe + frames
+    processVideoMetadata(videoId).then(() => {
+      startBackgroundTranscription(videoId)
+      startBackgroundFrameExtraction(videoId)
+    })
+
+    res.status(201).json({
+      videoId,
+      video: await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId),
+    })
+  } catch (err) {
+    console.error('[register] Error:', err)
+    res.status(500).json({ error: err.message || 'Registration failed' })
+  }
+})
+
+// Upload video file + transcribe (legacy: small files via multer)
 router.post('/upload', requireAuth, handleUpload('video'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No video file uploaded' })
   try {
