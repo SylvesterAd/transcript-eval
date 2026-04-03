@@ -1128,6 +1128,8 @@ router.post('/register', requireAuth, async (req, res) => {
     processVideoMetadata(videoId).then(() => {
       startBackgroundTranscription(videoId)
       startBackgroundFrameExtraction(videoId)
+    }).catch(err => {
+      console.error(`[register] Background processing failed for video ${videoId}:`, err.message)
     })
 
     res.status(201).json({

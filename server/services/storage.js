@@ -132,8 +132,20 @@ export async function downloadToTemp(url, filename) {
   const response = await fetch(url)
   if (!response.ok) throw new Error(`Download failed: ${response.status}`)
 
-  const buffer = Buffer.from(await response.arrayBuffer())
-  writeFileSync(tempPath, buffer)
+  // Stream to disk instead of buffering entire file in memory
+  const { createWriteStream: cws } = await import('fs')
+  const fileStream = cws(tempPath)
+  const reader = response.body.getReader()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      fileStream.write(value)
+    }
+  } finally {
+    fileStream.end()
+    await new Promise(resolve => fileStream.on('finish', resolve))
+  }
   return tempPath
 }
 
