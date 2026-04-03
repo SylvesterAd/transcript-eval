@@ -15,21 +15,28 @@ export function isEnabled() {
  * Returns { uid, tusUploadUrl }
  */
 export async function createDirectUpload(maxDurationSeconds = 21600) {
+  // Cloudflare direct_user=true requires TUS protocol headers, not JSON body
+  const metadata = `maxDurationSeconds ${Buffer.from(String(maxDurationSeconds)).toString('base64')}`
   const res = await fetch(`${CF_API}?direct_user=true`, {
     method: 'POST',
-    headers: headers(),
-    body: JSON.stringify({
-      maxDurationSeconds,
-      requireSignedURLs: false,
-    }),
+    headers: {
+      Authorization: `Bearer ${CF_API_TOKEN}`,
+      'Tus-Resumable': '1.0.0',
+      'Upload-Length': '0',
+      'Upload-Metadata': metadata,
+    },
   })
-  const data = await res.json()
-  if (!data.success) throw new Error(`CF Stream create failed: ${JSON.stringify(data.errors)}`)
 
-  return {
-    uid: data.result.uid,
-    tusUploadUrl: data.result.uploadURL,
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`CF Stream create failed (${res.status}): ${text}`)
   }
+
+  const tusUploadUrl = res.headers.get('location')
+  const uid = res.headers.get('stream-media-id')
+  if (!tusUploadUrl || !uid) throw new Error('CF Stream create: missing location or stream-media-id header')
+
+  return { uid, tusUploadUrl }
 }
 
 /**
