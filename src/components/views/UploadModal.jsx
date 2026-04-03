@@ -80,13 +80,15 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
 
       // 2. Upload to Cloudflare Stream via TUS (single upload — no Supabase)
+      console.log(`[upload] TUS URL: ${cfUploadUrl}`)
       await new Promise((resolve, reject) => {
         let lastPct = -1
         const upload = new tus.Upload(entry.file, {
-          uploadUrl: cfUploadUrl, // Direct PATCH to existing CF upload (not endpoint which POSTs to create)
+          uploadUrl: cfUploadUrl,
+          headers: { 'Tus-Resumable': '1.0.0' },
           retryDelays: [0, 1000, 3000, 5000],
           removeFingerprintOnSuccess: true,
-          chunkSize: 50 * 1024 * 1024, // 50MB chunks — fewer round trips for large files
+          chunkSize: 10 * 1024 * 1024, // 10MB chunks
           onError: (err) => reject(new Error(err.message || 'Upload failed')),
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
