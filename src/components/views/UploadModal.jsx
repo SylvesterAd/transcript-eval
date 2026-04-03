@@ -80,58 +80,66 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
 
     try {
       console.log(`[upload] uploadFileWithProgress called for ${entry.name}, gid=${gid}`)
-      // Upload via TUS (resumable upload protocol) — supports files up to 5GB on Pro
       const session = (await supabase.auth.getSession()).data.session
       const token = session?.access_token
-      const entryId = entry.id // capture for closure
+      const entryId = entry.id
 
-      await new Promise((resolve, reject) => {
-        let lastPctUpdate = -1
+      // 1. Get Cloudflare Stream direct-upload URL (if available)
+      let cfUploadUrl = null, cfStreamUid = null
+      try {
+        const cfData = await apiPost('/videos/stream/create-upload', { maxDurationSeconds: 21600 })
+        cfUploadUrl = cfData.tusUploadUrl
+        cfStreamUid = cfData.uid
+        console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
+      } catch (e) {
+        console.warn(`[upload] Cloudflare Stream not available, using Supabase only:`, e.message)
+      }
+
+      // 2. Upload to Cloudflare Stream (primary, with progress) + Supabase Storage (parallel, for transcription)
+      const tusUpload = (endpoint, headers, metadata) => new Promise((resolve, reject) => {
+        let lastPct = -1
         const upload = new tus.Upload(entry.file, {
-          endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`,
+          endpoint,
           retryDelays: [0, 1000, 3000, 5000],
-          headers: { authorization: `Bearer ${token}`, 'x-upsert': 'true' },
+          headers,
           uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
-          metadata: {
-            bucketName: bucket,
-            objectName: storageName,
-            contentType: entry.file.type || 'application/octet-stream',
-            cacheControl: '3600',
-          },
-          chunkSize: 6 * 1024 * 1024, // 6MB chunks
-          onError: (err) => {
-            console.error('[upload] TUS error for', entry.name, ':', err)
-            reject(new Error(err.message || 'Upload failed'))
-          },
+          metadata,
+          chunkSize: 6 * 1024 * 1024,
+          onError: (err) => reject(new Error(err.message || 'Upload failed')),
           onProgress: (bytesUploaded, bytesTotal) => {
             const pct = Math.round((bytesUploaded / bytesTotal) * 100)
-            // Only update UI every 1% to avoid React batching issues
-            if (pct !== lastPctUpdate) {
-              lastPctUpdate = pct
+            if (pct !== lastPct) {
+              lastPct = pct
               console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
-              // Force synchronous state update
-              setFiles(prev => {
-                const next = prev.map(f => f.id === entryId ? { ...f, progress: pct } : f)
-                return next
-              })
+              setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct } : f))
             }
           },
-          onSuccess: () => {
-            console.log(`[upload] ${entry.name}: complete`)
-            resolve()
-          },
-          onShouldRetry: (err) => {
-            console.warn(`[upload] ${entry.name}: retrying after error`, err)
-            return true
-          },
+          onSuccess: () => resolve(),
+          onShouldRetry: () => true,
         })
-
-        console.log(`[upload] Starting TUS upload for ${entry.name} (${(entry.file.size/1024/1024).toFixed(1)}MB)`)
+        console.log(`[upload] Starting TUS upload for ${entry.name} to ${endpoint.includes('cloudflare') ? 'Cloudflare' : 'Supabase'}`)
         upload.start()
       })
 
-      // Get public URL
+      // Supabase upload (for source/transcription)
+      const supabaseUpload = tusUpload(
+        `${SUPABASE_URL}/storage/v1/upload/resumable`,
+        { authorization: `Bearer ${token}`, 'x-upsert': 'true' },
+        { bucketName: bucket, objectName: storageName, contentType: entry.file.type || 'application/octet-stream', cacheControl: '3600' }
+      )
+
+      if (cfUploadUrl) {
+        // Upload to both in parallel — Cloudflare drives the progress bar
+        const cfUpload = tusUpload(cfUploadUrl, {}, {})
+        // Cloudflare upload shows progress; Supabase runs silently in parallel
+        await Promise.all([cfUpload, supabaseUpload.catch(e => console.warn('[upload] Supabase parallel upload failed:', e.message))])
+      } else {
+        // Supabase only
+        await supabaseUpload
+      }
+
+      // Get Supabase public URL
       const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(storageName)
       const fileUrl = urlData.publicUrl
 
@@ -145,6 +153,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         group_id: gid,
         video_type: 'raw',
         file_size: entry.file.size,
+        cf_stream_uid: cfStreamUid,
       })
 
       setFiles(prev => prev.map(f =>

@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef, useMemo } from 'react'
+import Hls from 'hls.js'
 import { EditorContext } from './EditorView.jsx'
 import { formatTime } from './useEditorState.js'
 
@@ -104,13 +105,30 @@ function PreviewVideo({ track, videoRefs, visible }) {
     return () => { delete videoRefs.current[track.videoId] }
   }, [track.videoId, videoRefs])
 
-  const src = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
-  if (!src) return null
+  const hlsSrc = track.cfStreamUid
+    ? `https://videodelivery.net/${track.cfStreamUid}/manifest/video.m3u8`
+    : null
+  const directSrc = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
+
+  // Attach HLS.js for Cloudflare Stream
+  useEffect(() => {
+    if (!hlsSrc || !ref.current) return
+    if (Hls.isSupported()) {
+      const hls = new Hls({ startLevel: -1 })
+      hls.loadSource(hlsSrc)
+      hls.attachMedia(ref.current)
+      return () => hls.destroy()
+    } else if (ref.current.canPlayType('application/vnd.apple.mpegurl')) {
+      ref.current.src = hlsSrc // Safari native HLS
+    }
+  }, [hlsSrc])
+
+  if (!hlsSrc && !directSrc) return null
 
   return (
     <video
       ref={ref}
-      src={src}
+      src={hlsSrc ? undefined : directSrc}
       className={visible ? 'max-w-full max-h-full object-contain' : 'absolute w-px h-px opacity-0 pointer-events-none overflow-hidden'}
       preload="auto"
       playsInline

@@ -13,6 +13,7 @@ import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, con
 import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
 import { runStageProgress } from '../services/llm-runner.js'
 import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TEMP_DIR as STORAGE_TEMP_DIR } from '../services/storage.js'
+import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled } from '../services/cloudflare-stream.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -1074,10 +1075,23 @@ async function processVideoMetadata(videoId) {
   }
 }
 
+// Get a Cloudflare Stream direct-upload URL
+router.post('/stream/create-upload', requireAuth, async (req, res) => {
+  try {
+    if (!cfStreamEnabled()) return res.status(400).json({ error: 'Cloudflare Stream not configured' })
+    const { maxDurationSeconds } = req.body
+    const result = await createDirectUpload(maxDurationSeconds || 21600)
+    res.json(result)
+  } catch (err) {
+    console.error('[cf-stream] Create upload error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // Register a video already uploaded to Supabase Storage (direct browser upload)
 router.post('/register', requireAuth, async (req, res) => {
   try {
-    const { file_url, filename, title, group_id, video_type = 'raw', file_size, link_video_id } = req.body
+    const { file_url, filename, title, group_id, video_type = 'raw', file_size, link_video_id, cf_stream_uid } = req.body
 
     if (!file_url) return res.status(400).json({ error: 'file_url is required' })
 
@@ -1102,16 +1116,16 @@ router.post('/register', requireAuth, async (req, res) => {
 
     // Insert video record (metadata will be filled in background)
     const result = await db.prepare(
-      'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json) VALUES (?, ?, ?, ?, ?)'
-    ).run(videoName, file_url, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null)
+      'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json, cf_stream_uid) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(videoName, file_url, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null, cf_stream_uid || null)
 
     const videoId = result.lastInsertRowid
-    console.log(`[register] Video registered: id=${videoId}, title="${videoName}", url=${file_url}`)
+    console.log(`[register] Video registered: id=${videoId}, title="${videoName}", cf_stream=${cf_stream_uid || 'none'}`)
 
     // Background: all run in parallel — don't wait for metadata before transcribing
     processVideoMetadata(videoId).catch(err => console.error(`[register] Metadata failed for video ${videoId}:`, err.message))
     startBackgroundTranscription(videoId)
-    startBackgroundFrameExtraction(videoId)
+    if (!cf_stream_uid) startBackgroundFrameExtraction(videoId) // Cloudflare handles thumbnails
 
     res.status(201).json({
       videoId,
@@ -1817,7 +1831,7 @@ router.put('/:id', requireAuth, async (req, res) => {
 // Background worker: actually delete group data + storage files
 async function purgeGroup(groupId) {
   try {
-    const videos = await db.prepare('SELECT id, file_path, thumbnail_path FROM videos WHERE group_id = ?').all(groupId)
+    const videos = await db.prepare('SELECT id, file_path, thumbnail_path, cf_stream_uid FROM videos WHERE group_id = ?').all(groupId)
     for (const v of videos) {
       const runs = await db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)
       for (const run of runs) {
@@ -1836,6 +1850,7 @@ async function purgeGroup(groupId) {
       else if (v.thumbnail_path) { try { unlinkSync(join(__dirname, '..', '..', v.thumbnail_path)) } catch {} }
       await deleteFolder('frames', String(v.id)).catch(() => {})
       try { rmSync(join(__dirname, '..', '..', 'uploads', 'frames', String(v.id)), { recursive: true }) } catch {}
+      if (v.cf_stream_uid) await deleteStream(v.cf_stream_uid).catch(() => {})
     }
     await db.prepare('DELETE FROM video_groups WHERE id = ?').run(groupId)
     console.log(`[delete] Group ${groupId} purged (${videos.length} videos)`)

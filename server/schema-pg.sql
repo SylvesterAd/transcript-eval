@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS videos (
   media_type TEXT DEFAULT 'video',
   frames_status TEXT,
   media_info_json TEXT,
+  cf_stream_uid TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

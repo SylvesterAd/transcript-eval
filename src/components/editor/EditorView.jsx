@@ -1085,6 +1085,7 @@ function deriveFromTimeline(timeline, videos) {
       visible: true,
       originalOffset: t.offset || 0,
       filePath: video?.file_path || null,
+      cfStreamUid: video?.cf_stream_uid || null,
       framesReady: video?.frames_status === 'done',
     })
     aTracks.push({
