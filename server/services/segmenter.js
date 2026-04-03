@@ -48,12 +48,18 @@ function gatherContextEntries(allEntries, boundaryIndex, contextSeconds, directi
  * Returns array of { seconds, position, text } entries.
  */
 function parseTimecodes(text) {
-  const entries = []
   const regex = /\[(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,2})?)?)\]\s*/g
+  // Collect all timecode match positions first
+  const matches = []
   let match
-
   while ((match = regex.exec(text)) !== null) {
-    const tc = match[1]
+    matches.push({ match, index: match.index, end: match.index + match[0].length })
+  }
+
+  const entries = []
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i]
+    const tc = m.match[1]
     const [timePart, csPart] = tc.split('.')
     const parts = timePart.split(':').map(Number)
     let seconds
@@ -64,18 +70,17 @@ function parseTimecodes(text) {
     }
     if (csPart) seconds += parseInt(csPart, 10) / 100
 
-    // Get text until next timecode or end
-    const start = match.index + match[0].length
-    const nextMatch = text.indexOf('[', start)
-    const end = nextMatch !== -1 ? nextMatch : text.length
-    const segText = text.slice(start, end).trim()
+    // Text runs from end of this timecode to start of next timecode (not just any '[')
+    const textStart = m.end
+    const textEnd = i + 1 < matches.length ? matches[i + 1].index : text.length
+    const segText = text.slice(textStart, textEnd).trim()
 
     entries.push({
       seconds,
-      position: match.index,
-      endPosition: end,
+      position: m.index,
+      endPosition: textEnd,
       text: segText,
-      timecode: match[0].trim(),
+      timecode: m.match[0].trim(),
     })
   }
 
@@ -283,12 +288,16 @@ export function segmentByChapters(text, chaptersJson, { contextSeconds = 30 } = 
 
   const segments = []
 
-  for (const chapter of chapters) {
+  for (let ci = 0; ci < chapters.length; ci++) {
+    const chapter = chapters[ci]
     const startSec = timecodeToSeconds(chapter.timecode_start)
-    const endSec = timecodeToSeconds(chapter.timecode_end)
+    // End at the next chapter's start, or end of transcript for the last chapter
+    const endSec = ci < chapters.length - 1
+      ? timecodeToSeconds(chapters[ci + 1].timecode_start)
+      : Infinity
 
-    // Find entries within this chapter's range
-    const chapterEntries = entries.filter(e => e.seconds >= startSec && e.seconds <= endSec)
+    // Find entries: inclusive start, exclusive end (last chapter gets everything remaining)
+    const chapterEntries = entries.filter(e => e.seconds >= startSec && e.seconds < endSec)
     if (chapterEntries.length === 0) continue
 
     const mainText = chapterEntries

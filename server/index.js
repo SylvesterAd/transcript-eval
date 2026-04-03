@@ -29,6 +29,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
+
 app.listen(PORT, () => {
   console.log(`Transcript Eval API running on http://localhost:${PORT}`)
   console.log(`[auth] ${hasServerAuthConfig ? 'Supabase JWT verification enabled' : 'Supabase JWT verification disabled'}`)

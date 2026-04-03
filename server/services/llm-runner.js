@@ -1,3 +1,6 @@
+import { writeFileSync, mkdirSync } from 'fs'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import db from '../db.js'
 import { scoreOutput } from './scorer.js'
 import { calculateSimilarity, checkTimecodePreservation, checkPausePreservation, computeDiff, extractDeletions } from './diff-engine.js'
@@ -286,7 +289,7 @@ export async function executeRun(experimentRunId) {
           let trimTimecode
           try {
             const parsed = JSON.parse(llmAnswer.replace(/```(?:json)?\s*([\s\S]*?)```/, '$1').trim())
-            trimTimecode = parsed.timecode
+            trimTimecode = parsed.keeper_timecode || parsed.timecode
           } catch {
             const tcMatch = llmAnswer.match(/\[[\d:\.]+\]/)
             trimTimecode = tcMatch ? tcMatch[0] : null
@@ -474,7 +477,7 @@ export async function executeRun(experimentRunId) {
             `).run(
               experimentRunId, i, stageLabel(stage, i),
               typeof currentInput === 'string' ? currentInput.slice(0, 500000) : JSON.stringify(currentInput).slice(0, 500000),
-              '[]', '', augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect),
+              '[]', '', '[Per-segment — chapter placeholders replaced at runtime]\n\n' + augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect),
               stage.model || 'claude-sonnet-4-20250514',
               JSON.stringify(stage.params || {})
             )
@@ -509,7 +512,12 @@ export async function executeRun(experimentRunId) {
               const beatsStr = (seg.chapterBeats || []).map(b => `- ${b.timecode}: ${b.description}${b.purpose ? ' (' + b.purpose + ')' : ''}`).join('\n')
               segPrompt = segPrompt.replace(/\{\{chapter_beats\}\}/g, beatsStr)
               segPrompt = replaceAnswerPlaceholders(segPrompt)
-              const augmentedSystem = replaceAnswerPlaceholders(augmentSystemForOutputMode(stage.system_instruction || '', stage.output_mode, stage.identifyPreselect))
+              let segSystem = (stage.system_instruction || '')
+                .replace(/\{\{chapter_name\}\}/g, seg.chapterName || '')
+                .replace(/\{\{chapter_description\}\}/g, seg.chapterDescription || '')
+                .replace(/\{\{chapter_purpose\}\}/g, seg.chapterPurpose || '')
+                .replace(/\{\{chapter_beats\}\}/g, beatsStr)
+              const augmentedSystem = replaceAnswerPlaceholders(augmentSystemForOutputMode(segSystem, stage.output_mode, stage.identifyPreselect))
 
               const MAX_OUTPUT_RETRIES = 2
               for (let attempt = 0; attempt <= MAX_OUTPUT_RETRIES; attempt++) {
@@ -535,7 +543,7 @@ export async function executeRun(experimentRunId) {
                       pendingContextDeletions.push({ sourceSegment: s, ...cd })
                     }
                   }
-                  partialResults[s] = { segment: s + 1, cleanedText: applied.cleanedText, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt }
+                  partialResults[s] = { segment: s + 1, cleanedText: applied.cleanedText, llmResponseRaw: llmResult.text, inputText: fullSegText, promptUsed: segPrompt, systemInstructionUsed: augmentedSystem }
                   break
                 } catch (parseErr) {
                   if (attempt === MAX_OUTPUT_RETRIES) {
@@ -612,7 +620,7 @@ export async function executeRun(experimentRunId) {
       } else if (stageType === 'llm_question') {
         // LLM Question: ask LLM a question, store answer as {{llm_answer}}, pass transcript through unchanged
         const prompt = replaceAnswerPlaceholders(insertTranscript(stage.prompt || '{{transcript}}', currentInput))
-        const sysInstr = replaceAnswerPlaceholders(stage.system_instruction || '')
+        const sysInstr = replaceAnswerPlaceholders(augmentSystemWithTimecodeFormat(stage.system_instruction || ''))
         promptUsed = prompt
         systemUsed = sysInstr
         modelUsed = stage.model || 'claude-sonnet-4-20250514'
@@ -772,12 +780,29 @@ export async function executeRun(experimentRunId) {
 
 /** Insert transcript into prompt template. Handles all placeholder styles:
  *  <transcript></transcript>, <transcript>, {{transcript}} */
+/** Strip pause markers like [5s], [10s], [10.5s] and surrounding blank lines from transcript text */
+function stripPauses(text) {
+  return text.replace(/\n*\[\d+(?:\.\d+)?s\]\n*/g, '\n\n')
+}
+
 function insertTranscript(template, text) {
+  const cleaned = stripPauses(text)
   return template
-    .replace(/<transcript><\/transcript>/g, text)
-    .replace(/<transcript>\s*$/g, text)
-    .replace(/<transcript>/g, text)
-    .replace(/\{\{transcript\}\}/g, text)
+    .replace(/<transcript><\/transcript>/g, cleaned)
+    .replace(/<transcript>\s*$/g, cleaned)
+    .replace(/<transcript>/g, cleaned)
+    .replace(/\{\{transcript\}\}/g, cleaned)
+}
+
+const TIMECODE_FORMAT_NOTE = `\n\n## TIMECODE FORMAT
+The transcript uses timecodes in the format [HH:MM:SS] or [HH:MM:SS.cc] (with centiseconds), e.g. [00:01:23] or [00:01:23.50].
+When referencing timecodes, you MUST use the EXACT format from the transcript — copy the timecode as-is. Do NOT use MM:SS or other formats.`
+
+/** Inject timecode format note into system instruction for all LLM stages */
+function augmentSystemWithTimecodeFormat(systemInstruction) {
+  if (!systemInstruction) return TIMECODE_FORMAT_NOTE.trim()
+  if (systemInstruction.includes('TIMECODE FORMAT')) return systemInstruction
+  return systemInstruction + TIMECODE_FORMAT_NOTE
 }
 
 /**
@@ -785,9 +810,9 @@ function insertTranscript(template, text) {
  * In these modes, the LLM returns a JSON array of timecoded items instead of a full transcript.
  */
 function augmentSystemForOutputMode(systemInstruction, outputMode, identifyPreselect) {
-  if (!outputMode || outputMode === 'passthrough') return systemInstruction || ''
+  if (!outputMode || outputMode === 'passthrough') return augmentSystemWithTimecodeFormat(systemInstruction || '')
 
-  let result = systemInstruction || ''
+  let result = augmentSystemWithTimecodeFormat(systemInstruction || '')
 
   // Fallback: if format section is missing (old flow not yet opened in editor), append it at runtime
   if (!result.includes('## CRITICAL OUTPUT FORMAT')) {
@@ -1024,15 +1049,15 @@ function applySingleDeletion(text, timecode, deleteText) {
 
 function buildSegmentPromptText(seg) {
   if (!seg.beforeContext && !seg.afterContext) {
-    return seg.mainText
+    return stripPauses(seg.mainText)
   }
   let text = ''
   if (seg.beforeContext) {
-    text += `<context>\n${seg.beforeContext}\n`
+    text += `<context>\n${stripPauses(seg.beforeContext)}\n`
   }
-  text += `*****\n<segment>\n${seg.mainText}\n*****`
+  text += `*****\n<segment>\n${stripPauses(seg.mainText)}\n*****`
   if (seg.afterContext) {
-    text += `\n<context>\n${seg.afterContext}`
+    text += `\n<context>\n${stripPauses(seg.afterContext)}`
   }
   return text
 }
@@ -1115,6 +1140,24 @@ const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 5000
 
 async function callLLM({ model, systemInstruction, prompt, params, experimentId }) {
+  // Log the actual request sent to the LLM
+  const logDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'data', 'llm-logs')
+  mkdirSync(logDir, { recursive: true })
+  const ts = new Date().toISOString().replace(/[:.]/g, '-')
+  const logFile = join(logDir, `${ts}_exp${experimentId || 'none'}_${model}.json`)
+  try {
+    writeFileSync(logFile, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      experimentId,
+      model,
+      params,
+      systemInstruction,
+      prompt,
+    }, null, 2))
+  } catch (e) {
+    console.error('[llm-log] Failed to write log:', e.message)
+  }
+
   const anthropicKey = process.env.ANTHROPIC_API_KEY
   const openaiKey = process.env.OPENAI_API_KEY
   const googleKey = process.env.GOOGLE_API_KEY

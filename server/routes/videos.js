@@ -2,7 +2,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import { join, dirname, extname } from 'path'
 import { fileURLToPath } from 'url'
-import { mkdirSync, unlinkSync, copyFileSync, existsSync, statSync, writeFileSync, createWriteStream } from 'fs'
+import { mkdirSync, unlinkSync, rmSync, copyFileSync, existsSync, statSync, writeFileSync, createWriteStream } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
@@ -154,10 +154,10 @@ async function runTranscription(videoId, signal) {
     const result = await transcribeVideo(actualPath, onProgress, signal)
 
     db.prepare(`
-      INSERT INTO transcripts (video_id, type, content, word_timestamps_json)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(video_id, type) DO UPDATE SET content = excluded.content, word_timestamps_json = excluded.word_timestamps_json
-    `).run(videoId, transcriptType, result.formatted, JSON.stringify(result.words))
+      INSERT INTO transcripts (video_id, type, content, word_timestamps_json, alignment_json)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(video_id, type) DO UPDATE SET content = excluded.content, word_timestamps_json = excluded.word_timestamps_json, alignment_json = excluded.alignment_json
+    `).run(videoId, transcriptType, result.formatted, JSON.stringify(result.words), result.alignment ? JSON.stringify(result.alignment) : null)
 
     if (result.duration && !video.duration_seconds) {
       db.prepare('UPDATE videos SET duration_seconds = ? WHERE id = ?').run(Math.round(result.duration), videoId)
@@ -742,6 +742,33 @@ router.post('/groups/:id/run-main-flow', async (req, res) => {
       }
     }
   })()
+})
+
+// Rebuild annotations from existing run (re-maps without re-running LLMs)
+router.post('/groups/:id/rebuild-annotations', async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const group = db.prepare('SELECT * FROM video_groups WHERE id = ?').get(groupId)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  let annotations
+  try { annotations = JSON.parse(group.annotations_json || 'null') } catch {}
+  if (!annotations?.flowRunId) return res.status(400).json({ error: 'No existing annotations to rebuild' })
+
+  const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await annotationMapper()
+  let wordTimestamps = getTimelineWordTimestamps(groupId)
+  if (!wordTimestamps?.length) {
+    const video = db.prepare("SELECT v.id FROM videos v JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw' WHERE v.group_id = ? ORDER BY v.id LIMIT 1").get(groupId)
+    if (video) {
+      const transcript = db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(video.id)
+      if (transcript?.word_timestamps_json) try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch {}
+    }
+  }
+  if (!wordTimestamps?.length) return res.status(400).json({ error: 'No word timestamps' })
+
+  const groupData = db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
+  const rebuilt = buildAnnotationsFromRun(annotations.flowRunId, wordTimestamps, groupData?.assembled_transcript)
+  db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?').run(JSON.stringify(rebuilt), groupId)
+  res.json({ success: true, items: rebuilt.items.length })
 })
 
 // Get word timestamps for all videos in a group
@@ -1575,7 +1602,7 @@ router.put('/:id', (req, res) => {
 
 // Delete a group and all its videos (and all related experiment data)
 router.delete('/groups/:id', requireAuth, (req, res) => {
-  const videos = db.prepare('SELECT id FROM videos WHERE group_id = ?').all(req.params.id)
+  const videos = db.prepare('SELECT id, file_path, thumbnail_path FROM videos WHERE group_id = ?').all(req.params.id)
   for (const v of videos) {
     const runs = db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)
     for (const run of runs) {
@@ -1588,6 +1615,12 @@ router.delete('/groups/:id', requireAuth, (req, res) => {
     db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(v.id)
     db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(v.id)
     db.prepare('DELETE FROM videos WHERE id = ?').run(v.id)
+    // Delete video file, thumbnail, and extracted frames from disk
+    const baseDir = join(__dirname, '..', '..')
+    if (v.file_path) try { unlinkSync(join(baseDir, v.file_path)) } catch {}
+    if (v.thumbnail_path) try { unlinkSync(join(baseDir, v.thumbnail_path)) } catch {}
+    const framesDir = join(baseDir, 'uploads', 'frames', String(v.id))
+    try { rmSync(framesDir, { recursive: true }) } catch {}
   }
   db.prepare('DELETE FROM video_groups WHERE id = ?').run(req.params.id)
   res.json({ success: true })
@@ -1597,8 +1630,8 @@ router.delete('/groups/:id', requireAuth, (req, res) => {
 router.delete('/:id', (req, res) => {
   const id = req.params.id
 
-  // Get group_id before deleting (to clean up empty groups after)
-  const video = db.prepare('SELECT group_id FROM videos WHERE id = ?').get(id)
+  // Get video info before deleting (to clean up files + empty groups after)
+  const video = db.prepare('SELECT group_id, file_path, thumbnail_path FROM videos WHERE id = ?').get(id)
   const groupId = video?.group_id
 
   // Clean up experiment run data referencing this video
@@ -1613,6 +1646,13 @@ router.delete('/:id', (req, res) => {
   db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(id)
   db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(id)
   db.prepare('DELETE FROM videos WHERE id = ?').run(id)
+
+  // Delete video file, thumbnail, and extracted frames from disk
+  const baseDir = join(__dirname, '..', '..')
+  if (video?.file_path) try { unlinkSync(join(baseDir, video.file_path)) } catch {}
+  if (video?.thumbnail_path) try { unlinkSync(join(baseDir, video.thumbnail_path)) } catch {}
+  const framesDir = join(baseDir, 'uploads', 'frames', String(id))
+  try { rmSync(framesDir, { recursive: true }) } catch {}
 
   // Clean up empty group if this was the last video in it
   if (groupId) {

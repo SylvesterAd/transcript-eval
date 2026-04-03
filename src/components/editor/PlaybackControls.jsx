@@ -47,12 +47,26 @@ export default function PlaybackControls() {
 
   const handleSplit = () => {
     if (state.activeTab === 'roughcut') {
-      // Single-click razor: create a zero-width cut at the playhead.
-      // User drags an edge to open it into a visible cut region.
-      dispatch({
-        type: 'ADD_CUT',
-        payload: { id: `cut-${Date.now()}`, start: state.currentTime, end: state.currentTime, source: 'split' },
-      })
+      // Razor split at the playhead position.
+      // If inside an existing cut, split that cut into two at the playhead,
+      // creating a visible seam the user can drag to resize either half.
+      const t = state.currentTime
+      const overlapping = state.cuts.filter(c => c.start < t && c.end > t && c.end > c.start + 0.01)
+      if (overlapping.length > 0) {
+        // Split all overlapping cuts at the playhead
+        for (const c of overlapping) {
+          dispatch({ type: 'UPDATE_CUT', payload: { id: c.id, updates: { end: t } } })
+          dispatch({ type: 'ADD_CUT', payload: { id: `cut-${Date.now()}-r`, start: t, end: c.end, source: 'split' } })
+        }
+        // Add exclusion at the split point so AI doesn't re-merge
+        dispatch({ type: 'ADD_EXCLUSION', payload: { start: t - 0.5, end: t + 0.5 } })
+      } else {
+        // No existing cut — create a zero-width razor for the user to drag open
+        dispatch({
+          type: 'ADD_CUT',
+          payload: { id: `cut-${Date.now()}`, start: t, end: t, source: 'split', splitPoint: t },
+        })
+      }
       return
     }
     const selected = [...state.selectedTrackIds]

@@ -116,6 +116,7 @@ const migrations = [
   ['video_groups', 'parent_group_id', 'ALTER TABLE video_groups ADD COLUMN parent_group_id INTEGER REFERENCES video_groups(id)'],
   ['strategies', 'is_main', "ALTER TABLE strategies ADD COLUMN is_main INTEGER DEFAULT 0"],
   ['video_groups', 'annotations_json', 'ALTER TABLE video_groups ADD COLUMN annotations_json TEXT'],
+  ['transcripts', 'alignment_json', 'ALTER TABLE transcripts ADD COLUMN alignment_json TEXT'],
 ]
 
 // Migrate experiment_runs CHECK constraint to allow 'partial' status

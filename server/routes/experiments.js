@@ -195,6 +195,58 @@ router.get('/runs/:runId/stages/:stageIndex', (req, res) => {
     }
   }
 
+  // Mark segments that have the actual saved system instruction (from new runs)
+  if (segments) {
+    for (const seg of segments) {
+      if (seg.systemInstructionUsed) seg.systemInstructionSaved = true
+    }
+  }
+
+  // For parallel segments without saved systemInstructionUsed, reconstruct from chapter data
+  if (segments && segments.length > 0 && !segments[0].systemInstructionUsed && rawStageConfig?.system_instruction) {
+    const sysTemplate = stage.system_instruction_used?.replace(/^\[Per-segment[^\]]*\]\n*/, '') || rawStageConfig.system_instruction
+    if (sysTemplate.includes('{{chapter_name}}')) {
+      // The segment_by_chapters output only has chapterName — full chapter data (description, purpose, beats)
+      // lives in the llm_question stage that preceded it. Find both.
+      const stageIdx = parseInt(req.params.stageIndex)
+      const chapterStage = db.prepare(
+        'SELECT output_text FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index < ? AND stage_name LIKE ? ORDER BY stage_index DESC LIMIT 1'
+      ).get(req.params.runId, stageIdx, '%Segment by Chapters%')
+      // Find the llm_question stage (Identify Chapters) that has the full chapter JSON
+      const questionStage = db.prepare(
+        'SELECT output_text FROM run_stage_outputs WHERE experiment_run_id = ? AND stage_index < ? AND stage_name LIKE ? ORDER BY stage_index DESC LIMIT 1'
+      ).get(req.params.runId, stageIdx, '%Chapters%Beats%')
+      // Parse the full chapters JSON from the llm_question output
+      let fullChapters = null
+      if (questionStage?.output_text) {
+        try {
+          const raw = questionStage.output_text
+          const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+          fullChapters = JSON.parse(jsonMatch ? jsonMatch[1].trim() : raw.trim())
+        } catch {}
+      }
+      const segmentNames = chapterStage?.output_text ? JSON.parse(chapterStage.output_text) : null
+      if (fullChapters || segmentNames) {
+        for (let si = 0; si < segments.length; si++) {
+          // Match by index — chapters and segments align 1:1
+          const ch = fullChapters?.[si] || {}
+          const segName = segmentNames?.[si]
+          const name = segName?.chapterName || ch.name || ''
+          const description = ch.description || ''
+          const purpose = ch.purpose || ''
+          const beats = (ch.beats || []).map(b => `- ${b.timecode}: ${b.description}${b.purpose ? ' (' + b.purpose + ')' : ''}`).join('\n')
+          segments[si].systemInstructionUsed = sysTemplate
+            .replace(/\{\{chapter_name\}\}/g, name)
+            .replace(/\{\{chapter_description\}\}/g, description)
+            .replace(/\{\{chapter_purpose\}\}/g, purpose)
+            .replace(/\{\{chapter_beats\}\}/g, beats)
+            .replace(/\{\{segment_number\}\}/g, String(si + 1))
+            .replace(/\{\{total_segments\}\}/g, String(segments.length))
+        }
+      }
+    }
+  }
+
   res.json({
     input: stage.input_text,
     output: effectiveOutput,

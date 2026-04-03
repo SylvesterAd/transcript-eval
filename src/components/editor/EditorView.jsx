@@ -20,6 +20,7 @@ export default function EditorView() {
   const { state, dispatch, totalDuration, formatTime } = useEditorState()
   const [showRoughCutWarning, setShowRoughCutWarning] = useState(false)
   const [flowRunState, setFlowRunState] = useState(null)
+  const cutDragRef = useRef(false) // true during cut edge drag — blocks AI cut regeneration
   // shape: { experimentId, runId, status: 'running'|'complete'|'error', progress: {...} }
 
   // URL tab is source of truth — sync to state before paint
@@ -92,18 +93,21 @@ export default function EditorView() {
   }, [groupDetail, state.groupId, state.annotations, state.cuts, state.aiCutsSelected, dispatch])
 
   // On roughcut load, seek to the first uncut position (skip leading cuts)
+  // Only runs once — never overrides a manual seek
   const initialSeekDoneRef = useRef(false)
   useEffect(() => {
     if (activeTab !== 'roughcut' || initialSeekDoneRef.current) return
     if (!skipRegions.length) return
+    initialSeekDoneRef.current = true
     if (skipRegions[0].start > 0.5) return
+    // Only auto-seek if playhead is still at the beginning (user hasn't manually seeked)
+    if (state.currentTime > 1.0) return
     let pos = 0
     for (const region of skipRegions) {
       if (region.start > pos + 0.05) break
       pos = Math.max(pos, region.end)
     }
     if (pos > 0.5) {
-      initialSeekDoneRef.current = true
       dispatch({ type: 'SET_CURRENT_TIME', payload: pos })
     }
   }, [activeTab, state.cuts, dispatch])
@@ -213,7 +217,9 @@ export default function EditorView() {
     const peaks = primaryAudio?.waveformPeaks
     const offset = primaryAudio?.offset || 0
 
-    const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
+    const valid = state.cuts.filter(c => c.end > c.start + 0.01)
+    if (!valid.length) return []
+    const sorted = [...valid].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
     for (let i = 1; i < sorted.length; i++) {
       const last = merged[merged.length - 1]
@@ -284,8 +290,35 @@ export default function EditorView() {
         if (region.end <= region.start) region.end = region.start + 0.01
       }
     }
+    // Split merged regions around manual exclusions — these always take priority
+    const exclusions = state.cutExclusions || []
+    if (exclusions.length > 0) {
+      const split = []
+      for (const region of merged) {
+        let current = { ...region }
+        for (const ex of [...exclusions].sort((a, b) => a.start - b.start)) {
+          if (ex.start >= current.end || ex.end <= current.start) continue
+          if (current.start < ex.start - 0.01) {
+            split.push({ start: current.start, end: ex.start })
+          }
+          current.start = ex.end
+        }
+        if (current.start < current.end - 0.01) {
+          split.push(current)
+        }
+      }
+      // Re-add manual/split cuts — these always skip regardless of exclusions
+      const manualCuts = state.cuts.filter(c => c.end > c.start + 0.01 && (c.source === 'manual' || c.source === 'split'))
+      for (const mc of manualCuts) {
+        // Only add if not already covered by an existing split region
+        const alreadyCovered = split.some(r => r.start <= mc.start && r.end >= mc.end)
+        if (!alreadyCovered) split.push({ start: mc.start, end: mc.end })
+      }
+      split.sort((a, b) => a.start - b.start)
+      return split
+    }
     return merged
-  }, [state.activeTab, state.cuts, state.tracks])
+  }, [state.activeTab, state.cuts, state.cutExclusions, state.tracks])
   const skipRegionsRef = useRef(skipRegions)
   skipRegionsRef.current = skipRegions
 
@@ -668,7 +701,7 @@ export default function EditorView() {
   }
 
   return (
-    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState }}>
+    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef }}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
@@ -999,6 +1032,9 @@ function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageName
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-6">
+      {/* Headline */}
+      <div className="text-sm text-on-surface-variant">Please wait</div>
+
       {/* Percentage */}
       <div className="relative flex items-center justify-center">
         <span className="text-6xl font-bold text-primary-fixed tabular-nums">{percent}</span>
@@ -1011,12 +1047,6 @@ function FlowProgressScreen({ progress, initialTotalStages = 0, initialStageName
           className="h-full bg-primary-fixed rounded-full transition-all duration-700 ease-out"
           style={{ width: `${percent}%` }}
         />
-      </div>
-
-      {/* Current stage info */}
-      <div className="text-center">
-        <div className="text-sm text-on-surface-variant">{currentName}</div>
-        {currentDetail && <div className="text-xs text-on-surface-variant/50 mt-0.5">{currentDetail}</div>}
       </div>
     </div>
   )

@@ -285,7 +285,8 @@ export default function ProcessingModal({ groupId, initialFiles, onBack, onCompl
       if (f.transcriptionStatus === 'failed') return 'error'
       // Actively transcribing stages from server
       if (f.transcriptionStatus === 'downloading' || f.transcriptionStatus === 'extracting_audio'
-        || f.transcriptionStatus === 'transcribing' || f.transcriptionStatus === 'processing'
+        || f.transcriptionStatus === 'transcribing' || f.transcriptionStatus === 'aligning'
+        || f.transcriptionStatus === 'processing'
         || f.transcriptionStatus?.startsWith('transcribing chunk')) return 'transcribing'
       // pending or null — uploaded but waiting for transcription slot
       return 'queued'
@@ -459,10 +460,12 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
     const stage = file.transcriptionStatus
     const stageLabel = stage?.startsWith('transcribing chunk') ? stage.replace('transcribing chunk', 'Transcribing part')
       : stage === 'transcribing' ? 'Transcribing'
+      : stage === 'aligning' ? 'Aligning timestamps'
       : stage === 'processing' ? 'Processing results'
       : (stage === 'downloading' || stage === 'extracting_audio') ? 'Preparing audio'
       : 'Starting...'
-    const stageProgress = (stage === 'transcribing' || stage?.startsWith('transcribing chunk')) ? '70%'
+    const stageProgress = (stage === 'transcribing' || stage?.startsWith('transcribing chunk')) ? '60%'
+      : stage === 'aligning' ? '80%'
       : stage === 'processing' ? '90%'
       : (stage === 'downloading' || stage === 'extracting_audio') ? '40%'
       : '20%'

@@ -111,34 +111,43 @@ function buildTimecodeWordIndex(assembledTranscript, wordTimestamps) {
     }
   }
 
-  // Walk both lists in parallel — each transcript word maps to the next
-  // matching word in the timestamps. This ensures positional accuracy:
-  // "clap" in "Kayla's good clap again" stays separate from standalone "Clap."
+  // For each transcript entry, use its timecode to find the nearest word
+  // in the timestamps (forced alignment), then match words sequentially from there.
+  // This prevents positional drift when the assembled transcript has deletions.
   const index = []
-  let wsPos = 0
 
   for (const entry of entries) {
+    // Find the best starting position using the entry's timecode
+    let bestPos = 0
+    let bestDist = Infinity
+    for (let j = 0; j < wordTimestamps.length; j++) {
+      const dist = Math.abs(wordTimestamps[j].start - entry.tcSec)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestPos = j
+      }
+      // Early exit — timestamps are sorted, so once we're moving away, stop
+      if (wordTimestamps[j].start > entry.tcSec + 5) break
+    }
+
     const matched = []
+    let wsPos = bestPos
 
     for (const word of entry.textWords) {
       const norm = normalizeText(word)
       if (!norm) continue
 
-      // Scan forward (limited) to find matching word
-      let found = false
+      // Scan forward (limited) from the timecode-aligned position
       const scanLimit = Math.min(wsPos + 40, wordTimestamps.length)
       for (let j = wsPos; j < scanLimit; j++) {
         const wNorm = normalizeText(wordTimestamps[j].word)
+        if (!wNorm) continue
         if (wNorm === norm || wNorm.startsWith(norm) || norm.startsWith(wNorm)) {
           matched.push(wordTimestamps[j])
           wsPos = j + 1
-          found = true
           break
         }
       }
-
-      // If not found in forward scan, the word might be missing from timestamps
-      // (e.g. formatting artifacts). Skip it — other words in the entry still match.
     }
 
     if (matched.length > 0) {
@@ -297,7 +306,9 @@ export function buildAnnotationsFromRun(experimentRunId, wordTimestamps, assembl
 
       // If LLM specified text, subset to matching words
       if (item.text) {
-        const targetTokens = normalizeText(item.text).split(' ').filter(Boolean)
+        // Strip timecode prefix if present (e.g. "[00:00:01] Mm-hmm." → "Mm-hmm.")
+        const cleanText = item.text.replace(/^\[[\d:\.]+\]\s*/, '')
+        const targetTokens = normalizeText(cleanText).split(' ').filter(Boolean)
         if (targetTokens.length > 0 && targetTokens.length <= matchedWords.length) {
           for (let i = 0; i <= matchedWords.length - targetTokens.length; i++) {
             let match = true

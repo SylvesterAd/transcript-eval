@@ -27,8 +27,11 @@ export default function Timeline() {
       start: w.start + (primaryAudio.offset || 0),
       end: w.end + (primaryAudio.offset || 0),
     })) || []
-    // Merge overlapping + wordless gaps
-    const sorted = [...state.cuts].sort((a, b) => a.start - b.start)
+    // Separate zero-width cuts (razor markers) from real cuts
+    const zeroWidth = state.cuts.filter(c => c.end <= c.start + 0.01 && c.end >= c.start)
+    const valid = state.cuts.filter(c => c.end > c.start + 0.01)
+    if (!valid.length) return [...zeroWidth]
+    const sorted = [...valid].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
     for (let i = 1; i < sorted.length; i++) {
       const last = merged[merged.length - 1]
@@ -44,7 +47,7 @@ export default function Timeline() {
       }
     }
 
-    return merged
+    return [...merged, ...zeroWidth]
   }, [state.cuts, state.tracks])
 
   // Track horizontal scroll for virtualized tick rendering

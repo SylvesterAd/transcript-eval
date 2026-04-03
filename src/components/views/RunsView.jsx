@@ -696,10 +696,10 @@ function SegmentsTab({ segments, selectedSegment, onSelect, systemInstruction, r
                 <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[20vh] whitespace-pre-wrap font-mono">{rawStageConfig.system_instruction}</pre>
               </div>
             )}
-            {systemInstruction && (
+            {(seg.systemInstructionUsed || systemInstruction) && (
               <div>
                 <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider block mb-1">System Instruction Sent</span>
-                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[20vh] whitespace-pre-wrap font-mono">{systemInstruction}</pre>
+                <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-auto max-h-[20vh] whitespace-pre-wrap font-mono">{seg.systemInstructionUsed || systemInstruction}</pre>
               </div>
             )}
             {seg.promptUsed && (

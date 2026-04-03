@@ -19,7 +19,7 @@ function formatGap(seconds) {
 }
 
 export default function TranscriptEditor() {
-  const { state, dispatch, playbackEngine } = useContext(EditorContext)
+  const { state, dispatch, playbackEngine, cutDragRef } = useContext(EditorContext)
 
   // Primary transcript: use the longest audio track's words as the single source.
   // Only fill in time gaps (ranges the primary doesn't cover) from other tracks.
@@ -86,7 +86,10 @@ export default function TranscriptEditor() {
           let b = wordEndBar
           while (b > wordStartBar && !hasSound(b)) b--
           if (b > wordStartBar) {
-            words[i].end = Math.max(offset + (b + 1) / PEAKS_PER_SEC + 0.15, words[i].start + 0.15)
+            let corrected = Math.max(offset + (b + 1) / PEAKS_PER_SEC + 0.15, words[i].start + 0.15)
+            // Never extend past the next word's start
+            if (i < words.length - 1) corrected = Math.min(corrected, words[i + 1].start)
+            words[i].end = corrected
           }
         }
       }
@@ -179,7 +182,8 @@ export default function TranscriptEditor() {
       for (let i = 0; i < displayItems.length; i++) {
         const item = displayItems[i]
         if (item.type !== 'word') continue
-        if (item.start < ann.endTime && item.end >= ann.startTime) {
+        const mid = (item.start + item.end) / 2
+        if (mid >= ann.startTime && mid < ann.endTime) {
           if (!map.has(i)) map.set(i, [])
           map.get(i).push(ann)
         }
@@ -290,6 +294,7 @@ export default function TranscriptEditor() {
       silenceMountRef.current = false
       return
     }
+    if (cutDragRef?.current) return // Don't regenerate during edge drag
 
     if (!cutsSelected.silences) {
       dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-silence-', cuts: [] } })
@@ -298,6 +303,7 @@ export default function TranscriptEditor() {
 
     // Word timestamps are already corrected by waveform in mergedWords useMemo.
     // Silence cuts simply span the gaps between corrected word boundaries.
+    const exclusions = state.cutExclusions || []
     const cuts = []
     for (let i = 1; i < mergedWords.length; i++) {
       const gap = mergedWords[i].start - mergedWords[i - 1].end
@@ -305,6 +311,10 @@ export default function TranscriptEditor() {
 
       const cutStart = mergedWords[i - 1].end + 0.1
       const cutEnd = mergedWords[i].start - 0.2
+
+      // Skip silence cuts that overlap with manual exclusions
+      const excluded = exclusions.some(ex => cutStart < ex.end && cutEnd > ex.start)
+      if (excluded) continue
 
       if (cutEnd > cutStart + 0.1) {
         cuts.push({
@@ -316,11 +326,12 @@ export default function TranscriptEditor() {
       }
     }
     dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-silence-', cuts } })
-  }, [cutsSelected.silences, mergedWords, state.tracks, dispatch])
+  }, [cutsSelected.silences, mergedWords, state.tracks, state.cutExclusions, dispatch])
 
   // AI Cut Annotations — merge adjacent annotation regions (bridging wordless
   // gaps), apply head/tail trim and exclusions, emit as continuous cut regions.
   useEffect(() => {
+    if (cutDragRef?.current) return // Don't regenerate during edge drag
     if (!annotationRegions.length || !mergedWords.length) {
       dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-ann-', cuts: [] } })
       dispatch({ type: 'SET_AI_CUTS', payload: { prefix: 'cut-ai-bridge-', cuts: [] } }) // clean legacy
@@ -389,15 +400,22 @@ export default function TranscriptEditor() {
 
     // Bridge adjacent annotation cuts when no uncut words exist in the gap
     // (covers silence gaps between consecutive deleted sections)
+    // Never bridge across exclusion zones — those are manual edits.
+    const exclusions = state.cutExclusions || []
     const bridged = [{ ...splits[0] }]
     for (let i = 1; i < splits.length; i++) {
       const last = bridged[bridged.length - 1]
       const gapStart = last.end
       const gapEnd = splits[i].start
+      // Don't bridge if an exclusion zone exists in the gap
+      const crossesExclusion = exclusions.some(ex => ex.start < gapEnd && ex.end > gapStart)
+      if (crossesExclusion) {
+        bridged.push({ ...splits[i] })
+        continue
+      }
       const hasUncutWordInGap = mergedWords.some(w => {
         const wEnd = Math.max(w.end, w.start + 0.01)
         if (w.start < gapStart || wEnd > gapEnd) return false
-        // Word is in the gap — but is it covered by an annotation region? (50ms tolerance)
         const isCoveredByAnn = annotationRegions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
         return !isCoveredByAnn
       })
@@ -410,25 +428,35 @@ export default function TranscriptEditor() {
 
     // Extend annotation cut edges to fill wordless gaps (micro-gaps between
     // annotation cuts and silence cuts). Only extend into gaps with no uncut words —
-    // never extend past the nearest uncut word boundary.
+    // never extend past the nearest uncut word boundary or exclusion zone.
     for (const region of bridged) {
       // Extend end forward: stretch to next uncut word's start (fills gap after last deleted word)
       const nextUncutWord = mergedWords.find(w => w.start >= region.end - 0.01 && !annotationRegions.some(r => w.start >= r.start - 0.05 && w.end <= r.end + 0.05))
       if (nextUncutWord) {
-        // Only extend if there are no uncut words between region.end and nextUncutWord.start
         const hasUncutBetween = mergedWords.some(w => {
           if (w === nextUncutWord) return false
           const wEnd = Math.max(w.end, w.start + 0.01)
           return w.start >= region.end - 0.01 && wEnd <= nextUncutWord.start + 0.01 &&
             !annotationRegions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
         })
-        if (!hasUncutBetween) region.end = nextUncutWord.start
+        if (!hasUncutBetween) {
+          let newEnd = nextUncutWord.start
+          // Never extend into an exclusion zone
+          for (const ex of exclusions) {
+            if (ex.start > region.end - 0.01 && ex.start < newEnd) newEnd = Math.min(newEnd, ex.start)
+          }
+          region.end = newEnd
+        }
       }
       // Extend start backward: stretch to prev uncut word's end (fills gap before first deleted word)
       const prevUncutWord = [...mergedWords].reverse().find(w => w.end <= region.start + 0.01 && !annotationRegions.some(r => w.start >= r.start - 0.05 && w.end <= r.end + 0.05))
       if (prevUncutWord) {
-        // Don't extend past the previous uncut word — the cut should start AFTER it, not inside it
-        region.start = Math.max(region.start, prevUncutWord.end)
+        let newStart = prevUncutWord.end
+        // Never extend into an exclusion zone
+        for (const ex of exclusions) {
+          if (ex.end < region.start + 0.01 && ex.end > newStart) newStart = Math.max(newStart, ex.end)
+        }
+        region.start = Math.max(newStart, prevUncutWord.end)
       }
     }
 
@@ -455,8 +483,16 @@ export default function TranscriptEditor() {
 
   // Check if an item overlaps any cut region
   const isItemCut = useCallback((item) => {
-    return state.cuts.some(c => item.start < c.end && item.end > c.start)
+    return state.cuts.some(c => c.end > c.start + 0.01 && item.start < c.end && item.end > c.start)
   }, [state.cuts])
+
+  // Clear visual highlight when transcriptSelection is cleared externally (e.g. Backspace handler)
+  useEffect(() => {
+    if (!state.transcriptSelection && selStart >= 0) {
+      setSelStart(-1)
+      setSelEnd(-1)
+    }
+  }, [state.transcriptSelection])
 
   // Clear selection when playback starts
   useEffect(() => {
@@ -760,11 +796,13 @@ export default function TranscriptEditor() {
                 className={`cursor-text px-[1px] py-[2px] inline ${
                   cut && !isUnsafeFiller ? 'line-through text-on-surface-variant' : ''
                 } ${
-                  cut && !isUnsafeFiller && !selected ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
+                  cut && !isUnsafeFiller && !selected && !isGap ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
                 } ${
                   isCurrent && !cut && !bgColor ? 'bg-white/15' : ''
                 } ${
                   isGap && !cut ? 'text-on-surface-variant/40 text-[11px]' : ''
+                } ${
+                  isGap && cut ? 'text-[11px] opacity-50' : ''
                 }`}
                 style={bgColor ? { backgroundColor: bgColor } : undefined}
                 onContextMenu={(e) => handleContextMenu(idx, e)}

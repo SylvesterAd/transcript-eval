@@ -202,8 +202,9 @@ function reducer(state, action) {
       const { wordTimestamps } = action.payload
       const tracks = state.tracks.map(t => {
         if (t.type !== 'audio') return t
-        const words = wordTimestamps[t.videoId]
-        if (!words) return t
+        const raw = wordTimestamps[t.videoId]
+        if (!raw) return t
+        const words = raw.filter(w => w.word && w.word.trim() !== '')
         return { ...t, transcriptWords: words, transcriptSentences: buildSentences(words) }
       })
       return { ...state, tracks }
@@ -445,10 +446,77 @@ function reducer(state, action) {
       return { ...state, cutExclusions: [], isDirty: true }
     case 'SET_EXCLUSIONS':
       return { ...state, cutExclusions: action.payload, isDirty: true }
-    case 'UPDATE_CUT':
-      return { ...state, cuts: state.cuts.map(c => c.id === action.payload.id ? { ...c, ...action.payload.updates } : c), isDirty: true }
+    case 'REMOVE_EXCLUSIONS_IN_RANGE': {
+      const { start, end } = action.payload
+      // Remove or trim exclusions that overlap the given range
+      const updated = []
+      for (const ex of (state.cutExclusions || [])) {
+        if (ex.start >= end || ex.end <= start) {
+          updated.push(ex) // no overlap
+        } else if (ex.start < start && ex.end > end) {
+          // Exclusion spans the range — split into two
+          updated.push({ start: ex.start, end: start })
+          updated.push({ start: end, end: ex.end })
+        } else if (ex.start < start) {
+          updated.push({ ...ex, end: start }) // trim end
+        } else if (ex.end > end) {
+          updated.push({ ...ex, start: end }) // trim start
+        }
+        // else: exclusion entirely inside range — remove
+      }
+      return { ...state, cutExclusions: updated, isDirty: true }
+    }
+    case 'ADD_EXCLUSION': {
+      const ex = action.payload
+      // Deduplicate: merge with any existing exclusion that overlaps
+      const mergedEx = []
+      let added = { ...ex }
+      for (const existing of (state.cutExclusions || [])) {
+        if (existing.start <= added.end && existing.end >= added.start) {
+          added = { start: Math.min(added.start, existing.start), end: Math.max(added.end, existing.end) }
+        } else {
+          mergedEx.push(existing)
+        }
+      }
+      mergedEx.push(added)
+      // Immediately trim all cuts that overlap the exclusion zone
+      const trimmedCuts = []
+      for (const c of state.cuts) {
+        if (c.start >= added.end || c.end <= added.start) {
+          trimmedCuts.push(c) // no overlap
+        } else if (c.start < added.start && c.end > added.end) {
+          // Cut spans the exclusion — split into two
+          trimmedCuts.push({ ...c, end: added.start, id: c.id })
+          trimmedCuts.push({ ...c, start: added.end, id: c.id + '-split' })
+        } else if (c.start < added.start) {
+          trimmedCuts.push({ ...c, end: added.start }) // trim end
+        } else if (c.end > added.end) {
+          trimmedCuts.push({ ...c, start: added.end }) // trim start
+        }
+        // else: cut is entirely inside exclusion — remove it
+      }
+      return { ...state, cutExclusions: mergedEx, cuts: trimmedCuts, isDirty: true }
+    }
+    case 'UPDATE_CUT': {
+      const updated = state.cuts.map(c => {
+        if (c.id !== action.payload.id) return c
+        const patched = { ...c, ...action.payload.updates, manuallyEdited: true }
+        // If edges cross on a manual/split cut, delete it (user dragged past the other edge)
+        if (patched.start > patched.end && (patched.source === 'split' || patched.source === 'manual')) {
+          return null // mark for removal
+        }
+        // Clamp AI cuts: never let start exceed end
+        if (patched.start > patched.end) {
+          if ('start' in action.payload.updates) patched.start = patched.end
+          else patched.end = patched.start
+        }
+        return patched
+      }).filter(Boolean)
+      return { ...state, cuts: updated, isDirty: true }
+    }
     case 'SET_AI_CUTS': {
       const { prefix, cuts } = action.payload
+      // AI regeneration replaces all cuts with this prefix — exclusions are the authority for manual edits
       return { ...state, cuts: [...state.cuts.filter(c => !c.id.startsWith(prefix)), ...cuts], isDirty: true }
     }
     case 'SET_AI_CUTS_SELECTED':
@@ -497,7 +565,7 @@ const TRACKED_ACTIONS = new Set([
 
 // Actions that coalesce (rapid-fire same type = one undo step, e.g. dragging)
 const COALESCE_ACTIONS = new Set([
-  'MOVE_TRACK', 'MOVE_GROUP', 'SET_ZOOM', 'SET_VOLUME',
+  'MOVE_TRACK', 'MOVE_GROUP', 'SET_ZOOM', 'SET_VOLUME', 'UPDATE_CUT',
 ])
 
 const HISTORY_LIMIT = 100

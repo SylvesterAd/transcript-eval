@@ -1049,12 +1049,12 @@ function SegmentDetailView({ segment, segmentIndex, totalSegments, systemInstruc
       {/* Input Log: system instruction + full prompt */}
       {tab === 'input_log' && (
         <div className="flex-1 overflow-auto p-5 space-y-4">
-          {systemInstruction && (
+          {(seg.systemInstructionUsed || systemInstruction) && (
             <div>
               <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-2">
-                <Cpu size={12} /> System Instruction <span className="text-zinc-600 font-normal normal-case">(shared across all segments)</span>
+                <Cpu size={12} /> System Instruction Sent
               </div>
-              <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4">{systemInstruction}</pre>
+              <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed text-zinc-300 bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-4">{seg.systemInstructionUsed || systemInstruction}</pre>
             </div>
           )}
           <div>

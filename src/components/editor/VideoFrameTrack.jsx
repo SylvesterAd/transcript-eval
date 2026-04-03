@@ -42,39 +42,62 @@ export default function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX 
     return slots
   }, [track.filePath, track.videoId, scrollX, left, buffer, zoom, labelW, viewW, displayInterval, track.duration])
 
-  // Cut edge drag handler
+  // Cut edge drag handler — blocks AI regeneration during drag, sets exclusion on release
+  const { cutDragRef } = useContext(EditorContext)
   const handleEdgeDrag = useCallback((mergedStart, mergedEnd, edge, e) => {
     e.preventDefault()
     e.stopPropagation()
     const startX = e.clientX
     const overlapping = state.cuts
       .filter(c => c.start < mergedEnd + 0.05 && c.end > mergedStart - 0.05)
-      .sort((a, b) => a.start - b.start)
-    const cut = edge === 'left' ? overlapping[0] : overlapping[overlapping.length - 1]
-    if (!cut) return
-    const isManual = cut.source === 'transcript' || cut.source === 'split'
-    const startVal = edge === 'left' ? mergedStart : mergedEnd
-    let manualCreated = false
-    const manualId = `cut-edge-${mergedStart.toFixed(2)}`
+    if (!overlapping.length) return
+    const primaryCut = edge === 'left'
+      ? overlapping.reduce((a, b) => a.start <= b.start ? a : b)
+      : overlapping.reduce((a, b) => a.end >= b.end ? a : b)
+    const startVal = edge === 'left' ? primaryCut.start : primaryCut.end
+    const splitPoint = primaryCut.splitPoint
+    const allOverlappingIds = overlapping.map(c => c.id)
+    cutDragRef.current = true
     const onMove = (ev) => {
       const dx = ev.clientX - startX
-      const newVal = Math.max(0, startVal + dx / zoom)
-      if (isManual) {
-        dispatch({ type: 'UPDATE_CUT', payload: { id: cut.id, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
-      } else if (manualCreated) {
-        dispatch({ type: 'UPDATE_CUT', payload: { id: manualId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
-      } else {
-        const newCut = edge === 'left'
-          ? { id: manualId, start: newVal, end: mergedStart, source: 'transcript' }
-          : { id: manualId, start: mergedEnd, end: newVal, source: 'transcript' }
-        dispatch({ type: 'ADD_CUT', payload: newCut })
-        manualCreated = true
+      let newVal = Math.max(0, startVal + dx / zoom)
+      if (splitPoint != null) {
+        if (edge === 'left') newVal = Math.min(newVal, splitPoint)
+        else newVal = Math.max(newVal, splitPoint)
+      }
+      dispatch({ type: 'UPDATE_CUT', payload: { id: primaryCut.id, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      for (const cId of allOverlappingIds) {
+        if (cId === primaryCut.id) continue
+        const c = state.cuts.find(x => x.id === cId)
+        if (!c) continue
+        if (edge === 'right' && c.end > newVal) {
+          dispatch({ type: 'UPDATE_CUT', payload: { id: cId, updates: c.start < newVal ? { end: newVal } : { start: newVal, end: newVal } } })
+        } else if (edge === 'left' && c.start < newVal) {
+          dispatch({ type: 'UPDATE_CUT', payload: { id: cId, updates: c.end > newVal ? { start: newVal } : { start: newVal, end: newVal } } })
+        }
       }
     }
-    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    const onUp = (ev) => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      cutDragRef.current = false
+      const finalDx = ev.clientX - startX
+      const finalVal = Math.max(0, startVal + finalDx / zoom)
+      if (edge === 'left' && finalVal > startVal + 0.05) {
+        dispatch({ type: 'ADD_EXCLUSION', payload: { start: Math.max(0, startVal - 2), end: finalVal } })
+      } else if (edge === 'right' && finalVal < startVal - 0.05) {
+        dispatch({ type: 'ADD_EXCLUSION', payload: { start: finalVal, end: startVal + 2 } })
+      } else if (edge === 'left' && finalVal < startVal - 0.05) {
+        dispatch({ type: 'REMOVE_EXCLUSIONS_IN_RANGE', payload: { start: finalVal, end: startVal } })
+        dispatch({ type: 'ADD_CUT', payload: { id: `cut-manual-${Date.now()}`, start: finalVal, end: startVal, source: 'manual' } })
+      } else if (edge === 'right' && finalVal > startVal + 0.05) {
+        dispatch({ type: 'REMOVE_EXCLUSIONS_IN_RANGE', payload: { start: startVal, end: finalVal } })
+        dispatch({ type: 'ADD_CUT', payload: { id: `cut-manual-${Date.now()}`, start: startVal, end: finalVal, source: 'manual' } })
+      }
+    }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [state.cuts, zoom, dispatch])
+  }, [state.cuts, state.cutExclusions, zoom, dispatch, cutDragRef])
 
   return (
     <div className="relative border-b border-white/10" style={{ height: `${FRAME_H}px` }}>
@@ -168,22 +191,37 @@ export function CompositeFrameTrack({ segments, zoom, cuts, scrollRef, scrollX }
   const vEndTime = ((scrollX || 0) - labelW + viewW + buffer) / zoom
 
   // Cut edge drag
-  const handleEdgeDrag = useCallback((cutId, edge, e) => {
+  const handleEdgeDrag = useCallback((mergedStart, mergedEnd, edge, e) => {
     e.preventDefault()
     e.stopPropagation()
     const startX = e.clientX
-    const cut = state.cuts.find(c => c.id === cutId)
-    if (!cut) return
+    const overlapping = state.cuts
+      .filter(c => c.start < mergedEnd + 0.05 && c.end > mergedStart - 0.05)
+    if (!overlapping.length) return
+    // Pick the cut that actually defines the boundary being dragged
+    const cut = edge === 'left'
+      ? overlapping.reduce((a, b) => a.start <= b.start ? a : b)
+      : overlapping.reduce((a, b) => a.end >= b.end ? a : b)
     const startVal = edge === 'left' ? cut.start : cut.end
     const onMove = (ev) => {
       const dx = ev.clientX - startX
       const newVal = Math.max(0, startVal + dx / zoom)
-      dispatch({ type: 'UPDATE_CUT', payload: { id: cutId, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
+      dispatch({ type: 'UPDATE_CUT', payload: { id: cut.id, updates: edge === 'left' ? { start: newVal } : { end: newVal } } })
     }
-    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    const onUp = (ev) => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      const finalDx = ev.clientX - startX
+      const finalVal = Math.max(0, startVal + finalDx / zoom)
+      if (edge === 'left' && finalVal > startVal + 0.05) {
+        dispatch({ type: 'SET_EXCLUSIONS', payload: [...(state.cutExclusions || []), { start: Math.max(0, startVal - 2), end: finalVal }] })
+      } else if (edge === 'right' && finalVal < startVal - 0.05) {
+        dispatch({ type: 'SET_EXCLUSIONS', payload: [...(state.cutExclusions || []), { start: finalVal, end: startVal + 2 }] })
+      }
+    }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [state.cuts, zoom, dispatch])
+  }, [state.cuts, state.cutExclusions, zoom, dispatch])
 
   const totalEnd = segments[segments.length - 1]?.end || 0
   const contentWidth = totalEnd * zoom

@@ -65,10 +65,49 @@ async function callScribe(filePath, signal) {
   }
 }
 
+/** Call ElevenLabs Forced Alignment API with retries */
+async function callForcedAlignment(filePath, text, signal) {
+  const maxRetries = 3
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) throw new Error('Alignment cancelled')
+    try {
+      const buffer = readFileSync(filePath)
+      const blob = new Blob([buffer], { type: 'audio/mpeg' })
+
+      const form = new FormData()
+      form.append('file', blob, basename(filePath))
+      form.append('text', text)
+
+      const response = await fetch('https://api.elevenlabs.io/v1/forced-alignment', {
+        method: 'POST',
+        headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+        body: form,
+        signal,
+      })
+
+      if (!response.ok) {
+        const body = await response.text()
+        throw new Error(`Forced Alignment API ${response.status}: ${body}`)
+      }
+
+      return await response.json()
+    } catch (err) {
+      if (signal?.aborted) throw new Error('Alignment cancelled')
+      const isRetryable = err.message?.includes('500') || err.message?.includes('503')
+      if (isRetryable && attempt < maxRetries) {
+        const delay = attempt * 3000
+        console.log(`[align] Error, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})...`)
+        await new Promise(r => setTimeout(r, delay))
+      } else {
+        throw err
+      }
+    }
+  }
+}
+
 /**
- * Transcribe a video/audio file using ElevenLabs Scribe V2.
- * Extracts audio for large files to reduce upload size.
- * Scribe V2 supports up to 3GB files natively — no chunking needed.
+ * Transcribe a video/audio file using ElevenLabs Scribe V2,
+ * then refine word timestamps with Forced Alignment.
  */
 export async function transcribeVideo(filePath, onProgress, signal) {
   const stat = statSync(filePath)
@@ -84,19 +123,42 @@ export async function transcribeVideo(filePath, onProgress, signal) {
       audioPath = await extractAudio(filePath)
     }
 
-    onProgress?.('transcribing')
     const fileToTranscribe = audioPath || filePath
+
+    // Step 1: Transcribe with Scribe V2
+    onProgress?.('transcribing')
     console.log(`[scribe] Sending to Scribe V2: ${(statSync(fileToTranscribe).size / 1024 / 1024).toFixed(1)}MB`)
-
     const response = await callScribe(fileToTranscribe, signal)
+    const text = response.text || ''
 
-    onProgress?.('processing')
-
-    // Map Scribe response to our format: { word, start, end }
-    const scribeWords = response.words || []
-    const words = scribeWords
-      .filter(w => w.type === 'word')
+    // Step 2: Refine timestamps with Forced Alignment
+    onProgress?.('aligning')
+    const scribeWords = (response.words || [])
+      .filter(w => w.type === 'word' && w.text && w.text.trim() !== '')
       .map(w => ({ word: w.text, start: w.start, end: w.end }))
+    console.log(`[align] Sending to Forced Alignment: ${text.length} chars`)
+    let words
+    let alignmentInfo = { used: false }
+    try {
+      const alignment = await callForcedAlignment(fileToTranscribe, text, signal)
+      words = (alignment.words || [])
+        .filter(w => w.text && w.text.trim() !== '')
+        .map(w => ({ word: w.text, start: w.start, end: w.end }))
+
+      // Compare timestamps
+      let changedCount = 0
+      const compareCount = Math.min(scribeWords.length, words.length)
+      for (let i = 0; i < compareCount; i++) {
+        if (Math.abs(scribeWords[i].start - words[i].start) > 0.001 || Math.abs(scribeWords[i].end - words[i].end) > 0.001) changedCount++
+      }
+
+      alignmentInfo = { used: true, loss: alignment.loss, wordsChanged: changedCount, wordsTotal: compareCount }
+      console.log(`[align] Alignment complete: ${words.length} words, loss=${alignment.loss?.toFixed(4)}, changed=${changedCount}/${compareCount}`)
+    } catch (err) {
+      console.warn(`[align] Forced alignment failed, falling back to Scribe timestamps: ${err.message}`)
+      alignmentInfo = { used: false, error: err.message }
+      words = scribeWords
+    }
 
     // Fix duplicate timestamps: if a word has the same start as the previous,
     // set its start/end to the average between the previous and next word
@@ -109,13 +171,14 @@ export async function transcribeVideo(filePath, onProgress, signal) {
       }
     }
 
-    const text = response.text || ''
+    // Step 3: Format transcript with refined timestamps
+    onProgress?.('processing')
     const duration = words.length > 0 ? words[words.length - 1].end : 0
     const formatted = formatTranscript(words)
 
     console.log(`[scribe] Transcription complete: ${words.length} words, ${duration.toFixed(1)}s`)
 
-    return { text, formatted, words, segments: [], duration }
+    return { text, formatted, words, segments: [], duration, alignment: alignmentInfo }
   } finally {
     if (audioPath) {
       try { unlinkSync(audioPath) } catch {}

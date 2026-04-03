@@ -1235,6 +1235,8 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                       <option value="segment">Segment Transcript</option>
                       <option value="segment_by_chapters">Segment by Chapters</option>
                       <option value="reassemble">Reassemble Segments</option>
+                      <option value="trim_before">Trim Pre-roll</option>
+                      <option value="trim_ranges">Delete Ranges (from LLM Question)</option>
                     </select>
                   </div>
                   {stage.action === 'segment' && (
@@ -1273,6 +1275,20 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                           onChange={e => updateStage(i, 'actionParams', { ...stage.actionParams, contextSeconds: Number(e.target.value) })}
                           className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none" />
                       </div>
+                    </div>
+                  )}
+                  {(stage.action === 'trim_before' || stage.action === 'trim_ranges') && (
+                    <div>
+                      <label className="block text-xs text-zinc-500 mb-1">Annotation Category</label>
+                      <select
+                        value={stage.identifyPreselect?.categories?.[0] || 'meta_commentary'}
+                        onChange={e => updateStage(i, 'identifyPreselect', { enabled: true, categories: [e.target.value] })}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none"
+                      >
+                        <option value="meta_commentary">Meta Commentary</option>
+                        <option value="false_starts">False Starts</option>
+                        <option value="filler_words">Filler Words</option>
+                      </select>
                     </div>
                   )}
                   <div>

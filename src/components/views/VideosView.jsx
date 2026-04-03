@@ -443,7 +443,8 @@ function VideoRow({ video: v, onRefresh }) {
               {v.transcription_status === 'pending' ? 'Queued...' :
                v.transcription_status === 'extracting_audio' ? 'Extracting audio...' :
                v.transcription_status?.startsWith('transcribing chunk') ? v.transcription_status.replace('transcribing', 'Transcribing') + '...' :
-               v.transcription_status === 'transcribing' ? 'Whisper transcribing...' :
+               v.transcription_status === 'transcribing' ? 'Transcribing...' :
+               v.transcription_status === 'aligning' ? 'Aligning timestamps...' :
                v.transcription_status === 'processing' ? 'Processing...' : 'Working...'}
             </span>
           )}
