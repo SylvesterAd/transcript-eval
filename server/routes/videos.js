@@ -590,9 +590,53 @@ router.post('/groups/:id/run-main-flow', requireAuth, async (req, res) => {
   const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
-  // Check if annotations already exist
+  // Check if annotations already exist (with actual items)
   if (!force && group.annotations_json) {
-    return res.json({ already_exists: true })
+    try {
+      const ann = JSON.parse(group.annotations_json)
+      if (ann?.items?.length > 0) {
+        return res.json({ already_exists: true })
+      }
+      // Empty annotations — try to rebuild from completed run below
+    } catch { /* invalid JSON, proceed */ }
+  }
+
+  // Check for a completed Auto: run that never had annotations built (e.g. after bug fix)
+  if (!force) {
+    const completedRun = await db.prepare(`
+      SELECT er.id AS run_id, e.id AS experiment_id FROM experiment_runs er
+      JOIN experiments e ON e.id = er.experiment_id
+      WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
+        AND er.status = 'complete'
+        AND e.name ILIKE 'Auto:%'
+      ORDER BY er.id DESC LIMIT 1
+    `).get(groupId)
+    if (completedRun) {
+      // Rebuild annotations from this completed run
+      try {
+        const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await annotationMapper()
+        const video = await db.prepare(`
+          SELECT v.* FROM videos v
+          JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+          WHERE v.group_id = ? AND v.video_type = 'raw'
+          ORDER BY v.id LIMIT 1
+        `).get(groupId)
+        let wordTimestamps = await getTimelineWordTimestamps(groupId)
+        if (!wordTimestamps?.length && video) {
+          const transcript = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(video.id)
+          if (transcript?.word_timestamps_json) try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch {}
+        }
+        if (wordTimestamps?.length) {
+          const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
+          const annotations = await buildAnnotationsFromRun(completedRun.run_id, wordTimestamps, groupData?.assembled_transcript)
+          console.log(`[run-main-flow] Rebuilt ${annotations.items.length} annotations from completed run ${completedRun.run_id} for group ${groupId}`)
+          await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?').run(JSON.stringify(annotations), groupId)
+          return res.json({ already_exists: true, rebuilt: true })
+        }
+      } catch (err) {
+        console.error(`[run-main-flow] Rebuild from completed run failed:`, err.message)
+      }
+    }
   }
 
   // Clear old annotations so editor doesn't show stale results while new run is in progress
