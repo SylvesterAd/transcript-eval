@@ -49,10 +49,11 @@ export default function UploadModal({ onClose, onComplete, initialGroupId }) {
         setGroupId(id)
         groupIdRef.current = id
         return id
-      } catch {
+      } catch (err) {
+        console.error('[upload] Group creation failed:', err)
         groupPromiseRef.current = null
-        setGroupError('Failed to create project. Please try again.')
-        throw new Error('Group creation failed')
+        setGroupError(`Failed to create project: ${err.message}`)
+        throw err
       }
     })()
     return groupPromiseRef.current
