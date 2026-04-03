@@ -1,6 +1,17 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { useApi } from '../../hooks/useApi.js'
+import { useApi, apiPost } from '../../hooks/useApi.js'
+import { supabase } from '../../lib/supabaseClient.js'
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+async function authFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  return fetch(`${API_BASE}${path}`, { ...opts, headers })
+}
 import useEditorState from './useEditorState.js'
 import EditorSidebar from './EditorSidebar.jsx'
 import VideoPreviewGrid from './VideoPreviewGrid.jsx'
@@ -127,7 +138,7 @@ export default function EditorView() {
     // Trigger main flow
     ;(async () => {
       try {
-        const res = await fetch(`/api/videos/groups/${state.groupId}/run-main-flow`, { method: 'POST' })
+        const res = await authFetch(`/videos/groups/${state.groupId}/run-main-flow`, { method: 'POST' })
         const data = await res.json()
         if (!res.ok) {
           if (data.error === 'too_many_failures') {
@@ -154,7 +165,7 @@ export default function EditorView() {
     if (!flowRunState?.experimentId || flowRunState.status !== 'running') return
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/experiments/${flowRunState.experimentId}/progress`)
+        const res = await authFetch(`/experiments/${flowRunState.experimentId}/progress`)
         const data = await res.json()
         const run = data.runs?.[0]
         if (run?.status === 'complete' || run?.status === 'partial') {
@@ -189,7 +200,7 @@ export default function EditorView() {
     if (!groupDetail?.videos) return
     const needsFrames = groupDetail.videos.some(v => v.frames_status !== 'done' && v.frames_status !== 'extracting')
     if (needsFrames) {
-      fetch(`/api/videos/groups/${id}/extract-frames`, { method: 'POST' }).catch(() => {})
+      authFetch(`/videos/groups/${id}/extract-frames`, { method: 'POST' }).catch(() => {})
     }
   }, [groupDetail, id])
 
@@ -934,7 +945,7 @@ function SyncingScreen({ groupId, status, onDone }) {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/videos/groups/${groupId}/status`)
+        const res = await authFetch(`/videos/groups/${groupId}/status`)
         const data = await res.json()
         setCurrentStatus(data.assembly_status)
         if (data.assembly_status === 'done' || data.assembly_status === 'error') {
