@@ -43,11 +43,9 @@ export async function uploadFile(bucket, storagePath, localFilePath) {
     const destDir = join(__dirname, '..', '..', 'uploads', bucket)
     mkdirSync(destDir, { recursive: true })
     const destPath = join(destDir, storagePath)
-    const { copyFileSync: cpSync } = await import('fs')
-    // Only copy if source and dest differ
-    const srcResolved = join(localFilePath)
-    if (srcResolved !== destPath) {
-      try { cpSync(localFilePath, destPath) } catch {}
+    // Only copy if source and dest differ (file may already be in the right place)
+    if (localFilePath !== destPath) {
+      try { copyFileSync(localFilePath, destPath) } catch {}
     }
     return `/uploads/${bucket}/${storagePath}`
   }
