@@ -17,6 +17,7 @@ export default function ProjectsView() {
 
   // Flow state from URL — files kept in ref (can't serialize XHR to URL)
   const filesRef = useRef(null)
+  const [liveFiles, setLiveFiles] = useState(null) // real-time file updates from UploadModal
   const step = searchParams.get('step')
   const groupId = searchParams.get('group') ? parseInt(searchParams.get('group')) : null
 
@@ -266,12 +267,15 @@ export default function ProjectsView() {
         </div>
       )}
 
-      {step === 'upload' && (
-        <UploadModal
-          onClose={() => setStep(null)}
-          onComplete={(gid, files) => setStep('config', gid, files)}
-          initialGroupId={groupId}
-        />
+      {(step === 'upload' || step === 'config' || step === 'processing') && (
+        <div style={{ display: step === 'upload' ? undefined : 'none' }}>
+          <UploadModal
+            onClose={() => setStep(null)}
+            onComplete={(gid, files) => setStep('config', gid, files)}
+            initialGroupId={groupId}
+            onFilesChange={(f) => { filesRef.current = f; setLiveFiles(f) }}
+          />
+        </div>
       )}
       {step === 'config' && (
         <RoughCutConfigModal
@@ -284,6 +288,7 @@ export default function ProjectsView() {
         <ProcessingModal
           groupId={groupId}
           initialFiles={filesRef.current}
+          liveFiles={liveFiles}
           onBack={() => setStep('config', groupId)}
           onComplete={(gid) => {
             setStep(null); refetch(); navigate(`/editor/${gid}/assets`)

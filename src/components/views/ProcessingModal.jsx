@@ -4,8 +4,23 @@ import { apiPost } from '../../hooks/useApi.js'
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
 const MAX_SIZE = 50 * 1024 * 1024 * 1024
 
-export default function ProcessingModal({ groupId, initialFiles, onBack, onComplete }) {
+export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBack, onComplete }) {
   const [files, setFiles] = useState(() => (initialFiles || []).map(f => ({ ...f })))
+
+  // Sync from live upload progress (UploadModal stays mounted and pushes updates)
+  useEffect(() => {
+    if (!liveFiles) return
+    setFiles(prev => {
+      const updated = prev.map(f => {
+        const live = liveFiles.find(lf => lf.id === f.id)
+        if (live && (live.progress !== f.progress || live.status !== f.status)) {
+          return { ...f, progress: live.progress, status: live.status, serverId: live.serverId || f.serverId, error: live.error || f.error }
+        }
+        return f
+      })
+      return updated
+    })
+  }, [liveFiles])
   const speedRef = useRef({}) // { [id]: { lastLoaded, lastTime, speed, eta } }
   const pollRef = useRef(null)
   const fileInputRef = useRef(null)

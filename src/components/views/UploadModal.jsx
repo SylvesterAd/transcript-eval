@@ -13,8 +13,15 @@ const VIDEO_ACCEPT = VIDEO_EXTS.join(',')
 const SCRIPT_ACCEPT = SCRIPT_EXTS.join(',')
 const MAX_SIZE = 50 * 1024 * 1024 * 1024 // 50GB
 
-export default function UploadModal({ onClose, onComplete, initialGroupId }) {
-  const [files, setFiles] = useState([])
+export default function UploadModal({ onClose, onComplete, initialGroupId, onFilesChange }) {
+  const [files, _setFiles] = useState([])
+  const setFiles = useCallback((updater) => {
+    _setFiles(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      onFilesChange?.(next)
+      return next
+    })
+  }, [onFilesChange])
   const [groupId, setGroupId] = useState(initialGroupId || null)
   const [videoUrl, setVideoUrl] = useState('')
   const [scriptUrl, setScriptUrl] = useState('')
