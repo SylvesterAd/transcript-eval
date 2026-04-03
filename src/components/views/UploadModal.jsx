@@ -73,52 +73,42 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       console.log(`[upload] uploadFileWithProgress called for ${entry.name}, gid=${gid}`)
       const entryId = entry.id
 
-      // 1. Get Cloudflare Stream direct-upload URL
-      const cfData = await apiPost('/videos/stream/create-upload', { maxDurationSeconds: 21600, file_size: entry.file.size })
-      const cfUploadUrl = cfData.tusUploadUrl
-      const cfStreamUid = cfData.uid
-      console.log(`[upload] Cloudflare Stream upload ready for ${entry.name}: ${cfStreamUid}`)
+      // 1. Upload via TUS to backend proxy → Cloudflare Stream
+      // Backend proxies the TUS creation POST to CF, returns Location header.
+      // tus-js-client then PATCHes directly to CF. This is the CF-recommended approach.
+      let cfStreamUid = null
+      const API_BASE = import.meta.env.VITE_API_URL || '/api'
+      const session = supabase ? (await supabase.auth.getSession()).data.session : null
+      const authToken = session?.access_token
 
-      // 2. Upload to Cloudflare Stream via TUS PATCH with XHR (for upload progress)
-      // fetch() has no upload progress events. XHR does via xhr.upload.onprogress.
-      console.log(`[upload] TUS PATCH (XHR) to: ${cfUploadUrl}`)
-      const CHUNK = 50 * 1024 * 1024 // 50MB — CF recommended
-      const totalSize = entry.file.size
-      let offset = 0
-
-      while (offset < totalSize) {
-        const end = Math.min(offset + CHUNK, totalSize)
-        const chunk = entry.file.slice(offset, end)
-        const chunkOffset = offset
-
-        const newOffset = await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest()
-          xhr.open('PATCH', cfUploadUrl)
-          xhr.setRequestHeader('Tus-Resumable', '1.0.0')
-          xhr.setRequestHeader('Upload-Offset', String(chunkOffset))
-          xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream')
-
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              const totalUploaded = chunkOffset + e.loaded
-              const pct = Math.round((totalUploaded / totalSize) * 100)
-              setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct, loaded: totalUploaded, total: totalSize } : f))
-            }
-          }
-          xhr.onload = () => {
-            if (xhr.status === 204 || xhr.status === 200) {
-              resolve(parseInt(xhr.getResponseHeader('Upload-Offset')) || end)
-            } else {
-              reject(new Error(`Upload chunk failed: ${xhr.status} ${xhr.responseText?.slice(0, 200)}`))
-            }
-          }
-          xhr.onerror = () => reject(new Error('Upload network error'))
-          xhr.send(chunk)
+      await new Promise((resolve, reject) => {
+        const upload = new tus.Upload(entry.file, {
+          endpoint: `${API_BASE}/videos/stream/tus-create`,
+          headers: {
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          },
+          chunkSize: 50 * 1024 * 1024, // 50MB — CF recommended
+          retryDelays: [0, 3000, 5000, 10000, 20000],
+          removeFingerprintOnSuccess: true,
+          storeFingerprintForResuming: false,
+          metadata: { name: entry.file.name, filetype: entry.file.type || 'video/mp4' },
+          onError: (err) => reject(new Error(err.message || 'Upload failed')),
+          onProgress: (bytesUploaded, bytesTotal) => {
+            const pct = Math.round((bytesUploaded / bytesTotal) * 100)
+            console.log(`[upload] ${entry.name}: ${pct}% (${(bytesUploaded/1024/1024).toFixed(1)}/${(bytesTotal/1024/1024).toFixed(1)} MB)`)
+            setFiles(prev => prev.map(f => f.id === entryId ? { ...f, progress: pct, loaded: bytesUploaded, total: bytesTotal } : f))
+          },
+          onAfterResponse: (req, res) => {
+            const mediaId = res.getHeader('Stream-Media-Id')
+            if (mediaId) cfStreamUid = mediaId
+          },
+          onSuccess: () => resolve(),
         })
+        upload.start()
+      })
 
-        offset = newOffset
-        console.log(`[upload] ${entry.name}: ${Math.round((offset/totalSize)*100)}% (${(offset/1024/1024).toFixed(1)}/${(totalSize/1024/1024).toFixed(1)} MB)`)
-      }
+      if (!cfStreamUid) throw new Error('Upload completed but no Stream-Media-Id received')
+      console.log(`[upload] Cloudflare Stream upload complete: ${cfStreamUid}`)
 
       // 3. Register with backend (Cloudflare only — no Supabase URL)
       setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress: 100 } : f))

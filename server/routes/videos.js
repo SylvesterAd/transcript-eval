@@ -1192,6 +1192,50 @@ async function processVideoMetadata(videoId) {
 }
 
 // Get a Cloudflare Stream direct-upload URL
+// TUS creation proxy — tus-js-client POSTs here, we forward to Cloudflare.
+// This is the approach Cloudflare documents for direct creator uploads.
+// tus-js-client then PATCHes directly to the CF URL returned in Location header.
+router.post('/stream/tus-create', requireAuth, async (req, res) => {
+  try {
+    if (!cfStreamEnabled()) return res.status(400).json({ error: 'Cloudflare Stream not configured' })
+
+    const uploadLength = req.headers['upload-length']
+    if (!uploadLength) return res.status(400).end('Upload-Length header required')
+
+    const CF_API = `https://api.cloudflare.com/client/v4/accounts/${process.env.CF_ACCOUNT_ID}/stream`
+    const cfRes = await fetch(`${CF_API}?direct_user=true`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.CF_API_TOKEN}`,
+        'Tus-Resumable': '1.0.0',
+        'Upload-Length': uploadLength,
+        'Upload-Metadata': req.headers['upload-metadata'] || '',
+      },
+    })
+
+    if (!cfRes.ok) {
+      const text = await cfRes.text()
+      console.error('[cf-stream] TUS create failed:', cfRes.status, text)
+      return res.status(cfRes.status).end(text)
+    }
+
+    const location = cfRes.headers.get('location')
+    const streamMediaId = cfRes.headers.get('stream-media-id')
+    console.log(`[cf-stream] TUS created: uid=${streamMediaId} location=${location}`)
+
+    // Forward TUS headers to the client — tus-js-client reads these
+    res.setHeader('Access-Control-Expose-Headers', 'Location, Tus-Resumable, Stream-Media-Id')
+    res.setHeader('Location', location)
+    res.setHeader('Tus-Resumable', '1.0.0')
+    if (streamMediaId) res.setHeader('Stream-Media-Id', streamMediaId)
+    res.status(201).end()
+  } catch (err) {
+    console.error('[cf-stream] TUS create error:', err.message)
+    res.status(500).end(err.message)
+  }
+})
+
+// Legacy JSON endpoint (kept for backward compat)
 router.post('/stream/create-upload', requireAuth, async (req, res) => {
   try {
     if (!cfStreamEnabled()) return res.status(400).json({ error: 'Cloudflare Stream not configured' })

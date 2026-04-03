@@ -20,8 +20,9 @@ const allowedOrigins = process.env.CORS_ORIGIN
 app.use(cors({
   origin: allowedOrigins || true,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Tus-Resumable', 'Upload-Length', 'Upload-Metadata', 'Upload-Offset'],
+  exposedHeaders: ['Location', 'Tus-Resumable', 'Stream-Media-Id', 'Upload-Offset'],
 }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.text({ limit: '10mb' })) // for sendBeacon (text/plain)
