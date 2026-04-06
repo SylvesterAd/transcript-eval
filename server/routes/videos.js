@@ -70,8 +70,18 @@ const router = Router()
         setTimeout(() => startBackgroundTranscription(v.id), 3000)
       }
     }
+    // Also reset experiment runs stuck at 'running' (killed by server restart)
+    const stuckRuns = await db.prepare(
+      "SELECT id FROM experiment_runs WHERE status = 'running'"
+    ).all()
+    if (stuckRuns.length > 0) {
+      console.log(`[startup] Resetting ${stuckRuns.length} stuck experiment run(s) to failed`)
+      for (const r of stuckRuns) {
+        await db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = 'Interrupted by server restart' WHERE id = ?").run(r.id)
+      }
+    }
   } catch (err) {
-    console.error('[transcribe] Startup cleanup failed:', err.message)
+    console.error('[startup] Startup cleanup failed:', err.message)
   }
 })()
 
