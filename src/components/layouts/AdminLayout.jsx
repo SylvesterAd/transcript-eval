@@ -32,8 +32,8 @@ export default function AdminLayout() {
     }
     const fetchSpending = async () => {
       const headers = await getHeaders()
-      fetch(`${API_BASE}/experiments/spending/today`, { headers }).then(r => r.json()).then(setSpending).catch(() => {})
-      fetch(`${API_BASE}/experiments/spending/total`, { headers }).then(r => r.json()).then(setTotalSpending).catch(() => {})
+      fetch(`${API_BASE}/experiments/spending/today`, { headers }).then(r => r.ok ? r.json() : null).then(d => d && setSpending(d)).catch(() => {})
+      fetch(`${API_BASE}/experiments/spending/total`, { headers }).then(r => r.ok ? r.json() : null).then(d => d && setTotalSpending(d)).catch(() => {})
     }
     fetchSpending()
     fetch(`${API_BASE}/health`).then(r => r.json()).then(setBackendVersion).catch(() => {})

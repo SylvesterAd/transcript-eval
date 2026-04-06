@@ -60,7 +60,7 @@ const router = Router()
 ;(async () => {
   try {
     const stuck = await db.prepare(
-      "SELECT id, title FROM videos WHERE transcription_status IN ('waiting_for_cloudflare', 'downloading', 'extracting_audio', 'transcribing', 'processing') AND transcription_status != 'done'"
+      "SELECT id, title FROM videos WHERE transcription_status IN ('pending', 'waiting_for_cloudflare', 'downloading', 'extracting_audio', 'transcribing', 'processing') AND transcription_status != 'done'"
     ).all()
     if (stuck.length > 0) {
       console.log(`[transcribe] Re-queuing ${stuck.length} interrupted transcription(s)`)
