@@ -122,14 +122,16 @@ function cascadeOverlaps(tracks) {
   const unitMap = new Map()
   for (let i = 0; i < tracks.length; i++) {
     const t = tracks[i]
+    const offset = Number.isFinite(t.offset) ? t.offset : 0
+    const duration = Number.isFinite(t.duration) ? t.duration : 0
     const unitId = t.groupId || t.id
     if (!unitMap.has(unitId)) {
       unitMap.set(unitId, { id: unitId, indices: [], start: Infinity, end: -Infinity })
     }
     const u = unitMap.get(unitId)
     u.indices.push(i)
-    u.start = Math.min(u.start, t.offset)
-    u.end = Math.max(u.end, t.offset + t.duration)
+    u.start = Math.min(u.start, offset)
+    u.end = Math.max(u.end, offset + duration)
   }
   // Sort by start, sweep, push overlapping units right
   const units = [...unitMap.values()].sort((a, b) => a.start - b.start)
@@ -146,6 +148,12 @@ function cascadeOverlaps(tracks) {
     }
     prevEnd = Math.max(prevEnd, u.end)
   }
+  // Ensure all offsets are valid numbers
+  for (let i = 0; i < result.length; i++) {
+    if (!Number.isFinite(result[i].offset)) {
+      result[i] = { ...result[i], offset: 0 }
+    }
+  }
   return result
 }
 
@@ -160,15 +168,20 @@ function reducer(state, action) {
         const freshById = Object.fromEntries(tracks.map(t => [t.id, t]))
         const mergedTracks = (restoredState.tracks || tracks).map(t => {
           const fresh = freshById[t.id]
-          if (fresh && t.type === 'audio') {
-            return { ...t, showTranscript: false, waveform: fresh.waveform, waveformPeaks: fresh.waveformPeaks }
+          // Ensure offset and duration are always valid numbers
+          const safeTrack = {
+            ...t,
+            offset: Number.isFinite(t.offset) ? t.offset : 0,
+            duration: Number.isFinite(t.duration) ? t.duration : (fresh?.duration || 0),
           }
-          if (t.type === 'audio') return { ...t, showTranscript: false }
-          // Merge filePath from fresh data — older saved states may not have it
-          if (fresh && t.type === 'video') {
-            return { ...t, filePath: fresh.filePath }
+          if (fresh && safeTrack.type === 'audio') {
+            return { ...safeTrack, showTranscript: false, waveform: fresh.waveform, waveformPeaks: fresh.waveformPeaks }
           }
-          return t
+          if (safeTrack.type === 'audio') return { ...safeTrack, showTranscript: false }
+          if (fresh && safeTrack.type === 'video') {
+            return { ...safeTrack, filePath: fresh.filePath }
+          }
+          return safeTrack
         })
         return {
           ...state,
@@ -240,6 +253,7 @@ function reducer(state, action) {
       const { trackId, newOffset } = action.payload
       const track = state.tracks.find(t => t.id === trackId)
       if (!track) return state
+      if (!Number.isFinite(newOffset)) return state
       const clampedOffset = Math.max(0, newOffset)
       let movedTracks
       // If grouped, move all tracks in the group
