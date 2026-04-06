@@ -269,7 +269,9 @@ function reducer(state, action) {
       if (!movedTracks) {
         movedTracks = state.tracks.map(t => t.id === trackId ? { ...t, offset: clampedOffset } : t)
       }
-      return { ...state, tracks: cascadeOverlaps(movedTracks), isDirty: true }
+      // In sync mode, tracks are meant to overlap — don't push them apart
+      const finalTracks = state.activeTab === 'sync' ? movedTracks : cascadeOverlaps(movedTracks)
+      return { ...state, tracks: finalTracks, isDirty: true }
     }
     case 'MOVE_GROUP': {
       const { groupId, delta } = action.payload
@@ -278,7 +280,8 @@ function reducer(state, action) {
       const movedTracks = state.tracks.map(t =>
         group.trackIds.includes(t.id) ? { ...t, offset: Math.max(0, t.offset + delta) } : t
       )
-      return { ...state, tracks: cascadeOverlaps(movedTracks), isDirty: true }
+      const finalTracks = state.activeTab === 'sync' ? movedTracks : cascadeOverlaps(movedTracks)
+      return { ...state, tracks: finalTracks, isDirty: true }
     }
     case 'TOGGLE_VISIBILITY': {
       const tracks = state.tracks.map(t =>
