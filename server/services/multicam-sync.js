@@ -93,10 +93,11 @@ ${previews}`
 
   const MAX_RETRIES = 2
   let lastError = null
+  let googleKey = process.env.GOOGLE_API_KEY
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GOOGLE_API_KEY}`
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${googleKey}`
       const r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -143,6 +144,12 @@ ${previews}`
     } catch (err) {
       lastError = err.message || String(err)
       console.warn(`[classify] Attempt ${attempt}/${MAX_RETRIES} failed: ${lastError}`)
+    }
+
+    // Switch to backup key on failure
+    if (process.env.GOOGLE_API_KEY_BACKUP && googleKey !== process.env.GOOGLE_API_KEY_BACKUP) {
+      googleKey = process.env.GOOGLE_API_KEY_BACKUP
+      console.log(`[classify] Switching to backup Google API key`)
     }
 
     // Wait before retry
@@ -935,7 +942,7 @@ function clusterMulticam(n, overlap, threshold) {
  */
 async function classifyContextWithGemini(videos) {
   const fallback = { groups: [videos.map(v => v.id)], gemini: null }
-  const apiKey = process.env.GOOGLE_API_KEY
+  let apiKey = process.env.GOOGLE_API_KEY
   if (!apiKey) {
     console.log('[multicam] No GOOGLE_API_KEY, skipping classification')
     return fallback
@@ -995,6 +1002,41 @@ async function classifyContextWithGemini(videos) {
     console.log('[multicam] Could not parse classification response, keeping all together')
     return { ...fallback, gemini: geminiData }
   } catch (err) {
+    // Retry with backup key
+    if (process.env.GOOGLE_API_KEY_BACKUP && apiKey !== process.env.GOOGLE_API_KEY_BACKUP) {
+      console.log('[multicam] Switching to backup Google API key for classification')
+      try {
+        const url2 = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GOOGLE_API_KEY_BACKUP}`
+        const r2 = await fetch(url2, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: 'You classify video transcripts by topic/context. Respond ONLY with a JSON object. No explanation.' }] },
+            generationConfig: { maxOutputTokens: 10000, temperature: 1, thinkingConfig: { thinkingLevel: 'HIGH' } },
+          })
+        })
+        if (r2.ok) {
+          const data2 = await r2.json()
+          const parts2 = data2.candidates?.[0]?.content?.parts || []
+          const textPart2 = [...parts2].reverse().find(p => p.text !== undefined)
+          const text2 = textPart2?.text || ''
+          const jsonMatch2 = text2.match(/\{[\s\S]*"groups"[\s\S]*\}/)
+          if (jsonMatch2) {
+            const parsed2 = JSON.parse(jsonMatch2[0])
+            if (Array.isArray(parsed2.groups) && parsed2.groups.length > 0) {
+              const allIds = new Set(videos.map(v => v.id))
+              const returnedIds = parsed2.groups.flat()
+              if (returnedIds.length === allIds.size && returnedIds.every(id => allIds.has(id)) && new Set(returnedIds).size === returnedIds.length) {
+                return { groups: parsed2.groups, gemini: { prompt, response: text2, thinking: parts2.find(p => p.thought === true)?.text || null } }
+              }
+            }
+          }
+        }
+      } catch (err2) {
+        console.error('[multicam] Backup key also failed:', err2.message)
+      }
+    }
     console.error('[multicam] Classification failed:', err.message)
     return fallback
   }
@@ -1006,7 +1048,7 @@ async function classifyContextWithGemini(videos) {
  */
 async function orderWithGemini(segments) {
   const noGemini = { ordered: segments, gemini: null }
-  const apiKey = process.env.GOOGLE_API_KEY
+  let apiKey = process.env.GOOGLE_API_KEY
   if (!apiKey) {
     console.log('[multicam] No GOOGLE_API_KEY, keeping upload order')
     return noGemini
@@ -1060,6 +1102,39 @@ async function orderWithGemini(segments) {
     console.log('[multicam] Could not parse Gemini order, keeping original')
     return { ordered: segments, gemini: geminiResult }
   } catch (err) {
+    // Retry with backup key
+    if (process.env.GOOGLE_API_KEY_BACKUP && apiKey !== process.env.GOOGLE_API_KEY_BACKUP) {
+      console.log('[multicam] Switching to backup Google API key for ordering')
+      try {
+        const url2 = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GOOGLE_API_KEY_BACKUP}`
+        const r2 = await fetch(url2, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: 'You analyze transcript segments and determine their chronological order. Respond ONLY with a JSON array of 1-based segment numbers. No explanation.' }] },
+            generationConfig: { maxOutputTokens: 10000, temperature: 1, thinkingConfig: { thinkingLevel: 'HIGH' } },
+          })
+        })
+        if (r2.ok) {
+          const data2 = await r2.json()
+          const parts2 = data2.candidates?.[0]?.content?.parts || []
+          const textPart2 = [...parts2].reverse().find(p => p.text !== undefined)
+          const text2 = textPart2?.text || ''
+          geminiResult.response = text2
+          const match2 = text2.match(/\[[\d,\s]+\]/)
+          if (match2) {
+            const order2 = JSON.parse(match2[0])
+            if (order2.length === segments.length && order2.every(n => n >= 1 && n <= segments.length)) {
+              geminiResult.order = order2
+              return { ordered: order2.map(n => segments[n - 1]), gemini: geminiResult }
+            }
+          }
+        }
+      } catch (err2) {
+        console.error('[multicam] Backup key ordering also failed:', err2.message)
+      }
+    }
     console.error('[multicam] Gemini ordering failed:', err.message)
     geminiResult.response = `Error: ${err.message}`
     return { ordered: segments, gemini: geminiResult }
