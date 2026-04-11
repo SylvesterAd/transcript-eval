@@ -5,6 +5,7 @@ import { Home, LayoutGrid, List, Film, Loader2, CheckCircle2, AlertCircle, Trash
 import UploadModal from './UploadModal.jsx'
 import RoughCutConfigModal from './RoughCutConfigModal.jsx'
 import ProcessingModal from './ProcessingModal.jsx'
+import BRollExamplesModal from './BRollExamplesModal.jsx'
 
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
 
@@ -267,7 +268,7 @@ export default function ProjectsView() {
         </div>
       )}
 
-      {(step === 'upload' || step === 'config' || step === 'processing') && (
+      {(step === 'upload' || step === 'config' || step === 'processing' || step === 'broll-examples') && (
         <div style={{ display: step === 'upload' ? undefined : 'none' }}>
           <UploadModal
             onClose={() => setStep(null)}
@@ -281,6 +282,13 @@ export default function ProjectsView() {
         <RoughCutConfigModal
           groupId={groupId}
           onBack={() => setStep('upload', groupId)}
+          onComplete={(gid) => setStep('broll-examples', gid)}
+        />
+      )}
+      {step === 'broll-examples' && (
+        <BRollExamplesModal
+          groupId={groupId}
+          onBack={() => setStep('config', groupId)}
           onComplete={(gid) => setStep('processing', gid)}
         />
       )}
@@ -289,7 +297,7 @@ export default function ProjectsView() {
           groupId={groupId}
           initialFiles={filesRef.current}
           liveFiles={liveFiles}
-          onBack={() => setStep('config', groupId)}
+          onBack={() => setStep('broll-examples', groupId)}
           onComplete={(gid) => {
             setStep(null); refetch(); navigate(`/editor/${gid}/assets`)
           }}

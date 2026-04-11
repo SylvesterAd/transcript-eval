@@ -27,6 +27,12 @@ const schema = readFileSync(join(__dirname, 'schema-pg.sql'), 'utf-8')
 try {
   await pool.query(schema)
   console.log('[db] Schema initialized')
+  // Migrations for existing databases
+  try {
+    await pool.query(`ALTER TABLE transcripts DROP CONSTRAINT IF EXISTS transcripts_type_check`)
+    await pool.query(`ALTER TABLE transcripts ADD CONSTRAINT transcripts_type_check CHECK (type IN ('raw', 'human_edited', 'rough_cut_adjusted'))`)
+    await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE`)
+  } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
 }

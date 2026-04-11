@@ -20,6 +20,7 @@ import Timeline from './Timeline.jsx'
 import TranscriptEditor from './TranscriptEditor.jsx'
 import RoughCutPreview from './RoughCutPreview.jsx'
 import AssetsView from './AssetsView.jsx'
+import BRollPanel from './BRollPanel.jsx'
 
 export const EditorContext = createContext(null)
 
@@ -760,6 +761,8 @@ export default function EditorView() {
           />
           {activeTab === 'assets' ? (
             <AssetsView />
+          ) : activeTab === 'brolls' ? (
+            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} />
           ) : (
             <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} isMainMode={activeTab === 'roughcut' && state.roughCutTrackMode === 'main'} />
           )}

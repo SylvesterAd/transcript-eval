@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS videos (
 CREATE TABLE IF NOT EXISTS transcripts (
   id SERIAL PRIMARY KEY,
   video_id INTEGER NOT NULL REFERENCES videos(id),
-  type TEXT NOT NULL CHECK (type IN ('raw', 'human_edited')),
+  type TEXT NOT NULL CHECK (type IN ('raw', 'human_edited', 'rough_cut_adjusted')),
   content TEXT NOT NULL,
   word_timestamps_json TEXT,
   alignment_json TEXT,
@@ -173,5 +173,87 @@ CREATE TABLE IF NOT EXISTS spending_log (
   total_tokens INTEGER DEFAULT 0,
   total_runtime_ms INTEGER DEFAULT 0,
   source TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B-Roll Strategies
+CREATE TABLE IF NOT EXISTS broll_strategies (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  strategy_kind TEXT,
+  bundle_key TEXT,
+  bundle_name TEXT,
+  hook_strategy_id INTEGER,
+  main_strategy_id INTEGER,
+  analysis_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-20250514',
+  analysis_system_prompt TEXT NOT NULL DEFAULT '',
+  analysis_prompt TEXT NOT NULL DEFAULT '',
+  analysis_params_json TEXT NOT NULL DEFAULT '{}',
+  plan_model TEXT NOT NULL DEFAULT 'gpt-5.4',
+  plan_system_prompt TEXT NOT NULL DEFAULT '',
+  plan_prompt TEXT NOT NULL DEFAULT '',
+  plan_params_json TEXT NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS broll_strategy_versions (
+  id SERIAL PRIMARY KEY,
+  strategy_id INTEGER NOT NULL REFERENCES broll_strategies(id),
+  name TEXT NOT NULL,
+  notes TEXT,
+  hook_prompt TEXT NOT NULL DEFAULT '',
+  main_prompt TEXT NOT NULL DEFAULT '',
+  plan_prompt TEXT NOT NULL DEFAULT '',
+  hook_params_json TEXT NOT NULL DEFAULT '{}',
+  main_params_json TEXT NOT NULL DEFAULT '{}',
+  plan_params_json TEXT NOT NULL DEFAULT '{}',
+  stages_json TEXT NOT NULL DEFAULT '[]',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS broll_runs (
+  id SERIAL PRIMARY KEY,
+  strategy_id INTEGER NOT NULL REFERENCES broll_strategies(id),
+  video_id INTEGER NOT NULL REFERENCES videos(id),
+  step_name TEXT NOT NULL CHECK (step_name IN ('analysis', 'plan')),
+  status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete', 'failed')),
+  transcript_source TEXT NOT NULL DEFAULT 'best_available' CHECK (transcript_source IN ('best_available', 'raw', 'human_edited', 'group_assembled')),
+  resolved_transcript_source TEXT,
+  analysis_run_id INTEGER REFERENCES broll_runs(id),
+  input_text TEXT,
+  output_text TEXT,
+  prompt_used TEXT,
+  system_instruction_used TEXT,
+  model TEXT,
+  params_json TEXT NOT NULL DEFAULT '{}',
+  tokens_in INTEGER DEFAULT 0,
+  tokens_out INTEGER DEFAULT 0,
+  cost REAL DEFAULT 0,
+  runtime_ms INTEGER DEFAULT 0,
+  error_message TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B-Roll Example Sets (per video group)
+CREATE TABLE IF NOT EXISTS broll_example_sets (
+  id SERIAL PRIMARY KEY,
+  group_id INTEGER NOT NULL REFERENCES video_groups(id),
+  created_by TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS broll_example_sources (
+  id SERIAL PRIMARY KEY,
+  example_set_id INTEGER NOT NULL REFERENCES broll_example_sets(id),
+  kind TEXT NOT NULL CHECK (kind IN ('upload', 'yt_video', 'yt_channel')),
+  source_url TEXT,
+  label TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'ready', 'failed')),
+  error TEXT,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );

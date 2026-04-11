@@ -4,6 +4,12 @@ import { useApi, apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+
+function ytThumbnail(url) {
+  if (!url) return null
+  const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?.*v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/)
+  return m ? `https://img.youtube.com/vi/${m[1]}/mqdefault.jpg` : null
+}
 async function authFetch(path, opts = {}) {
   const headers = { ...opts.headers }
   if (supabase) {
@@ -17,6 +23,7 @@ export default function AssetsView() {
   const { id } = useParams()
   const navigate = useNavigate()
   const { data, loading: initialLoading, refetch: refetchClassification } = useApi(`/videos/groups/${id}/classification`)
+  const { data: refSources } = useApi(`/broll/groups/${id}/examples`)
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [moveDropdown, setMoveDropdown] = useState(false)
   const [newGroupName, setNewGroupName] = useState('')
@@ -319,6 +326,56 @@ export default function AssetsView() {
           </section>
         )
       })}
+
+      {/* Reference Videos */}
+      {refSources?.length > 0 && (
+        <section className="space-y-6 pt-12 border-t border-white/5 mb-10">
+          <div className="flex items-center gap-4">
+            <h2 className="font-headline text-xl font-bold text-on-surface-variant">Reference Videos</h2>
+            <span className="px-2 py-0.5 text-[10px] font-bold rounded uppercase tracking-widest bg-[#c180ff]/10 text-[#c180ff] border border-[#c180ff]/20">
+              {refSources.length} {refSources.length === 1 ? 'Reference' : 'References'}
+            </span>
+            <span className="text-[10px] text-on-surface-variant/60 uppercase tracking-wider">B-Roll AI Context</span>
+          </div>
+          <div className="grid grid-cols-4 gap-6">
+            {refSources.map(source => {
+              const thumb = ytThumbnail(source.source_url) || (source.meta_json && JSON.parse(source.meta_json || '{}').thumbnailUrl)
+              const label = source.label || source.source_url || `Reference #${source.id}`
+              return (
+                <div key={source.id} className="bg-surface-container-low rounded-xl overflow-hidden relative opacity-70 hover:opacity-100 transition-opacity">
+                  <div className="aspect-video relative overflow-hidden bg-surface-container-highest">
+                    {thumb ? (
+                      <img src={thumb} alt={label} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <span className="material-symbols-outlined text-3xl text-on-surface-variant/30">smart_display</span>
+                      </div>
+                    )}
+                    {source.is_favorite && (
+                      <span className="absolute top-2 right-2 material-symbols-outlined text-[#cefc00] text-base" style={{ fontVariationSettings: '"FILL" 1' }}>star</span>
+                    )}
+                    <span className={`absolute bottom-2 right-2 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                      source.status === 'ready' ? 'bg-[#cefc00]/20 text-[#cefc00]' :
+                      source.status === 'processing' ? 'bg-[#c180ff]/20 text-[#c180ff] animate-pulse' :
+                      source.status === 'failed' ? 'bg-red-500/20 text-red-400' :
+                      'bg-white/10 text-on-surface-variant'
+                    }`}>
+                      {source.status}
+                    </span>
+                  </div>
+                  <div className="p-3">
+                    <p className="text-sm font-bold text-on-surface truncate">{label}</p>
+                    <p className="text-[10px] tracking-widest uppercase text-on-surface-variant mt-1">
+                      {source.kind === 'yt_video' ? 'YouTube' : source.kind === 'upload' ? 'Local Upload' : source.kind.replace('_', ' ')}
+                      {source.is_favorite ? ' \u2022 Favorite' : ''}
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
       {/* Bottom Action Bar */}
       {selectedIds.size > 0 && !effectiveConfirmedGroups && (

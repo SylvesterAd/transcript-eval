@@ -11,6 +11,8 @@ import ExperimentsView from './components/views/ExperimentsView.jsx'
 import RunDetailView from './components/views/RunDetailView.jsx'
 import RunsView from './components/views/RunsView.jsx'
 import StabilityView from './components/views/StabilityView.jsx'
+import BRollStrategiesView from './components/views/BRollStrategiesView.jsx'
+import BRollRunsView from './components/views/BRollRunsView.jsx'
 import ProjectsView from './components/views/ProjectsView.jsx'
 import EditorView from './components/editor/EditorView.jsx'
 
@@ -176,6 +178,8 @@ export default function App() {
         <Route path="videos" element={<VideosView />} />
         <Route path="videos/:id" element={<VideoDetailView />} />
         <Route path="strategies" element={<StrategiesView />} />
+        <Route path="broll" element={<BRollStrategiesView />} />
+        <Route path="broll-runs" element={<BRollRunsView />} />
         <Route path="experiments" element={<ExperimentsView />} />
         <Route path="runs" element={<RunsView />} />
         <Route path="runs/:runId" element={<RunDetailView />} />

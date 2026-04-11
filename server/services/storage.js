@@ -129,6 +129,14 @@ export async function downloadToTemp(url, filename) {
   }
 
   const tempPath = join(TEMP_DIR, filename || `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+
+  // Reuse existing temp file if it exists and has content
+  try {
+    const { statSync } = await import('fs')
+    const stat = statSync(tempPath)
+    if (stat.size > 0) return tempPath
+  } catch {}
+
   const response = await fetch(url)
   if (!response.ok) throw new Error(`Download failed: ${response.status}`)
 

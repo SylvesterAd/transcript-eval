@@ -62,6 +62,12 @@ export function requireAuth(req, res, next) {
     return res.status(503).json({ error: 'Server auth is not configured' })
   }
 
+  // Dev bypass: allow unauthenticated requests on localhost with X-Dev-Bypass header
+  if (process.env.NODE_ENV !== 'production' && req.headers['x-dev-bypass'] === 'true') {
+    req.auth = { userId: 'dev', email: ADMIN_EMAILS[0], role: 'authenticated' }
+    return next()
+  }
+
   if (req.auth) {
     return next()
   }

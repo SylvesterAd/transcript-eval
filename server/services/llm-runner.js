@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync, statSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import db from '../db.js'
@@ -1139,7 +1139,7 @@ async function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 5000
 
-async function callLLM({ model, systemInstruction, prompt, params, experimentId }) {
+export async function callLLM({ model, systemInstruction, prompt, params, experimentId, videoFile, onProgress, abortSignal }) {
   // Log the actual request sent to the LLM
   const logDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'data', 'llm-logs')
   mkdirSync(logDir, { recursive: true })
@@ -1170,8 +1170,19 @@ async function callLLM({ model, systemInstruction, prompt, params, experimentId 
     if (!activeAbortControllers.has(experimentId)) activeAbortControllers.set(experimentId, new Set())
     activeAbortControllers.get(experimentId).add(controller)
   }
-  // Combine user-abort with a 5-minute timeout so hung connections don't block forever
-  const combinedSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60 * 1000)])
+  // Idle timeout: aborts only if no progress for 5 minutes (resets on each onProgress call)
+  const idleController = new AbortController()
+  let idleTimer = setTimeout(() => idleController.abort(), 5 * 60 * 1000)
+  const originalOnProgress = onProgress
+  onProgress = originalOnProgress ? (status) => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => idleController.abort(), 5 * 60 * 1000)
+    originalOnProgress(status)
+  } : undefined
+
+  const signals = [controller.signal, idleController.signal]
+  if (abortSignal) signals.push(abortSignal)
+  const combinedSignal = AbortSignal.any(signals)
 
   // Track which Google key to use (falls back to backup on failure)
   let currentGoogleKey = googleKey
@@ -1182,7 +1193,7 @@ async function callLLM({ model, systemInstruction, prompt, params, experimentId 
   } else if (model.startsWith('gpt') && openaiKey) {
     callFn = () => callOpenAI({ model, systemInstruction, prompt, params, apiKey: openaiKey, signal: combinedSignal })
   } else if (model.startsWith('gemini') && currentGoogleKey) {
-    callFn = () => callGemini({ model, systemInstruction, prompt, params, apiKey: currentGoogleKey, signal: combinedSignal })
+    callFn = () => callGemini({ model, systemInstruction, prompt, params, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
   } else if (anthropicKey && !model.startsWith('gpt') && !model.startsWith('gemini')) {
     callFn = () => callAnthropic({ model: 'claude-sonnet-4-20250514', systemInstruction, prompt, params, apiKey: anthropicKey, signal: combinedSignal })
   } else {
@@ -1225,21 +1236,21 @@ async function callLLM({ model, systemInstruction, prompt, params, experimentId 
             // Step 1: same model but with LOW thinking
             console.log(`[llm] ${currentModel} thinking timed out, retrying with thinking: LOW`)
             currentParams = { ...currentParams, thinking_level: 'LOW' }
-            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
             attempt--; continue
           } else if (fallbackStep <= 2 && currentModel !== 'gemini-3-pro-preview') {
             // Step 2: try gemini-3-pro-preview with LOW thinking
             console.log(`[llm] Falling back to gemini-3-pro-preview with thinking: LOW`)
             currentModel = 'gemini-3-pro-preview'
             currentParams = { ...currentParams, thinking_level: 'LOW' }
-            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
             attempt--; continue
           } else if (fallbackStep <= 3) {
             // Step 3: fall back to flash (always works)
             console.log(`[llm] Falling back to gemini-3-flash-preview`)
             currentModel = 'gemini-3-flash-preview'
             currentParams = { ...params } // Reset params for flash
-            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
             attempt--; continue
           }
         }
@@ -1247,7 +1258,7 @@ async function callLLM({ model, systemInstruction, prompt, params, experimentId 
         // Switch to backup Google key on failure
         if (currentModel.startsWith('gemini') && googleKeyBackup && currentGoogleKey !== googleKeyBackup) {
           currentGoogleKey = googleKeyBackup
-          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal })
+          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
           console.log(`[llm] Switching to backup Google API key`)
         }
         if (attempt === MAX_RETRIES) throw new Error(realMsg)
@@ -1376,8 +1387,114 @@ async function callOpenAI({ model, systemInstruction, prompt, params, apiKey, si
   return { text, tokensIn, tokensOut, cost }
 }
 
-async function callGemini({ model, systemInstruction, prompt, params, apiKey, signal }) {
-  const contents = [{ role: 'user', parts: [{ text: prompt }] }]
+/**
+ * Upload a video file to Gemini File API for use in multimodal prompts.
+ * Returns { fileUri, mimeType } once the file is ACTIVE.
+ */
+async function uploadToGeminiFileAPI(filePath, apiKey, onProgress, signal) {
+  const fileBuffer = readFileSync(filePath)
+  const fileSize = statSync(filePath).size
+  const ext = filePath.split('.').pop().toLowerCase()
+  const mimeType = ext === 'mp4' ? 'video/mp4' : ext === 'webm' ? 'video/webm' : ext === 'mov' ? 'video/quicktime' : 'video/mp4'
+  const displayName = `broll-analysis-${Date.now()}.${ext}`
+
+  // Step 1: Start resumable upload
+  const startRes = await fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
+    {
+      method: 'POST',
+      signal,
+      headers: {
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(fileSize),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { displayName } }),
+    }
+  )
+  if (!startRes.ok) throw new Error(`Gemini File API start failed (${startRes.status}): ${await startRes.text()}`)
+  const uploadUrl = startRes.headers.get('x-goog-upload-url')
+  if (!uploadUrl) throw new Error('Gemini File API: missing upload URL')
+
+  // Step 2: Upload the file bytes (chunked for progress tracking)
+  const sizeMB = (fileSize / 1024 / 1024).toFixed(0)
+  if (onProgress) onProgress(`Uploading video (0% of ${sizeMB}MB)...`)
+  const CHUNK_SIZE = 8 * 1024 * 1024 // 8MB chunks
+  let offset = 0
+  let uploadData
+  while (offset < fileSize) {
+    const end = Math.min(offset + CHUNK_SIZE, fileSize)
+    const chunk = fileBuffer.subarray(offset, end)
+    const isLast = end >= fileSize
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'POST',
+      signal,
+      headers: {
+        'Content-Length': String(chunk.length),
+        'X-Goog-Upload-Offset': String(offset),
+        'X-Goog-Upload-Command': isLast ? 'upload, finalize' : 'upload',
+      },
+      body: chunk,
+    })
+    if (isLast) {
+      if (!uploadRes.ok) throw new Error(`Gemini File API upload failed (${uploadRes.status}): ${await uploadRes.text()}`)
+      uploadData = await uploadRes.json()
+    } else if (!uploadRes.ok) {
+      throw new Error(`Gemini File API chunk upload failed at offset ${offset} (${uploadRes.status}): ${await uploadRes.text()}`)
+    }
+    offset = end
+    const pct = Math.round((offset / fileSize) * 100)
+    if (onProgress) onProgress(`Uploading video (${pct}% of ${sizeMB}MB)...`)
+  }
+  const fileName = uploadData.file?.name
+  if (!fileName) throw new Error('Gemini File API: missing file name in response')
+
+  // Step 3: Poll until file is ACTIVE
+  if (onProgress) onProgress(`Processing video on Gemini (0s)...`)
+  const maxWait = 300_000 // 5 minutes
+  const start = Date.now()
+  while (Date.now() - start < maxWait) {
+    const statusRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`, { signal })
+    const statusData = await statusRes.json()
+    if (statusData.state === 'ACTIVE') {
+      console.log(`[gemini-file] Video uploaded and ready: ${fileName} (${(fileSize / 1024 / 1024).toFixed(1)}MB)`)
+      return { fileUri: statusData.uri, mimeType }
+    }
+    if (statusData.state === 'FAILED') throw new Error(`Gemini file processing failed: ${statusData.error?.message || 'unknown'}`)
+    await new Promise(r => setTimeout(r, 3000))
+    const elapsed = Math.round((Date.now() - start) / 1000)
+    if (onProgress) onProgress(`Processing video on Gemini (${elapsed}s)...`)
+  }
+  throw new Error('Gemini file processing timed out (5 min)')
+}
+
+// Cache Gemini file uploads: filePath → { fileUri, mimeType, expiry }
+const geminiFileCache = new Map()
+
+async function getOrUploadGeminiFile(videoFile, apiKey, onProgress, signal) {
+  const cached = geminiFileCache.get(videoFile)
+  if (cached && cached.expiry > Date.now()) {
+    if (onProgress) onProgress('Using cached video upload')
+    return { fileUri: cached.fileUri, mimeType: cached.mimeType }
+  }
+  const result = await uploadToGeminiFileAPI(videoFile, apiKey, onProgress, signal)
+  // Gemini files expire after ~48h, cache for 1h to be safe
+  geminiFileCache.set(videoFile, { ...result, expiry: Date.now() + 3600_000 })
+  return result
+}
+
+async function callGemini({ model, systemInstruction, prompt, params, apiKey, signal, videoFile, onProgress }) {
+  // Build parts: video file (if provided) + text prompt
+  const parts = []
+  if (videoFile) {
+    const { fileUri, mimeType } = await getOrUploadGeminiFile(videoFile, apiKey, onProgress, signal)
+    parts.push({ fileData: { mimeType, fileUri } })
+    if (onProgress) onProgress('Analyzing video...')
+  }
+  parts.push({ text: prompt })
+  const contents = [{ role: 'user', parts }]
   const body = { contents }
 
   if (systemInstruction) {

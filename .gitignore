@@ -5,3 +5,6 @@ data/
 uploads/
 server/database.sqlite
 server/services/.venv/
+.vercel
+.DS_Store
+server/eval.db

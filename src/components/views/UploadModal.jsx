@@ -78,8 +78,6 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       // tus-js-client then PATCHes directly to CF. This is the CF-recommended approach.
       let cfStreamUid = null
       const API_BASE = import.meta.env.VITE_API_URL || '/api'
-      const session = supabase ? (await supabase.auth.getSession()).data.session : null
-      const authToken = session?.access_token
 
       await new Promise((resolve, reject) => {
         const backendOrigin = API_BASE.startsWith('http') ? new URL(API_BASE).origin : window.location.origin
@@ -90,11 +88,16 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
           removeFingerprintOnSuccess: true,
           storeFingerprintForResuming: false,
           metadata: { name: entry.file.name, filetype: entry.file.type || 'video/mp4' },
-          onBeforeRequest: (req) => {
-            // Only send Authorization to our backend, not to Cloudflare
+          onBeforeRequest: async (req) => {
+            // Fetch fresh token per-request so it never expires mid-upload
+            // Only send auth to our backend, not to Cloudflare
             const url = req.getURL ? req.getURL() : req._url || ''
-            if (authToken && url.startsWith(backendOrigin)) {
-              req.setHeader('Authorization', `Bearer ${authToken}`)
+            const isOurBackend = url.startsWith('/') || url.startsWith(backendOrigin)
+            if (supabase && isOurBackend) {
+              const { data: { session } } = await supabase.auth.getSession()
+              if (session?.access_token) {
+                req.setHeader('Authorization', `Bearer ${session.access_token}`)
+              }
             }
           },
           onError: (err) => reject(new Error(err.message || 'Upload failed')),

@@ -13,6 +13,26 @@ mkdirSync(TEMP_DIR, { recursive: true })
 mkdirSync(FRAMES_DIR, { recursive: true })
 
 /**
+ * Extract a segment from a video file using ffmpeg (fast seek, no re-encode).
+ * Returns path to the segment file in temp dir.
+ */
+export async function extractVideoSegment(videoPath, startSeconds, endSeconds, outputFilename) {
+  const outputPath = join(TEMP_DIR, outputFilename)
+  if (existsSync(outputPath)) return outputPath // reuse cached segment
+  const duration = endSeconds - startSeconds
+  await execFileAsync('ffmpeg', [
+    '-ss', String(startSeconds),
+    '-i', videoPath,
+    '-t', String(duration),
+    '-c', 'copy', // no re-encode, fast
+    '-avoid_negative_ts', '1',
+    '-y',
+    outputPath,
+  ], { timeout: 30000 })
+  return outputPath
+}
+
+/**
  * Extract a thumbnail from a video file using ffmpeg.
  * Takes a frame at 2 seconds (or 0 if video is shorter).
  */
@@ -110,6 +130,90 @@ export async function concatenateVideos(filePaths, outputPath) {
     return mp3Output
   } finally {
     try { unlinkSync(listPath) } catch {}
+  }
+}
+
+/**
+ * Export a post-cut video: trim cut regions, concat, downscale to 360p.
+ * Single FFmpeg pass with filter_complex for frame-accurate cuts + small output.
+ * @param {string} videoPath - Path to the original video file
+ * @param {Array<{start: number, end: number}>} cuts - Regions to remove (sorted)
+ * @param {number} totalDuration - Total video duration in seconds
+ * @returns {string} Path to the exported 360p post-cut video
+ */
+export async function exportPostCutVideo(videoPath, cuts, totalDuration) {
+  if (!cuts || !cuts.length) return videoPath // nothing to cut
+
+  // Sort and merge overlapping cuts
+  const sorted = [...cuts].filter(c => c.end > c.start + 0.01).sort((a, b) => a.start - b.start)
+  const merged = [{ start: sorted[0].start, end: sorted[0].end }]
+  for (let i = 1; i < sorted.length; i++) {
+    const last = merged[merged.length - 1]
+    if (sorted[i].start <= last.end + 0.05) {
+      last.end = Math.max(last.end, sorted[i].end)
+    } else {
+      merged.push({ start: sorted[i].start, end: sorted[i].end })
+    }
+  }
+
+  // Invert cuts to get keep segments
+  const keepSegments = []
+  let pos = 0
+  for (const cut of merged) {
+    if (pos < cut.start - 0.01) {
+      keepSegments.push({ start: pos, end: cut.start })
+    }
+    pos = cut.end
+  }
+  if (pos < totalDuration - 0.01) {
+    keepSegments.push({ start: pos, end: totalDuration })
+  }
+
+  if (!keepSegments.length) throw new Error('No segments remain after cuts')
+
+  const timestamp = Date.now()
+  const outputPath = join(TEMP_DIR, `postcut-${timestamp}.mp4`)
+
+  // Build filter_complex: trim each segment, scale to 360p, concat
+  const n = keepSegments.length
+  const vFilters = []
+  const aFilters = []
+  const concatInputs = []
+
+  for (let i = 0; i < n; i++) {
+    const seg = keepSegments[i]
+    vFilters.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS,scale=-2:360[v${i}]`)
+    aFilters.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`)
+    concatInputs.push(`[v${i}][a${i}]`)
+  }
+
+  const filterComplex = [
+    ...vFilters,
+    ...aFilters,
+    `${concatInputs.join('')}concat=n=${n}:v=1:a=1[outv][outa]`,
+  ].join(';')
+
+  const keptDuration = keepSegments.reduce((s, seg) => s + (seg.end - seg.start), 0)
+  console.log(`[postcut] ${n} segments, ${keptDuration.toFixed(1)}s kept of ${totalDuration.toFixed(1)}s → 360p`)
+
+  try {
+    await execFileAsync('ffmpeg', [
+      '-i', videoPath,
+      '-filter_complex', filterComplex,
+      '-map', '[outv]', '-map', '[outa]',
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+      '-c:a', 'aac', '-b:a', '96k',
+      '-movflags', '+faststart',
+      '-y', outputPath,
+    ], { timeout: 900000 }) // 15min for long videos
+
+    const { statSync } = await import('fs')
+    const { size } = statSync(outputPath)
+    console.log(`[postcut] Exported 360p: ${outputPath} (${(size / 1024 / 1024).toFixed(1)}MB)`)
+    return outputPath
+  } catch (err) {
+    try { unlinkSync(outputPath) } catch {}
+    throw err
   }
 }
 

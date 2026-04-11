@@ -990,8 +990,8 @@ router.post('/groups/:id/transcribe', requireAuth, async (req, res) => {
 
   // Find all videos that need transcription (not done, not currently active)
   const videos = await db.prepare(`
-    SELECT id, title, transcription_status, file_path FROM videos
-    WHERE group_id = ? AND file_path IS NOT NULL
+    SELECT id, title, transcription_status, file_path, cf_stream_uid FROM videos
+    WHERE group_id = ? AND (file_path IS NOT NULL OR cf_stream_uid IS NOT NULL)
     AND (transcription_status IS NULL OR transcription_status NOT IN ('done'))
     ORDER BY id ASC
   `).all(req.params.id)
@@ -2004,6 +2004,13 @@ router.put('/:id', requireAuth, async (req, res) => {
 // Background worker: actually delete group data + storage files
 async function purgeGroup(groupId) {
   try {
+    // Clean up broll example sources/sets for this group
+    const exampleSets = await db.prepare('SELECT id FROM broll_example_sets WHERE group_id = ?').all(groupId)
+    for (const set of exampleSets) {
+      await db.prepare('DELETE FROM broll_example_sources WHERE example_set_id = ?').run(set.id)
+    }
+    await db.prepare('DELETE FROM broll_example_sets WHERE group_id = ?').run(groupId)
+
     const videos = await db.prepare('SELECT id, file_path, thumbnail_path, cf_stream_uid FROM videos WHERE group_id = ?').all(groupId)
     for (const v of videos) {
       const runs = await db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)

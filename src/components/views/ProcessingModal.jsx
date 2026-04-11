@@ -147,8 +147,42 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // Only on mount
 
+  // Bootstrap files from server if we have none (e.g. navigated here after b-roll step)
+  const bootstrappedRef = useRef(false)
+  useEffect(() => {
+    if (files.length > 0 || bootstrappedRef.current) return
+    bootstrappedRef.current = true
+    ;(async () => {
+      try {
+        const headers = {}
+        if (supabase) {
+          const { data } = await supabase.auth.getSession()
+          if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+        }
+        const res = await fetch(`${API_BASE}/videos/groups/${groupIdRef.current}/detail`, { headers })
+        if (!res.ok) return
+        const data = await res.json()
+        if (!data.videos?.length) return
+        setFiles(data.videos.map(v => ({
+          id: `server-${v.id}`,
+          name: v.title || `Video ${v.id}`,
+          file: null,
+          type: 'video',
+          status: 'complete',
+          progress: 100,
+          error: null,
+          xhr: null,
+          serverId: v.id,
+          transcriptionStatus: v.transcription_status || null,
+          transcriptionError: v.transcription_error || null,
+        })))
+      } catch {}
+    })()
+  }, [files.length])
+
   // Transcription starts automatically per-video when /register is called
   // This batch trigger is a fallback for any videos that missed auto-start
+  const hasInitialFiles = (initialFiles || []).length > 0
   const allUploadsFinished = files.length > 0 && files.every(f => f.status === 'complete' || f.status === 'error')
   const classificationTriggeredRef = useRef(false)
   useEffect(() => {

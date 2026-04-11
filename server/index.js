@@ -7,6 +7,9 @@ import strategiesRouter from './routes/strategies.js'
 import experimentsRouter from './routes/experiments.js'
 import diffsRouter from './routes/diffs.js'
 import rankingsRouter from './routes/rankings.js'
+import brollRouter from './routes/broll.js'
+import storyblocksRouter from './routes/storyblocks.js'
+import pexelsRouter from './routes/pexels.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 
@@ -35,6 +38,9 @@ app.use('/api/strategies', strategiesRouter)
 app.use('/api/experiments', experimentsRouter)
 app.use('/api/diffs', diffsRouter)
 app.use('/api/rankings', rankingsRouter)
+app.use('/api/broll', brollRouter)
+app.use('/api/storyblocks', storyblocksRouter)
+app.use('/api/pexels', pexelsRouter)
 
 const APP_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'dev'
 const DEPLOY_TIME = new Date().toISOString()

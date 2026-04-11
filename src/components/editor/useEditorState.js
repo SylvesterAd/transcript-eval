@@ -77,6 +77,7 @@ function deriveTracksFromTimeline(timeline, videos) {
       groupId: gId,
       muted: i > 0,
       waveform: t.waveform || [],
+      waveformPeaks: t.waveformPeaks || null,
       transcriptWords: [],
       transcriptSentences: [],
       showTranscript: false,

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Outlet, NavLink } from 'react-router-dom'
-import { Database, Video, FlaskConical, LayoutDashboard, DollarSign, Play } from 'lucide-react'
+import { Database, Video, FlaskConical, LayoutDashboard, DollarSign, Play, Film } from 'lucide-react'
 import { useRole } from '../../contexts/RoleContext.jsx'
 import AuthDropdown from '../auth/AuthDropdown.jsx'
 import { supabase } from '../../lib/supabaseClient.js'
@@ -10,9 +10,11 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const navItems = [
   { to: '/admin', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/admin/videos', icon: Video, label: 'Videos' },
-  { to: '/admin/strategies', icon: Database, label: 'Flows' },
+  { to: '/admin/strategies', icon: Database, label: 'Rough Cut Strategies' },
+  { to: '/admin/broll', icon: Film, label: 'B-Roll Strategies' },
   { to: '/admin/experiments', icon: FlaskConical, label: 'Experiments' },
-  { to: '/admin/runs', icon: Play, label: 'Runs' },
+  { to: '/admin/runs', icon: Play, label: 'Rough Cut Runs' },
+  { to: '/admin/broll-runs', icon: Play, label: 'B-Roll Runs' },
 ]
 
 export default function AdminLayout() {
