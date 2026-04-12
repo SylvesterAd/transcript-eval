@@ -14,6 +14,7 @@ const ADMIN_EMAILS = ['silvestras.stonk@gmail.com']
 
 function getRoleFromUser(user) {
   if (user?.email && ADMIN_EMAILS.includes(user.email.toLowerCase())) return 'admin'
+  if (user?.app_metadata?.role === 'admin') return 'admin'
   return user?.app_metadata?.role || user?.user_metadata?.role || 'user'
 }
 

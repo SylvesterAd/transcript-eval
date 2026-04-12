@@ -54,7 +54,12 @@ export async function attachAuth(req, _res, next) {
 const ADMIN_EMAILS = ['silvestras.stonk@gmail.com']
 
 export function isAdmin(req) {
-  return req.auth?.email && ADMIN_EMAILS.includes(req.auth.email.toLowerCase())
+  if (!req.auth) return false
+  // Check hardcoded email list (owner fallback)
+  if (req.auth.email && ADMIN_EMAILS.includes(req.auth.email.toLowerCase())) return true
+  // Check app_metadata.role set via Supabase dashboard
+  if (req.auth.payload?.app_metadata?.role === 'admin') return true
+  return false
 }
 
 export function requireAuth(req, res, next) {
