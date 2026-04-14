@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useApi, apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
 import { Play, Loader2, CheckCircle, AlertCircle, RotateCcw, Search, Sparkles, Layers, Tag, Film } from 'lucide-react'
+import BRollEditor from './BRollEditor.jsx'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 async function authFetch(path) {
@@ -209,6 +210,11 @@ export default function BRollPanel({ groupId, videoId }) {
   }
 
   const isRunning = !!runningType
+
+  // Switch to B-Roll editor when search exists or is running
+  if (hasCompletedBrollSearch || runningType === 'broll_search') {
+    return <BRollEditor groupId={groupId} videoId={videoId} planPipelineId={planPipelineId} />
+  }
 
   return (
     <div className="flex-1 overflow-auto p-6">

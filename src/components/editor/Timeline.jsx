@@ -3,6 +3,8 @@ import { EditorContext } from './EditorView.jsx'
 import { formatTime, formatTimeRuler } from './useEditorState.js'
 import { VideoTrack, AudioTrack, CompositeAudioTrack } from './TimelineTrack.jsx'
 import VideoFrameTrack, { CompositeFrameTrack } from './VideoFrameTrack.jsx'
+import BRollTrack, { BROLL_TRACK_H } from './BRollTrack.jsx'
+import { BRollContext } from './useBRollEditorState.js'
 
 const COMPOSITE_H = 80
 const COMPOSITE_AUDIO_H = 56
@@ -476,6 +478,9 @@ export default function Timeline() {
             </div>
           </div>
 
+          {/* B-Roll track (above composite when in B-Roll editor) */}
+          <BRollTrackRow scrollRef={scrollRef} scrollX={scrollX} zoom={state.zoom} />
+
           {/* Composite video + audio tracks in MAIN mode */}
           {isMainMode && mainTrackSegments?.length > 0 && (
             <>
@@ -697,6 +702,25 @@ export default function Timeline() {
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+function BRollTrackRow({ scrollRef, scrollX, zoom }) {
+  const broll = useContext(BRollContext)
+  if (!broll?.placements?.length) return null
+
+  return (
+    <div className="relative">
+      <div className="flex">
+        <div className="sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 text-[10px] font-bold z-30 bg-surface-container text-teal-400" style={{ height: `${BROLL_TRACK_H}px` }}>
+          <span className="material-symbols-outlined text-[12px] shrink-0 opacity-30 mr-1">movie</span>
+          B-Roll
+        </div>
+        <div className="flex-1 relative z-0">
+          <BRollTrack zoom={zoom} scrollRef={scrollRef} scrollX={scrollX} />
+        </div>
+      </div>
     </div>
   )
 }

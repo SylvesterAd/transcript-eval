@@ -1518,19 +1518,19 @@ export async function executeBrollSearch(planPipelineId) {
       brollPipelineProgress.set(searchPipelineId, { ...brollPipelineProgress.get(searchPipelineId), subDone: completedItems, subLabel })
       console.log(`[broll-pipeline] Search ${idx + 1}/${workItems.length}: ${subLabel}`)
 
-      // Build brief
+      // Build brief — description + full style, no function/type metadata
       const styleParts = []
       if (p.style?.colors) styleParts.push(`colors: ${p.style.colors}`)
       if (p.style?.temperature) styleParts.push(`temperature: ${p.style.temperature}`)
       if (p.style?.motion) styleParts.push(`motion: ${p.style.motion}`)
+      if (p.style?.framing) styleParts.push(`framing: ${p.style.framing}`)
+      if (p.style?.lighting) styleParts.push(`lighting: ${p.style.lighting}`)
 
       const brief = [
-        `Function: ${p.function || ''}`,
-        `Type group: ${p.type_group || ''}`,
-        `Source feel: ${p.source_feel || ''}`,
-        `Description: ${p.description || ''}`,
-        styleParts.length ? `Style: ${styleParts.join('; ')}` : '',
-      ].filter(Boolean).join('. ')
+        p.description ? `# ${p.description}` : '',
+        styleParts.length ? `## Style: ${styleParts.join('; ')}` : '',
+        p.source_feel ? `## Source feel: ${p.source_feel}` : '',
+      ].filter(Boolean).join('\n')
 
       // Use keywords from keyword generation, or fall back to placement's search_keywords
       const searchKeywords = item.keywords.length ? item.keywords : (p.search_keywords || [])
@@ -2973,4 +2973,110 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     }
     throw err
   }
+}
+
+// ── B-Roll Editor Data ────────────────────────────────────────────────
+
+/**
+ * Assemble all data needed for the B-Roll editor UI.
+ * Loads plan placements and search results for a given plan pipeline.
+ */
+export async function getBRollEditorData(planPipelineId) {
+  // 1. Load per-chapter plan sub-runs → extract placements
+  const planSubRuns = await db.prepare(`
+    SELECT id, output_text, metadata_json FROM broll_runs
+    WHERE metadata_json LIKE ? AND status = 'complete'
+    ORDER BY id
+  `).all(`%"pipelineId":"${planPipelineId}"%`)
+
+  const chapterRuns = planSubRuns.filter(r => {
+    try { const m = JSON.parse(r.metadata_json || '{}'); return m.isSubRun && m.stageName === 'Per-chapter B-Roll plan' }
+    catch { return false }
+  }).sort((a, b) => {
+    const ma = JSON.parse(a.metadata_json || '{}'), mb = JSON.parse(b.metadata_json || '{}')
+    return (ma.subIndex || 0) - (mb.subIndex || 0)
+  })
+
+  // Flatten placements from all chapters
+  const placements = []
+  for (let chIdx = 0; chIdx < chapterRuns.length; chIdx++) {
+    const raw = chapterRuns[chIdx].output_text || ''
+    let parsed
+    try {
+      const cleaned = raw.replace(/^```json\n?/, '').replace(/\n?```$/, '')
+      parsed = JSON.parse(cleaned)
+    } catch { continue }
+
+    // Find the placements array at any nesting
+    let items = parsed.placements || parsed.broll_placements || []
+    if (!items.length) {
+      for (const v of Object.values(parsed)) {
+        if (Array.isArray(v) && v.length && v[0]?.description) { items = v; break }
+      }
+    }
+
+    for (let pIdx = 0; pIdx < items.length; pIdx++) {
+      const p = items[pIdx]
+      if (p.category && p.category !== 'broll') continue
+      placements.push({
+        index: placements.length,
+        chapterIndex: chIdx,
+        placementIndex: pIdx,
+        start: p.start,
+        end: p.end,
+        audio_anchor: p.audio_anchor || '',
+        description: p.description || '',
+        function: p.function || '',
+        type_group: p.type_group || '',
+        source_feel: p.source_feel || '',
+        style: p.style || {},
+        searchStatus: 'pending',
+        results: [],
+      })
+    }
+  }
+
+  // 2. Load search sub-runs → match to placements
+  const searchRuns = await db.prepare(`
+    SELECT id, output_text, metadata_json FROM broll_runs
+    WHERE metadata_json LIKE ? AND status IN ('complete', 'failed')
+    ORDER BY id
+  `).all(`%"pipelineId":"bs-${planPipelineId}-%`)
+
+  const searchSubRuns = searchRuns.filter(r => {
+    try { return JSON.parse(r.metadata_json || '{}').isSubRun } catch { return false }
+  })
+
+  for (const sr of searchSubRuns) {
+    const meta = JSON.parse(sr.metadata_json || '{}')
+    const chIdx = meta.chapterIndex
+    const pIdx = meta.placementIndex
+    // Find matching placement
+    const match = placements.find(p => p.chapterIndex === chIdx && p.placementIndex === pIdx)
+    if (!match) continue
+
+    try {
+      const output = JSON.parse(sr.output_text || '{}')
+      match.results = output.results || []
+      match.searchStatus = match.results.length > 0 ? 'complete' : 'no_results'
+    } catch {
+      match.searchStatus = 'failed'
+    }
+  }
+
+  // 3. Check for active search progress
+  let searchProgress = null
+  for (const [pid, prog] of brollPipelineProgress.entries()) {
+    if (pid.startsWith(`bs-${planPipelineId}-`) && prog.status === 'running') {
+      searchProgress = { status: 'running', subDone: prog.subDone || 0, subTotal: prog.subTotal || 0 }
+      // Mark the currently-searching element
+      const currentIdx = prog.subDone || 0
+      if (currentIdx < placements.length) {
+        placements[currentIdx].searchStatus = 'searching'
+      }
+      break
+    }
+  }
+
+  return { placements, searchProgress, totalPlacements: placements.length }
 }

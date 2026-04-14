@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useApi } from '../../hooks/useApi.js'
-import { ChevronDown, ChevronRight, Clock, AlertCircle, CheckCircle, Copy, Check, Loader2 } from 'lucide-react'
+import { useApi, apiPost } from '../../hooks/useApi.js'
+import { ChevronDown, ChevronRight, Clock, AlertCircle, CheckCircle, Copy, Check, Loader2, RotateCw } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -83,7 +83,45 @@ function EventTimeline({ events }) {
   )
 }
 
-function LogDetail({ log }) {
+function RetryButton({ log, onRetry }) {
+  const [retrying, setRetrying] = useState(false)
+
+  // Only show for GPU search calls
+  if (!log.url?.includes('/broll/search')) return null
+
+  async function handleRetry(e) {
+    e.stopPropagation()
+    setRetrying(true)
+    try {
+      let body = {}
+      if (log.request_body) {
+        try { body = JSON.parse(log.request_body) } catch {}
+      }
+      // Remove stream flag — the backend adds it
+      delete body.stream
+      await apiPost('/admin/test-search', body)
+      if (onRetry) onRetry()
+    } catch (err) {
+      console.error('Retry failed:', err)
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={handleRetry}
+      disabled={retrying}
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 text-xs text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 disabled:opacity-40 transition-colors"
+      title="Retry this request"
+    >
+      <RotateCw size={12} className={retrying ? 'animate-spin' : ''} />
+      {retrying ? 'Sending...' : 'Retry'}
+    </button>
+  )
+}
+
+function LogDetail({ log, onRetry }) {
   // Parse response body to extract events if it's a streaming response
   let events = null
   if (log.response_body) {
@@ -95,10 +133,11 @@ function LogDetail({ log }) {
 
   return (
     <div className="space-y-3 mt-3">
-      {/* URL + Method */}
+      {/* URL + Method + Retry */}
       <div className="flex items-center gap-2">
         <span className="text-xs font-mono font-bold text-blue-400">{log.method}</span>
         <code className="text-xs text-zinc-300 font-mono flex-1 truncate">{log.url}</code>
+        <RetryButton log={log} onRetry={onRetry} />
         <CopyButton text={`${log.method} ${log.url}`} />
       </div>
 
@@ -251,7 +290,7 @@ export default function ApiLogsView() {
 
             {expandedId === log.id && detail && (
               <div className="px-4 pb-4 border-t border-zinc-800">
-                <LogDetail log={detail} />
+                <LogDetail log={detail} onRetry={() => refetch()} />
               </div>
             )}
           </div>

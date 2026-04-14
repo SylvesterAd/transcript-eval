@@ -9,13 +9,13 @@ const items = [
 
 const SYNC_READY_STATUSES = ['done', 'confirmed']
 
-export default function EditorSidebar({ activeTab = 'sync', assemblyStatus, onTabChange }) {
+export default function EditorSidebar({ activeTab = 'sync', assemblyStatus, hasVideos = true, onTabChange }) {
   const { isAdmin } = useRole()
   return (
     <aside className="flex flex-col items-center py-4 gap-8 border-r border-white/5 bg-[#0e0e10] w-20 shrink-0">
       <nav className="flex flex-col gap-6 w-full px-2">
         {items.filter(item => !item.adminOnly || isAdmin).map(item => {
-          const locked = item.needsSync && !SYNC_READY_STATUSES.includes(assemblyStatus)
+          const locked = item.needsSync && (!SYNC_READY_STATUSES.includes(assemblyStatus) || !hasVideos)
           const disabled = item.disabled || locked
           const active = item.id === activeTab
           return (

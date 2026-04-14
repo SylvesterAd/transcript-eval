@@ -748,6 +748,7 @@ export default function EditorView() {
           <EditorSidebar
             activeTab={activeTab}
             assemblyStatus={groupDetail?.assembly_status}
+            hasVideos={groupDetail?.videos?.length > 0}
             onTabChange={(newTab) => {
               // Warn when leaving roughcut with progress
               const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0

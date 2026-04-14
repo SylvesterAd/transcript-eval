@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { requireAuth, isAdmin } from '../auth.js'
 import db from '../db.js'
-import { activeStreams } from '../services/api-logger.js'
+import { activeStreams, streamingFetch } from '../services/api-logger.js'
 
 const router = Router()
 
@@ -63,6 +63,31 @@ router.get('/keys', requireAuth, requireAdmin, (req, res) => {
   })).filter(g => g.keys.length > 0)
 
   res.json({ groups })
+})
+
+router.post('/test-search', requireAuth, requireAdmin, async (req, res) => {
+  const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
+  const GPU_KEY = process.env.GPU_INTERNAL_KEY
+  if (!GPU_KEY) return res.status(500).json({ error: 'GPU_INTERNAL_KEY not set' })
+
+  const body = req.body || {
+    keywords: ['book page', 'reading book page', 'medical journal'],
+    brief: 'Function: Inform - Illustrate. Description: Book page with medical text.',
+    sources: ['pexels', 'storyblocks'],
+    max_results: 5, min_duration: 3, max_duration: 30, orientation: 'horizontal',
+  }
+
+  try {
+    const data = await streamingFetch(GPU_URL, {
+      body,
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
+      logSource: 'test-search:admin',
+      onProgress: (ev) => console.log(`[test-search] ${ev.stage}: ${ev.status}`),
+    })
+    res.json({ status: 'complete', results: data.results?.length || 0, events: data.events?.length || 0 })
+  } catch (err) {
+    res.json({ status: 'error', error: err.message })
+  }
 })
 
 router.get('/api-logs/active', requireAuth, requireAdmin, (req, res) => {

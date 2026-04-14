@@ -39,6 +39,7 @@ import {
   executeAltPlans,
   executeKeywords,
   executeBrollSearch,
+  getBRollEditorData,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -537,6 +538,15 @@ router.post('/pipeline/:pipelineId/run-keywords', requireAuth, async (req, res) 
 })
 
 // Run B-Roll video search using keywords + GPU-powered API
+router.get('/pipeline/:pipelineId/editor-data', requireAuth, async (req, res) => {
+  try {
+    const data = await getBRollEditorData(req.params.pipelineId)
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 router.post('/pipeline/:pipelineId/run-broll-search', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
