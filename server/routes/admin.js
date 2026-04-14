@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { requireAuth, isAdmin } from '../auth.js'
+import db from '../db.js'
 
 const router = Router()
 
@@ -61,6 +62,36 @@ router.get('/keys', requireAuth, requireAdmin, (req, res) => {
   })).filter(g => g.keys.length > 0)
 
   res.json({ groups })
+})
+
+router.get('/api-logs', requireAuth, requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200)
+  const offset = parseInt(req.query.offset) || 0
+  const source = req.query.source || null
+
+  let query = 'SELECT id, method, url, request_body, response_status, error, duration_ms, source, created_at FROM api_logs'
+  const params = []
+
+  if (source) {
+    query += ' WHERE source LIKE ?'
+    params.push(`%${source}%`)
+  }
+
+  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  params.push(limit, offset)
+
+  const logs = await db.prepare(query).all(...params)
+  const countQuery = source
+    ? await db.prepare('SELECT COUNT(*) as total FROM api_logs WHERE source LIKE ?').get(`%${source}%`)
+    : await db.prepare('SELECT COUNT(*) as total FROM api_logs').get()
+
+  res.json({ logs, total: parseInt(countQuery.total), limit, offset })
+})
+
+router.get('/api-logs/:id', requireAuth, requireAdmin, async (req, res) => {
+  const log = await db.prepare('SELECT * FROM api_logs WHERE id = ?').get(req.params.id)
+  if (!log) return res.status(404).json({ error: 'Log not found' })
+  res.json(log)
 })
 
 export default router

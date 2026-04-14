@@ -237,6 +237,21 @@ CREATE TABLE IF NOT EXISTS broll_runs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Outgoing API request log
+CREATE TABLE IF NOT EXISTS api_logs (
+  id SERIAL PRIMARY KEY,
+  method TEXT NOT NULL,
+  url TEXT NOT NULL,
+  request_headers TEXT,
+  request_body TEXT,
+  response_status INTEGER,
+  response_body TEXT,
+  error TEXT,
+  duration_ms INTEGER,
+  source TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- B-Roll Example Sets (per video group)
 CREATE TABLE IF NOT EXISTS broll_example_sets (
   id SERIAL PRIMARY KEY,

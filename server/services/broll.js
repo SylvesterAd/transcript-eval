@@ -1,4 +1,5 @@
 import db from '../db.js'
+import { loggedFetch } from './api-logger.js'
 import { callLLM } from './llm-runner.js'
 import { downloadToTemp, uploadFile, deleteFile, getPublicUrl } from './storage.js'
 import { extractVideoSegment } from './video-processor.js'
@@ -1525,11 +1526,12 @@ export async function executeBrollSearch(planPipelineId) {
       let responseStatus = 0
       const searchStart = Date.now()
       try {
-        const response = await fetch(GPU_URL, {
+        const response = await loggedFetch(GPU_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
           body: JSON.stringify(requestBody),
           signal: pipelineAbort.signal,
+          logSource: `broll-search:${searchPipelineId}`,
         })
 
         responseStatus = response.status
