@@ -63,3 +63,122 @@ export async function loggedFetch(url, opts = {}) {
 
   return response
 }
+
+/**
+ * SSE streaming fetch — sends request with stream:true, parses SSE events,
+ * calls onProgress for each progress event, and returns the final result.
+ *
+ * @param {string} url
+ * @param {object} opts
+ * @param {object} opts.body - request body (stream:true is added automatically)
+ * @param {object} opts.headers - request headers
+ * @param {AbortSignal} [opts.signal] - abort signal
+ * @param {string} [opts.logSource] - tag for api_logs
+ * @param {(event: {stage: string, status: string}) => void} [opts.onProgress] - called for each progress event
+ * @returns {Promise<{results: any[], search_count: number, filtered_count: number, model_used: string, events: object[]}>}
+ */
+export async function streamingFetch(url, opts = {}) {
+  const { body, headers, signal, logSource, onProgress } = opts
+  const method = 'POST'
+
+  const requestBody = { ...body, stream: true }
+  const requestStr = JSON.stringify(requestBody)
+
+  // Redact auth headers for storage
+  const safeHeaders = { ...headers }
+  if (safeHeaders['X-Internal-Key']) safeHeaders['X-Internal-Key'] = '***'
+  if (safeHeaders['Authorization']) safeHeaders['Authorization'] = '***'
+
+  const start = Date.now()
+  const allEvents = []
+  let finalResult = null
+  let errorEvent = null
+  let responseStatus = null
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: requestStr,
+      signal,
+    })
+    responseStatus = response.status
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.error || `HTTP ${response.status}`)
+    }
+
+    const contentType = response.headers.get('content-type') || ''
+
+    if (contentType.includes('text/event-stream')) {
+      // Parse SSE stream
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // keep incomplete line in buffer
+
+        let currentEvent = {}
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent.event = line.slice(7).trim()
+          } else if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6).trim()
+            try { currentEvent.data = JSON.parse(dataStr) } catch { currentEvent.data = dataStr }
+          } else if (line === '' && currentEvent.event) {
+            // End of event block
+            allEvents.push(currentEvent)
+
+            if (currentEvent.event === 'progress' && onProgress) {
+              onProgress(currentEvent.data)
+            } else if (currentEvent.event === 'result') {
+              finalResult = currentEvent.data
+            } else if (currentEvent.event === 'error') {
+              errorEvent = currentEvent.data
+            }
+            currentEvent = {}
+          }
+        }
+      }
+    } else {
+      // Non-streaming fallback (server didn't stream)
+      const data = await response.json()
+      finalResult = data
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') throw err
+    errorEvent = { error: err.message }
+  }
+
+  const duration = Date.now() - start
+
+  // Log the full exchange
+  const responseBody = JSON.stringify({ events: allEvents, result: finalResult, error: errorEvent })
+  db.prepare(
+    `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
+  ).run(
+    method,
+    url,
+    JSON.stringify(safeHeaders),
+    requestStr,
+    responseStatus,
+    responseBody.length > 50000 ? responseBody.substring(0, 50000) + '...[truncated]' : responseBody,
+    errorEvent ? (errorEvent.error || JSON.stringify(errorEvent)) : null,
+    duration,
+    logSource || null,
+  ).catch(err => console.warn('[api-logger] Failed to log:', err.message))
+
+  if (errorEvent && !finalResult) {
+    throw new Error(errorEvent.error || JSON.stringify(errorEvent))
+  }
+
+  return { ...finalResult, events: allEvents }
+}

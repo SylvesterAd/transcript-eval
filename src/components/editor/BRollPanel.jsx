@@ -238,6 +238,7 @@ export default function BRollPanel({ groupId, videoId }) {
               <div className="text-xs text-on-surface-variant">
                 Stage {(progress.stageIndex || 0) + 1} of {progress.totalStages}
                 {progress.subTotal ? ` — ${progress.subLabel || ''} (${progress.subDone || 0}/${progress.subTotal})` : ''}
+                {progress.gpuStage ? ` · GPU: ${progress.gpuStage}${progress.gpuStatus ? ` (${progress.gpuStatus})` : ''}` : ''}
                 {progress.subStatus ? ` · ${progress.subStatus}` : ''}
               </div>
             </div>

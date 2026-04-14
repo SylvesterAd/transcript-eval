@@ -1,5 +1,5 @@
 import db from '../db.js'
-import { loggedFetch } from './api-logger.js'
+import { loggedFetch, streamingFetch } from './api-logger.js'
 import { callLLM } from './llm-runner.js'
 import { downloadToTemp, uploadFile, deleteFile, getPublicUrl } from './storage.js'
 import { extractVideoSegment } from './video-processor.js'
@@ -1523,24 +1523,26 @@ export async function executeBrollSearch(planPipelineId) {
 
       let results = []
       let searchMeta = {}
-      let responseStatus = 0
       const searchStart = Date.now()
       try {
-        const response = await loggedFetch(GPU_URL, {
-          method: 'POST',
+        const data = await streamingFetch(GPU_URL, {
+          body: requestBody,
           headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
-          body: JSON.stringify(requestBody),
           signal: pipelineAbort.signal,
           logSource: `broll-search:${searchPipelineId}`,
+          onProgress: (ev) => {
+            const gpuStatus = ev.status ? `${ev.stage}: ${ev.status}` : ev.stage
+            console.log(`[broll-pipeline] GPU [${idx + 1}/${workItems.length}] ${gpuStatus}`)
+            brollPipelineProgress.set(searchPipelineId, {
+              ...brollPipelineProgress.get(searchPipelineId),
+              subDone: completedItems,
+              subLabel,
+              gpuStage: ev.stage,
+              gpuStatus: ev.status,
+            })
+          },
         })
 
-        responseStatus = response.status
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}))
-          throw new Error(err.error || `HTTP ${response.status}`)
-        }
-
-        const data = await response.json()
         results = data.results || []
         searchMeta = { search_count: data.search_count, filtered_count: data.filtered_count, model_used: data.model_used }
       } catch (err) {
@@ -1561,7 +1563,7 @@ export async function executeBrollSearch(planPipelineId) {
       await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         searchStrategy.id, videoId, 'analysis', results.length ? 'complete' : (searchMeta.error ? 'failed' : 'complete'),
         brief, output,
-        JSON.stringify(requestBody, null, 2), `HTTP ${responseStatus} | ${results.length} results | ${searchDuration}ms`,
+        JSON.stringify(requestBody, null, 2), `${results.length} results | ${searchDuration}ms`,
         'gpu-search', 0, 0, 0, searchDuration,
         JSON.stringify({ pipelineId: searchPipelineId, stageIndex: 0, stageName: 'B-Roll Search', subIndex: idx, subLabel, source: item.source, chapterIndex: item.chapterIndex, placementIndex: item.placementIndex, isSubRun: true, phase: 'broll_search', groupId }),
       )

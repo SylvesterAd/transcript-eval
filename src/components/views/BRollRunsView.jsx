@@ -293,6 +293,7 @@ function ActivePipelineRow({ pipeline, completedStages = [], completedSubRuns = 
             <div className="text-[10px] text-blue-400 mt-0.5">
               {stageName}
               {pipeline.subTotal ? ` (${pipeline.subDone || 0}/${pipeline.subTotal})` : ''}
+              {pipeline.gpuStage ? <span className="text-cyan-400/70 ml-1">· GPU: {pipeline.gpuStage}{pipeline.gpuStatus ? ` (${pipeline.gpuStatus})` : ''}</span> : ''}
               {pipeline.subStatus ? <span className="text-amber-400/70 ml-1">· {pipeline.subStatus}</span> : ''}
             </div>
           )}
