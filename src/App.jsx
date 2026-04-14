@@ -15,6 +15,7 @@ import BRollStrategiesView from './components/views/BRollStrategiesView.jsx'
 import BRollRunsView from './components/views/BRollRunsView.jsx'
 import ApiKeysView from './components/views/ApiKeysView.jsx'
 import ApiLogsView from './components/views/ApiLogsView.jsx'
+import GpuPipelineView from './components/views/GpuPipelineView.jsx'
 import ProjectsView from './components/views/ProjectsView.jsx'
 import EditorView from './components/editor/EditorView.jsx'
 
@@ -184,6 +185,7 @@ export default function App() {
         <Route path="broll-runs" element={<BRollRunsView />} />
         <Route path="keys" element={<ApiKeysView />} />
         <Route path="api-logs" element={<ApiLogsView />} />
+        <Route path="gpu" element={<GpuPipelineView />} />
         <Route path="experiments" element={<ExperimentsView />} />
         <Route path="runs" element={<RunsView />} />
         <Route path="runs/:runId" element={<RunDetailView />} />
