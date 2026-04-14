@@ -1,5 +1,8 @@
 import db from '../db.js'
 
+// ── Active streams (in-memory, for live UI) ──────────────────────────
+export const activeStreams = new Map()
+
 /**
  * Fetch wrapper that logs the request and response to api_logs table.
  * Drop-in replacement for fetch() — same signature, same return value.
@@ -89,11 +92,24 @@ export async function streamingFetch(url, opts = {}) {
   if (safeHeaders['X-Internal-Key']) safeHeaders['X-Internal-Key'] = '***'
   if (safeHeaders['Authorization']) safeHeaders['Authorization'] = '***'
 
+  const streamId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const start = Date.now()
   const allEvents = []
   let finalResult = null
   let errorEvent = null
   let responseStatus = null
+
+  // Register as active stream for live UI
+  activeStreams.set(streamId, {
+    id: streamId,
+    method,
+    url,
+    request_body: requestStr,
+    source: logSource || null,
+    started_at: new Date().toISOString(),
+    status: 'connecting',
+    events: [],
+  })
 
   try {
     const response = await fetch(url, {
@@ -112,6 +128,8 @@ export async function streamingFetch(url, opts = {}) {
     const contentType = response.headers.get('content-type') || ''
 
     if (contentType.includes('text/event-stream')) {
+      activeStreams.set(streamId, { ...activeStreams.get(streamId), status: 'streaming', response_status: responseStatus })
+
       // Parse SSE stream
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -134,7 +152,18 @@ export async function streamingFetch(url, opts = {}) {
             try { currentEvent.data = JSON.parse(dataStr) } catch { currentEvent.data = dataStr }
           } else if (line === '' && currentEvent.event) {
             // End of event block
-            allEvents.push(currentEvent)
+            const timestamped = { ...currentEvent, received_at: new Date().toISOString() }
+            allEvents.push(timestamped)
+
+            // Update active stream with new event
+            const active = activeStreams.get(streamId)
+            if (active) {
+              active.events.push(timestamped)
+              if (currentEvent.event === 'progress') {
+                active.lastStage = currentEvent.data?.stage
+                active.lastStatus = currentEvent.data?.status
+              }
+            }
 
             if (currentEvent.event === 'progress' && onProgress) {
               onProgress(currentEvent.data)
@@ -149,17 +178,24 @@ export async function streamingFetch(url, opts = {}) {
       }
     } else {
       // Non-streaming fallback (server didn't stream)
+      activeStreams.set(streamId, { ...activeStreams.get(streamId), status: 'non-streaming', response_status: responseStatus })
       const data = await response.json()
       finalResult = data
     }
   } catch (err) {
-    if (err.name === 'AbortError') throw err
+    if (err.name === 'AbortError') {
+      activeStreams.delete(streamId)
+      throw err
+    }
     errorEvent = { error: err.message }
   }
 
   const duration = Date.now() - start
 
-  // Log the full exchange
+  // Remove from active streams
+  activeStreams.delete(streamId)
+
+  // Log the full exchange to DB
   const responseBody = JSON.stringify({ events: allEvents, result: finalResult, error: errorEvent })
   db.prepare(
     `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, created_at)

@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { requireAuth, isAdmin } from '../auth.js'
 import db from '../db.js'
+import { activeStreams } from '../services/api-logger.js'
 
 const router = Router()
 
@@ -62,6 +63,11 @@ router.get('/keys', requireAuth, requireAdmin, (req, res) => {
   })).filter(g => g.keys.length > 0)
 
   res.json({ groups })
+})
+
+router.get('/api-logs/active', requireAuth, requireAdmin, (req, res) => {
+  const streams = Array.from(activeStreams.values())
+  res.json({ streams })
 })
 
 router.get('/api-logs', requireAuth, requireAdmin, async (req, res) => {
