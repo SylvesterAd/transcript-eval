@@ -1367,6 +1367,30 @@ export async function executeKeywords(planPipelineId) {
   }
 }
 
+// Poll GPU proxy job until complete or timeout
+async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
+  const GPU_JOB_URL = `https://gpu-proxy-production.up.railway.app/broll/jobs/${jobId}`
+  const start = Date.now()
+  while ((Date.now() - start) < timeoutSeconds * 1000) {
+    await new Promise(r => setTimeout(r, 10000)) // poll every 10s
+    try {
+      const resp = await fetch(GPU_JOB_URL, {
+        headers: { 'X-Internal-Key': gpuKey },
+      })
+      if (!resp.ok) continue
+      const job = await resp.json()
+      if (job.status === 'complete' && job.final_results) {
+        return job.final_results
+      }
+      if (job.status === 'failed') {
+        return { status: 'failed', error: job.error }
+      }
+      console.log(`[broll-pipeline] Job ${jobId}: ${job.status}`)
+    } catch {}
+  }
+  return { status: 'timeout' }
+}
+
 // Search stock footage for each B-Roll placement using keywords + GPU-powered API
 export async function executeBrollSearch(planPipelineId) {
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
@@ -1547,8 +1571,33 @@ export async function executeBrollSearch(planPipelineId) {
         searchMeta = { search_count: data.search_count, filtered_count: data.filtered_count, model_used: data.model_used }
       } catch (err) {
         if (err.name === 'AbortError') throw err
-        console.warn(`[broll-pipeline] Search failed for element ${idx}: ${err.message}`)
-        searchMeta = { error: err.message }
+
+        // Try to recover via job polling if we got a job_id before disconnect
+        const jobId = err.job_id || null
+        if (!jobId) {
+          // Check events array from streamingFetch for job_id
+          const events = err.events || []
+          const jobEvent = events.find(e => e.data?.job_id)
+          if (jobEvent?.data?.job_id) {
+            console.log(`[broll-pipeline] SSE failed but have job_id ${jobEvent.data.job_id}, polling for results...`)
+            try {
+              const jobResult = await _pollGpuJob(jobEvent.data.job_id, GPU_KEY, 900)
+              if (jobResult?.results) {
+                results = jobResult.results
+                searchMeta = { search_count: jobResult.search_count, filtered_count: jobResult.filtered_count, model_used: jobResult.model_used, recovered: true }
+                console.log(`[broll-pipeline] Recovered ${results.length} results from job ${jobEvent.data.job_id}`)
+              } else {
+                searchMeta = { error: `Job ${jobEvent.data.job_id}: ${jobResult?.status || 'unknown'}` }
+              }
+            } catch (pollErr) {
+              console.warn(`[broll-pipeline] Job poll failed: ${pollErr.message}`)
+              searchMeta = { error: err.message }
+            }
+          } else {
+            console.warn(`[broll-pipeline] Search failed for element ${idx}: ${err.message}`)
+            searchMeta = { error: err.message }
+          }
+        }
       }
       const searchDuration = Date.now() - searchStart
 

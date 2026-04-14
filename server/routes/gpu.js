@@ -55,4 +55,26 @@ router.get('/progress', requireAuth, (_req, res) => {
   res.json({ active })
 })
 
+// GET /api/gpu/jobs — Recent GPU jobs with per-stage persistence
+router.get('/jobs', requireAuth, async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ error: 'Supabase not configured' })
+  }
+
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200)
+    const { data, error } = await supabase
+      .from('broll_jobs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+    res.json({ jobs: data })
+  } catch (err) {
+    console.error('[gpu/jobs] Error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 export default router

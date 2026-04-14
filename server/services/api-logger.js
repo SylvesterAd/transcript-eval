@@ -167,8 +167,19 @@ export async function streamingFetch(url, opts = {}) {
 
             if (currentEvent.event === 'progress' && onProgress) {
               onProgress(currentEvent.data)
+              // Capture job_id from the first progress event
+              if (currentEvent.data?.stage === 'job' && currentEvent.data?.job_id) {
+                if (!finalResult) finalResult = {}
+                finalResult.job_id = currentEvent.data.job_id
+              }
+            } else if (currentEvent.event === 'stage_result') {
+              // Store intermediate stage results (search candidates, SigLIP filtered)
+              if (!finalResult) finalResult = {}
+              if (!finalResult.stages) finalResult.stages = {}
+              finalResult.stages[currentEvent.data.stage] = currentEvent.data
+              if (onProgress) onProgress(currentEvent.data)
             } else if (currentEvent.event === 'result') {
-              finalResult = currentEvent.data
+              finalResult = { ...(finalResult || {}), ...currentEvent.data }
             } else if (currentEvent.event === 'error') {
               errorEvent = currentEvent.data
             }
