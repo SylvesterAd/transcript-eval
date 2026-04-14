@@ -275,6 +275,7 @@ export default function ApiLogsView() {
               className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-zinc-800/30 transition-colors"
             >
               {expandedId === log.id ? <ChevronDown size={14} className="text-zinc-500 shrink-0" /> : <ChevronRight size={14} className="text-zinc-500 shrink-0" />}
+              <span className="text-[10px] font-mono text-zinc-600 w-8 shrink-0">#{log.id}</span>
               <span className="text-xs font-mono font-medium text-blue-400 w-12 shrink-0">{log.method}</span>
               <span className="text-sm text-zinc-200 truncate flex-1 font-mono">{log.url.replace(/^https?:\/\//, '')}</span>
               <StatusBadge status={log.response_status} error={log.error} />

@@ -21,11 +21,12 @@ import TranscriptEditor from './TranscriptEditor.jsx'
 import RoughCutPreview from './RoughCutPreview.jsx'
 import AssetsView from './AssetsView.jsx'
 import BRollPanel from './BRollPanel.jsx'
+import EstimationModal from './EstimationModal.jsx'
 
 export const EditorContext = createContext(null)
 
 export default function EditorView() {
-  const { id, tab } = useParams()
+  const { id, tab, placementId } = useParams()
   const navigate = useNavigate()
   const { data: groupDetail, loading, error, refetch: refetchDetail } = useApi(`/videos/groups/${id}/detail`)
   const { data: wordTimestamps, refetch: refetchTimestamps } = useApi(`/videos/groups/${id}/word-timestamps`)
@@ -34,6 +35,12 @@ export default function EditorView() {
   const [flowRunState, setFlowRunState] = useState(null)
   const cutDragRef = useRef(false) // true during cut edge drag — blocks AI cut regeneration
   // shape: { experimentId, runId, status: 'running'|'complete'|'error', progress: {...} }
+
+  // Token system
+  const [showEstimationModal, setShowEstimationModal] = useState(false)
+  const [estimation, setEstimation] = useState(null)
+  const [tokenBalance, setTokenBalance] = useState(null)
+  const [estimationLoading, setEstimationLoading] = useState(false)
 
   // URL tab is source of truth — sync to state before paint
   const assetsStatuses = ['classifying', 'classified', 'classification_failed', 'confirmed']
@@ -124,42 +131,13 @@ export default function EditorView() {
     }
   }, [activeTab, state.cuts, dispatch])
 
-  // Trigger main flow when switching to roughcut tab
-  const flowTriggeredRef = useRef(false)
+  // Apply annotation defaults when entering roughcut tab with existing annotations
   useEffect(() => {
-    if (activeTab !== 'roughcut' || !state.groupId || flowTriggeredRef.current) return
-    flowTriggeredRef.current = true
-
-    // If annotations already exist, apply defaults and done
+    if (activeTab !== 'roughcut' || !state.groupId) return
     if (groupDetail?.annotations?.items?.length > 0) {
       applyConfigDefaults(groupDetail.rough_cut_config, dispatch)
-      return
     }
-
-    // Trigger main flow
-    ;(async () => {
-      try {
-        const res = await authFetch(`/videos/groups/${state.groupId}/run-main-flow`, { method: 'POST' })
-        const data = await res.json()
-        if (!res.ok) {
-          if (data.error === 'too_many_failures') {
-            setFlowRunState({ status: 'blocked', message: data.message })
-          }
-          return
-        }
-        if (data.already_exists) {
-          // Auto-run already completed — refetch to load annotations
-          await refetchDetail()
-          return
-        }
-        if (data.experimentId) {
-          setFlowRunState({ experimentId: data.experimentId, runId: data.runId, status: 'running', progress: null, totalStages: data.totalStages || 0, stageNames: data.stageNames || [], stageTypes: data.stageTypes || [] })
-        }
-      } catch (err) {
-        console.error('[main-flow] Trigger failed:', err)
-      }
-    })()
-  }, [activeTab, state.groupId, groupDetail, dispatch, refetchDetail])
+  }, [activeTab, state.groupId, groupDetail, dispatch])
 
   // Poll flow progress
   useEffect(() => {
@@ -209,6 +187,62 @@ export default function EditorView() {
       authFetch(`/videos/groups/${id}/extract-frames`, { method: 'POST' }).catch(() => {})
     }
   }, [groupDetail, id])
+
+  // Fetch token balance on mount
+  useEffect(() => {
+    authFetch('/videos/user/tokens').then(r => r.json()).then(d => setTokenBalance(d.balance)).catch(() => {})
+  }, [])
+
+  // Handler: open estimation modal
+  const handleStartAIRoughCut = useCallback(async () => {
+    if (!state.groupId) return
+    setEstimationLoading(true)
+    try {
+      const res = await authFetch(`/videos/groups/${state.groupId}/estimate-ai-roughcut`, { method: 'POST' })
+      const data = await res.json()
+      setEstimation(data)
+      setShowEstimationModal(true)
+    } catch (err) {
+      console.error('[estimate] Failed:', err)
+    } finally {
+      setEstimationLoading(false)
+    }
+  }, [state.groupId])
+
+  // Handler: accept estimation and start pipeline
+  const handleAcceptAIRoughCut = useCallback(async () => {
+    if (!state.groupId) return
+    setEstimationLoading(true)
+    try {
+      const res = await authFetch(`/videos/groups/${state.groupId}/start-ai-roughcut`, { method: 'POST' })
+      const data = await res.json()
+      if (data.error === 'insufficient_tokens') {
+        setEstimation(prev => ({ ...prev, sufficient: false, balance: data.balance }))
+        setEstimationLoading(false)
+        return
+      }
+      setShowEstimationModal(false)
+      setEstimation(null)
+      if (data.balanceAfter != null) setTokenBalance(data.balanceAfter)
+      if (data.already_exists) {
+        await refetchDetail()
+      } else if (data.experimentId) {
+        setFlowRunState({
+          experimentId: data.experimentId,
+          runId: data.runId,
+          status: 'running',
+          progress: null,
+          totalStages: data.totalStages || 0,
+          stageNames: data.stageNames || [],
+          stageTypes: data.stageTypes || [],
+        })
+      }
+    } catch (err) {
+      console.error('[start-ai-roughcut] Failed:', err)
+    } finally {
+      setEstimationLoading(false)
+    }
+  }, [state.groupId, refetchDetail])
 
   // Load word timestamps — re-runs when tracks reference changes (e.g. after INIT_TRACKS)
   // to handle the case where timestamps loaded before tracks were populated,
@@ -718,7 +752,7 @@ export default function EditorView() {
   }
 
   return (
-    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef }}>
+    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
@@ -734,6 +768,12 @@ export default function EditorView() {
           </div>
           <div className="flex-1" />
           <div className="flex items-center gap-4">
+            {tokenBalance !== null && (
+              <div className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-white/5 border border-white/10">
+                <span className="material-symbols-outlined text-sm text-secondary">token</span>
+                <span className="text-xs font-bold text-on-surface-variant">{tokenBalance.toLocaleString()}</span>
+              </div>
+            )}
             <button className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all">
               Export
             </button>
@@ -806,6 +846,16 @@ export default function EditorView() {
             <div className="h-1 w-full bg-gradient-to-r from-transparent via-error/20 to-transparent" />
           </div>
         </div>
+      )}
+
+      {/* AI Rough Cut estimation modal */}
+      {showEstimationModal && estimation && (
+        <EstimationModal
+          estimation={estimation}
+          onAccept={handleAcceptAIRoughCut}
+          onDecline={() => { setShowEstimationModal(false); setEstimation(null) }}
+          loading={estimationLoading}
+        />
       )}
     </EditorContext.Provider>
   )
@@ -1127,5 +1177,5 @@ function deriveFromTimeline(timeline, videos) {
       originalOffset: t.offset || 0,
     })
   })
-  return { tracks: [...vTracks, ...aTracks], groups }
+  return { tracks: [...aTracks, ...vTracks], groups }
 }

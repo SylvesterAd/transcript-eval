@@ -16,7 +16,7 @@ async function authFetch(path) {
 
 export default function BRollPanel({ groupId, videoId }) {
   const { data: strategies } = useApi('/broll/strategies')
-  const { data: videoRunsData, refetch: refetchRuns } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
+  const { data: videoRunsData, loading: runsLoading, refetch: refetchRuns } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
   const [runningType, setRunningType] = useState(null) // 'analysis' | 'plan' | null
   const [pipelineId, setPipelineId] = useState(null)
   const [progress, setProgress] = useState(null)
@@ -194,26 +194,22 @@ export default function BRollPanel({ groupId, videoId }) {
     }
   }
 
-  async function handleRunBrollSearch() {
-    if (!planPipelineId) return
-    setRunningType('broll_search')
-    setError(null)
-    setProgress(null)
-    try {
-      await apiPost(`/broll/pipeline/${planPipelineId}/run-broll-search`, {})
-      refetchRuns()
-      setTimeout(() => refetchRuns(), 2000)
-    } catch (err) {
-      setError(err.message)
-      setRunningType(null)
-    }
-  }
+  const [showEditor, setShowEditor] = useState(false)
 
   const isRunning = !!runningType
 
-  // Switch to B-Roll editor when search exists or is running
-  if (hasCompletedBrollSearch || runningType === 'broll_search') {
+  // Switch to B-Roll editor when search exists, keywords done and user clicked, or already has results
+  if (hasCompletedBrollSearch || showEditor) {
     return <BRollEditor groupId={groupId} videoId={videoId} planPipelineId={planPipelineId} />
+  }
+
+  // Show loading while checking if steps are already complete (prevents flash of steps UI)
+  if (runsLoading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <Loader2 size={24} className="text-primary-fixed animate-spin" />
+      </div>
+    )
   }
 
   return (
@@ -437,29 +433,14 @@ export default function BRollPanel({ groupId, videoId }) {
                 </div>
               </div>
             </div>
-            {hasCompletedBrollSearch ? (
-              <div className="flex items-center gap-2">
-                <CheckCircle size={14} className="text-emerald-400" />
-                <span className="text-xs text-emerald-400 font-medium">Complete</span>
-                <button
-                  onClick={handleRunBrollSearch}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface bg-surface-variant/30 hover:bg-surface-variant/50 transition-colors disabled:opacity-40"
-                >
-                  <RotateCcw size={12} />
-                  Re-run
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={handleRunBrollSearch}
-                disabled={isRunning || !hasCompletedKeywords || !planPipelineId}
-                className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
-              >
-                {runningType === 'broll_search' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {runningType === 'broll_search' ? 'Searching...' : 'Search B-Roll'}
-              </button>
-            )}
+            <button
+              onClick={() => setShowEditor(true)}
+              disabled={isRunning || !hasCompletedKeywords || !planPipelineId}
+              className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
+            >
+              <Search size={14} />
+              Search B-Roll
+            </button>
           </div>
         </div>
 

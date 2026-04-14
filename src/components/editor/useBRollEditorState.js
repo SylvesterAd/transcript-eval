@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from 'react'
 import { supabase } from '../../lib/supabaseClient.js'
+import { apiPost } from '../../hooks/useApi.js'
 import { EditorContext } from './EditorView.jsx'
 import { matchPlacementsToTranscript } from './brollUtils.js'
 
@@ -32,14 +33,51 @@ function reducer(state, action) {
       return { ...state, selectedResults: { ...state.selectedResults, [action.payload.placementIndex]: action.payload.resultIndex } }
     case 'MERGE_SEARCH_RESULTS': {
       const { placements: newPlacements, searchProgress } = action.payload
-      // Merge new results into existing, preserving user selections
       const merged = state.rawPlacements.map((existing, i) => {
+        if (existing.hidden) return existing
         const updated = newPlacements[i]
         if (!updated) return existing
         if (existing.searchStatus === 'complete' && updated.searchStatus === 'pending') return existing
         return { ...existing, results: updated.results, searchStatus: updated.searchStatus }
       })
       return { ...state, rawPlacements: merged, searchProgress }
+    }
+    case 'SET_PLACEMENT_SEARCHING': {
+      const updated = state.rawPlacements.map((p, i) =>
+        i === action.payload ? { ...p, searchStatus: 'searching' } : p
+      )
+      return { ...state, rawPlacements: updated }
+    }
+    case 'SET_PLACEMENT_RESULTS': {
+      const { index, results, searchStatus } = action.payload
+      const updated = state.rawPlacements.map((p, i) =>
+        i === index ? { ...p, results, searchStatus } : p
+      )
+      return { ...state, rawPlacements: updated }
+    }
+    case 'RESET_ALL_PLACEMENTS': {
+      const reset = state.rawPlacements.map(p => ({
+        ...p,
+        results: [],
+        searchStatus: 'pending',
+        hidden: false,
+        userTimelineStart: undefined,
+        userTimelineEnd: undefined,
+      }))
+      return { ...state, rawPlacements: reset, selectedResults: {} }
+    }
+    case 'UPDATE_PLACEMENT_POSITION': {
+      const { index, timelineStart, timelineEnd } = action.payload
+      const updated = state.rawPlacements.map((p, i) =>
+        i === index ? { ...p, userTimelineStart: timelineStart, userTimelineEnd: timelineEnd } : p
+      )
+      return { ...state, rawPlacements: updated }
+    }
+    case 'HIDE_PLACEMENT': {
+      const updated = state.rawPlacements.map((p, i) =>
+        i === action.payload ? { ...p, hidden: true } : p
+      )
+      return { ...state, rawPlacements: updated }
     }
     default:
       return state
@@ -85,7 +123,8 @@ export function useBRollEditorState(planPipelineId) {
 
   useEffect(() => {
     if (!state.rawPlacements.length) return
-    const resolved = matchPlacementsToTranscript(state.rawPlacements, transcriptWords)
+    const visible = state.rawPlacements.filter(p => !p.hidden)
+    const resolved = matchPlacementsToTranscript(visible, transcriptWords)
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
   }, [state.rawPlacements, transcriptWords])
 
@@ -113,7 +152,7 @@ export function useBRollEditorState(planPipelineId) {
 
   const selectedPlacement = useMemo(() => {
     if (state.selectedIndex == null) return null
-    return state.placements[state.selectedIndex] || null
+    return state.placements.find(p => p.index === state.selectedIndex) || null
   }, [state.selectedIndex, state.placements])
 
   // Find which placement covers a given time
@@ -123,6 +162,63 @@ export function useBRollEditorState(planPipelineId) {
     }
     return null
   }, [state.placements])
+
+  // Search a single placement
+  const searchPlacement = useCallback(async (index) => {
+    const placement = state.rawPlacements[index]
+    if (!placement || !planPipelineId) return
+    dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
+    try {
+      const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
+        chapterIndex: placement.chapterIndex,
+        placementIndex: placement.placementIndex,
+      })
+      dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
+        index,
+        results: result.results || [],
+        searchStatus: result.results?.length ? 'complete' : 'no_results',
+      }})
+    } catch (err) {
+      dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
+        index,
+        results: [],
+        searchStatus: 'failed',
+      }})
+    }
+  }, [state.rawPlacements, planPipelineId])
+
+  // Search with custom overrides (from edit modal)
+  const searchPlacementCustom = useCallback(async (index, overrides) => {
+    const placement = state.rawPlacements[index]
+    if (!placement || !planPipelineId) return
+    dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
+    try {
+      const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
+        chapterIndex: placement.chapterIndex,
+        placementIndex: placement.placementIndex,
+        ...overrides,
+      })
+      dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
+        index,
+        results: result.results || [],
+        searchStatus: result.results?.length ? 'complete' : 'no_results',
+      }})
+    } catch (err) {
+      dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
+        index,
+        results: [],
+        searchStatus: 'failed',
+      }})
+    }
+  }, [state.rawPlacements, planPipelineId])
+
+  const hidePlacement = useCallback((index) => {
+    dispatch({ type: 'HIDE_PLACEMENT', payload: index })
+  }, [])
+
+  const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd) => {
+    dispatch({ type: 'UPDATE_PLACEMENT_POSITION', payload: { index, timelineStart, timelineEnd } })
+  }, [])
 
   return {
     placements: state.placements,
@@ -135,5 +231,11 @@ export function useBRollEditorState(planPipelineId) {
     selectPlacement,
     selectResult,
     activePlacementAtTime,
+    searchPlacement,
+    searchPlacementCustom,
+    hidePlacement,
+    updatePlacementPosition,
+    resetAllPlacements: useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), []),
+    planPipelineId,
   }
 }

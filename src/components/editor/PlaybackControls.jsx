@@ -1,5 +1,6 @@
 import { useContext, useState, useCallback } from 'react'
 import { EditorContext } from './EditorView.jsx'
+import { BRollContext } from './useBRollEditorState.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
 
@@ -30,8 +31,10 @@ const speeds = [0.5, 1, 1.5, 2]
 
 export default function PlaybackControls() {
   const { state, dispatch, playbackEngine, refetchDetail, refetchTimestamps } = useContext(EditorContext)
+  const broll = useContext(BRollContext)
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState(null)
+  const [resuming, setResuming] = useState(false)
 
   const togglePlay = () => {
     if (state.isPlaying) {
@@ -111,7 +114,7 @@ export default function PlaybackControls() {
               <span className={`flex-1 text-center text-[7px] font-bold z-10 whitespace-nowrap ${state.roughCutTrackMode === 'main' ? 'text-on-surface' : 'text-on-surface/30'}`}>Main track</span>
               <span className={`flex-1 text-center text-[7px] font-bold z-10 whitespace-nowrap ${state.roughCutTrackMode === 'all' ? 'text-primary-fixed' : 'text-on-surface/30'}`}>All tracks</span>
             </button>
-          ) : (
+          ) : state.activeTab !== 'brolls' ? (
             <>
               <span className="text-[9px] font-bold uppercase tracking-wider text-on-surface/40">Audio</span>
               <button
@@ -125,9 +128,11 @@ export default function PlaybackControls() {
                 <span className={`flex-1 text-center text-[7px] font-bold z-10 ${state.audioOnly ? 'text-primary-fixed' : 'text-on-surface/30'}`}>ON</span>
               </button>
             </>
-          )}
+          ) : null}
         </div>
-        {state.activeTab !== 'roughcut' && (
+        {state.activeTab === 'brolls' && broll?.placements?.length > 0 ? (
+          <BRollSearchStatus broll={broll} resuming={resuming} setResuming={setResuming} />
+        ) : state.activeTab !== 'roughcut' ? (
           <div className="border-l border-white/10 pl-3">
             <button
               onClick={async () => {
@@ -158,7 +163,7 @@ export default function PlaybackControls() {
               </span>
             </button>
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* Center: play, speed, split */}
@@ -223,4 +228,81 @@ export default function PlaybackControls() {
       </div>
     </div>
   )
+}
+
+function BRollSearchStatus({ broll, resuming, setResuming }) {
+  const completed = broll.placements?.filter(p => p.searchStatus === 'complete').length || 0
+  const total = broll.placements?.length || 0
+  const pending = total - completed
+  const isRunning = broll.searchProgress?.status === 'running'
+
+  async function handleResume() {
+    if (!broll.planPipelineId) return
+    setResuming(true)
+    try {
+      await apiPost(`/broll/pipeline/${broll.planPipelineId}/run-broll-search`, {})
+    } catch (err) {
+      console.error('Resume failed:', err)
+    }
+    setResuming(false)
+  }
+
+  if (isRunning) {
+    const done = broll.searchProgress.subDone || 0
+    const subTotal = broll.searchProgress.subTotal || total
+    return (
+      <div className="border-l border-white/10 pl-3 flex items-center gap-2">
+        <span className="material-symbols-outlined text-sm text-teal-400 animate-spin">progress_activity</span>
+        <span className="text-[10px] font-bold uppercase tracking-wider text-teal-400">
+          {done}/{subTotal}
+        </span>
+      </div>
+    )
+  }
+
+  async function handleResetAndSearch() {
+    if (!broll.planPipelineId) return
+    broll.resetAllPlacements()
+    setResuming(true)
+    try {
+      await apiPost(`/broll/pipeline/${broll.planPipelineId}/run-broll-search`, {})
+    } catch (err) {
+      console.error('Reset & search failed:', err)
+    }
+    setResuming(false)
+  }
+
+  if (pending > 0) {
+    return (
+      <div className="border-l border-white/10 pl-3 flex items-center gap-2">
+        <span className="text-[10px] text-zinc-500">{completed}/{total}</span>
+        {completed > 0 && (
+          <button
+            onClick={handleResetAndSearch}
+            disabled={resuming || !broll.planPipelineId}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-400 bg-white/5 hover:bg-white/10 transition-all disabled:opacity-40"
+          >
+            Reset
+          </button>
+        )}
+        <button
+          onClick={handleResume}
+          disabled={resuming || !broll.planPipelineId}
+          className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider text-teal-400 bg-white/5 hover:bg-white/10 transition-all disabled:opacity-40"
+        >
+          {resuming ? 'Starting...' : completed > 0 ? 'Continue Search' : 'Search All'}
+        </button>
+      </div>
+    )
+  }
+
+  if (completed === total && total > 0) {
+    return (
+      <div className="border-l border-white/10 pl-3 flex items-center gap-2">
+        <span className="text-[10px] text-zinc-500">{completed}/{total} found</span>
+      </div>
+    )
+  }
+
+  return null
 }

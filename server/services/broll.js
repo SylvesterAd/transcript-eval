@@ -75,6 +75,22 @@ export const BROLL_MODELS = [
 
 export const BROLL_STRATEGY_KINDS = ['hook_analysis', 'main_analysis', 'plan', 'alt_plan', 'keywords', 'broll_search']
 
+/**
+ * Upgrade a stock footage preview URL to HD quality.
+ * Storyblocks: __P180.mp4 → __P1080.mp4, resolution=180p → resolution=1080p
+ * Pexels: -sd_426_240_Xfps.mp4 → -hd_1920_1080_Xfps.mp4
+ */
+function upgradePreviewUrl(url) {
+  if (!url) return null
+  if (url.includes('storyblocks') || url.includes('dm0qx8t0i9gc9.cloudfront.net')) {
+    return url.replace(/__P\d+\.mp4/, '__P1080.mp4').replace(/resolution=\d+p/, 'resolution=1080p')
+  }
+  if (url.includes('pexels.com')) {
+    return url.replace(/-sd_\d+_\d+_(\d+fps)/, '-hd_1920_1080_$1')
+  }
+  return null // no upgrade available
+}
+
 function slugify(value) {
   return String(value || '')
     .toLowerCase()
@@ -1529,7 +1545,6 @@ export async function executeBrollSearch(planPipelineId) {
       const brief = [
         p.description ? `# ${p.description}` : '',
         styleParts.length ? `## Style: ${styleParts.join('; ')}` : '',
-        p.source_feel ? `## Source feel: ${p.source_feel}` : '',
       ].filter(Boolean).join('\n')
 
       // Use keywords from keyword generation, or fall back to placement's search_keywords
@@ -1539,10 +1554,7 @@ export async function executeBrollSearch(planPipelineId) {
         keywords: searchKeywords,
         brief,
         sources: ['pexels', 'storyblocks'],
-        max_results: 5,
-        min_duration: 3,
-        max_duration: 30,
-        orientation: 'horizontal',
+        max_results: 10,
       }
 
       let results = []
@@ -3057,10 +3069,47 @@ export async function getBRollEditorData(planPipelineId) {
 
     try {
       const output = JSON.parse(sr.output_text || '{}')
-      match.results = output.results || []
+      match.results = (output.results || []).map(r => r.preview_url_hq ? r : { ...r, preview_url_hq: upgradePreviewUrl(r.preview_url) })
       match.searchStatus = match.results.length > 0 ? 'complete' : 'no_results'
     } catch {
       match.searchStatus = 'failed'
+    }
+  }
+
+  // 2b. Fallback: check broll_search_logs for placements that have no results in broll_runs.
+  // The GPU proxy writes results there independently, and the SSE stream often fails to deliver them.
+  // Use a single batch query instead of per-placement queries.
+  const noResultPlacements = placements.filter(p => !p.results?.length && p.searchStatus !== 'complete')
+  if (noResultPlacements.length) {
+    // Build brief→placement map
+    const briefMap = new Map()
+    for (const p of noResultPlacements) {
+      const styleParts = []
+      if (p.style?.colors) styleParts.push(`colors: ${p.style.colors}`)
+      if (p.style?.temperature) styleParts.push(`temperature: ${p.style.temperature}`)
+      if (p.style?.motion) styleParts.push(`motion: ${p.style.motion}`)
+      if (p.style?.framing) styleParts.push(`framing: ${p.style.framing}`)
+      if (p.style?.lighting) styleParts.push(`lighting: ${p.style.lighting}`)
+      const brief = [
+        p.description ? `# ${p.description}` : '',
+        styleParts.length ? `## Style: ${styleParts.join('; ')}` : '',
+      ].filter(Boolean).join('\n')
+      briefMap.set(brief, p)
+    }
+    try {
+      // Single query: fetch all logs with results, deduplicated by brief (latest wins)
+      const allLogs = await db.prepare(
+        `SELECT DISTINCT ON (brief) brief, results, num_results FROM broll_search_logs WHERE num_results > 0 ORDER BY brief, id DESC`
+      ).all()
+      for (const logRow of allLogs) {
+        const p = briefMap.get(logRow.brief)
+        if (!p) continue
+        const raw = Array.isArray(logRow.results) ? logRow.results : JSON.parse(logRow.results || '[]')
+        p.results = raw.map(r => r.preview_url_hq ? r : { ...r, preview_url_hq: upgradePreviewUrl(r.preview_url) })
+        p.searchStatus = 'complete'
+      }
+    } catch (err) {
+      console.error('[getBRollEditorData] broll_search_logs fallback error:', err.message)
     }
   }
 
@@ -3079,4 +3128,188 @@ export async function getBRollEditorData(planPipelineId) {
   }
 
   return { placements, searchProgress, totalPlacements: placements.length }
+}
+
+/**
+ * Search a single B-Roll placement by its chapterIndex + placementIndex.
+ * Reuses the same brief/keyword building as executeBrollSearch but for one item.
+ */
+export async function searchSinglePlacement(planPipelineId, chapterIndex, placementIndex, overrides = {}) {
+  const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
+  const GPU_KEY = process.env.GPU_INTERNAL_KEY
+  if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')
+
+  // Load plan sub-runs to find the placement
+  const planRuns = await db.prepare(
+    `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
+  ).all(`%"pipelineId":"${planPipelineId}"%`)
+
+  const videoId = planRuns[0]?.video_id
+  if (!videoId) throw new Error('No video found for pipeline')
+
+  const chapterRuns = planRuns.filter(r => {
+    try { const m = JSON.parse(r.metadata_json || '{}'); return m.isSubRun && m.stageName === 'Per-chapter B-Roll plan' }
+    catch { return false }
+  }).sort((a, b) => {
+    const ma = JSON.parse(a.metadata_json || '{}'), mb = JSON.parse(b.metadata_json || '{}')
+    return (ma.subIndex || 0) - (mb.subIndex || 0)
+  })
+
+  if (chapterIndex >= chapterRuns.length) throw new Error(`Chapter ${chapterIndex} not found`)
+
+  const chapterRun = chapterRuns[chapterIndex]
+  let parsed
+  try {
+    const raw = chapterRun.output_text || ''
+    parsed = extractJSON(raw)
+  } catch { throw new Error('Failed to parse chapter plan') }
+
+  const items = parsed.placements || parsed
+  if (!Array.isArray(items)) throw new Error('No placements array in chapter plan')
+  const brollOnly = items.filter(p => !p.category || p.category === 'broll')
+  if (placementIndex >= brollOnly.length) throw new Error(`Placement ${placementIndex} not found in chapter ${chapterIndex}`)
+
+  const p = brollOnly[placementIndex]
+
+  // Load keywords
+  const kwRuns = await db.prepare(
+    `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id DESC`
+  ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
+  const kwSubRuns = kwRuns.filter(r => JSON.parse(r.metadata_json || '{}').isSubRun)
+
+  let keywords = []
+  for (const r of kwSubRuns) {
+    const m = JSON.parse(r.metadata_json || '{}')
+    if (m.subIndex === chapterIndex) {
+      try {
+        const kwData = extractJSON(r.output_text || '')
+        const kwEntry = (Array.isArray(kwData) ? kwData : []).find(k => k.placement_index === placementIndex) || kwData[placementIndex]
+        if (kwEntry?.keywords) {
+          keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
+        }
+      } catch {}
+      break
+    }
+  }
+
+  // Build brief — use overrides if provided
+  const desc = overrides.description || p.description
+  let styleStr
+  if (overrides.style) {
+    styleStr = overrides.style
+  } else {
+    const styleParts = []
+    if (p.style?.colors) styleParts.push(`colors: ${p.style.colors}`)
+    if (p.style?.temperature) styleParts.push(`temperature: ${p.style.temperature}`)
+    if (p.style?.motion) styleParts.push(`motion: ${p.style.motion}`)
+    if (p.style?.framing) styleParts.push(`framing: ${p.style.framing}`)
+    if (p.style?.lighting) styleParts.push(`lighting: ${p.style.lighting}`)
+    styleStr = styleParts.join('; ')
+  }
+
+  const brief = [
+    desc ? `# ${desc}` : '',
+    styleStr ? `## Style: ${styleStr}` : '',
+  ].filter(Boolean).join('\n')
+
+  const searchKeywords = keywords.length ? keywords : (p.search_keywords || [])
+  const sources = overrides.sources?.length ? overrides.sources : ['pexels', 'storyblocks']
+
+  const requestBody = {
+    keywords: searchKeywords,
+    brief,
+    sources,
+    max_results: 10,
+  }
+
+  // Find or create broll_search strategy
+  let searchStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'broll_search' ORDER BY id LIMIT 1").get()
+  if (!searchStrategy) {
+    const r = await db.prepare("INSERT INTO broll_strategies (name, strategy_kind) VALUES (?, ?)").run('B-Roll Video Search', 'broll_search')
+    searchStrategy = { id: r.lastInsertRowid }
+  }
+
+  const searchStart = Date.now()
+  let results = []
+  let searchMeta = {}
+
+  const progressId = `search-single-ch${chapterIndex}-p${placementIndex}-${Date.now()}`
+  let gpuJobId = null
+  brollPipelineProgress.set(progressId, {
+    status: 'running', stageName: 'GPU Search', gpuStage: 'search', gpuStatus: 'Starting...',
+    startedAt: Date.now(),
+  })
+
+  try {
+    const data = await streamingFetch(GPU_URL, {
+      body: requestBody,
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
+      logSource: `broll-search-single:ch${chapterIndex}-p${placementIndex}`,
+      onProgress: (evt) => {
+        if (evt.stage === 'job' && evt.job_id) gpuJobId = evt.job_id
+        brollPipelineProgress.set(progressId, {
+          ...brollPipelineProgress.get(progressId),
+          gpuStage: evt.stage,
+          gpuStatus: evt.message || evt.status,
+          gpuJobId,
+          subDone: evt.processed ?? evt.done,
+          subTotal: evt.total,
+        })
+      },
+    })
+    results = data.results || []
+    searchMeta = { search_count: data.search_count, filtered_count: data.filtered_count, model_used: data.model_used }
+  } catch (err) {
+    console.error(`[searchSinglePlacement] streamingFetch error:`, err.message)
+    searchMeta = { error: err.message }
+  }
+
+  // Fallback: if still no results, check broll_search_logs (GPU proxy writes there independently)
+  if (!results.length) {
+    console.log(`[searchSinglePlacement] No results yet, checking broll_search_logs by brief...`)
+    await new Promise(r => setTimeout(r, 3000))
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const logRow = await db.prepare(
+          `SELECT results, num_results, num_candidates FROM broll_search_logs WHERE brief = ? ORDER BY id DESC LIMIT 1`
+        ).get(brief)
+        if (logRow?.num_results > 0) {
+          results = Array.isArray(logRow.results) ? logRow.results : JSON.parse(logRow.results || '[]')
+          searchMeta = { search_count: logRow.num_candidates }
+          console.log(`[searchSinglePlacement] Got ${results.length} results from broll_search_logs fallback (attempt ${attempt + 1})`)
+          break
+        }
+      } catch (fallbackErr) {
+        console.error(`[searchSinglePlacement] fallback error:`, fallbackErr.message)
+      }
+      if (attempt < 4) await new Promise(r => setTimeout(r, 5000))
+    }
+  }
+
+  brollPipelineProgress.set(progressId, { ...brollPipelineProgress.get(progressId), status: 'complete', gpuStage: null, gpuStatus: null })
+  setTimeout(() => brollPipelineProgress.delete(progressId), 60_000)
+
+  // Upgrade preview URLs to HD where possible
+  results = results.map(r => ({ ...r, preview_url_hq: upgradePreviewUrl(r.preview_url) }))
+
+  const searchDuration = Date.now() - searchStart
+  const groupId = JSON.parse(planRuns[0].metadata_json || '{}').groupId || null
+
+  const output = JSON.stringify({
+    placement: { description: p.description, start: p.start, end: p.end, audio_anchor: p.audio_anchor, function: p.function, type_group: p.type_group, source_feel: p.source_feel },
+    keywords_used: searchKeywords,
+    results,
+    ...searchMeta,
+  })
+
+  // Save to broll_runs
+  await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    searchStrategy.id, videoId, 'analysis', results.length ? 'complete' : (searchMeta.error ? 'failed' : 'complete'),
+    brief, output,
+    JSON.stringify(requestBody, null, 2), `${results.length} results | ${searchDuration}ms`,
+    'gpu-search', 0, 0, 0, searchDuration,
+    JSON.stringify({ pipelineId: `bs-${planPipelineId}-single`, stageIndex: 0, stageName: 'B-Roll Search', subIndex: 0, subLabel: `Ch${chapterIndex} #${placementIndex}`, source: 'favorite', chapterIndex, placementIndex, isSubRun: true, phase: 'broll_search', groupId }),
+  )
+
+  return { results, ...searchMeta, duration: searchDuration }
 }

@@ -32,6 +32,16 @@ export function matchPlacementsToTranscript(placements, words) {
   if (!placements?.length || !words?.length) return placements || []
 
   return placements.map(p => {
+    // User has manually positioned this placement — their position wins
+    if (p.userTimelineStart != null && p.userTimelineEnd != null) {
+      return {
+        ...p,
+        timelineStart: p.userTimelineStart,
+        timelineEnd: p.userTimelineEnd,
+        timelineDuration: p.userTimelineEnd - p.userTimelineStart,
+      }
+    }
+
     const planStart = parseTimecode(p.start)
     const planEnd = parseTimecode(p.end)
     const planDuration = Math.max(planEnd - planStart, 1)

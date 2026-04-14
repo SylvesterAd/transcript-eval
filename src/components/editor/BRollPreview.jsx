@@ -12,8 +12,11 @@ export default function BRollPreview() {
 
   const activePlacement = useMemo(() => {
     if (!broll) return null
-    return broll.activePlacementAtTime(state.currentTime)
-  }, [broll, state.currentTime])
+    // Show the placement under the playhead, or the selected placement
+    const atTime = broll.activePlacementAtTime(state.currentTime)
+    if (atTime) return atTime
+    return broll.selectedPlacement || null
+  }, [broll, state.currentTime, broll?.selectedPlacement])
 
   // Get the selected result for the active placement
   const activeResult = useMemo(() => {
@@ -28,7 +31,7 @@ export default function BRollPreview() {
       setShowBRoll(true)
       // If it's a different placement or result, update video src
       if (brollVideoRef.current) {
-        const url = activeResult.preview_url || activeResult.url
+        const url = activeResult.preview_url_hq || activeResult.preview_url || activeResult.url
         if (brollVideoRef.current.src !== url) {
           brollVideoRef.current.src = url
         }
@@ -64,18 +67,12 @@ export default function BRollPreview() {
       {/* B-Roll video overlay */}
       <video
         ref={brollVideoRef}
-        className={`max-w-full max-h-full object-contain ${showBRoll ? '' : 'hidden'}`}
+        className={`w-full h-full object-contain ${showBRoll ? '' : 'hidden'}`}
         preload="metadata"
         playsInline
         muted
       />
 
-      {/* B-Roll indicator badge */}
-      {showBRoll && (
-        <div className="absolute top-3 left-3 px-2 py-1 rounded bg-teal-600/80 text-[10px] font-bold text-white uppercase tracking-wider">
-          B-Roll
-        </div>
-      )}
     </div>
   )
 }

@@ -322,26 +322,54 @@ export default function Timeline() {
 
   const currentCameras = segmentCameras[currentSegmentIndex] || []
 
+  // Resolve B-Roll track position: -1 means "after last audio track"
+  const broll = useContext(BRollContext)
+  const hasBrollTrack = !!broll?.placements?.length
+  const resolvedBrollPosition = useMemo(() => {
+    if (!hasBrollTrack) return -2 // no B-Roll track to show
+    const pos = state.brollTrackPosition
+    if (pos >= 0 && pos <= state.tracks.length) return pos
+    // Default: after last audio track
+    let lastAudioIdx = -1
+    for (let i = 0; i < state.tracks.length; i++) {
+      if (state.tracks[i].type === 'audio') lastAudioIdx = i
+    }
+    return lastAudioIdx + 1
+  }, [state.brollTrackPosition, state.tracks, hasBrollTrack])
+
   const visibleLayout = useMemo(() => {
     const items = []
     const compositeAudioH = state.compositeShowTranscript ? 112 : 56
     let y = isMainMode ? COMPOSITE_H + compositeAudioH : 0
+    let trackSlot = 0 // counts visible track slots for B-Roll insertion
+    let brollInserted = false
     for (let i = 0; i < state.tracks.length; i++) {
       const t = state.tracks[i]
       if (t.type === 'video' && ((!isRoughCut && state.audioOnly) || isMainMode)) continue
       if (t.type === 'audio' && isMainMode) continue
+      // Insert B-Roll row before this track if position matches
+      if (!brollInserted && hasBrollTrack && resolvedBrollPosition <= i) {
+        items.push({ absIdx: -1, y, h: BROLL_TRACK_H, isBroll: true })
+        y += BROLL_TRACK_H
+        brollInserted = true
+      }
       const h = t.type === 'video' ? (isRoughCut ? 80 : 24) : (t.showTranscript ? 112 : 56)
       items.push({ absIdx: i, y, h })
       y += h
+      trackSlot++
+    }
+    // B-Roll at the end if not yet inserted
+    if (!brollInserted && hasBrollTrack) {
+      items.push({ absIdx: -1, y, h: BROLL_TRACK_H, isBroll: true })
     }
     return items
-  }, [state.tracks, state.audioOnly, isRoughCut, isMainMode, state.compositeShowTranscript])
+  }, [state.tracks, state.audioOnly, isRoughCut, isMainMode, state.compositeShowTranscript, hasBrollTrack, resolvedBrollPosition])
 
   // Context menu
   const ctxTrack = state.contextMenu ? state.tracks.find(t => t.id === state.contextMenu.trackId) : null
 
   // Unified track drag reorder — any track can be moved to any position
-  const [dragState, setDragState] = useState({ dragging: false, fromAbsIdx: -1, overAbsIdx: -1, dy: 0 })
+  const [dragState, setDragState] = useState({ dragging: false, fromAbsIdx: -2, overAbsIdx: -2, dy: 0 })
   const dragDidMove = useRef(false)
   const mouseYRef = useRef(0)
   const scrollRafRef = useRef(0)
@@ -412,10 +440,20 @@ export default function Timeline() {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       stopAutoScroll()
-      setDragState({ dragging: false, fromAbsIdx: -1, overAbsIdx: -1, dy: 0 })
+      setDragState({ dragging: false, fromAbsIdx: -2, overAbsIdx: -2, dy: 0 })
       if (dragDidMove.current && absIdx !== dropAbsIdx) {
-        dispatch({ type: 'REORDER_TRACK', payload: { fromIndex: absIdx, toIndex: dropAbsIdx } })
-      } else if (!dragDidMove.current) {
+        if (absIdx === -1) {
+          // Dragging B-Roll track: find the real track index at the drop position
+          const dropItem = layout.find(l => l.absIdx === dropAbsIdx)
+          const targetIdx = dropItem && !dropItem.isBroll ? dropAbsIdx : resolvedBrollPosition
+          dispatch({ type: 'MOVE_BROLL_TRACK', payload: targetIdx })
+        } else if (dropAbsIdx === -1) {
+          // Dropping a regular track at the B-Roll row position — reorder to B-Roll's slot
+          dispatch({ type: 'REORDER_TRACK', payload: { fromIndex: absIdx, toIndex: resolvedBrollPosition } })
+        } else {
+          dispatch({ type: 'REORDER_TRACK', payload: { fromIndex: absIdx, toIndex: dropAbsIdx } })
+        }
+      } else if (!dragDidMove.current && absIdx >= 0) {
         dispatch({
           type: 'SELECT_TRACK',
           payload: { trackId: state.tracks[absIdx]?.id, shift: ev.shiftKey, meta: ev.metaKey || ev.ctrlKey }
@@ -477,9 +515,6 @@ export default function Timeline() {
               </div>
             </div>
           </div>
-
-          {/* B-Roll track (above composite when in B-Roll editor) */}
-          <BRollTrackRow scrollRef={scrollRef} scrollX={scrollX} zoom={state.zoom} />
 
           {/* Composite video + audio tracks in MAIN mode */}
           {isMainMode && mainTrackSegments?.length > 0 && (
@@ -560,15 +595,42 @@ export default function Timeline() {
             </>
           )}
 
-          {/* Track rows — unified list, any track can be dragged to any position */}
-          {state.tracks.map((track, absIdx) => {
-            if (track.type === 'video' && ((!isRoughCut && state.audioOnly) || isMainMode)) return null
-            if (track.type === 'audio' && isMainMode) return null
+          {/* Track rows — unified list including B-Roll, any track can be dragged to any position */}
+          {visibleLayout.map((item) => {
+            const absIdx = item.absIdx
+            const isDragSource = dragState.dragging && dragState.fromAbsIdx === absIdx
+            const showInsertBefore = dragState.dragging && dragState.overAbsIdx === absIdx && dragState.fromAbsIdx > absIdx
+            const showInsertAfter = dragState.dragging && dragState.overAbsIdx === absIdx && dragState.fromAbsIdx < absIdx
+
+            // B-Roll track row
+            if (item.isBroll) {
+              return (
+                <div key="broll-track" className="relative" style={isDragSource ? { opacity: 0.5, zIndex: 30, transform: `translateY(${dragState.dy}px)`, pointerEvents: 'none' } : undefined}>
+                  {showInsertBefore && <div className="absolute top-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
+                  <div className="flex">
+                    <div
+                      onMouseDown={(e) => handleTrackDragStart(e, -1)}
+                      className={`sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 text-[10px] font-bold z-30 bg-surface-container text-teal-400 cursor-grab active:cursor-grabbing select-none ${isDragSource ? 'ring-1 ring-teal-400 bg-teal-900/20' : ''}`}
+                      style={{ height: `${BROLL_TRACK_H}px` }}
+                    >
+                      <span className={`material-symbols-outlined text-[12px] shrink-0 mr-1 ${isDragSource ? 'text-teal-400 opacity-100' : 'opacity-30'}`}>drag_indicator</span>
+                      <span className="material-symbols-outlined text-[12px] shrink-0 opacity-60 mr-1">movie</span>
+                      B-Roll
+                    </div>
+                    <div className="flex-1 relative z-0">
+                      <BRollTrack zoom={state.zoom} scrollRef={scrollRef} scrollX={scrollX} />
+                    </div>
+                  </div>
+                  {showInsertAfter && <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
+                </div>
+              )
+            }
+
+            // Regular audio/video track row
+            const track = state.tracks[absIdx]
+            if (!track) return null
             const selected = state.selectedTrackIds.has(track.id)
             const num = trackNumber(track)
-            const isDragSource = dragState.dragging && dragState.fromAbsIdx === absIdx
-            const showInsertBefore = dragState.dragging && dragState.overAbsIdx === absIdx && absIdx < dragState.fromAbsIdx
-            const showInsertAfter = dragState.dragging && dragState.overAbsIdx === absIdx && absIdx > dragState.fromAbsIdx
             const isVideo = track.type === 'video'
 
             return (
@@ -706,21 +768,3 @@ export default function Timeline() {
   )
 }
 
-function BRollTrackRow({ scrollRef, scrollX, zoom }) {
-  const broll = useContext(BRollContext)
-  if (!broll?.placements?.length) return null
-
-  return (
-    <div className="relative">
-      <div className="flex">
-        <div className="sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 text-[10px] font-bold z-30 bg-surface-container text-teal-400" style={{ height: `${BROLL_TRACK_H}px` }}>
-          <span className="material-symbols-outlined text-[12px] shrink-0 opacity-30 mr-1">movie</span>
-          B-Roll
-        </div>
-        <div className="flex-1 relative z-0">
-          <BRollTrack zoom={zoom} scrollRef={scrollRef} scrollX={scrollX} />
-        </div>
-      </div>
-    </div>
-  )
-}

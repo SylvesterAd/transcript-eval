@@ -176,6 +176,25 @@ CREATE TABLE IF NOT EXISTS spending_log (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS user_tokens (
+  id SERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE,
+  balance INTEGER NOT NULL DEFAULT 10000,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS token_transactions (
+  id SERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('initial', 'debit', 'credit', 'refund')),
+  description TEXT,
+  group_id INTEGER REFERENCES video_groups(id),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- B-Roll Strategies
 CREATE TABLE IF NOT EXISTS broll_strategies (
   id SERIAL PRIMARY KEY,

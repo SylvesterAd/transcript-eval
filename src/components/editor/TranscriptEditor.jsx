@@ -19,7 +19,7 @@ function formatGap(seconds) {
 }
 
 export default function TranscriptEditor() {
-  const { state, dispatch, playbackEngine, cutDragRef } = useContext(EditorContext)
+  const { state, dispatch, playbackEngine, cutDragRef, flowRunState, handleStartAIRoughCut, estimationLoading } = useContext(EditorContext)
 
   // Primary transcript: use the longest audio track's words as the single source.
   // Only fill in time gaps (ranges the primary doesn't cover) from other tracks.
@@ -657,92 +657,120 @@ export default function TranscriptEditor() {
 
       {/* AI Smart Controls */}
       <div className="flex items-center gap-2 px-5 py-2 border-b border-white/5 shrink-0">
-        {/* AI Cuts Dropdown */}
-        <div className="relative" ref={cutsRef}>
-          <button
-            onClick={() => { setCutsOpen(o => !o); setIdentifyOpen(false) }}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-xs font-bold text-on-surface-variant/80 hover:text-primary-fixed border border-white/10 transition-all"
-          >
-            <span className="material-symbols-outlined text-[16px]">auto_videocam</span>
-            AI Cuts
-            <span className="material-symbols-outlined text-[16px] opacity-40">expand_more</span>
-          </button>
-          {cutsOpen && (
-            <div
-              className="absolute top-full left-0 mt-1 w-52 rounded-md py-1 z-[60]"
-              style={{ background: '#19191c', border: '1px solid rgba(206,252,0,0.1)', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.5)' }}
-            >
-              {[
-                ['silences', 'Cut silences'],
-                ['false_starts', 'Cut false starts'],
-                ['filler_words', 'Cut filler words'],
-                ['meta_commentary', 'Cut meta commentary'],
-              ].map(([key, label]) => (
-                <button
-                  key={key}
-                  onClick={() => dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: { [key]: !cutsSelected[key] } })}
-                  className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-on-surface-variant/70 hover:bg-primary-fixed/10 hover:text-primary-fixed transition-colors"
+        {hasAnnotations ? (
+          <>
+            {/* AI Cuts Dropdown — shown after AI analysis completes */}
+            <div className="relative" ref={cutsRef}>
+              <button
+                onClick={() => { setCutsOpen(o => !o); setIdentifyOpen(false) }}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-xs font-bold text-on-surface-variant/80 hover:text-primary-fixed border border-white/10 transition-all"
+              >
+                <span className="material-symbols-outlined text-[16px]">auto_videocam</span>
+                AI Cuts
+                <span className="material-symbols-outlined text-[16px] opacity-40">expand_more</span>
+              </button>
+              {cutsOpen && (
+                <div
+                  className="absolute top-full left-0 mt-1 w-52 rounded-md py-1 z-[60]"
+                  style={{ background: '#19191c', border: '1px solid rgba(206,252,0,0.1)', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.5)' }}
                 >
-                  <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
-                    cutsSelected[key] ? 'bg-primary-fixed border-primary-fixed' : 'border-white/20'
-                  }`}>
-                    {cutsSelected[key] && <span className="material-symbols-outlined text-[12px] text-on-primary-fixed">check</span>}
-                  </span>
-                  {label}
-                </button>
-              ))}
-              {state.cutExclusions?.length > 0 && (
-                <>
-                  <div className="border-t border-white/10 my-1" />
-                  <button
-                    onClick={() => dispatch({ type: 'CLEAR_EXCLUSIONS' })}
-                    className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-red-400 hover:bg-red-500/10 transition-colors"
-                  >
-                    Reset exclusions ({state.cutExclusions.length})
-                  </button>
-                </>
+                  {[
+                    ['silences', 'Cut silences'],
+                    ['false_starts', 'Cut false starts'],
+                    ['filler_words', 'Cut filler words'],
+                    ['meta_commentary', 'Cut meta commentary'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: { [key]: !cutsSelected[key] } })}
+                      className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-on-surface-variant/70 hover:bg-primary-fixed/10 hover:text-primary-fixed transition-colors"
+                    >
+                      <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+                        cutsSelected[key] ? 'bg-primary-fixed border-primary-fixed' : 'border-white/20'
+                      }`}>
+                        {cutsSelected[key] && <span className="material-symbols-outlined text-[12px] text-on-primary-fixed">check</span>}
+                      </span>
+                      {label}
+                    </button>
+                  ))}
+                  {state.cutExclusions?.length > 0 && (
+                    <>
+                      <div className="border-t border-white/10 my-1" />
+                      <button
+                        onClick={() => dispatch({ type: 'CLEAR_EXCLUSIONS' })}
+                        className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-red-400 hover:bg-red-500/10 transition-colors"
+                      >
+                        Reset exclusions ({state.cutExclusions.length})
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
             </div>
-          )}
-        </div>
 
-        {/* AI Identify Dropdown */}
-        <div className="relative" ref={identifyRef}>
-          <button
-            onClick={() => { setIdentifyOpen(o => !o); setCutsOpen(false) }}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-xs font-bold text-on-surface-variant/80 hover:text-primary-fixed border border-white/10 transition-all"
-          >
-            <span className="material-symbols-outlined text-[16px]">visibility</span>
-            AI Identify
-            <span className="material-symbols-outlined text-[16px] opacity-40">expand_more</span>
-          </button>
-          {identifyOpen && (
-            <div
-              className="absolute top-full left-0 mt-1 w-64 rounded-md py-1 z-[60]"
-              style={{ background: '#19191c', border: '1px solid rgba(206,252,0,0.1)', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.5)' }}
-            >
-              {[
-                ['repetition', 'Repetitive Parts'],
-                ['lengthy', 'Over-explanation & lengthy parts'],
-                ['technical_unclear', 'Too technical & unclear parts'],
-                ['irrelevance', 'Irrelevant parts'],
-              ].map(([key, label]) => (
-                <button
-                  key={key}
-                  onClick={() => dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: { [key]: !identifySelected[key] } })}
-                  className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-on-surface-variant/70 hover:bg-primary-fixed/10 hover:text-primary-fixed transition-colors"
+            {/* AI Identify Dropdown */}
+            <div className="relative" ref={identifyRef}>
+              <button
+                onClick={() => { setIdentifyOpen(o => !o); setCutsOpen(false) }}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-xs font-bold text-on-surface-variant/80 hover:text-primary-fixed border border-white/10 transition-all"
+              >
+                <span className="material-symbols-outlined text-[16px]">visibility</span>
+                AI Identify
+                <span className="material-symbols-outlined text-[16px] opacity-40">expand_more</span>
+              </button>
+              {identifyOpen && (
+                <div
+                  className="absolute top-full left-0 mt-1 w-64 rounded-md py-1 z-[60]"
+                  style={{ background: '#19191c', border: '1px solid rgba(206,252,0,0.1)', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.5)' }}
                 >
-                  <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
-                    identifySelected[key] ? 'bg-primary-fixed border-primary-fixed' : 'border-white/20'
-                  }`}>
-                    {identifySelected[key] && <span className="material-symbols-outlined text-[12px] text-on-primary-fixed">check</span>}
-                  </span>
-                  {label}
-                </button>
-              ))}
+                  {[
+                    ['repetition', 'Repetitive Parts'],
+                    ['lengthy', 'Over-explanation & lengthy parts'],
+                    ['technical_unclear', 'Too technical & unclear parts'],
+                    ['irrelevance', 'Irrelevant parts'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: { [key]: !identifySelected[key] } })}
+                      className="flex items-center gap-3 w-full px-4 py-2 text-[11px] text-on-surface-variant/70 hover:bg-primary-fixed/10 hover:text-primary-fixed transition-colors"
+                    >
+                      <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+                        identifySelected[key] ? 'bg-primary-fixed border-primary-fixed' : 'border-white/20'
+                      }`}>
+                        {identifySelected[key] && <span className="material-symbols-outlined text-[12px] text-on-primary-fixed">check</span>}
+                      </span>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </>
+        ) : (
+          <>
+            {/* Pre-AI controls — Cut Silences toggle + Start AI Rough Cut button */}
+            <button
+              onClick={() => dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: { silences: !cutsSelected.silences } })}
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-xs font-bold transition-all border ${
+                cutsSelected.silences
+                  ? 'bg-primary-fixed/20 text-primary-fixed border-primary-fixed/30'
+                  : 'bg-white/5 hover:bg-white/10 text-on-surface-variant/80 hover:text-primary-fixed border-white/10'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px]">airwave</span>
+              Cut Silences
+            </button>
+
+            <button
+              onClick={handleStartAIRoughCut}
+              disabled={estimationLoading || flowRunState?.status === 'running'}
+              className="flex items-center gap-2 px-6 py-2 rounded-md bg-gradient-to-br from-[#D0FF00] to-[#c1ed00] text-[#3b4a00] font-bold text-xs hover:opacity-90 transition-all shadow-[0_0_15px_rgba(208,255,0,0.2)] disabled:opacity-50"
+            >
+              <span className="material-symbols-outlined text-[18px]">auto_videocam</span>
+              Start AI Rough Cut
+            </button>
+          </>
+        )}
       </div>
 
       {/* Annotation legend */}

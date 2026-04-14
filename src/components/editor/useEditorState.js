@@ -108,6 +108,7 @@ const initialState = {
   cutExclusions: [], // [{start, end}] — words manually excluded from annotation cuts
   aiCutsSelected: { silences: false, false_starts: false, filler_words: false, meta_commentary: false },
   aiIdentifySelected: { repetition: false, lengthy: false, technical_unclear: false, irrelevance: false },
+  brollTrackPosition: -1, // index in tracks where B-Roll row is inserted (-1 = after last audio track)
   roughCutTrackMode: 'main', // 'main' = single composite track, 'all' = individual tracks
   compositeShowTranscript: false,
   syncTranscriptState: null,      // stashed per-track showTranscript for sync mode
@@ -176,9 +177,9 @@ function reducer(state, action) {
             duration: Number.isFinite(t.duration) ? t.duration : (fresh?.duration || 0),
           }
           if (fresh && safeTrack.type === 'audio') {
-            return { ...safeTrack, showTranscript: false, waveform: fresh.waveform, waveformPeaks: fresh.waveformPeaks }
+            return { ...safeTrack, showTranscript: safeTrack.showTranscript ?? true, waveform: fresh.waveform, waveformPeaks: fresh.waveformPeaks }
           }
-          if (safeTrack.type === 'audio') return { ...safeTrack, showTranscript: false }
+          if (safeTrack.type === 'audio') return { ...safeTrack, showTranscript: safeTrack.showTranscript ?? true }
           if (fresh && safeTrack.type === 'video') {
             return { ...safeTrack, filePath: fresh.filePath }
           }
@@ -202,6 +203,7 @@ function reducer(state, action) {
           aiIdentifySelected: restoredState.aiIdentifySelected || initialState.aiIdentifySelected,
           activeTab: restoredState.activeTab || 'sync',
           roughCutTrackMode: restoredState.roughCutTrackMode || 'main',
+          brollTrackPosition: restoredState.brollTrackPosition ?? -1,
           compositeShowTranscript: restoredState.compositeShowTranscript ?? false,
           syncTranscriptState: restoredState.syncTranscriptState || null,
           roughcutTranscriptState: restoredState.roughcutTranscriptState ?? null,
@@ -404,6 +406,9 @@ function reducer(state, action) {
       tracks.splice(toIndex, 0, moved)
       return { ...state, tracks, isDirty: true }
     }
+    case 'MOVE_BROLL_TRACK': {
+      return { ...state, brollTrackPosition: action.payload, isDirty: true }
+    }
     case 'RESYNC_TRACK': {
       const tracks = state.tracks.map(t =>
         t.id === action.payload ? { ...t, offset: t.originalOffset } : t
@@ -572,7 +577,7 @@ function reducer(state, action) {
 
 // Actions that create undo history entries
 const TRACKED_ACTIONS = new Set([
-  'MOVE_TRACK', 'MOVE_GROUP', 'REORDER_TRACK',
+  'MOVE_TRACK', 'MOVE_GROUP', 'REORDER_TRACK', 'MOVE_BROLL_TRACK',
   'REORDER_AUDIO_TRACKS', 'REORDER_VIDEO_TRACKS',
   'TOGGLE_VISIBILITY', 'TOGGLE_MUTE', 'TOGGLE_TRANSCRIPT', 'TOGGLE_COMPOSITE_TRANSCRIPT', 'TOGGLE_AUDIO_ONLY',
   'SPLIT_TRACK', 'UNGROUP_TRACK', 'GROUP_TRACKS', 'RESYNC_TRACK',
@@ -634,9 +639,9 @@ function undoableReducer(historyState, action) {
 }
 
 function serializeState(state) {
-  const { tracks, groups, zoom, audioOnly, volume, cuts, cutExclusions, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides } = state
+  const { tracks, groups, zoom, audioOnly, volume, cuts, cutExclusions, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, brollTrackPosition, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides } = state
   const serializableTracks = tracks.map(({ transcriptSegments, transcriptWords, transcriptSentences, waveform, waveformPeaks, ...rest }) => rest)
-  return { tracks: serializableTracks, groups, zoom, audioOnly, volume, cuts, cutExclusions, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides }
+  return { tracks: serializableTracks, groups, zoom, audioOnly, volume, cuts, cutExclusions, aiCutsSelected, aiIdentifySelected, activeTab, roughCutTrackMode, brollTrackPosition, compositeShowTranscript, syncTranscriptState, roughcutTranscriptState, segmentVideoOverrides, segmentAudioOverrides }
 }
 
 export default function useEditorState() {

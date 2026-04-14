@@ -40,6 +40,7 @@ import {
   executeKeywords,
   executeBrollSearch,
   getBRollEditorData,
+  searchSinglePlacement,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -342,6 +343,19 @@ router.get('/pipeline/:pipelineId/progress', requireAuth, (req, res) => {
   res.json(progress)
 })
 
+// Stop ALL running pipelines
+router.post('/pipeline/stop-all', requireAuth, (req, res) => {
+  let stopped = 0
+  for (const [pipelineId, controller] of pipelineAbortControllers.entries()) {
+    abortedBrollPipelines.add(pipelineId)
+    controller.abort()
+    pipelineAbortControllers.delete(pipelineId)
+    stopped++
+  }
+  console.log(`[broll-pipeline] stop-all: ${stopped} pipelines aborted`)
+  res.json({ success: true, stopped })
+})
+
 // Stop a running pipeline — immediately abort all in-flight requests
 router.post('/pipeline/:pipelineId/stop', requireAuth, (req, res) => {
   const { pipelineId } = req.params
@@ -542,6 +556,24 @@ router.get('/pipeline/:pipelineId/editor-data', requireAuth, async (req, res) =>
   try {
     const data = await getBRollEditorData(req.params.pipelineId)
     res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, res) => {
+  try {
+    const { pipelineId } = req.params
+    const { chapterIndex, placementIndex, description, style, sources } = req.body
+    if (chapterIndex == null || placementIndex == null) {
+      return res.status(400).json({ error: 'chapterIndex and placementIndex required' })
+    }
+    const overrides = {}
+    if (description) overrides.description = description
+    if (style) overrides.style = style
+    if (sources) overrides.sources = sources
+    const result = await searchSinglePlacement(pipelineId, chapterIndex, placementIndex, overrides)
+    res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

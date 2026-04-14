@@ -135,9 +135,14 @@ export async function streamingFetch(url, opts = {}) {
       const decoder = new TextDecoder()
       let buffer = ''
 
+      let lastEventTime = Date.now()
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) {
+          console.log(`[streamingFetch] SSE stream ended normally after ${((Date.now() - start) / 1000).toFixed(1)}s, ${allEvents.length} events`)
+          break
+        }
+        lastEventTime = Date.now()
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -194,6 +199,7 @@ export async function streamingFetch(url, opts = {}) {
       finalResult = data
     }
   } catch (err) {
+    console.error(`[streamingFetch] ERROR after ${((Date.now() - start) / 1000).toFixed(1)}s, ${allEvents.length} events: ${err.name}: ${err.message}`)
     if (err.name === 'AbortError') {
       activeStreams.delete(streamId)
       throw err

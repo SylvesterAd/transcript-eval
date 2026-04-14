@@ -174,6 +174,7 @@ export default function App() {
       {/* Editor — full-screen, outside UserLayout */}
       <Route path="/editor/:id" element={<ErrorBoundary><EditorView /></ErrorBoundary>} />
       <Route path="/editor/:id/:tab" element={<ErrorBoundary><EditorView /></ErrorBoundary>} />
+      <Route path="/editor/:id/:tab/:placementId" element={<ErrorBoundary><EditorView /></ErrorBoundary>} />
 
       {/* Admin panel routes */}
       <Route path="/admin" element={<AdminLayout />}>
