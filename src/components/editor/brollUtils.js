@@ -31,7 +31,8 @@ function normalize(text) {
 export function matchPlacementsToTranscript(placements, words) {
   if (!placements?.length || !words?.length) return placements || []
 
-  return placements.map(p => {
+  // Step 1: Position each placement independently based on audio_anchor
+  const resolved = placements.map(p => {
     // User has manually positioned this placement — their position wins
     if (p.userTimelineStart != null && p.userTimelineEnd != null) {
       return {
@@ -101,4 +102,20 @@ export function matchPlacementsToTranscript(placements, words) {
     // Fallback: use plan timecodes directly
     return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration }
   })
+
+  // Step 2: Fix overlaps — audio_anchor position has priority.
+  // Sort by timelineStart, then trim earlier placement's end if it overlaps
+  // the next placement's anchor-based start.
+  const sorted = [...resolved].sort((a, b) => a.timelineStart - b.timelineStart)
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const curr = sorted[i]
+    const next = sorted[i + 1]
+    if (curr.timelineEnd > next.timelineStart) {
+      // Trim current placement's end to where the next one starts
+      curr.timelineEnd = next.timelineStart
+      curr.timelineDuration = Math.max(0, curr.timelineEnd - curr.timelineStart)
+    }
+  }
+
+  return sorted
 }
