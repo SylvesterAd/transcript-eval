@@ -1697,7 +1697,7 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   }
 }
 
-export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false } = {}) {
+export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, exampleVideoId = null } = {}) {
   const strategy = await getStrategy(strategyId)
   if (!strategy) throw new Error('Strategy not found')
 
@@ -1711,7 +1711,11 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   let exampleVideos = []
   if (groupId) {
     exampleVideos = await loadExampleVideos(groupId)
-    if (exampleVideos.length) console.log(`[broll-pipeline] Loaded ${exampleVideos.length} example videos for group ${groupId}`)
+    // Filter to a single example video if requested (for parallel per-video runs)
+    if (exampleVideoId) {
+      exampleVideos = exampleVideos.filter(v => v.id === exampleVideoId)
+    }
+    if (exampleVideos.length) console.log(`[broll-pipeline] Loaded ${exampleVideos.length} example videos for group ${groupId}${exampleVideoId ? ` (filtered to video ${exampleVideoId})` : ''}`)
   }
 
   // Require reference videos for plan strategies
