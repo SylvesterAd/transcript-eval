@@ -1700,6 +1700,41 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   }
 }
 
+/**
+ * Run Plan Prep pipeline: stages 1-5 (transcript, video, A-Roll, chapters, split).
+ * This is a convenience wrapper that runs executePipeline with the plan_prep strategy.
+ */
+export async function executePlanPrep(videoId, groupId, editorCuts = null) {
+  // Find the plan_prep strategy and its latest version
+  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1").get()
+  if (!strategy) throw new Error('No plan_prep strategy found. Run the split-plan-strategies migration.')
+
+  const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
+  if (!version) throw new Error('No plan_prep strategy version found')
+
+  // Run using the existing pipeline executor
+  const result = await executePipeline(
+    strategy.id,
+    version.id,
+    videoId,
+    groupId,
+    'raw',
+    editorCuts,
+    null, // no referenceRunId
+    null, // no resumeData
+    { stopAfterPlan: false, exampleVideoId: null },
+  )
+
+  return {
+    prepPipelineId: result.pipelineId,
+    stageCount: result.stageCount,
+    totalTokensIn: result.totalTokensIn,
+    totalTokensOut: result.totalTokensOut,
+    totalCost: result.totalCost,
+    totalRuntime: result.totalRuntime,
+  }
+}
+
 export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, exampleVideoId = null } = {}) {
   const strategy = await getStrategy(strategyId)
   if (!strategy) throw new Error('Strategy not found')
