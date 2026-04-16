@@ -906,7 +906,7 @@ export const pipelineAbortControllers = new Map() // pipelineId → AbortControl
  * Load example video IDs for a group from broll_example_sources.
  * Returns array of { videoId, filePath, title } for each ready example.
  */
-async function loadExampleVideos(groupId) {
+export async function loadExampleVideos(groupId) {
   // Check this group and its parent (sub-groups inherit parent's references)
   const parent = await db.prepare('SELECT parent_group_id FROM video_groups WHERE id = ?').get(groupId)
   const groupIds = [groupId]

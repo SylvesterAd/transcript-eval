@@ -41,6 +41,10 @@ import {
   executeBrollSearch,
   getBRollEditorData,
   searchSinglePlacement,
+  executePlanPrep,
+  executeCreateStrategy,
+  executeCreatePlan,
+  loadExampleVideos,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -582,9 +586,156 @@ router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, r
 router.post('/pipeline/:pipelineId/run-broll-search', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
-    const result = executeBrollSearch(pipelineId)
-    res.json({ pipelineId, started: true })
+    const limit = req.body.limit ? parseInt(req.body.limit, 10) : undefined
+    const result = executeBrollSearch(pipelineId, { limit })
+    res.json({ pipelineId, started: true, limit })
     result.catch(err => console.error(`[broll-pipeline] B-Roll search failed for ${pipelineId}:`, err.message))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ── Split Pipeline Routes ──
+
+// One-button: start prep + analysis runs in parallel
+router.post('/pipeline/run-all', requireAuth, async (req, res) => {
+  try {
+    const { video_id, group_id } = req.body || {}
+    if (!video_id || !group_id) return res.status(400).json({ error: 'video_id and group_id required' })
+
+    // Load editor cuts
+    let editorCuts = null
+    const group = await (await import('../db.js')).default
+      .prepare('SELECT editor_state_json FROM video_groups WHERE id = ?')
+      .get(group_id)
+    if (group?.editor_state_json) {
+      try {
+        const state = JSON.parse(group.editor_state_json)
+        if (state.cuts?.length) editorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
+      } catch {}
+    }
+
+    // Load example videos
+    const examples = await loadExampleVideos(group_id)
+    const readyVideos = examples.filter(v => v.id) // filter to ready videos with IDs
+
+    // Fire prep (don't await — fire and forget)
+    const prepPromise = executePlanPrep(video_id, group_id, editorCuts)
+    prepPromise.catch(err => console.error(`[broll-pipeline] Plan prep failed: ${err.message}`))
+
+    // Fire analysis runs in parallel (one per example video)
+    const analysisStrategy = await (await import('../db.js')).default
+      .prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'main_analysis' ORDER BY id LIMIT 1").get()
+
+    let analysisPipelineIds = []
+    if (analysisStrategy) {
+      const analysisVersion = await (await import('../db.js')).default
+        .prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(analysisStrategy.id)
+
+      if (analysisVersion) {
+        for (const vid of readyVideos) {
+          const analysisPromise = executePipeline(
+            analysisStrategy.id,
+            analysisVersion.id,
+            video_id,
+            group_id,
+            'raw',
+            null,
+            null,
+            null,
+            { exampleVideoId: vid.id },
+          )
+          analysisPromise.then(r => analysisPipelineIds.push(r.pipelineId))
+            .catch(err => console.error(`[broll-pipeline] Analysis for video ${vid.id} failed: ${err.message}`))
+        }
+      }
+    }
+
+    // Wait briefly for pipeline IDs to be generated (they're created synchronously at start of executePipeline)
+    await new Promise(r => setTimeout(r, 500))
+
+    // Get the prep pipeline ID from progress map
+    let prepPipelineId = null
+    for (const [pid, prog] of brollPipelineProgress.entries()) {
+      if (prog.videoId === video_id && prog.strategyName?.includes('Prep')) {
+        prepPipelineId = pid
+        break
+      }
+    }
+
+    res.json({
+      prepPipelineId,
+      analysisPipelineIds: readyVideos.map(v => {
+        // Find the pipeline ID for this video from progress map
+        for (const [pid, prog] of brollPipelineProgress.entries()) {
+          if (prog.videoId === video_id && pid.includes(`-ex${v.id}`)) return pid
+        }
+        return null
+      }).filter(Boolean),
+      videoCount: readyVideos.length,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Create strategies (one per analysis pipeline)
+router.post('/pipeline/run-strategies', requireAuth, async (req, res) => {
+  try {
+    const { prep_pipeline_id, analysis_pipeline_ids, video_id, group_id } = req.body || {}
+    if (!prep_pipeline_id || !analysis_pipeline_ids?.length || !video_id) {
+      return res.status(400).json({ error: 'prep_pipeline_id, analysis_pipeline_ids, and video_id required' })
+    }
+
+    const strategyPipelineIds = []
+    for (const analysisPipelineId of analysis_pipeline_ids) {
+      const promise = executeCreateStrategy(prep_pipeline_id, analysisPipelineId, video_id, group_id || null)
+      promise
+        .then(r => strategyPipelineIds.push(r.strategyPipelineId))
+        .catch(err => console.error(`[broll-pipeline] Create strategy failed for analysis ${analysisPipelineId}: ${err.message}`))
+    }
+
+    // Wait briefly for pipeline IDs to be generated
+    await new Promise(r => setTimeout(r, 500))
+
+    res.json({
+      strategyPipelineIds: strategyPipelineIds.length ? strategyPipelineIds : analysis_pipeline_ids.map((_, i) => {
+        // Fallback: find from progress map
+        for (const [pid, prog] of brollPipelineProgress.entries()) {
+          if (pid.startsWith('strat-') && prog.phase === 'create_strategy') return pid
+        }
+        return null
+      }).filter(Boolean),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Create plan from a selected strategy
+router.post('/pipeline/run-plan', requireAuth, async (req, res) => {
+  try {
+    const { prep_pipeline_id, strategy_pipeline_id, video_id, group_id } = req.body || {}
+    if (!prep_pipeline_id || !strategy_pipeline_id || !video_id) {
+      return res.status(400).json({ error: 'prep_pipeline_id, strategy_pipeline_id, and video_id required' })
+    }
+
+    const result = executeCreatePlan(prep_pipeline_id, strategy_pipeline_id, video_id, group_id || null)
+    result.catch(err => console.error(`[broll-pipeline] Create plan failed: ${err.message}`))
+
+    // Wait briefly for pipeline ID
+    await new Promise(r => setTimeout(r, 500))
+
+    // Find pipeline ID from progress map
+    let planPipelineId = null
+    for (const [pid, prog] of brollPipelineProgress.entries()) {
+      if (pid.startsWith('plan-') && prog.phase === 'create_plan') {
+        planPipelineId = pid
+        break
+      }
+    }
+
+    res.json({ planPipelineId })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
