@@ -2169,7 +2169,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   // ── Build combined stages: analysis×N + plan + alt_plan×(N-1) ──
   let stages = planStages
   let analysisStageCount = 0
-  const analysisPhases = [] // [{videoId, videoTitle, startIdx, endIdx}]
   let planPhaseStartIdx = 0
   const altPlanPhases = [] // [{videoId, videoTitle, startIdx, endIdx}]
   let favoriteVideo = exampleVideos.find(v => v.isFavorite) || exampleVideos[0] || null
@@ -2216,24 +2215,33 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       )
 
       let completedCount = 0
-      const analysisResults = await Promise.all(
-        analysisPromises.map(p => p.then(result => {
-          completedCount++
-          brollPipelineProgress.set(pipelineId, {
-            ...pipelineMeta,
-            stageIndex: 0,
-            totalStages: analysisStagesTemplate.length + planStages.length,
-            status: 'running',
-            stageName: `Analysis: ${completedCount}/${exampleVideos.length} videos done`,
-            phase: 'analysis',
-            subDone: completedCount,
-            subTotal: exampleVideos.length,
-            subLabel: `${result.videoLabel} complete`,
-          })
-          console.log(`[broll-pipeline] Analysis complete for "${result.videoLabel}" (${completedCount}/${exampleVideos.length})`)
-          return result
-        }))
-      )
+      let analysisResults
+      try {
+        analysisResults = await Promise.all(
+          analysisPromises.map(p => p.then(result => {
+            completedCount++
+            brollPipelineProgress.set(pipelineId, {
+              ...pipelineMeta,
+              stageIndex: 0,
+              totalStages: analysisStagesTemplate.length + planStages.length,
+              status: 'running',
+              stageName: `Analysis: ${completedCount}/${exampleVideos.length} videos done`,
+              phase: 'analysis',
+              subDone: completedCount,
+              subTotal: exampleVideos.length,
+              subLabel: `${result.videoLabel} complete`,
+            })
+            console.log(`[broll-pipeline] Analysis complete for "${result.videoLabel}" (${completedCount}/${exampleVideos.length})`)
+            return result
+          }))
+        )
+      } catch (err) {
+        pipelineAbortControllers.delete(pipelineId)
+        const isAbort = abortedBrollPipelines.has(pipelineId) || err.name === 'AbortError'
+        brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: 0, status: 'failed', error: isAbort ? 'Aborted by user' : err.message })
+        setTimeout(() => { brollPipelineProgress.delete(pipelineId); abortedBrollPipelines.delete(pipelineId) }, 300_000)
+        throw err
+      }
 
       // Merge results into pipeline state
       for (const result of analysisResults) {
@@ -2286,22 +2294,31 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     console.log(`[broll-pipeline] Starting parallel standalone analysis for ${exampleVideos.length} videos`)
     brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: planStages.length, status: 'running', stageName: `Analyzing ${exampleVideos.length} videos in parallel...`, phase: 'analysis', subDone: 0, subTotal: exampleVideos.length, subLabel: '' })
 
-    const analysisResults = await Promise.all(
-      exampleVideos.map(vid =>
-        runVideoAnalysis(vid, planStages, {
-          pipelineId,
-          strategyId,
-          mainVideoId: videoId,
-          groupId,
-          pipelineAbort,
-          abortedSet: abortedBrollPipelines,
-          progressMap: brollPipelineProgress,
-          pipelineMeta,
-          exampleVideos,
-          mainTranscript,
-        })
+    let analysisResults
+    try {
+      analysisResults = await Promise.all(
+        exampleVideos.map(vid =>
+          runVideoAnalysis(vid, planStages, {
+            pipelineId,
+            strategyId,
+            mainVideoId: videoId,
+            groupId,
+            pipelineAbort,
+            abortedSet: abortedBrollPipelines,
+            progressMap: brollPipelineProgress,
+            pipelineMeta,
+            exampleVideos,
+            mainTranscript,
+          })
+        )
       )
-    )
+    } catch (err) {
+      pipelineAbortControllers.delete(pipelineId)
+      const isAbort = abortedBrollPipelines.has(pipelineId) || err.name === 'AbortError'
+      brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: 0, status: 'failed', error: isAbort ? 'Aborted by user' : err.message })
+      setTimeout(() => { brollPipelineProgress.delete(pipelineId); abortedBrollPipelines.delete(pipelineId) }, 300_000)
+      throw err
+    }
 
     for (const result of analysisResults) {
       analysisOutputs[result.videoId] = result.assembledOutput
