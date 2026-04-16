@@ -19,6 +19,8 @@ export default function BRollPanel({ groupId, videoId }) {
   const { data: videoRunsData, loading: runsLoading, refetch: refetchRuns } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
   const [runningType, setRunningType] = useState(null) // 'analysis' | 'plan' | null
   const [pipelineId, setPipelineId] = useState(null)
+  const [pipelineIds, setPipelineIds] = useState([]) // multiple parallel analysis runs
+  const [pipelineProgresses, setPipelineProgresses] = useState({}) // { pipelineId: progress }
   const [progress, setProgress] = useState(null)
   const [error, setError] = useState(null)
 
@@ -111,6 +113,32 @@ export default function BRollPanel({ groupId, videoId }) {
     return () => clearInterval(interval)
   }, [pipelineId, runningType, refetchRuns])
 
+  // Poll progress for parallel analysis runs
+  useEffect(() => {
+    if (!pipelineIds.length || runningType !== 'analysis') return
+    const interval = setInterval(async () => {
+      try {
+        const updates = {}
+        for (const pid of pipelineIds) {
+          const res = await authFetch(`/broll/pipeline/${pid}/progress`)
+          updates[pid] = await res.json()
+        }
+        setPipelineProgresses(updates)
+
+        const allDone = Object.values(updates).every(p => p.status === 'complete' || p.status === 'failed')
+        if (allDone) {
+          setRunningType(null)
+          setPipelineIds([])
+          setPipelineProgresses({})
+          const failed = Object.values(updates).filter(p => p.status === 'failed')
+          if (failed.length) setError(`${failed.length} analysis run(s) failed: ${failed.map(p => p.error).join('; ')}`)
+          refetchRuns()
+        }
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [pipelineIds, runningType, refetchRuns])
+
   async function getLatestVersion(strategyId) {
     const res = await authFetch(`/broll/strategies/${strategyId}/versions`)
     const versions = await res.json()
@@ -123,14 +151,38 @@ export default function BRollPanel({ groupId, videoId }) {
     setRunningType('analysis')
     setError(null)
     setProgress(null)
+    setPipelineIds([])
+    setPipelineProgresses({})
     try {
       const version = await getLatestVersion(analysisStrategy.id)
-      const res = await apiPost(`/broll/strategies/${analysisStrategy.id}/versions/${version.id}/run`, {
-        video_id: videoId,
-        group_id: groupId,
-        transcript_source: 'raw',
-      })
-      setPipelineId(res.pipelineId)
+
+      // Fetch example videos to launch one run per video
+      const exRes = await authFetch(`/broll/groups/${groupId}/examples`)
+      const examples = await exRes.json()
+      const readyVideos = (examples || []).filter(e => e.status === 'ready' && e.meta_json).map(e => {
+        try { return { ...e, meta: JSON.parse(e.meta_json) } } catch { return null }
+      }).filter(e => e?.meta?.videoId)
+
+      if (readyVideos.length > 1) {
+        // Fire one run per example video concurrently
+        const results = await Promise.all(readyVideos.map(ex =>
+          apiPost(`/broll/strategies/${analysisStrategy.id}/versions/${version.id}/run`, {
+            video_id: videoId,
+            group_id: groupId,
+            transcript_source: 'raw',
+            example_video_id: ex.meta.videoId,
+          })
+        ))
+        setPipelineIds(results.map(r => r.pipelineId))
+      } else {
+        // Single video — use existing single-run flow
+        const res = await apiPost(`/broll/strategies/${analysisStrategy.id}/versions/${version.id}/run`, {
+          video_id: videoId,
+          group_id: groupId,
+          transcript_source: 'raw',
+        })
+        setPipelineId(res.pipelineId)
+      }
     } catch (err) {
       setError(err.message)
       setRunningType(null)
@@ -222,8 +274,8 @@ export default function BRollPanel({ groupId, videoId }) {
           </p>
         </div>
 
-        {/* Progress card */}
-        {isRunning && progress && (() => {
+        {/* Progress card — single run */}
+        {isRunning && progress && !pipelineIds.length && (() => {
           const pct = progress.totalStages > 0 ? Math.round((progress.stageIndex / progress.totalStages) * 100) : 0
           return (
             <div className="bg-surface-variant/20 border border-blue-800/30 rounded-lg p-4 space-y-2">
@@ -246,6 +298,40 @@ export default function BRollPanel({ groupId, videoId }) {
             </div>
           )
         })()}
+
+        {/* Progress card — parallel analysis runs */}
+        {isRunning && pipelineIds.length > 0 && (
+          <div className="bg-surface-variant/20 border border-blue-800/30 rounded-lg p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <Loader2 size={14} className="text-primary-fixed animate-spin" />
+              <span className="text-sm font-semibold text-on-surface">Analyzing {pipelineIds.length} videos in parallel</span>
+            </div>
+            {pipelineIds.map(pid => {
+              const p = pipelineProgresses[pid]
+              if (!p) return <div key={pid} className="text-xs text-on-surface-variant">Starting...</div>
+              const pct = p.totalStages > 0 ? Math.round((p.stageIndex / p.totalStages) * 100) : 0
+              const isDone = p.status === 'complete'
+              const isFailed = p.status === 'failed'
+              return (
+                <div key={pid} className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-on-surface-variant truncate max-w-[80%]">
+                      {isDone ? <CheckCircle size={12} className="inline text-emerald-400 mr-1" /> : isFailed ? <AlertCircle size={12} className="inline text-error mr-1" /> : null}
+                      {p.videoTitle || p.stageName || pid}
+                    </span>
+                    <span className={`text-xs font-bold ${isDone ? 'text-emerald-400' : isFailed ? 'text-error' : 'text-primary-fixed'}`}>{isDone ? 'Done' : isFailed ? 'Failed' : `${pct}%`}</span>
+                  </div>
+                  <div className="w-full bg-surface-variant/50 rounded-full h-1">
+                    <div className={`h-1 rounded-full transition-all ${isDone ? 'bg-emerald-400' : isFailed ? 'bg-error' : 'bg-primary-fixed'}`} style={{ width: `${isDone ? 100 : pct}%` }} />
+                  </div>
+                  {!isDone && !isFailed && p.subTotal ? (
+                    <div className="text-[10px] text-on-surface-variant">{p.subLabel || ''} ({p.subDone || 0}/{p.subTotal})</div>
+                  ) : null}
+                </div>
+              )
+            })}
+          </div>
+        )}
 
         {/* Error */}
         {error && !isRunning && (
