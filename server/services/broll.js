@@ -31,6 +31,24 @@ function cleanupTempFiles(files) {
   }, 5000) // small delay so any in-flight reads finish
 }
 
+/**
+ * Retry a stage function with escalating delays: 5s, then 20s, then give up.
+ * Designed for Gemini API rate limit / connection errors during parallel analysis.
+ */
+async function withStageRetry(fn, { label, abortSignal } = {}) {
+  const delays = [5000, 20000]
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (abortSignal?.aborted || err.name === 'AbortError') throw err
+      if (attempt === delays.length) throw err
+      console.log(`[broll-pipeline] ${label || 'Stage'} failed (attempt ${attempt + 1}/${delays.length + 1}), retrying in ${delays[attempt] / 1000}s: ${err.message}`)
+      await new Promise(r => setTimeout(r, delays[attempt]))
+    }
+  }
+}
+
 // ── Robust JSON extraction from LLM output ──
 function extractJSON(text) {
   if (!text) return null
@@ -1408,7 +1426,7 @@ async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
 }
 
 // Search stock footage for each B-Roll placement using keywords + GPU-powered API
-export async function executeBrollSearch(planPipelineId) {
+export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
   const GPU_KEY = process.env.GPU_INTERNAL_KEY
   if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')
@@ -1512,27 +1530,46 @@ export async function executeBrollSearch(planPipelineId) {
 
   if (!workItems.length) throw new Error('No broll placements found')
 
+  // Skip items that already have search results
+  const existingSearchRuns = await db.prepare(
+    `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
+  ).all(`%"pipelineId":"bs-${planPipelineId}-%`)
+  const searched = new Set()
+  for (const r of existingSearchRuns) {
+    try {
+      const m = JSON.parse(r.metadata_json || '{}')
+      if (m.isSubRun) searched.add(`${m.chapterIndex}:${m.placementIndex}`)
+    } catch {}
+  }
+  const pendingItems = workItems.filter(w => !searched.has(`${w.chapterIndex}:${w.placementIndex}`))
+  const itemsToProcess = limit ? pendingItems.slice(0, limit) : pendingItems
+
+  if (!itemsToProcess.length) {
+    console.log(`[broll-pipeline] All ${workItems.length} items already searched, nothing to do`)
+    return
+  }
+
   const searchPipelineId = `bs-${planPipelineId}-${Date.now()}`
   const pipelineStart = Date.now()
   const pipelineAbort = new AbortController()
   pipelineAbortControllers.set(searchPipelineId, pipelineAbort)
 
-  console.log(`[broll-pipeline] Starting B-Roll search: ${workItems.length} elements`)
-  brollPipelineProgress.set(searchPipelineId, { strategyId: searchStrategy.id, videoId, groupId, strategyName: 'B-Roll Search', videoTitle: '', startedAt: pipelineStart, stageIndex: 0, totalStages: 1, status: 'running', stageName: 'Searching stock footage', phase: 'broll_search', videoLabel: '', subDone: 0, subTotal: workItems.length, subLabel: '' })
+  console.log(`[broll-pipeline] Starting B-Roll search: ${itemsToProcess.length} of ${workItems.length} elements (${searched.size} already done, limit: ${limit || 'none'})`)
+  brollPipelineProgress.set(searchPipelineId, { strategyId: searchStrategy.id, videoId, groupId, strategyName: 'B-Roll Search', videoTitle: '', startedAt: pipelineStart, stageIndex: 0, totalStages: 1, status: 'running', stageName: 'Searching stock footage', phase: 'broll_search', videoLabel: '', subDone: 0, subTotal: itemsToProcess.length, subLabel: '' })
 
   let completedItems = 0
 
   try {
     // Process ONE element at a time (sequential — API takes ~90s each)
-    for (let idx = 0; idx < workItems.length; idx++) {
+    for (let idx = 0; idx < itemsToProcess.length; idx++) {
       if (abortedBrollPipelines.has(searchPipelineId)) break
-      const item = workItems[idx]
+      const item = itemsToProcess[idx]
       const p = item.placement
       const shortDesc = (p.description || '').slice(0, 60)
       const subLabel = `Ch${item.chapterIndex + 1} #${item.placementIndex + 1}: ${shortDesc}`
 
       brollPipelineProgress.set(searchPipelineId, { ...brollPipelineProgress.get(searchPipelineId), subDone: completedItems, subLabel })
-      console.log(`[broll-pipeline] Search ${idx + 1}/${workItems.length}: ${subLabel}`)
+      console.log(`[broll-pipeline] Search ${idx + 1}/${itemsToProcess.length}: ${subLabel}`)
 
       // Build brief — description + full style, no function/type metadata
       const styleParts = []
@@ -1568,7 +1605,7 @@ export async function executeBrollSearch(planPipelineId) {
           logSource: `broll-search:${searchPipelineId}`,
           onProgress: (ev) => {
             const gpuStatus = ev.status ? `${ev.stage}: ${ev.status}` : ev.stage
-            console.log(`[broll-pipeline] GPU [${idx + 1}/${workItems.length}] ${gpuStatus}`)
+            console.log(`[broll-pipeline] GPU [${idx + 1}/${itemsToProcess.length}] ${gpuStatus}`)
             brollPipelineProgress.set(searchPipelineId, {
               ...brollPipelineProgress.get(searchPipelineId),
               subDone: completedItems,
