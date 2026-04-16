@@ -456,8 +456,9 @@ export async function listExampleSources(groupId) {
   if (parent?.parent_group_id) groupIds.push(parent.parent_group_id)
 
   return db.prepare(`
-    SELECT es.* FROM broll_example_sources es
+    SELECT es.*, v.duration_seconds, v.title AS video_title FROM broll_example_sources es
     JOIN broll_example_sets eset ON eset.id = es.example_set_id
+    LEFT JOIN videos v ON v.id = (es.meta_json::json->>'videoId')::int
     WHERE eset.group_id IN (${groupIds.map(() => '?').join(',')})
     ORDER BY es.created_at DESC
   `).all(...groupIds)
@@ -1881,11 +1882,11 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   let questionCount = 0
   let examplesOutput = '' // aggregated output from all examples-targeted stages
   const stageOutputs = []
-  const pipelineId = resumeData?.originalPipelineId || `${strategyId}-${videoId}-${Date.now()}`
+  const pipelineId = resumeData?.originalPipelineId || `${strategyId}-${videoId}-${Date.now()}${exampleVideoId ? `-ex${exampleVideoId}` : ''}`
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const mainVideo = await db.prepare('SELECT title FROM videos WHERE id = ?').get(videoId)
   const videoTitle = mainVideo?.title || `Video #${videoId}`
-  const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now() }
+  const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now(), exampleVideoId: exampleVideoId || null }
 
   if (resumeData) {
     const completedCount = Object.keys(resumeData.completedStages).length
