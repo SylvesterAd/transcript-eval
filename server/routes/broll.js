@@ -287,7 +287,7 @@ router.post('/strategies/:id/analyze', requireAuth, async (req, res) => {
 // Pipeline execution (multi-stage sequential)
 router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, res) => {
   try {
-    const { video_id, group_id, transcript_source, reference_run_id, stop_after_plan } = req.body || {}
+    const { video_id, group_id, transcript_source, reference_run_id, stop_after_plan, example_video_id } = req.body || {}
     if (!video_id) return res.status(400).json({ error: 'video_id required' })
 
     // Load editor cuts from group if available (needed for plan strategies)
@@ -315,7 +315,7 @@ router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, 
       editorCuts,
       reference_run_id || null,
       null,
-      { stopAfterPlan: !!stop_after_plan },
+      { stopAfterPlan: !!stop_after_plan, exampleVideoId: example_video_id || null },
     )
     res.json(result)
   } catch (err) {
