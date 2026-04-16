@@ -1035,11 +1035,12 @@ export async function executeAltPlans(planPipelineId) {
       if (t === null) return false
       return t >= ch.start_seconds && t < ch.end_seconds
     })
-    const beats = (ch.beats || []).map(b => `  - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)}): ${b.description || ''}${b.purpose ? ' | Purpose: ' + b.purpose : ''}`).join('\n')
+    const beats = (ch.beats || []).map(b => `  - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)}): ${b.description || ''}${b.purpose ? ' | Purpose: ' + b.purpose : ''}${b.emotion ? ' | Emotion: ' + b.emotion : ''}`).join('\n')
     return {
       chapter_number: idx + 1,
       chapter_name: ch.name || `Chapter ${idx + 1}`,
       chapter_purpose: ch.purpose || ch.description || '',
+      chapter_emotion: ch.emotion || '',
       chapter_start: ch.start_seconds,
       chapter_end: ch.end_seconds,
       chapter_start_tc: toTC(ch.start_seconds),
@@ -1055,7 +1056,7 @@ export async function executeAltPlans(planPipelineId) {
   // Build _allChaptersContext
   const allChaptersSummary = chapters.map((ch, idx) => {
     const beats = (ch.beats || []).map(b => `    - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)})`).join('\n')
-    return `### Chapter ${idx + 1}: ${ch.name} (${toTC(ch.start_seconds)}-${toTC(ch.end_seconds)})\nPurpose: ${ch.purpose || ch.description || ''}\nBeats:\n${beats}`
+    return `### Chapter ${idx + 1}: ${ch.name} (${toTC(ch.start_seconds)}-${toTC(ch.end_seconds)})\nPurpose: ${ch.purpose || ch.description || ''}${ch.emotion ? '\nEmotion: ' + ch.emotion : ''}\nBeats:\n${beats}`
   }).join('\n\n')
   const aRollSummary = aRolls.map(a => {
     const changeAt = a.change_at_seconds != null ? ` — change at ${toTC(a.change_at_seconds)}` : ''
@@ -1151,6 +1152,7 @@ export async function executeAltPlans(planPipelineId) {
               .replace(/\{\{total_chapters\}\}/g, String(chapterSplits.length))
               .replace(/\{\{chapter_name\}\}/g, ch.chapter_name)
               .replace(/\{\{chapter_purpose\}\}/g, ch.chapter_purpose)
+              .replace(/\{\{chapter_emotion\}\}/g, ch.chapter_emotion || '')
               .replace(/\{\{chapter_start_tc\}\}/g, ch.chapter_start_tc)
               .replace(/\{\{chapter_end_tc\}\}/g, ch.chapter_end_tc)
               .replace(/\{\{chapter_duration_seconds\}\}/g, String(ch.chapter_duration_seconds))
@@ -2402,6 +2404,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             .replace(/\{\{total_chapters\}\}/g, String(chapterSplits.length))
             .replace(/\{\{chapter_name\}\}/g, ch.chapter_name)
             .replace(/\{\{chapter_purpose\}\}/g, ch.chapter_purpose)
+            .replace(/\{\{chapter_emotion\}\}/g, ch.chapter_emotion || '')
             .replace(/\{\{chapter_start_tc\}\}/g, ch.chapter_start_tc)
             .replace(/\{\{chapter_end_tc\}\}/g, ch.chapter_end_tc)
             .replace(/\{\{chapter_duration_seconds\}\}/g, String(ch.chapter_duration_seconds))
@@ -2643,12 +2646,13 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
               return t >= ch.start_seconds && t < ch.end_seconds
             })
             const beatsRaw = ch.beats || []
-            const beats = beatsRaw.map(b => `  - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)}): ${b.description}${b.purpose ? ' | Purpose: ' + b.purpose : ''}`).join('\n')
+            const beats = beatsRaw.map(b => `  - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)}): ${b.description}${b.purpose ? ' | Purpose: ' + b.purpose : ''}${b.emotion ? ' | Emotion: ' + b.emotion : ''}`).join('\n')
 
             return {
               chapter_number: idx + 1,
               chapter_name: ch.name || `Chapter ${idx + 1}`,
               chapter_purpose: ch.purpose || ch.description || '',
+              chapter_emotion: ch.emotion || '',
               chapter_start: ch.start_seconds,
               chapter_end: ch.end_seconds,
               chapter_start_tc: toTC(ch.start_seconds),
@@ -2665,7 +2669,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           // Build all-chapters summary for context
           const allChaptersSummary = chapters.map((ch, idx) => {
             const beats = (ch.beats || []).map(b => `    - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)})`).join('\n')
-            return `### Chapter ${idx + 1}: ${ch.name} (${toTC(ch.start_seconds)}-${toTC(ch.end_seconds)})\nPurpose: ${ch.purpose || ch.description || ''}\nBeats:\n${beats}`
+            return `### Chapter ${idx + 1}: ${ch.name} (${toTC(ch.start_seconds)}-${toTC(ch.end_seconds)})\nPurpose: ${ch.purpose || ch.description || ''}${ch.emotion ? '\nEmotion: ' + ch.emotion : ''}\nBeats:\n${beats}`
           }).join('\n\n')
           const aRollSummary = aRolls.map(a => {
             const changeAt = a.change_at_seconds != null ? ` — change at ${toTC(a.change_at_seconds)}` : ''
