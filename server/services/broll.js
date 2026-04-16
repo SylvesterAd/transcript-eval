@@ -2152,6 +2152,20 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     throw new Error('No reference videos found. Add reference videos before generating a B-Roll plan.')
   }
 
+  // ── Resolve transcript and key state early (needed for parallel analysis) ──
+  const { content: mainTranscript, resolved: resolvedSource } = await resolveTranscript(videoId, transcriptSource)
+  const pipelineId = resumeData?.originalPipelineId || `${strategyId}-${videoId}-${Date.now()}`
+  let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
+  const mainVideo = await db.prepare('SELECT title FROM videos WHERE id = ?').get(videoId)
+  const videoTitle = mainVideo?.title || `Video #${videoId}`
+  const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now() }
+
+  // Track per-video analysis outputs
+  const analysisOutputs = {} // { [videoId]: assembledJSON }
+  const chapterAnalyses = {} // { [videoId]: chaptersJSON } — collected for cross-video reference
+  let favoriteOutput = '' // the favorite plan assembled output
+  let referenceAnalysis = ''
+
   // ── Build combined stages: analysis×N + plan + alt_plan×(N-1) ──
   let stages = planStages
   let analysisStageCount = 0
@@ -2179,35 +2193,74 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     }
 
     if (analysisStagesTemplate.length && exampleVideos.length) {
-      const combined = []
+      // ── Run analysis for all videos in PARALLEL ──
+      const pipelineAbort = new AbortController()
+      pipelineAbortControllers.set(pipelineId, pipelineAbort)
 
-      // Phase 1: Analysis per example video
-      for (const vid of exampleVideos) {
-        const label = vid.title || `Video #${vid.id}`
-        const isFav = vid === favoriteVideo
-        const startIdx = combined.length
-        for (const s of analysisStagesTemplate) {
-          const clone = JSON.parse(JSON.stringify(s))
-          if (clone.actionParams) {
-            for (const key of Object.keys(clone.actionParams)) {
-              if (key.endsWith('StageIndex') && typeof clone.actionParams[key] === 'number') {
-                clone.actionParams[key] += startIdx
-              }
-            }
-          }
-          combined.push({ ...clone, _phase: 'analysis', _videoId: vid.id, _videoLabel: label, _isFavorite: isFav })
+      console.log(`[broll-pipeline] Starting parallel analysis for ${exampleVideos.length} videos`)
+      brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: analysisStagesTemplate.length + planStages.length, status: 'running', stageName: `Analyzing ${exampleVideos.length} videos in parallel...`, phase: 'analysis', subDone: 0, subTotal: exampleVideos.length, subLabel: '' })
+
+      const analysisPromises = exampleVideos.map(vid =>
+        runVideoAnalysis(vid, analysisStagesTemplate, {
+          pipelineId,
+          strategyId,
+          mainVideoId: videoId,
+          groupId,
+          pipelineAbort,
+          abortedSet: abortedBrollPipelines,
+          progressMap: brollPipelineProgress,
+          pipelineMeta,
+          exampleVideos,
+          mainTranscript,
+        })
+      )
+
+      let completedCount = 0
+      const analysisResults = await Promise.all(
+        analysisPromises.map(p => p.then(result => {
+          completedCount++
+          brollPipelineProgress.set(pipelineId, {
+            ...pipelineMeta,
+            stageIndex: 0,
+            totalStages: analysisStagesTemplate.length + planStages.length,
+            status: 'running',
+            stageName: `Analysis: ${completedCount}/${exampleVideos.length} videos done`,
+            phase: 'analysis',
+            subDone: completedCount,
+            subTotal: exampleVideos.length,
+            subLabel: `${result.videoLabel} complete`,
+          })
+          console.log(`[broll-pipeline] Analysis complete for "${result.videoLabel}" (${completedCount}/${exampleVideos.length})`)
+          return result
+        }))
+      )
+
+      // Merge results into pipeline state
+      for (const result of analysisResults) {
+        analysisOutputs[result.videoId] = result.assembledOutput
+        if (result.chapterAnalysis) {
+          chapterAnalyses[result.videoId] = result.chapterAnalysis
         }
-        analysisPhases.push({ videoId: vid.id, videoTitle: label, isFavorite: isFav, startIdx, endIdx: combined.length - 1, stageCount: analysisStagesTemplate.length })
+        totalTokensIn += result.totalTokensIn
+        totalTokensOut += result.totalTokensOut
+        totalCost += result.totalCost
       }
-      analysisStageCount = combined.length
 
-      // Phase 2: Favorite B-Roll plan
-      planPhaseStartIdx = combined.length
+      // Set referenceAnalysis from favorite
+      if (favoriteVideo) {
+        referenceAnalysis = analysisOutputs[favoriteVideo.id] || ''
+        console.log(`[broll-pipeline] referenceAnalysis from favorite "${favoriteVideo.title || favoriteVideo.id}" (${referenceAnalysis.length} chars)`)
+      }
+
+      console.log(`[broll-pipeline] All ${exampleVideos.length} analyses complete ($${totalCost.toFixed(4)})`)
+
+      // Build stages: plan + alt_plan only (analysis already done)
+      const combined = []
+      planPhaseStartIdx = 0
       for (const s of planStages) {
         combined.push({ ...JSON.parse(JSON.stringify(s)), _phase: 'plan' })
       }
 
-      // Phase 3: Alt plans per non-favorite video
       if (altPlanStagesTemplate.length) {
         for (const vid of altVideos) {
           const label = vid.title || `Video #${vid.id}`
@@ -2220,38 +2273,49 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       }
 
       stages = combined
-      console.log(`[broll-pipeline] Combined: ${analysisStageCount} analysis (${exampleVideos.length} videos) + ${planStages.length} plan + ${altPlanPhases.length * altPlanStagesTemplate.length} alt plan stages`)
+      analysisStageCount = 0 // analysis is done, not in stages array
+      console.log(`[broll-pipeline] Remaining stages: ${planStages.length} plan + ${altPlanPhases.length * (altPlanStagesTemplate.length || 0)} alt plan`)
     }
   }
 
-  // For standalone analysis strategies with multiple example videos: expand stages per video
+  // For standalone analysis strategies with multiple example videos: run in parallel
   if (!strategy.main_strategy_id && exampleVideos.length > 1) {
-    const combined = []
-    for (const vid of exampleVideos) {
-      const label = vid.title || `Video #${vid.id}`
-      const isFav = vid === favoriteVideo
-      const startIdx = combined.length
-      for (const s of planStages) {
-        const clone = JSON.parse(JSON.stringify(s))
-        // Offset actionParams stage references by startIdx
-        if (clone.actionParams) {
-          for (const key of Object.keys(clone.actionParams)) {
-            if (key.endsWith('StageIndex') && typeof clone.actionParams[key] === 'number') {
-              clone.actionParams[key] += startIdx
-            }
-          }
-        }
-        combined.push({ ...clone, _phase: 'analysis', _videoId: vid.id, _videoLabel: label, _isFavorite: isFav })
-      }
-      analysisPhases.push({ videoId: vid.id, videoTitle: label, isFavorite: isFav, startIdx, endIdx: combined.length - 1, stageCount: planStages.length })
-    }
-    analysisStageCount = combined.length
-    stages = combined
-    console.log(`[broll-pipeline] Analysis expanded: ${exampleVideos.length} videos × ${planStages.length} stages = ${stages.length} total`)
-  }
+    const pipelineAbort = new AbortController()
+    pipelineAbortControllers.set(pipelineId, pipelineAbort)
 
-  // Resolve main video transcript
-  const { content: mainTranscript, resolved: resolvedSource } = await resolveTranscript(videoId, transcriptSource)
+    console.log(`[broll-pipeline] Starting parallel standalone analysis for ${exampleVideos.length} videos`)
+    brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: planStages.length, status: 'running', stageName: `Analyzing ${exampleVideos.length} videos in parallel...`, phase: 'analysis', subDone: 0, subTotal: exampleVideos.length, subLabel: '' })
+
+    const analysisResults = await Promise.all(
+      exampleVideos.map(vid =>
+        runVideoAnalysis(vid, planStages, {
+          pipelineId,
+          strategyId,
+          mainVideoId: videoId,
+          groupId,
+          pipelineAbort,
+          abortedSet: abortedBrollPipelines,
+          progressMap: brollPipelineProgress,
+          pipelineMeta,
+          exampleVideos,
+          mainTranscript,
+        })
+      )
+    )
+
+    for (const result of analysisResults) {
+      analysisOutputs[result.videoId] = result.assembledOutput
+      if (result.chapterAnalysis) chapterAnalyses[result.videoId] = result.chapterAnalysis
+      totalTokensIn += result.totalTokensIn
+      totalTokensOut += result.totalTokensOut
+      totalCost += result.totalCost
+    }
+
+    // Set stages to empty so the main loop is skipped
+    stages = []
+    analysisStageCount = 0
+    console.log(`[broll-pipeline] Standalone parallel analysis complete for ${exampleVideos.length} videos`)
+  }
 
   // Pre-load main video file if needed
   let mainVideoFilePath = null
@@ -2260,13 +2324,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     mainVideoFilePath = await getVideoFilePath(videoId)
   }
 
-  // Track per-video analysis outputs
-  const analysisOutputs = {} // { [videoId]: assembledJSON }
-  const chapterAnalyses = {} // { [videoId]: chaptersJSON } — collected for cross-video reference
-  let favoriteOutput = '' // the favorite plan assembled output
-
-  // Load reference analysis — either from a specific run or chain will produce it
-  let referenceAnalysis = ''
+  // Load reference analysis from a specific run (if not chaining)
   if (referenceRunId) {
     referenceAnalysis = await loadRunOutput(referenceRunId) || ''
     if (referenceAnalysis) console.log(`[broll-pipeline] Loaded reference analysis from run ${referenceRunId} (${referenceAnalysis.length} chars)`)
@@ -2277,13 +2335,11 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       const refMeta = JSON.parse(refRun.metadata_json || '{}')
       const refPipelineId = refMeta.pipelineId
       if (refPipelineId) {
-        // Find all "Analyze Chapters" or stage index 1 outputs per video from the analysis pipeline
         const chapterRuns = await db.prepare(
           `SELECT output_text, metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND metadata_json NOT LIKE '%"isSubRun":true%' AND status = 'complete' ORDER BY id`
         ).all(`%"pipelineId":"${refPipelineId}"%`)
         for (const cr of chapterRuns) {
           const cm = JSON.parse(cr.metadata_json || '{}')
-          // Stage that contains chapters — look for chapters in output
           if (cr.output_text && cm.videoLabel) {
             try {
               const parsed = extractJSON(cr.output_text)
@@ -2298,23 +2354,17 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       }
     }
   }
-  // If chaining, referenceAnalysis will be set after analysis stages complete
 
-  // Pipeline state
+  // Pipeline state (for main loop — plan/alt_plan stages)
   let currentTranscript = mainTranscript
   let segments = null
-  let chapterSplits = null // set by split_by_chapter action
-  let timeWindows = null // set by build_time_windows action
+  let chapterSplits = null
+  let timeWindows = null
   let llmAnswer = ''
   const llmAnswers = {}
   let questionCount = 0
-  let examplesOutput = '' // aggregated output from all examples-targeted stages
+  let examplesOutput = ''
   const stageOutputs = []
-  const pipelineId = resumeData?.originalPipelineId || `${strategyId}-${videoId}-${Date.now()}`
-  let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
-  const mainVideo = await db.prepare('SELECT title FROM videos WHERE id = ?').get(videoId)
-  const videoTitle = mainVideo?.title || `Video #${videoId}`
-  const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now() }
 
   if (resumeData) {
     const completedCount = Object.keys(resumeData.completedStages).length
@@ -2415,7 +2465,8 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   }
 
   const pipelineStart = Date.now()
-  const pipelineAbort = new AbortController()
+  // Reuse abort controller if already created by parallel analysis, otherwise create new
+  const pipelineAbort = pipelineAbortControllers.get(pipelineId) || new AbortController()
   pipelineAbortControllers.set(pipelineId, pipelineAbort)
   const pipelineTempFiles = [] // { bucket, path } — cleaned up after pipeline completes
 
@@ -2497,46 +2548,20 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       console.log(`[broll-pipeline] ${pipelineId} Stage ${i + 1}/${stages.length}: ${phaseLabel}${stageName} (${stage.type}, target=${target})`)
 
       // ── Phase transitions ──
-      // After each analysis video's last stage: store assembled output
-      for (const ap of analysisPhases) {
-        if (i === ap.endIdx + 1) {
-          // Just finished this video's analysis
-          const assembledIdx = ap.startIdx + ap.stageCount - 1
-          analysisOutputs[ap.videoId] = stageOutputs[assembledIdx] || ''
-          // Capture chapter analysis (template index 1) for cross-video reference
-          const chaptersIdx = ap.startIdx + 1
-          if (stageOutputs[chaptersIdx]) {
-            chapterAnalyses[ap.videoId] = stageOutputs[chaptersIdx]
-            console.log(`[broll-pipeline] Chapters for "${ap.videoTitle}" saved (${stageOutputs[chaptersIdx].length} chars)`)
-          }
-          console.log(`[broll-pipeline] Analysis for "${ap.videoTitle}" complete (${(analysisOutputs[ap.videoId] || '').length} chars)`)
-        }
-      }
-
-      // When plan phase starts: set referenceAnalysis from favorite video
-      if (analysisStageCount && i === planPhaseStartIdx && !referenceAnalysis && favoriteVideo) {
-        referenceAnalysis = analysisOutputs[favoriteVideo.id] || ''
-        console.log(`[broll-pipeline] Plan phase starting → referenceAnalysis from favorite "${favoriteVideo.title || favoriteVideo.id}" (${referenceAnalysis.length} chars)`)
-        chapterSplits = null
-        timeWindows = null
-      }
+      // Analysis is now done as a parallel pre-step — only alt_plan transitions remain
 
       // When an alt plan phase starts: switch referenceAnalysis to that video's analysis
       for (const ap of altPlanPhases) {
         if (i === ap.startIdx) {
           referenceAnalysis = analysisOutputs[ap.videoId] || ''
-          // favoriteOutput should already be set from plan phase
           console.log(`[broll-pipeline] Alt plan for "${ap.videoTitle}" → switching referenceAnalysis (${referenceAnalysis.length} chars)`)
-          // Keep chapterSplits — chapters are from the main video and stay the same
-          // Only switch the reference analysis (different style inspiration)
         }
       }
 
       // After plan phase's last stage: capture favorite plan output
-      if (analysisStageCount && altPlanPhases.length && i === planPhaseStartIdx + planStages.length && !favoriteOutput) {
+      if (altPlanPhases.length && i === planPhaseStartIdx + planStages.length && !favoriteOutput) {
         favoriteOutput = stageOutputs[planPhaseStartIdx + planStages.length - 1] || ''
         console.log(`[broll-pipeline] Favorite plan complete (${favoriteOutput.length} chars)`)
-        // Stop here if alt plans should be triggered separately (Step 3)
         if (stopAfterPlan) {
           console.log(`[broll-pipeline] stopAfterPlan: stopping before alt_plan phase (${altPlanPhases.length} alt videos pending)`)
           break
