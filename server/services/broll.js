@@ -91,7 +91,7 @@ export const BROLL_MODELS = [
   'claude-sonnet-4-20250514',
 ]
 
-export const BROLL_STRATEGY_KINDS = ['hook_analysis', 'main_analysis', 'plan', 'alt_plan', 'keywords', 'broll_search']
+export const BROLL_STRATEGY_KINDS = ['hook_analysis', 'main_analysis', 'plan', 'alt_plan', 'keywords', 'broll_search', 'plan_prep', 'create_strategy', 'create_plan']
 
 /**
  * Upgrade a stock footage preview URL to HD quality.
