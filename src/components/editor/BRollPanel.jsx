@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useApi, apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
-import { Play, Loader2, CheckCircle, AlertCircle, RotateCcw, Search, Sparkles, Layers, Tag, Film } from 'lucide-react'
+import { Play, Loader2, CheckCircle, AlertCircle, RotateCcw, Search, Sparkles, Layers, Tag, Film, Star } from 'lucide-react'
 import BRollEditor from './BRollEditor.jsx'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -14,9 +15,26 @@ async function authFetch(path) {
   return fetch(`${API_BASE}${path}`, { headers })
 }
 
-export default function BRollPanel({ groupId, videoId }) {
+function ytThumbnail(url) {
+  if (!url) return null
+  const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?.*v=|embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/)
+  return m ? `https://img.youtube.com/vi/${m[1]}/mqdefault.jpg` : null
+}
+
+function formatDuration(sec) {
+  if (!sec) return '--:--:--'
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = Math.floor(sec % 60)
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+export default function BRollPanel({ groupId, videoId, sub, detail }) {
+  const { id } = useParams()
+  const navigate = useNavigate()
   const { data: strategies } = useApi('/broll/strategies')
   const { data: videoRunsData, loading: runsLoading, refetch: refetchRuns } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
+  const { data: examples } = useApi(groupId ? `/broll/groups/${groupId}/examples` : null)
   const [runningType, setRunningType] = useState(null) // 'analysis' | 'plan' | null
   const [pipelineId, setPipelineId] = useState(null)
   const [pipelineIds, setPipelineIds] = useState([]) // multiple parallel analysis runs
@@ -28,6 +46,9 @@ export default function BRollPanel({ groupId, videoId }) {
   const planStrategy = (strategies || []).find(s => s.strategy_kind === 'plan')
   const altPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'alt_plan')
   const keywordsStrategy = (strategies || []).find(s => s.strategy_kind === 'keywords')
+  const planPrepStrategy = (strategies || []).find(s => s.strategy_kind === 'plan_prep')
+  const createStrategyKind = (strategies || []).find(s => s.strategy_kind === 'create_strategy')
+  const createPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'create_plan')
   const videoRuns = videoRunsData?.runs || []
   const activePipelines = videoRunsData?.activePipelines || []
 
@@ -48,6 +69,46 @@ export default function BRollPanel({ groupId, videoId }) {
       }
     } catch {}
   }
+
+  // Parse chapters, stats, and patterns per example video from analysis runs
+  // pipelineId format: "{strategyId}-{videoId}-{ts}-ex{exampleVideoId}"
+  const chaptersByExampleVideo = useMemo(() => {
+    const map = {} // { exampleVideoId: { chapters, stats, patterns } }
+
+    function parseOutput(text) {
+      const jsonMatch = text?.match(/```json\s*([\s\S]*?)```/)
+      if (jsonMatch) { try { return JSON.parse(jsonMatch[1]) } catch {} }
+      try { return JSON.parse(text) } catch {}
+      return null
+    }
+
+    for (const run of videoRuns) {
+      if (run.status !== 'complete' || !run.output_text) continue
+      const meta = (() => { try { return JSON.parse(run.metadata_json || '{}') } catch { return {} } })()
+      const exMatch = meta.pipelineId?.match(/-ex(\d+)$/)
+      if (!exMatch) continue
+      const exVid = Number(exMatch[1])
+      if (!map[exVid]) map[exVid] = { chapters: [], stats: [], patterns: [] }
+
+      if (meta.stageName === 'Analyze A-Roll + Chapters & Beats') {
+        const parsed = parseOutput(run.output_text)
+        if (parsed?.chapters) map[exVid].chapters = parsed.chapters
+      }
+      if (meta.stageName === 'Compute chapter stats') {
+        const parsed = parseOutput(run.output_text)
+        if (Array.isArray(parsed)) map[exVid].stats = parsed
+      }
+      if (meta.stageName === 'Pattern analysis' && meta.isSubRun) {
+        const parsed = parseOutput(run.output_text)
+        if (parsed) map[exVid].patterns.push({ subIndex: meta.subIndex, data: parsed })
+      }
+    }
+    // Sort patterns by subIndex
+    for (const v of Object.values(map)) {
+      v.patterns.sort((a, b) => (a.subIndex || 0) - (b.subIndex || 0))
+    }
+    return map
+  }, [videoRuns])
 
   // Check for completed analysis (strategy_id matches analysis strategy)
   const completedAnalysis = Object.values(pipelineMap).find(p =>
@@ -82,17 +143,75 @@ export default function BRollPanel({ groupId, videoId }) {
     })
   )
 
+  // Check for completed plan prep
+  const hasCompletedPrep = Object.values(pipelineMap).some(p =>
+    p.status === 'complete' && p.stages.some(s => {
+      try { return JSON.parse(s.metadata_json || '{}').phase === 'plan_prep' } catch { return false }
+    })
+  )
+
+  // Find completed prep pipeline ID
+  const completedPrepPipeline = Object.entries(pipelineMap).find(([pid, p]) =>
+    p.status === 'complete' && pid.startsWith('prep-')
+  )
+  const prepPipelineId = completedPrepPipeline?.[0] || null
+
+  // Find completed analysis pipeline IDs
+  const completedAnalysisPipelineIds = Object.entries(pipelineMap)
+    .filter(([pid, p]) => p.status === 'complete' && p.stages.some(s => s.strategy_id === analysisStrategy?.id))
+    .map(([pid]) => pid)
+
+  // Check for completed strategies
+  const hasCompletedStrategies = Object.values(pipelineMap).some(p =>
+    p.status === 'complete' && p.stages.some(s => {
+      try { const m = JSON.parse(s.metadata_json || '{}'); return m.phase === 'create_strategy' || m.phase === 'create_combined_strategy' } catch { return false }
+    })
+  )
+
+  // Find completed strategy pipeline IDs
+  const completedStrategyPipelineIds = Object.entries(pipelineMap)
+    .filter(([pid, p]) => p.status === 'complete' && (pid.startsWith('strat-') || pid.startsWith('cstrat-')))
+    .map(([pid]) => pid)
+
+  // Check for completed plan (new style)
+  const hasCompletedNewPlan = Object.values(pipelineMap).some(p =>
+    p.status === 'complete' && p.stages.some(s => {
+      try { return JSON.parse(s.metadata_json || '{}').phase === 'create_plan' } catch { return false }
+    })
+  )
+
+  // Find new-style plan pipeline ID for keywords/search
+  const completedNewPlanPipeline = Object.entries(pipelineMap).find(([pid, p]) =>
+    p.status === 'complete' && pid.startsWith('plan-')
+  )
+  const newPlanPipelineId = completedNewPlanPipeline?.[0] || null
+
   const hasActivePipeline = activePipelines.length > 0
   const activeProgress = activePipelines[0] || null
 
-  // If there's an active pipeline on mount, track it
+  // If there are active pipelines on mount (started externally), track them
   useEffect(() => {
-    if (activeProgress && !pipelineId) {
+    if (!activePipelines.length || pipelineId || pipelineIds.length) return
+
+    // Check for parallel analysis runs (multiple pipelines with exampleVideoId)
+    const activeAnalysis = activePipelines.filter(p => p.status === 'running' && String(p.strategyId) === String(analysisStrategy?.id))
+    if (activeAnalysis.length > 1 || (activeAnalysis.length === 1 && activeAnalysis[0].exampleVideoId)) {
+      setPipelineIds(activeAnalysis.map(p => p.pipelineId))
+      setRunningType('analysis')
+      // Seed initial progress
+      const initial = {}
+      for (const p of activeAnalysis) initial[p.pipelineId] = p
+      setPipelineProgresses(initial)
+      return
+    }
+
+    // Single active pipeline
+    if (activeProgress) {
       setPipelineId(activeProgress.pipelineId)
-      setRunningType(activeProgress.phase === 'alt_plan' ? 'alt_plan' : activeProgress.strategyId === analysisStrategy?.id ? 'analysis' : 'plan')
+      setRunningType(activeProgress.phase === 'alt_plan' ? 'alt_plan' : String(activeProgress.strategyId) === String(analysisStrategy?.id) ? 'analysis' : 'plan')
       setProgress(activeProgress)
     }
-  }, [activeProgress, pipelineId, analysisStrategy?.id])
+  }, [activePipelines, pipelineId, pipelineIds.length, analysisStrategy?.id])
 
   // Poll progress
   useEffect(() => {
@@ -115,7 +234,7 @@ export default function BRollPanel({ groupId, videoId }) {
 
   // Poll progress for parallel analysis runs
   useEffect(() => {
-    if (!pipelineIds.length || runningType !== 'analysis') return
+    if (!pipelineIds.length || !['analysis', 'strategy'].includes(runningType)) return
     const interval = setInterval(async () => {
       try {
         const updates = {}
@@ -147,84 +266,70 @@ export default function BRollPanel({ groupId, videoId }) {
   }
 
   async function handleRunAnalysis() {
-    if (!analysisStrategy || !videoId) return
+    if (!videoId || !groupId) return
     setRunningType('analysis')
     setError(null)
     setProgress(null)
     setPipelineIds([])
     setPipelineProgresses({})
     try {
-      const version = await getLatestVersion(analysisStrategy.id)
-
-      // Fetch example videos to launch one run per video
-      const exRes = await authFetch(`/broll/groups/${groupId}/examples`)
-      const examples = await exRes.json()
-      const readyVideos = (examples || []).filter(e => e.status === 'ready' && e.meta_json).map(e => {
-        try { return { ...e, meta: JSON.parse(e.meta_json) } } catch { return null }
-      }).filter(e => e?.meta?.videoId)
-
-      if (readyVideos.length > 1) {
-        // Fire one run per example video concurrently
-        const results = await Promise.all(readyVideos.map(ex =>
-          apiPost(`/broll/strategies/${analysisStrategy.id}/versions/${version.id}/run`, {
-            video_id: videoId,
-            group_id: groupId,
-            transcript_source: 'raw',
-            example_video_id: ex.meta.videoId,
-          })
-        ))
-        setPipelineIds(results.map(r => r.pipelineId))
-      } else {
-        // Single video — use existing single-run flow
-        const res = await apiPost(`/broll/strategies/${analysisStrategy.id}/versions/${version.id}/run`, {
-          video_id: videoId,
-          group_id: groupId,
-          transcript_source: 'raw',
-        })
-        setPipelineId(res.pipelineId)
-      }
-    } catch (err) {
-      setError(err.message)
-      setRunningType(null)
-    }
-  }
-
-  async function handleRunPlan() {
-    if (!planStrategy || !videoId || !analysisRunId) return
-    setRunningType('plan')
-    setError(null)
-    setProgress(null)
-    try {
-      const version = await getLatestVersion(planStrategy.id)
-      const res = await apiPost(`/broll/strategies/${planStrategy.id}/versions/${version.id}/run`, {
+      const res = await apiPost('/broll/pipeline/run-all', {
         video_id: videoId,
         group_id: groupId,
-        transcript_source: 'raw',
-        reference_run_id: analysisRunId,
-        stop_after_plan: true,
       })
-      setPipelineId(res.pipelineId)
+      // Track all pipeline IDs (prep + analyses)
+      const allIds = [res.prepPipelineId, ...(res.analysisPipelineIds || [])].filter(Boolean)
+      setPipelineIds(allIds)
     } catch (err) {
       setError(err.message)
       setRunningType(null)
     }
   }
 
-  // Find the completed plan pipeline ID (for resuming alt plans)
+  async function handleRunStrategies() {
+    if (!prepPipelineId || !completedAnalysisPipelineIds.length || !videoId) return
+    setRunningType('strategy')
+    setError(null)
+    setProgress(null)
+    setPipelineIds([])
+    setPipelineProgresses({})
+    try {
+      const res = await apiPost('/broll/pipeline/run-strategies', {
+        prep_pipeline_id: prepPipelineId,
+        analysis_pipeline_ids: completedAnalysisPipelineIds,
+        video_id: videoId,
+        group_id: groupId,
+      })
+      setPipelineIds(res.strategyPipelineIds || [])
+    } catch (err) {
+      setError(err.message)
+      setRunningType(null)
+    }
+  }
+
+  // Find the completed plan pipeline ID (for resuming keywords/search - old style)
   const completedPlanPipeline = Object.entries(pipelineMap).find(([pid, p]) =>
     p.status === 'complete' && p.stages.some(s => s.strategy_id === planStrategy?.id)
   )
   const planPipelineId = completedPlanPipeline?.[0] || null
 
-  async function handleRunAltPlans() {
-    if (!planPipelineId) return
-    setRunningType('alt_plan')
+  async function handleRunNewPlan() {
+    // For now, use the first completed strategy. Later: user picks.
+    const stratId = completedStrategyPipelineIds[0]
+    if (!prepPipelineId || !stratId || !videoId) return
+    setRunningType('plan')
     setError(null)
     setProgress(null)
+    setPipelineIds([])
+    setPipelineProgresses({})
     try {
-      await apiPost(`/broll/pipeline/${planPipelineId}/run-alt-plans`, {})
-      refetchRuns()
-      setTimeout(() => refetchRuns(), 2000)
+      const res = await apiPost('/broll/pipeline/run-plan', {
+        prep_pipeline_id: prepPipelineId,
+        strategy_pipeline_id: stratId,
+        video_id: videoId,
+        group_id: groupId,
+      })
+      if (res.planPipelineId) setPipelineId(res.planPipelineId)
     } catch (err) {
       setError(err.message)
       setRunningType(null)
@@ -232,12 +337,13 @@ export default function BRollPanel({ groupId, videoId }) {
   }
 
   async function handleRunKeywords() {
-    if (!planPipelineId) return
+    const kwPipelineId = newPlanPipelineId || planPipelineId
+    if (!kwPipelineId) return
     setRunningType('keywords')
     setError(null)
     setProgress(null)
     try {
-      await apiPost(`/broll/pipeline/${planPipelineId}/run-keywords`, {})
+      await apiPost(`/broll/pipeline/${kwPipelineId}/run-keywords`, {})
       refetchRuns()
       setTimeout(() => refetchRuns(), 2000)
     } catch (err) {
@@ -246,13 +352,28 @@ export default function BRollPanel({ groupId, videoId }) {
     }
   }
 
-  const [showEditor, setShowEditor] = useState(false)
-
   const isRunning = !!runningType
 
-  // Switch to B-Roll editor when search exists, keywords done and user clicked, or already has results
-  if (hasCompletedBrollSearch || showEditor) {
-    return <BRollEditor groupId={groupId} videoId={videoId} planPipelineId={planPipelineId} />
+  // URL-based sub-routing for brolls
+  // Redirect bare /brolls to /brolls/strategy or /brolls/edit based on state
+  useEffect(() => {
+    if (runsLoading) return
+    if (!sub) {
+      if (hasCompletedBrollSearch) {
+        navigate(`/editor/${id}/brolls/edit`, { replace: true })
+      } else {
+        navigate(`/editor/${id}/brolls/strategy`, { replace: true })
+      }
+    }
+    // Redirect old numeric placement URLs (e.g. /brolls/5) to /brolls/edit/5
+    if (sub && sub !== 'strategy' && sub !== 'edit' && !isNaN(Number(sub))) {
+      navigate(`/editor/${id}/brolls/edit/${sub}`, { replace: true })
+    }
+  }, [sub, runsLoading, hasCompletedBrollSearch, id, navigate])
+
+  // Show B-Roll editor when sub === 'edit'
+  if (sub === 'edit') {
+    return <BRollEditor groupId={groupId} videoId={videoId} planPipelineId={newPlanPipelineId || planPipelineId} />
   }
 
   // Show loading while checking if steps are already complete (prevents flash of steps UI)
@@ -264,272 +385,270 @@ export default function BRollPanel({ groupId, videoId }) {
     )
   }
 
+  const refVideos = examples || []
+
+  // Pipeline step config
+  const isAnalysisDone = hasCompletedAnalysis && hasCompletedPrep
+  const isStrategyDone = hasCompletedStrategies
+  const isPlanDone = hasCompletedNewPlan || hasCompletedPlan
+  const kwPipelineId = newPlanPipelineId || planPipelineId
+
+  const steps = [
+    { key: 'analysis', label: 'Analyze & Prepare', icon: Search, done: isAnalysisDone, enabled: true, handler: handleRunAnalysis, running: runningType === 'analysis' },
+    { key: 'strategy', label: 'Generate Strategies', icon: Layers, done: isStrategyDone, enabled: isAnalysisDone, handler: handleRunStrategies, running: runningType === 'strategy' },
+    { key: 'plan', label: 'Generate Plan', icon: Sparkles, done: isPlanDone, enabled: isStrategyDone, handler: handleRunNewPlan, running: runningType === 'plan' },
+    { key: 'keywords', label: 'Keywords', icon: Tag, done: hasCompletedKeywords, enabled: isPlanDone, handler: handleRunKeywords, running: runningType === 'keywords' },
+    { key: 'search', label: 'Search B-Roll', icon: Film, done: hasCompletedBrollSearch, enabled: hasCompletedKeywords, handler: () => navigate(`/editor/${id}/brolls/edit`) },
+  ]
+
   return (
-    <div className="flex-1 overflow-auto p-6">
-      <div className="max-w-2xl mx-auto space-y-6">
-        <div>
-          <h2 className="text-lg font-semibold text-on-surface">B-Roll</h2>
-          <p className="text-sm text-on-surface-variant mt-1">
-            Analyze reference videos, then generate a B-Roll placement plan.
-          </p>
+    <div className="flex-1 overflow-auto">
+      <div className="px-8 pt-8 pb-12">
+        {/* Header */}
+        <header className="mb-8">
+          <div className="flex items-center gap-2 text-[#cefc00] mb-3">
+            <span className="material-symbols-outlined text-sm" style={{ fontVariationSettings: '"FILL" 1' }}>auto_awesome</span>
+            <span className="text-[10px] font-bold uppercase tracking-[0.2em]">B-Roll Strategy</span>
+          </div>
+          <h1 className="text-3xl font-extrabold tracking-tight text-zinc-100">Step 1: Reference Analysis</h1>
+        </header>
+
+        {/* Pipeline Steps Bar */}
+        <div className="flex items-center gap-1 mb-8 bg-zinc-900 rounded-xl p-2">
+          {steps.map((step, i) => {
+            const Icon = step.icon
+            const isActive = step.running
+            return (
+              <button
+                key={step.key}
+                onClick={step.handler}
+                disabled={isRunning || !step.enabled}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex-1 justify-center disabled:opacity-30 ${
+                  step.done
+                    ? 'bg-[#cefc00]/10 text-[#cefc00]'
+                    : isActive
+                    ? 'bg-zinc-800 text-blue-400'
+                    : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+                }`}
+              >
+                {isActive ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : step.done ? (
+                  <CheckCircle size={12} />
+                ) : (
+                  <Icon size={12} />
+                )}
+                {step.label}
+              </button>
+            )
+          })}
         </div>
 
         {/* Progress card — single run */}
         {isRunning && progress && !pipelineIds.length && (() => {
           const pct = progress.totalStages > 0 ? Math.round((progress.stageIndex / progress.totalStages) * 100) : 0
           return (
-            <div className="bg-surface-variant/20 border border-blue-800/30 rounded-lg p-4 space-y-2">
-              <div className="flex items-center justify-between">
+            <div className="bg-zinc-900 rounded-xl p-5 mb-8 border border-zinc-800/50">
+              <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <Loader2 size={14} className="text-primary-fixed animate-spin" />
-                  <span className="text-sm text-on-surface">{progress.stageName || 'Processing...'}</span>
+                  <Loader2 size={14} className="text-[#cefc00] animate-spin" />
+                  <span className="text-sm text-zinc-200 font-semibold">{progress.stageName || 'Processing...'}</span>
                 </div>
-                <span className="text-sm font-bold text-primary-fixed">{pct}%</span>
+                <span className="text-sm font-black text-[#cefc00]">{pct}%</span>
               </div>
-              <div className="w-full bg-surface-variant/50 rounded-full h-1.5">
-                <div className="bg-primary-fixed h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }} />
+              <div className="h-1.5 w-full bg-zinc-950 rounded-full overflow-hidden mb-2">
+                <div className="h-full bg-[#cefc00] transition-all" style={{ width: `${pct}%` }} />
               </div>
-              <div className="text-xs text-on-surface-variant">
+              <div className="text-[10px] text-zinc-500 font-mono">
                 Stage {(progress.stageIndex || 0) + 1} of {progress.totalStages}
                 {progress.subTotal ? ` — ${progress.subLabel || ''} (${progress.subDone || 0}/${progress.subTotal})` : ''}
                 {progress.gpuStage ? ` · GPU: ${progress.gpuStage}${progress.gpuStatus ? ` (${progress.gpuStatus})` : ''}` : ''}
-                {progress.subStatus ? ` · ${progress.subStatus}` : ''}
               </div>
             </div>
           )
         })()}
 
-        {/* Progress card — parallel analysis runs */}
-        {isRunning && pipelineIds.length > 0 && (
-          <div className="bg-surface-variant/20 border border-blue-800/30 rounded-lg p-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <Loader2 size={14} className="text-primary-fixed animate-spin" />
-              <span className="text-sm font-semibold text-on-surface">Analyzing {pipelineIds.length} videos in parallel</span>
-            </div>
-            {pipelineIds.map(pid => {
-              const p = pipelineProgresses[pid]
-              if (!p) return <div key={pid} className="text-xs text-on-surface-variant">Starting...</div>
-              const pct = p.totalStages > 0 ? Math.round((p.stageIndex / p.totalStages) * 100) : 0
-              const isDone = p.status === 'complete'
-              const isFailed = p.status === 'failed'
-              return (
-                <div key={pid} className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-on-surface-variant truncate max-w-[80%]">
-                      {isDone ? <CheckCircle size={12} className="inline text-emerald-400 mr-1" /> : isFailed ? <AlertCircle size={12} className="inline text-error mr-1" /> : null}
-                      {p.videoTitle || p.stageName || pid}
-                    </span>
-                    <span className={`text-xs font-bold ${isDone ? 'text-emerald-400' : isFailed ? 'text-error' : 'text-primary-fixed'}`}>{isDone ? 'Done' : isFailed ? 'Failed' : `${pct}%`}</span>
-                  </div>
-                  <div className="w-full bg-surface-variant/50 rounded-full h-1">
-                    <div className={`h-1 rounded-full transition-all ${isDone ? 'bg-emerald-400' : isFailed ? 'bg-error' : 'bg-primary-fixed'}`} style={{ width: `${isDone ? 100 : pct}%` }} />
-                  </div>
-                  {!isDone && !isFailed && p.subTotal ? (
-                    <div className="text-[10px] text-on-surface-variant">{p.subLabel || ''} ({p.subDone || 0}/{p.subTotal})</div>
-                  ) : null}
-                </div>
-              )
-            })}
-          </div>
-        )}
-
         {/* Error */}
         {error && !isRunning && (
-          <div className="bg-error-container/20 border border-error/30 rounded-lg p-4 flex items-start gap-2">
-            <AlertCircle size={16} className="text-error shrink-0 mt-0.5" />
-            <div className="text-sm text-error">{error}</div>
+          <div className="bg-red-950/30 border border-red-900/50 rounded-xl p-4 flex items-start gap-2 mb-8">
+            <AlertCircle size={16} className="text-red-400 shrink-0 mt-0.5" />
+            <div className="text-sm text-red-300">{error}</div>
           </div>
         )}
 
-        {/* Step 1: Analysis */}
-        <div className={`rounded-xl border p-5 space-y-3 ${hasCompletedAnalysis ? 'border-emerald-800/30 bg-emerald-900/10' : 'border-outline-variant/20 bg-surface-variant/10'}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${hasCompletedAnalysis ? 'bg-emerald-900/30' : 'bg-surface-variant/30'}`}>
-                <Search size={16} className={hasCompletedAnalysis ? 'text-emerald-400' : 'text-on-surface-variant'} />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-on-surface">Step 1: Analyze Reference Videos</div>
-                <div className="text-xs text-on-surface-variant">
-                  {analysisStrategy?.name || 'No analysis strategy configured'}
+        {/* Reference Video Cards */}
+        <section className="space-y-6">
+          {refVideos.length === 0 && (
+            <div className="bg-zinc-900 rounded-xl p-12 text-center border border-zinc-800/30">
+              <span className="material-symbols-outlined text-4xl text-zinc-700 mb-3 block">video_library</span>
+              <p className="text-zinc-500 text-sm">No reference videos added yet.</p>
+              <p className="text-zinc-600 text-xs mt-1">Add reference videos in the project setup to analyze their b-roll patterns.</p>
+            </div>
+          )}
+
+          {refVideos.map((source, sourceIdx) => {
+            const thumb = ytThumbnail(source.source_url)
+            const duration = source.duration_seconds
+            const isReady = source.status === 'ready'
+            const isFav = source.is_favorite
+
+            // Per-source analysis status — match by exampleVideoId from pipeline progress
+            const sourceVideoId = (() => { try { return JSON.parse(source.meta_json || '{}').videoId } catch { return null } })()
+            const sourceProgress = Object.values(pipelineProgresses).find(p => p.exampleVideoId === sourceVideoId)
+              || (pipelineIds[sourceIdx] ? pipelineProgresses[pipelineIds[sourceIdx]] : null)
+            const sourceAnalysisDone = sourceProgress?.status === 'complete' || hasCompletedAnalysis
+            const sourceAnalysisRunning = sourceProgress && sourceProgress.status === 'running'
+            const sourceAnalysisPct = sourceProgress?.totalStages > 0
+              ? Math.round(((sourceProgress.stageIndex || sourceProgress.completedStages || 0) / sourceProgress.totalStages) * 100)
+              : 0
+
+            return (
+              <div key={source.id} className="bg-zinc-900 rounded-xl overflow-hidden flex flex-col md:flex-row group transition-all">
+                {/* Thumbnail — compact */}
+                <div className="md:w-1/5 relative overflow-hidden aspect-video md:aspect-auto min-h-[140px]">
+                  {thumb ? (
+                    <img src={thumb} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" />
+                  ) : (
+                    <div className="w-full h-full bg-zinc-950 flex items-center justify-center">
+                      <span className="material-symbols-outlined text-zinc-800 text-5xl">smart_display</span>
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-transparent" />
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent to-zinc-900/40" />
+                  {/* Video name */}
+                  <div className="absolute top-3 left-3 right-3">
+                    <p className="text-xs font-bold text-white truncate drop-shadow-md">{source.label || source.video_title || 'Reference Video'}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="font-mono text-[10px] text-zinc-300">{formatDuration(duration)}</span>
+                      <span className="text-zinc-600">·</span>
+                      <span className="text-[10px] text-zinc-400">{source.source_url ? 'YouTube' : 'Upload'}</span>
+                    </div>
+                  </div>
+                  {/* Favorite / Alt badge */}
+                  <div className={`absolute bottom-3 left-3 backdrop-blur px-2.5 py-1 rounded flex items-center gap-1.5 ${
+                    isFav ? 'bg-[#cefc00]/20' : 'bg-zinc-950/80'
+                  }`}>
+                    {isFav && <Star size={10} className="text-[#cefc00] fill-[#cefc00]" />}
+                    <span className={`text-[9px] font-bold uppercase tracking-wider ${isFav ? 'text-[#cefc00]' : 'text-zinc-500'}`}>
+                      {isFav ? 'Primary Reference' : 'Alt Reference'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Details */}
+                <div className="md:w-4/5 p-6 flex flex-col justify-between">
+                  <div>
+
+                    {/* Chapters & Beats with stats and patterns */}
+                    {(() => {
+                      const analysis = chaptersByExampleVideo[sourceVideoId]
+                      if (!analysis?.chapters?.length) return null
+                      const { stats, patterns } = analysis
+                      return (
+                        <div>
+                          <h3 className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-2">
+                            Detected Chapters ({analysis.chapters.length})
+                          </h3>
+                          <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+                            {analysis.chapters.map((ch, ci) => {
+                              const chStats = stats?.find(s => s.chapter_name === ch.name) || stats?.[ci]
+                              const chPattern = patterns?.[ci]?.data
+                              const brollPerMin = chStats?.broll?.count && chStats?.duration_seconds
+                                ? (chStats.broll.count / (chStats.duration_seconds / 60)).toFixed(1)
+                                : null
+                              return (
+                                <div key={ci} className="bg-zinc-950/50 rounded-lg p-3">
+                                  {/* Chapter header + stats */}
+                                  <div className="flex items-start justify-between gap-3 mb-2">
+                                    <p className="text-zinc-200 font-bold text-xs">
+                                      {ch.name} <span className="font-mono text-[#cefc00] font-normal text-[10px]">{ch.start || ch.start_tc || (ch.start_seconds != null ? formatDuration(ch.start_seconds) : '')}</span>
+                                    </p>
+                                    {chStats?.broll && (
+                                      <div className="flex gap-3 shrink-0">
+                                        {brollPerMin && (
+                                          <div className="text-right">
+                                            <p className="text-[9px] text-zinc-600 uppercase">B-rolls</p>
+                                            <p className="text-xs font-mono text-[#cefc00]">{brollPerMin}/min</p>
+                                          </div>
+                                        )}
+                                        {chStats.broll.avg_duration_seconds && (
+                                          <div className="text-right">
+                                            <p className="text-[9px] text-zinc-600 uppercase">Avg dur.</p>
+                                            <p className="text-xs font-mono text-zinc-300">{chStats.broll.avg_duration_seconds}s</p>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                  {ch.description && <p className="text-zinc-400 text-xs leading-relaxed flex items-start gap-1.5"><span className="material-symbols-outlined text-[#cefc00] shrink-0 leading-none" style={{ fontSize: '12px', marginTop: '2px' }}>description</span>{ch.description}</p>}
+                                  {ch.purpose && <p className="text-zinc-500 text-[11px] italic mb-2 flex items-start gap-1.5"><span className="material-symbols-outlined text-[#cefc00] shrink-0 leading-none" style={{ fontSize: '11px', marginTop: '2px' }}>target</span>{ch.purpose}</p>}
+
+                                  {/* Beats with emotion + per-beat strategies */}
+                                  {ch.beats?.length > 0 && (
+                                    <div className="mt-2 space-y-2.5">
+                                      <p className="text-[9px] text-[#c180ff] font-bold uppercase">Beats ({ch.beats.length})</p>
+                                      {ch.beats.map((beat, bi) => {
+                                        // Match beat_strategies from pattern analysis by name
+                                        const beatStrategy = chPattern?.beat_strategies?.find(bs =>
+                                          bs.beat_name?.toLowerCase() === beat.name?.toLowerCase()
+                                        )
+                                        const emotion = beatStrategy?.beat_emotion || beat.emotion
+                                        return (
+                                          <div key={bi} className="border-l-2 border-zinc-800 pl-3">
+                                            <p className="text-zinc-300 text-[11px] font-medium">
+                                              {beat.name} <span className="font-mono text-zinc-600 font-normal text-[10px]">{beat.start || beat.start_tc || (beat.start_seconds != null ? formatDuration(beat.start_seconds) : '')}</span>
+                                            </p>
+                                            {beat.description && <p className="text-zinc-500 text-[11px] leading-relaxed flex items-start gap-1"><span className="material-symbols-outlined text-[#cefc00] shrink-0 leading-none" style={{ fontSize: '11px', marginTop: '2px' }}>description</span>{beat.description}</p>}
+                                            {beat.purpose && <p className="text-zinc-500 text-[11px] italic flex items-start gap-1"><span className="material-symbols-outlined text-[#cefc00] shrink-0 leading-none" style={{ fontSize: '11px', marginTop: '2px' }}>target</span>{beat.purpose}</p>}
+                                            {emotion && <p className="text-zinc-500 text-[11px] flex items-start gap-1"><span className="material-symbols-outlined text-[#cefc00] shrink-0 leading-none" style={{ fontSize: '11px', marginTop: '2px' }}>mood</span>{emotion}</p>}
+                                            {beatStrategy?.strategy_points?.length > 0 && (
+                                              <ul className="mt-1 space-y-0.5">
+                                                {beatStrategy.strategy_points.map((sp, si) => (
+                                                  <li key={si} className="text-zinc-400 text-[11px] leading-relaxed flex gap-1.5">
+                                                    <span className="text-[#cefc00]/50 shrink-0 mt-0.5">-</span>
+                                                    <span>{sp}</span>
+                                                  </li>
+                                                ))}
+                                              </ul>
+                                            )}
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )
+                    })()}
+
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className="mt-5">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-[10px] text-zinc-500 font-bold uppercase">Analysis Status</span>
+                      <span className={`text-[10px] font-bold ${sourceAnalysisDone ? 'text-[#cefc00]' : sourceAnalysisRunning ? 'text-blue-400' : 'text-zinc-500 italic'}`}>
+                        {sourceAnalysisDone ? '100% COMPLETE' : sourceAnalysisRunning ? `${sourceAnalysisPct}% PROCESSING` : 'NOT STARTED'}
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full bg-zinc-950 rounded-full overflow-hidden">
+                      {sourceAnalysisDone ? (
+                        <div className="h-full bg-[#cefc00] w-full" />
+                      ) : sourceAnalysisRunning ? (
+                        <div className="h-full bg-blue-400 transition-all" style={{ width: `${Math.max(sourceAnalysisPct, 5)}%` }} />
+                      ) : (
+                        <div className="h-full bg-zinc-800 w-0" />
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-            {hasCompletedAnalysis ? (
-              <div className="flex items-center gap-2">
-                <CheckCircle size={14} className="text-emerald-400" />
-                <span className="text-xs text-emerald-400 font-medium">Complete</span>
-                <button
-                  onClick={handleRunAnalysis}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface bg-surface-variant/30 hover:bg-surface-variant/50 transition-colors disabled:opacity-40"
-                >
-                  <RotateCcw size={12} />
-                  Re-run
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={handleRunAnalysis}
-                disabled={isRunning || !analysisStrategy}
-                className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
-              >
-                {runningType === 'analysis' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {runningType === 'analysis' ? 'Running...' : 'Run Analysis'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Step 2: Plan */}
-        <div className={`rounded-xl border p-5 space-y-3 ${hasCompletedPlan ? 'border-emerald-800/30 bg-emerald-900/10' : !hasCompletedAnalysis ? 'border-outline-variant/10 bg-surface-variant/5 opacity-50' : 'border-outline-variant/20 bg-surface-variant/10'}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${hasCompletedPlan ? 'bg-emerald-900/30' : 'bg-surface-variant/30'}`}>
-                <Sparkles size={16} className={hasCompletedPlan ? 'text-emerald-400' : 'text-on-surface-variant'} />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-on-surface">Step 2: Generate B-Roll Plan</div>
-                <div className="text-xs text-on-surface-variant">
-                  {planStrategy?.name || 'No plan strategy configured'}
-                  {!hasCompletedAnalysis && ' — complete analysis first'}
-                </div>
-              </div>
-            </div>
-            {hasCompletedPlan ? (
-              <div className="flex items-center gap-2">
-                <CheckCircle size={14} className="text-emerald-400" />
-                <span className="text-xs text-emerald-400 font-medium">Complete</span>
-                <button
-                  onClick={handleRunPlan}
-                  disabled={isRunning || !hasCompletedAnalysis}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface bg-surface-variant/30 hover:bg-surface-variant/50 transition-colors disabled:opacity-40"
-                >
-                  <RotateCcw size={12} />
-                  Re-run
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={handleRunPlan}
-                disabled={isRunning || !hasCompletedAnalysis || !planStrategy}
-                className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
-              >
-                {runningType === 'plan' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {runningType === 'plan' ? 'Running...' : 'Generate Plan'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Step 3: Alternative Plans */}
-        <div className={`rounded-xl border p-5 space-y-3 ${hasCompletedAltPlan ? 'border-emerald-800/30 bg-emerald-900/10' : !hasCompletedPlan ? 'border-outline-variant/10 bg-surface-variant/5 opacity-50' : 'border-outline-variant/20 bg-surface-variant/10'}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${hasCompletedAltPlan ? 'bg-emerald-900/30' : 'bg-surface-variant/30'}`}>
-                <Layers size={16} className={hasCompletedAltPlan ? 'text-emerald-400' : 'text-on-surface-variant'} />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-on-surface">Step 3: Create Alternative Plans</div>
-                <div className="text-xs text-on-surface-variant">
-                  {altPlanStrategy?.name || 'No alt plan strategy configured'}
-                  {!hasCompletedPlan && ' — complete plan first'}
-                </div>
-              </div>
-            </div>
-            {hasCompletedAltPlan ? (
-              <div className="flex items-center gap-2">
-                <CheckCircle size={14} className="text-emerald-400" />
-                <span className="text-xs text-emerald-400 font-medium">Complete</span>
-                <button
-                  onClick={handleRunAltPlans}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface bg-surface-variant/30 hover:bg-surface-variant/50 transition-colors disabled:opacity-40"
-                >
-                  <RotateCcw size={12} />
-                  Re-run
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={handleRunAltPlans}
-                disabled={isRunning || !hasCompletedPlan || !planPipelineId}
-                className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
-              >
-                {runningType === 'alt_plan' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {runningType === 'alt_plan' ? 'Running...' : 'Generate Alt Plans'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Step 4: Keywords */}
-        <div className={`rounded-xl border p-5 space-y-3 ${hasCompletedKeywords ? 'border-emerald-800/30 bg-emerald-900/10' : !hasCompletedPlan ? 'border-outline-variant/10 bg-surface-variant/5 opacity-50' : 'border-outline-variant/20 bg-surface-variant/10'}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${hasCompletedKeywords ? 'bg-emerald-900/30' : 'bg-surface-variant/30'}`}>
-                <Tag size={16} className={hasCompletedKeywords ? 'text-emerald-400' : 'text-on-surface-variant'} />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-on-surface">Step 4: Generate Search Keywords</div>
-                <div className="text-xs text-on-surface-variant">
-                  {keywordsStrategy?.name || 'B-Roll Search Keywords'}
-                  {!hasCompletedPlan && ' — complete plan first'}
-                </div>
-              </div>
-            </div>
-            {hasCompletedKeywords ? (
-              <div className="flex items-center gap-2">
-                <CheckCircle size={14} className="text-emerald-400" />
-                <span className="text-xs text-emerald-400 font-medium">Complete</span>
-                <button
-                  onClick={handleRunKeywords}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface bg-surface-variant/30 hover:bg-surface-variant/50 transition-colors disabled:opacity-40"
-                >
-                  <RotateCcw size={12} />
-                  Re-run
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={handleRunKeywords}
-                disabled={isRunning || !hasCompletedPlan || !planPipelineId}
-                className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
-              >
-                {runningType === 'keywords' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {runningType === 'keywords' ? 'Running...' : 'Generate Keywords'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Step 5: B-Roll Video Search */}
-        <div className={`rounded-xl border p-5 space-y-3 ${hasCompletedBrollSearch ? 'border-emerald-800/30 bg-emerald-900/10' : !hasCompletedKeywords ? 'border-outline-variant/10 bg-surface-variant/5 opacity-50' : 'border-outline-variant/20 bg-surface-variant/10'}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${hasCompletedBrollSearch ? 'bg-emerald-900/30' : 'bg-surface-variant/30'}`}>
-                <Film size={16} className={hasCompletedBrollSearch ? 'text-emerald-400' : 'text-on-surface-variant'} />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-on-surface">Step 5: Search Stock Footage</div>
-                <div className="text-xs text-on-surface-variant">
-                  Search Pexels & Storyblocks for each placement (~90s/element)
-                  {!hasCompletedKeywords && ' — generate keywords first'}
-                </div>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowEditor(true)}
-              disabled={isRunning || !hasCompletedKeywords || !planPipelineId}
-              className="flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 disabled:opacity-40 transition-all"
-            >
-              <Search size={14} />
-              Search B-Roll
-            </button>
-          </div>
-        </div>
-
+            )
+          })}
+        </section>
       </div>
     </div>
   )
