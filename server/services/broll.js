@@ -1713,11 +1713,12 @@ export async function executePlanPrep(videoId, groupId, editorCuts = null) {
   if (!version) throw new Error('No plan_prep strategy version found')
 
   // Run using the existing pipeline executor
+  // Pass groupId=null to prevent standalone analysis expansion (plan_prep doesn't need example videos)
   const result = await executePipeline(
     strategy.id,
     version.id,
     videoId,
-    groupId,
+    null, // no groupId — prevents example video expansion
     'raw',
     editorCuts,
     null, // no referenceRunId
