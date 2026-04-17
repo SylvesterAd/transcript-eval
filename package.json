@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:client": "vite",
-    "dev:server": "node --env-file=.env --watch server/index.js",
+    "dev:server": "node --env-file=.env --watch-path=server/index.js --watch-path=server/routes --watch-path=server/services server/index.js",
     "start": "node server/index.js",
     "build": "if [ \"$RAILWAY_ENVIRONMENT\" ]; then echo 'Railway: skip frontend build'; else vite build; fi",
     "seed": "node server/seed/import-benchmark.js",
