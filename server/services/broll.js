@@ -2760,8 +2760,10 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   // Pre-load main video file if needed
   let mainVideoFilePath = null
   const needsMainVideo = stages.some(s => (s.type === 'video_llm' || s.type === 'video_question') && (s.target || 'main_video') === 'main_video')
+  console.log(`[broll-pipeline] needsMainVideo=${needsMainVideo} stages=${stages.length} videoId=${videoId}`)
   if (needsMainVideo) {
     mainVideoFilePath = await getVideoFilePath(videoId)
+    console.log(`[broll-pipeline] mainVideoFilePath=${mainVideoFilePath}`)
   }
 
   // Track per-video analysis outputs
@@ -3951,6 +3953,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     return { pipelineId, stageCount: stages.length, stageOutputs, transcriptSource: resolvedSource, totalTokensIn, totalTokensOut, totalCost, totalRuntime }
 
   } catch (err) {
+    console.error(`[broll-pipeline] PIPELINE CATCH (${typeof pipelineId !== 'undefined' ? pipelineId : 'unknown'}): ${err.message}`)
     pipelineAbortControllers.delete(pipelineId)
     const isAbort = abortedBrollPipelines.has(pipelineId) || err.name === 'AbortError'
     brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: stageOutputs.length, totalStages: stages.length, status: 'failed', error: isAbort ? 'Aborted by user' : err.message })
