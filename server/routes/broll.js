@@ -44,6 +44,7 @@ import {
   executePlanPrep,
   executeCreateStrategy,
   executeCreatePlan,
+  executeCreateCombinedStrategy,
   loadExampleVideos,
 } from '../services/broll.js'
 
@@ -688,6 +689,7 @@ router.post('/pipeline/run-strategies', requireAuth, async (req, res) => {
     }
 
     const strategyPipelineIds = []
+    // Fire one strategy per reference video
     for (const analysisPipelineId of analysis_pipeline_ids) {
       const promise = executeCreateStrategy(prep_pipeline_id, analysisPipelineId, video_id, group_id || null)
       promise
@@ -695,17 +697,29 @@ router.post('/pipeline/run-strategies', requireAuth, async (req, res) => {
         .catch(err => console.error(`[broll-pipeline] Create strategy failed for analysis ${analysisPipelineId}: ${err.message}`))
     }
 
+    // Fire combined "best of all" strategy if 2+ references
+    let combinedPipelineId = null
+    if (analysis_pipeline_ids.length >= 2) {
+      const combinedPromise = executeCreateCombinedStrategy(prep_pipeline_id, analysis_pipeline_ids, video_id, group_id || null)
+      combinedPromise
+        .then(r => { combinedPipelineId = r.strategyPipelineId })
+        .catch(err => console.error(`[broll-pipeline] Combined strategy failed: ${err.message}`))
+    }
+
     // Wait briefly for pipeline IDs to be generated
     await new Promise(r => setTimeout(r, 500))
 
+    // Collect pipeline IDs from progress map
+    const allStratIds = []
+    for (const [pid, prog] of brollPipelineProgress.entries()) {
+      if ((pid.startsWith('strat-') || pid.startsWith('cstrat-')) && (prog.phase === 'create_strategy' || prog.phase === 'create_combined_strategy')) {
+        allStratIds.push(pid)
+      }
+    }
+
     res.json({
-      strategyPipelineIds: strategyPipelineIds.length ? strategyPipelineIds : analysis_pipeline_ids.map((_, i) => {
-        // Fallback: find from progress map
-        for (const [pid, prog] of brollPipelineProgress.entries()) {
-          if (pid.startsWith('strat-') && prog.phase === 'create_strategy') return pid
-        }
-        return null
-      }).filter(Boolean),
+      strategyPipelineIds: allStratIds.length ? allStratIds : strategyPipelineIds,
+      combinedPipelineId,
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
