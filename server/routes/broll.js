@@ -688,18 +688,40 @@ router.post('/pipeline/run-strategies', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'prep_pipeline_id, analysis_pipeline_ids, and video_id required' })
     }
 
+    // Check which analysis pipelines already have a completed strategy (skip duplicates)
+    const db = (await import('../db.js')).default
+    const existingStratRuns = await db.prepare(
+      `SELECT metadata_json FROM broll_runs WHERE video_id = ? AND status = 'complete' AND metadata_json LIKE '%"phase":"create_strategy"%' AND metadata_json NOT LIKE '%"isSubRun":true%'`
+    ).all(video_id)
+    const alreadyDoneAnalysisIds = new Set()
+    for (const r of existingStratRuns) {
+      try {
+        const m = JSON.parse(r.metadata_json || '{}')
+        if (m.analysisPipelineId) alreadyDoneAnalysisIds.add(m.analysisPipelineId)
+      } catch {}
+    }
+
+    // Only fire strategies for analysis pipelines that don't have one yet
+    const newAnalysisIds = analysis_pipeline_ids.filter(id => !alreadyDoneAnalysisIds.has(id))
+    const skippedCount = analysis_pipeline_ids.length - newAnalysisIds.length
+    if (skippedCount) console.log(`[broll-pipeline] Skipping ${skippedCount} strategies (already exist)`)
+
     const strategyPipelineIds = []
-    // Fire one strategy per reference video
-    for (const analysisPipelineId of analysis_pipeline_ids) {
+    for (const analysisPipelineId of newAnalysisIds) {
       const promise = executeCreateStrategy(prep_pipeline_id, analysisPipelineId, video_id, group_id || null)
       promise
         .then(r => strategyPipelineIds.push(r.strategyPipelineId))
         .catch(err => console.error(`[broll-pipeline] Create strategy failed for analysis ${analysisPipelineId}: ${err.message}`))
     }
 
-    // Fire combined "best of all" strategy if 2+ references
+    // Fire combined "best of all" strategy if 2+ references AND no existing combined strategy
     let combinedPipelineId = null
-    if (analysis_pipeline_ids.length >= 2) {
+    const existingCombined = existingStratRuns.some(r => {
+      try { return JSON.parse(r.metadata_json || '{}').phase === 'create_combined_strategy' } catch { return false }
+    })
+    // Re-fire combined if there are new references (more analyses than before)
+    const shouldFireCombined = analysis_pipeline_ids.length >= 2 && (!existingCombined || newAnalysisIds.length > 0)
+    if (shouldFireCombined) {
       const combinedPromise = executeCreateCombinedStrategy(prep_pipeline_id, analysis_pipeline_ids, video_id, group_id || null)
       combinedPromise
         .then(r => { combinedPipelineId = r.strategyPipelineId })
