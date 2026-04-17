@@ -3786,54 +3786,64 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           }, null, 2)
         } else if (action === 'generate_post_cut_transcript') {
           // Generate transcript with timecodes adjusted for rough cut
-          if (!editorCuts?.cuts?.length) throw new Error('generate_post_cut_transcript requires editor cuts')
-          const postCutTranscript = await generatePostCutTranscript(videoId, editorCuts.cuts, editorCuts.cutExclusions || [])
-          currentTranscript = postCutTranscript
-          output = postCutTranscript
-          // Persist to database
-          try {
-            await db.prepare("DELETE FROM transcripts WHERE video_id = ? AND type = 'rough_cut_adjusted'").run(videoId)
-            await db.prepare("INSERT INTO transcripts (video_id, type, content) VALUES (?, 'rough_cut_adjusted', ?)").run(videoId, postCutTranscript)
-          } catch (e) { console.warn('[broll-pipeline] Could not persist rough_cut_adjusted transcript:', e.message) }
+          if (!editorCuts?.cuts?.length) {
+            // No cuts — use raw transcript as-is (plan prep without rough cut)
+            console.log('[broll-pipeline] No editor cuts — using raw transcript')
+            output = currentTranscript
+          } else {
+            const postCutTranscript = await generatePostCutTranscript(videoId, editorCuts.cuts, editorCuts.cutExclusions || [])
+            currentTranscript = postCutTranscript
+            output = postCutTranscript
+            // Persist to database
+            try {
+              await db.prepare("DELETE FROM transcripts WHERE video_id = ? AND type = 'rough_cut_adjusted'").run(videoId)
+              await db.prepare("INSERT INTO transcripts (video_id, type, content) VALUES (?, 'rough_cut_adjusted', ?)").run(videoId, postCutTranscript)
+            } catch (e) { console.warn('[broll-pipeline] Could not persist rough_cut_adjusted transcript:', e.message) }
+          }
         } else if (action === 'export_post_cut_video') {
           // Export post-cut 360p video, upload to Supabase for persistence across deploys
-          if (!editorCuts?.cuts?.length) throw new Error('export_post_cut_video requires editor cuts')
-          const storagePath = `temp/postcut-${pipelineId}.mp4`
-          let postCutPath = null
+          if (!editorCuts?.cuts?.length) {
+            // No cuts — skip video export, use original video
+            console.log('[broll-pipeline] No editor cuts — skipping post-cut video export')
+            output = 'No editor cuts — using original video'
+          } else {
+            const storagePath = `temp/postcut-${pipelineId}.mp4`
+            let postCutPath = null
 
-          // On resume: try downloading cached post-cut from Supabase (seconds vs minutes of FFmpeg)
-          if (isResumedStage) {
-            try {
-              const cachedUrl = getPublicUrl('videos', storagePath)
-              postCutPath = await downloadToTemp(cachedUrl, `postcut-${pipelineId}.mp4`)
-              console.log(`[broll-pipeline] Resume: reused cached post-cut from storage (skipped FFmpeg)`)
-              output = resumeData.completedStages[i] || `Post-cut video restored from cache`
-            } catch (e) {
-              console.warn(`[broll-pipeline] Resume: cached post-cut not available, falling back to FFmpeg: ${e.message}`)
-              postCutPath = null
+            // On resume: try downloading cached post-cut from Supabase (seconds vs minutes of FFmpeg)
+            if (isResumedStage) {
+              try {
+                const cachedUrl = getPublicUrl('videos', storagePath)
+                postCutPath = await downloadToTemp(cachedUrl, `postcut-${pipelineId}.mp4`)
+                console.log(`[broll-pipeline] Resume: reused cached post-cut from storage (skipped FFmpeg)`)
+                output = resumeData.completedStages[i] || `Post-cut video restored from cache`
+              } catch (e) {
+                console.warn(`[broll-pipeline] Resume: cached post-cut not available, falling back to FFmpeg: ${e.message}`)
+                postCutPath = null
+              }
             }
-          }
 
-          // Initial run or resume fallback: run FFmpeg
-          if (!postCutPath) {
-            const { exportPostCutVideo } = await import('./video-processor.js')
-            const { getVideoDuration } = await import('./video-processor.js')
-            const originalPath = await getVideoFilePath(videoId)
-            const duration = await getVideoDuration(originalPath) || 600
-            const effectiveCuts = computeEffectiveCuts(editorCuts.cuts, editorCuts.cutExclusions || [])
-            postCutPath = await exportPostCutVideo(originalPath, effectiveCuts, duration)
-            // Upload to Supabase — kept for future resumes (not added to cleanup list)
-            try {
-              const url = await uploadFile('videos', storagePath, postCutPath)
-              console.log(`[broll-pipeline] Post-cut uploaded to storage: ${url}`)
-              output = `Post-cut video exported (360p) and uploaded: ${url}`
-            } catch (e) {
-              console.warn(`[broll-pipeline] Post-cut upload failed (using local): ${e.message}`)
-              output = `Post-cut video exported (360p, local only): ${postCutPath}`
+            // Initial run or resume fallback: run FFmpeg
+            if (!postCutPath) {
+              const { exportPostCutVideo } = await import('./video-processor.js')
+              const { getVideoDuration } = await import('./video-processor.js')
+              const originalPath = await getVideoFilePath(videoId)
+              const duration = await getVideoDuration(originalPath) || 600
+              const effectiveCuts = computeEffectiveCuts(editorCuts.cuts, editorCuts.cutExclusions || [])
+              postCutPath = await exportPostCutVideo(originalPath, effectiveCuts, duration)
+              // Upload to Supabase — kept for future resumes (not added to cleanup list)
+              try {
+                const url = await uploadFile('videos', storagePath, postCutPath)
+                console.log(`[broll-pipeline] Post-cut uploaded to storage: ${url}`)
+                output = `Post-cut video exported (360p) and uploaded: ${url}`
+              } catch (e) {
+                console.warn(`[broll-pipeline] Post-cut upload failed (using local): ${e.message}`)
+                output = `Post-cut video exported (360p, local only): ${postCutPath}`
+              }
             }
-          }
 
-          mainVideoFilePath = postCutPath
+            mainVideoFilePath = postCutPath
+          }
         } else if (action === 'assemble_broll_plan') {
           // Merge per-chapter B-Roll plan outputs into one document
           if (!chapterSplits) throw new Error('assemble_broll_plan requires preceding split_by_chapter')
