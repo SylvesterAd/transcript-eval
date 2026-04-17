@@ -91,7 +91,7 @@ export const BROLL_MODELS = [
   'claude-sonnet-4-20250514',
 ]
 
-export const BROLL_STRATEGY_KINDS = ['hook_analysis', 'main_analysis', 'plan', 'alt_plan', 'keywords', 'broll_search', 'plan_prep', 'create_strategy', 'create_plan']
+export const BROLL_STRATEGY_KINDS = ['hook_analysis', 'main_analysis', 'plan', 'alt_plan', 'keywords', 'broll_search', 'plan_prep', 'create_strategy', 'create_plan', 'create_combined_strategy']
 
 /**
  * Upgrade a stock footage preview URL to HD quality.
@@ -2009,6 +2009,313 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
     brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), status: 'failed', error: err.message })
     setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
     console.error(`[broll-pipeline] Create strategy ${pipelineId} failed: ${err.message}`)
+    throw err
+  }
+
+  // 6. Return
+  return {
+    strategyPipelineId: pipelineId,
+    stageCount: stages.length,
+    totalTokensIn,
+    totalTokensOut,
+    totalCost,
+    totalRuntime: Date.now() - pipelineStart,
+  }
+}
+
+// Run per-chapter B-Roll strategy for MULTIPLE reference videos using completed prep + analysis pipelines
+export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipelineIds, videoId, groupId) {
+  // 1. Load create_combined_strategy strategy and version
+  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy' ORDER BY id LIMIT 1").get()
+  if (!strategy) throw new Error('No create_combined_strategy strategy found')
+  const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
+  if (!version) throw new Error('No create_combined_strategy version found')
+  const stages = JSON.parse(version.stages_json || '[]')
+  if (!stages.length) throw new Error('create_combined_strategy strategy has no stages')
+
+  // 2. Load prep pipeline data from DB
+  const prepRuns = await db.prepare(
+    `SELECT output_text, metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
+  ).all(`%"pipelineId":"${prepPipelineId}"%`)
+  if (!prepRuns.length) throw new Error('No completed stages found for prep pipeline')
+
+  function findPrepStage(name) {
+    return prepRuns.find(r => {
+      const m = JSON.parse(r.metadata_json || '{}')
+      return !m.isSubRun && m.stageName === name
+    })
+  }
+
+  const transcriptRun = findPrepStage('Generate post-cut transcript')
+  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+
+  const currentTranscript = transcriptRun?.output_text || ''
+  const aRollOutput = aRollRun?.output_text || ''
+  const chaptersOutput = chaptersRun?.output_text || ''
+
+  // 3. Rebuild chapterSplits from chapters JSON + transcript
+  let chaptersData
+  try { chaptersData = JSON.parse(chaptersOutput) } catch { chaptersData = extractJSON(chaptersOutput) }
+  const chapters = chaptersData?.chapters || []
+  let aRolls = chaptersData?.a_roll_appearances || chaptersData?.a_rolls || []
+  if (!aRolls.length && aRollOutput) {
+    try {
+      const aRollParsed = extractJSON(aRollOutput)
+      aRolls = aRollParsed?.a_roll_appearances || aRollParsed?.a_rolls || []
+    } catch {}
+  }
+
+  const toTC = (s) => `[${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}]`
+  function tcToSec(tc) {
+    const m = String(tc).match(/\[?(\d{1,2}):(\d{2}):(\d{2})\]?/)
+    if (!m) return null
+    return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3])
+  }
+  for (const ch of chapters) {
+    if (ch.start && !ch.start_seconds) ch.start_seconds = tcToSec(ch.start) ?? 0
+    if (ch.end && !ch.end_seconds) ch.end_seconds = tcToSec(ch.end) ?? 0
+    for (const b of (ch.beats || [])) {
+      if (b.start && !b.start_seconds) b.start_seconds = tcToSec(b.start) ?? 0
+      if (b.end && !b.end_seconds) b.end_seconds = tcToSec(b.end) ?? 0
+    }
+  }
+  for (const a of aRolls) {
+    if (a.change_at && !a.change_at_seconds) a.change_at_seconds = tcToSec(a.change_at) ?? 0
+  }
+
+  const transcriptLines = currentTranscript.split('\n')
+  function parseLineTime(line) {
+    const m = line.match(/\[(\d{1,2}):(\d{2}):?(\d{2})?(?:\.\d+)?\]/)
+    if (!m) return null
+    return (parseInt(m[1]) * 3600) + (parseInt(m[2]) * 60) + (parseInt(m[3] || '0'))
+  }
+
+  const chapterSplits = chapters.map((ch, idx) => {
+    const chTranscriptLines = transcriptLines.filter(line => {
+      const t = parseLineTime(line)
+      if (t === null) return false
+      return t >= ch.start_seconds && t < ch.end_seconds
+    })
+    const beats = (ch.beats || []).map(b => `  - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)}): ${b.description || ''}${b.purpose ? ' | Purpose: ' + b.purpose : ''}${b.emotion ? ' | Emotion: ' + b.emotion : ''}`).join('\n')
+    return {
+      chapter_number: idx + 1,
+      chapter_name: ch.name || `Chapter ${idx + 1}`,
+      chapter_purpose: ch.purpose || ch.description || '',
+      chapter_emotion: ch.emotion || '',
+      chapter_start: ch.start_seconds,
+      chapter_end: ch.end_seconds,
+      chapter_start_tc: toTC(ch.start_seconds),
+      chapter_end_tc: toTC(ch.end_seconds),
+      chapter_duration_seconds: ch.end_seconds - ch.start_seconds,
+      beats_formatted: beats,
+      beats_raw: ch.beats || [],
+      elements: [],
+      transcript: chTranscriptLines.join('\n'),
+    }
+  })
+
+  // Build _allChaptersContext
+  const allChaptersSummary = chapters.map((ch, idx) => {
+    const beats = (ch.beats || []).map(b => `    - ${b.name} (${toTC(b.start_seconds)}-${toTC(b.end_seconds)})`).join('\n')
+    return `### Chapter ${idx + 1}: ${ch.name} (${toTC(ch.start_seconds)}-${toTC(ch.end_seconds)})\nPurpose: ${ch.purpose || ch.description || ''}${ch.emotion ? '\nEmotion: ' + ch.emotion : ''}\nBeats:\n${beats}`
+  }).join('\n\n')
+  const aRollSummary = aRolls.map(a => {
+    const changeAt = a.change_at_seconds != null ? ` — change at ${toTC(a.change_at_seconds)}` : ''
+    const note = a.change_note ? ` (${a.change_note})` : ''
+    return `A-Roll #${a.id}: ${a.description}${changeAt}${note}`
+  }).join('\n')
+  chapterSplits._allChaptersContext = `## A-Rolls:\n${aRollSummary}\n\n## Chapters & Beats:\n${allChaptersSummary}`
+
+  // 4. Load ALL reference analyses from analysis pipelines
+  const allAnalyses = []
+  for (const apId of analysisPipelineIds) {
+    const analysisRuns = await db.prepare(
+      `SELECT output_text, metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
+    ).all(`%"pipelineId":"${apId}"%`)
+
+    const assembleRun = analysisRuns.find(r => {
+      const m = JSON.parse(r.metadata_json || '{}')
+      return !m.isSubRun && (m.stageName === 'Assemble full analysis')
+    })
+
+    // Get reference video label from metadata
+    const labelRun = analysisRuns.find(r => {
+      const m = JSON.parse(r.metadata_json || '{}')
+      return m.videoLabel
+    })
+    const label = labelRun ? JSON.parse(labelRun.metadata_json).videoLabel : apId
+
+    if (assembleRun?.output_text) {
+      allAnalyses.push({ label, analysis: assembleRun.output_text, pipelineId: apId })
+    }
+  }
+  if (!allAnalyses.length) throw new Error('No assembled analyses found for any analysis pipeline')
+
+  // Build concatenated reference analyses text
+  const allReferenceAnalyses = allAnalyses.map(a =>
+    `\n========== REFERENCE: ${a.label} ==========\n${a.analysis}`
+  ).join('\n\n')
+
+  // 5. Set up pipeline state and run stages
+  const pipelineId = `cstrat-${videoId}-${Date.now()}`
+  const pipelineStart = Date.now()
+  let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
+
+  brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_combined_strategy' })
+
+  const pipelineAbort = new AbortController()
+  pipelineAbortControllers.set(pipelineId, pipelineAbort)
+  const stageOutputs = []
+  let llmAnswer = '', questionCount = 0
+  const llmAnswers = {}
+
+  function replacePlaceholders(text) {
+    let result = text
+      .replace(/\{\{transcript\}\}/g, currentTranscript)
+      .replace(/\{\{llm_answer\}\}/g, llmAnswer)
+      .replace(/\{\{all_reference_analyses\}\}/g, allReferenceAnalyses)
+      .replace(/\{\{reference_analysis\}\}/g, allReferenceAnalyses) // fallback
+    // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
+    result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
+    for (const [num, ans] of Object.entries(llmAnswers)) {
+      result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
+    }
+    stageOutputs.forEach((out, i) => {
+      result = result.replace(new RegExp(`\\{\\{stage_${i + 1}_output\\}\\}`, 'g'), out || '')
+    })
+    return result
+  }
+
+  try {
+    for (let i = 0; i < stages.length; i++) {
+      if (abortedBrollPipelines.has(pipelineId)) break
+      const stage = stages[i]
+      const stageName = stage.name || `Stage ${i + 1}`
+      brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: i, totalStages: stages.length, status: 'running', stageName, phase: 'create_combined_strategy' })
+      console.log(`[broll-pipeline] ${pipelineId} Stage ${i + 1}/${stages.length}: ${stageName}`)
+
+      let output = ''
+      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0
+      const stageStart = Date.now()
+
+      if (stage.type === 'transcript_question' && stage.per_chapter) {
+        // Per-chapter stage
+        const allChaptersCtx = chapterSplits._allChaptersContext || ''
+        const CHAPTER_CONCURRENCY = 5
+        const chapterResults = new Array(chapterSplits.length).fill(null)
+        let completedChapters = 0
+        brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subDone: 0, subTotal: chapterSplits.length, subLabel: '' })
+
+        async function processChapter(c) {
+          if (abortedBrollPipelines.has(pipelineId)) return
+          const ch = chapterSplits[c]
+          let prevChapterOutput = ''
+          for (let pi = i - 1; pi >= 0; pi--) {
+            if (stages[pi].type === 'transcript_question' && stages[pi].per_chapter) {
+              try { prevChapterOutput = JSON.parse(stageOutputs[pi] || '[]')[c] || '' } catch {}
+              break
+            }
+          }
+
+          let chPrompt = replacePlaceholders(stage.prompt || '')
+            .replace(/\{\{chapter_number\}\}/g, String(ch.chapter_number))
+            .replace(/\{\{total_chapters\}\}/g, String(chapterSplits.length))
+            .replace(/\{\{chapter_name\}\}/g, ch.chapter_name)
+            .replace(/\{\{chapter_purpose\}\}/g, ch.chapter_purpose)
+            .replace(/\{\{chapter_emotion\}\}/g, ch.chapter_emotion || '')
+            .replace(/\{\{chapter_start_tc\}\}/g, ch.chapter_start_tc)
+            .replace(/\{\{chapter_end_tc\}\}/g, ch.chapter_end_tc)
+            .replace(/\{\{chapter_duration_seconds\}\}/g, String(ch.chapter_duration_seconds))
+            .replace(/\{\{chapter_beats\}\}/g, ch.beats_formatted)
+            .replace(/\{\{chapter_transcript\}\}/g, ch.transcript)
+            .replace(/\{\{all_chapters\}\}/g, allChaptersCtx)
+            .replace(/\{\{a_rolls\}\}/g, allChaptersCtx.split('## Chapters')[0] || '')
+            .replace(/\{\{prev_chapter_output\}\}/g, prevChapterOutput)
+
+          const chSystem = replacePlaceholders(stage.system_instruction || '')
+
+          const { callLLM } = await import('./llm-runner.js')
+          const result = await callLLM({
+            model: stage.model || 'gemini-3.1-pro-preview',
+            systemInstruction: chSystem,
+            prompt: chPrompt,
+            params: stage.params || { temperature: 0.3 },
+            experimentId: null,
+            abortSignal: pipelineAbort.signal,
+          })
+
+          chapterResults[c] = result.text
+          stageTokensIn += result.tokensIn || 0
+          stageTokensOut += result.tokensOut || 0
+          stageCost += result.cost || 0
+          completedChapters++
+          brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subDone: completedChapters, subTotal: chapterSplits.length, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}` })
+
+          // Store sub-run
+          await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            strategy.id, videoId, 'analysis', 'complete',
+            ch.transcript.slice(0, 500), result.text, chPrompt, chSystem,
+            stage.model || 'gemini-3.1-pro-preview',
+            result.tokensIn || 0, result.tokensOut || 0, result.cost || 0, 0,
+            JSON.stringify({ pipelineId, stageIndex: i, stageName, subIndex: c, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}`, isSubRun: true, phase: 'create_combined_strategy', prepPipelineId, analysisPipelineIds }),
+          )
+        }
+
+        let nextC = 0
+        async function runNext() { while (nextC < chapterSplits.length && !abortedBrollPipelines.has(pipelineId)) { const c = nextC++; await processChapter(c) } }
+        await Promise.all(Array.from({ length: Math.min(CHAPTER_CONCURRENCY, chapterSplits.length) }, () => runNext()))
+
+        output = JSON.stringify(chapterResults.filter(Boolean))
+        questionCount++
+        llmAnswer = output
+        llmAnswers[questionCount] = output
+
+      } else if (stage.type === 'programmatic' && stage.action === 'assemble_broll_plan') {
+        // Assemble strategy output
+        const lastPerChapterOutput = stageOutputs[stageOutputs.length - 1] || '[]'
+        let llmResults = []
+        try { llmResults = JSON.parse(lastPerChapterOutput) } catch {}
+        const parsedPlans = llmResults.map(r => { try { return extractJSON(r) } catch { return r } })
+        const allChaptersCtx = chapterSplits._allChaptersContext || ''
+        const assembledChapters = chapterSplits.map((ch, idx) => ({
+          chapter_number: ch.chapter_number, chapter_name: ch.chapter_name,
+          time: `${ch.chapter_start_tc} - ${ch.chapter_end_tc}`,
+          duration_seconds: ch.chapter_duration_seconds, purpose: ch.chapter_purpose,
+          beats: ch.beats_formatted, plan: parsedPlans[idx] || null,
+        }))
+        output = JSON.stringify({ video_context: allChaptersCtx, total_chapters: assembledChapters.length, chapters: assembledChapters }, null, 2)
+      }
+
+      stageOutputs.push(output)
+      totalTokensIn += stageTokensIn
+      totalTokensOut += stageTokensOut
+      totalCost += stageCost
+      const stageRuntime = Date.now() - stageStart
+
+      await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        strategy.id, videoId, 'analysis', 'complete',
+        '', output, stage.prompt || '', stage.system_instruction || '',
+        stage.model || 'programmatic',
+        stageTokensIn, stageTokensOut, stageCost, stageRuntime,
+        JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, phase: 'create_combined_strategy', prepPipelineId, analysisPipelineIds, groupId }),
+      )
+
+      if (stageCost > 0 || stageTokensIn + stageTokensOut > 0) {
+        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-combined-strategy ${pipelineId} stage ${i}`, new Date().toISOString())
+      }
+    }
+
+    brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), stageIndex: stages.length, status: 'complete', stageName: 'Done' })
+    setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
+    pipelineAbortControllers.delete(pipelineId)
+    console.log(`[broll-pipeline] Create combined strategy ${pipelineId} complete (${((Date.now() - pipelineStart) / 1000).toFixed(1)}s)`)
+
+  } catch (err) {
+    pipelineAbortControllers.delete(pipelineId)
+    brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), status: 'failed', error: err.message })
+    setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
+    console.error(`[broll-pipeline] Create combined strategy ${pipelineId} failed: ${err.message}`)
     throw err
   }
 
