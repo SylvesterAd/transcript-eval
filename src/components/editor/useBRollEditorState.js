@@ -165,6 +165,11 @@ export function useBRollEditorState(planPipelineId) {
       return
     }
 
+    if (!transcriptWords.length) {
+      // Wait for transcript words before fetching — otherwise placements resolve with no
+      // timelineStart and BRollTrack filters them all out (producing an empty-looking track).
+      return
+    }
     dispatch({ type: 'SET_LOADING' })
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
       .then(data => {
@@ -173,11 +178,12 @@ export function useBRollEditorState(planPipelineId) {
         dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
-  }, [planPipelineId])
+  }, [planPipelineId, transcriptWords])
 
   // Re-resolve when transcript words change (rare — only on initial track load)
   useEffect(() => {
     if (!state.rawPlacements.length) return
+    if (!transcriptWords.length) return
     const visible = state.rawPlacements.filter(p => !p.hidden)
     const resolved = matchPlacementsToTranscript(visible, transcriptWords)
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
