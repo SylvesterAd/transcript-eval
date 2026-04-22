@@ -48,7 +48,16 @@ function reducer(state, action) {
         if (existing.searchStatus === 'complete' && updated.searchStatus === 'pending') return existing
         return { ...existing, results: updated.results, searchStatus: updated.searchStatus }
       })
-      return { ...state, rawPlacements: merged, searchProgress }
+      // Also propagate the updated results/searchStatus into the already-resolved placements
+      // array so BRollTrack (which reads placements, not rawPlacements) shows progressive
+      // search updates without waiting for a transcriptWords change.
+      const mergedPlacements = state.placements.map(resolved => {
+        const raw = merged.find(r => r.index === resolved.index)
+        if (!raw) return resolved
+        if (resolved.results === raw.results && resolved.searchStatus === raw.searchStatus) return resolved
+        return { ...resolved, results: raw.results, searchStatus: raw.searchStatus }
+      })
+      return { ...state, rawPlacements: merged, placements: mergedPlacements, searchProgress }
     }
     case 'SET_PLACEMENT_SEARCHING': {
       const updated = state.rawPlacements.map((p, i) =>
