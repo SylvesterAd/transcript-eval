@@ -13,7 +13,7 @@ import { extractThumbnail, getVideoDuration, getVideoMediaInfo, checkFfmpeg, con
 import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-sync.js'
 import { runStageProgress } from '../services/llm-runner.js'
 import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TEMP_DIR as STORAGE_TEMP_DIR } from '../services/storage.js'
-import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled, waitForStreamReady, enableMp4Downloads, mp4Url as cfMp4Url, thumbnailUrl as cfThumbnailUrl } from '../services/cloudflare-stream.js'
+import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled, waitForStreamReady, enableMp4Downloads, waitForMp4Ready, mp4Url as cfMp4Url, thumbnailUrl as cfThumbnailUrl } from '../services/cloudflare-stream.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -178,6 +178,7 @@ async function runTranscription(videoId, signal) {
     try {
       await waitForStreamReady(video.cf_stream_uid, 600000, signal)
       await enableMp4Downloads(video.cf_stream_uid)
+      await waitForMp4Ready(video.cf_stream_uid, 300000, signal)
     } catch (err) {
       await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
         .run('failed', `Cloudflare Stream not ready: ${err.message}`, videoId)
@@ -190,25 +191,32 @@ async function runTranscription(videoId, signal) {
 
   let actualPath
   let tempTranscribeFile = false
-  if (downloadUrl.startsWith('http')) {
-    // Retry download with delay — CF MP4 may need a few seconds after enableMp4Downloads
-    let lastErr
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        actualPath = await downloadToTemp(downloadUrl, `transcribe-${video.id}-${Date.now()}.mp4`)
-        break
-      } catch (err) {
-        lastErr = err
-        if (attempt < 5 && video.cf_stream_uid) {
-          console.log(`[transcribe] Video ${videoId} download attempt ${attempt} failed (${err.message}), retrying in 5s...`)
-          await new Promise(r => setTimeout(r, 5000))
+  try {
+    if (downloadUrl.startsWith('http')) {
+      // Short retry loop for transient network blips — MP4 readiness is already
+      // verified above via waitForMp4Ready, so 404s here are rare edge propagation delays.
+      let lastErr
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+          actualPath = await downloadToTemp(downloadUrl, `transcribe-${video.id}-${Date.now()}.mp4`)
+          break
+        } catch (err) {
+          lastErr = err
+          if (attempt < 5) {
+            console.log(`[transcribe] Video ${videoId} download attempt ${attempt} failed (${err.message}), retrying in 5s...`)
+            await new Promise(r => setTimeout(r, 5000))
+          }
         }
       }
+      if (!actualPath) throw lastErr
+      tempTranscribeFile = true
+    } else {
+      actualPath = join(__dirname, '..', '..', downloadUrl)
     }
-    if (!actualPath) throw lastErr
-    tempTranscribeFile = true
-  } else {
-    actualPath = join(__dirname, '..', '..', downloadUrl)
+  } catch (err) {
+    await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
+      .run('failed', `Download failed: ${err.message}`, videoId)
+    return
   }
   const transcriptType = video.video_type === 'human_edited' ? 'human_edited' : 'raw'
 

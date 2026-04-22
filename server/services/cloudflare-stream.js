@@ -130,3 +130,28 @@ export function thumbnailUrl(uid, timeSec = 2) {
 export function mp4Url(uid) {
   return `https://videodelivery.net/${uid}/downloads/default.mp4`
 }
+
+/**
+ * After enableMp4Downloads, CF generates the MP4 asynchronously.
+ * Poll /downloads until status is 'ready' (or throw on error/timeout).
+ */
+export async function waitForMp4Ready(uid, timeoutMs = 300000, signal) {
+  const start = Date.now()
+  const pollInterval = 5000
+
+  while (Date.now() - start < timeoutMs) {
+    if (signal?.aborted) throw new Error('Aborted')
+
+    const res = await fetch(`${CF_API}/${uid}/downloads`, { headers: headers() })
+    const data = await res.json()
+    const d = data?.result?.default
+    const status = d?.status || 'unknown'
+    console.log(`[cf-stream] waitForMp4Ready ${uid}: status=${status} percent=${d?.percentComplete ?? '?'}`)
+    if (status === 'ready') return d
+    if (status === 'error') throw new Error(`CF MP4 generation failed for ${uid}`)
+
+    await new Promise(r => setTimeout(r, pollInterval))
+  }
+
+  throw new Error(`Timed out waiting for MP4 for ${uid} (${Math.round(timeoutMs / 1000)}s)`)
+}
