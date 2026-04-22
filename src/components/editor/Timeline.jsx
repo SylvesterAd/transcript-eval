@@ -179,7 +179,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
         el.scrollLeft = state.currentTime * state.zoom - playheadScreenX + labelW
       }
     }
-  }, [state.zoom, state.currentTime])
+  }, [state.zoom])
 
   // Own the playhead transform for render-driven updates (mount, zoom change, paused seek).
   // During playback the rAF engine in EditorView writes transform directly at 60fps — this
