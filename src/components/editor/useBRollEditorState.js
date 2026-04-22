@@ -106,6 +106,9 @@ export function useBRollEditorState(planPipelineId) {
   const [state, dispatch] = useReducer(reducer, initialState)
   const editorCtx = useContext(EditorContext)
   const pollRef = useRef(null)
+  // Tracks which pipelineId the current reducer state was seeded for — so the load effect
+  // can skip SET_LOADING + fetch when a cached seed already populated placements.
+  const seededPipelineIdRef = useRef(null)
 
   // Fetch editor data on mount or when pipeline changes (variant switch)
   const refetchEditorData = useCallback(() => {
@@ -131,15 +134,28 @@ export function useBRollEditorState(planPipelineId) {
   const transcriptWordsRef = useRef(transcriptWords)
   transcriptWordsRef.current = transcriptWords
 
-  // Seed cached placements synchronously (called by BRollEditor before variant switch)
-  const seedFromCache = useCallback((rawPlacements, searchProgress) => {
+  // Seed cached placements synchronously. Called by BRollEditor BEFORE setActiveVariantIdx,
+  // so the pipelineId passed here is the INCOMING one.
+  const seedFromCache = useCallback((pipelineId, rawPlacements, searchProgress) => {
     const visible = rawPlacements.filter(p => !p.hidden)
     const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+    seededPipelineIdRef.current = pipelineId
     dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
   }, [])
 
   useEffect(() => {
     if (!planPipelineId) return
+
+    // If seedFromCache just populated the reducer for this exact pipelineId, skip the
+    // LOADING→fetch→RESOLVED round-trip. If the seeded searchProgress.status is 'running',
+    // the active-pipeline poll below will live-refresh results. If the search finished
+    // between the last inactive-poll and the seed, results may be transiently stale
+    // until the user takes another action — acceptable trade-off to avoid the blank frame.
+    if (seededPipelineIdRef.current === planPipelineId) {
+      seededPipelineIdRef.current = null
+      return
+    }
+
     dispatch({ type: 'SET_LOADING' })
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
       .then(data => {

@@ -82,8 +82,9 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     const newPid = variants[newIdx]?.id
     const cached = newPid ? rawInactivePlacements[newPid] : null
     if (cached?.length) {
-      // Seed synchronously — the fetch useEffect will still fire and refresh, but we won't flash empty
-      brollState.seedFromCache(cached)
+      // Seed synchronously. The load effect will see the seededPipelineIdRef match
+      // and skip the SET_LOADING clear, avoiding a blank frame.
+      brollState.seedFromCache(newPid, cached)
     }
     if (selectIndex != null) pendingSelectionRef.current = selectIndex
     setActiveVariantIdx(newIdx)
