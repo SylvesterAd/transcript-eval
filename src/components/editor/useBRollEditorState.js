@@ -8,17 +8,17 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 export const BRollContext = createContext(null)
 
-export async function authFetchBRollData(planPipelineId) {
-  return authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
+export async function authFetchBRollData(planPipelineId, signal) {
+  return authFetch(`/broll/pipeline/${planPipelineId}/editor-data`, signal)
 }
 
-async function authFetch(path) {
+async function authFetch(path, signal) {
   const headers = {}
   if (supabase) {
     const { data } = await supabase.auth.getSession()
     if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
   }
-  const res = await fetch(`${API_BASE}${path}`, { headers })
+  const res = await fetch(`${API_BASE}${path}`, { headers, signal })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
 }

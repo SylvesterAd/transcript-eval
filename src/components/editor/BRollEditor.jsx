@@ -55,19 +55,23 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   useEffect(() => {
     if (variants.length <= 1) return
     const inactiveIds = variants.filter((_, i) => i !== activeVariantIdx).map(v => v.id)
+    const controller = new AbortController()
     function fetchInactive() {
       for (const pid of inactiveIds) {
-        authFetchBRollData(pid)
+        authFetchBRollData(pid, controller.signal)
           .then(data => setRawInactivePlacements(prev => ({ ...prev, [pid]: data.placements || [] })))
-          .catch(() => {})
+          .catch(err => { if (err.name !== 'AbortError') {/* swallow */} })
       }
     }
     fetchInactive()
     // Re-fetch every 5s while a search is running
     const isRunning = brollState.searchProgress?.status === 'running'
-    if (!isRunning) return
+    if (!isRunning) return () => controller.abort()
     const interval = setInterval(fetchInactive, 5000)
-    return () => clearInterval(interval)
+    return () => {
+      clearInterval(interval)
+      controller.abort()
+    }
   }, [variants, activeVariantIdx, brollState.searchProgress?.status])
 
   // Cache active variant's placements into inactive cache before switching
