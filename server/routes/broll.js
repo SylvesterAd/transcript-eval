@@ -3,7 +3,7 @@ import multer from 'multer'
 import { dirname, join, extname } from 'path'
 import { fileURLToPath } from 'url'
 import { mkdirSync } from 'fs'
-import { requireAuth } from '../auth.js'
+import { requireAuth, isAdmin } from '../auth.js'
 import { uploadFile } from '../services/storage.js'
 import { extractThumbnail } from '../services/video-processor.js'
 import db from '../db.js'
@@ -48,6 +48,8 @@ import {
   executeCreateCombinedStrategy,
   executeSearchBatch,
   loadExampleVideos,
+  previewBrollReset,
+  resetBrollSearches,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -429,6 +431,32 @@ router.post('/pipeline/stop-all', requireAuth, (req, res) => {
   }
   console.log(`[broll-pipeline] stop-all: ${stopped} pipelines aborted`)
   res.json({ success: true, stopped })
+})
+
+// Admin-only: preview what Reset B-Roll Searches would delete for a group
+router.get('/groups/:groupId/reset-searches/preview', requireAuth, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' })
+  try {
+    const groupId = Number(req.params.groupId)
+    if (!Number.isFinite(groupId)) return res.status(400).json({ error: 'Invalid groupId' })
+    const preview = await previewBrollReset(groupId)
+    res.json(preview)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Admin-only: execute Reset B-Roll Searches for a group
+router.post('/groups/:groupId/reset-searches', requireAuth, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' })
+  try {
+    const groupId = Number(req.params.groupId)
+    if (!Number.isFinite(groupId)) return res.status(400).json({ error: 'Invalid groupId' })
+    const result = await resetBrollSearches(groupId)
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 // Generate keywords for plan placements (LLM only, no GPU)
