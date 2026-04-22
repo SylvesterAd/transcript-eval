@@ -672,7 +672,6 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
     setResetError(null)
     try {
       const res = await apiPost(`/broll/groups/${groupId}/reset-searches`)
-      console.log('[reset-searches] result:', res)
       setResetConfirming(false)
       setResetPreview(null)
       refetchRuns()
@@ -2259,7 +2258,7 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
               <div className="text-sm text-zinc-300 space-y-2 mb-4">
                 <p>This will delete:</p>
                 <ul className="list-disc ml-5 text-zinc-400 text-xs">
-                  <li>{resetPreview.searches.total} b-roll search rows ({Object.entries(resetPreview.searches.byStatus).map(([k, v]) => `${v} ${k}`).join(', ') || 'none'})</li>
+                  <li>{resetPreview.searches.total} b-roll search rows ({Object.entries(resetPreview.searches.byStatus || {}).map(([k, v]) => `${v} ${k}`).join(', ') || 'none'})</li>
                   <li>{resetPreview.kwRuns} keyword pipeline runs</li>
                   <li>{resetPreview.bsRuns} legacy b-roll search runs</li>
                   <li>Abort {resetPreview.activePipelines.length} active in-memory pipelines</li>
