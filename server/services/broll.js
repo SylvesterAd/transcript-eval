@@ -1,5 +1,6 @@
 import db from '../db.js'
 import { loggedFetch, streamingFetch } from './api-logger.js'
+import { notify } from './slack-notifier.js'
 import { callLLM } from './llm-runner.js'
 import { downloadToTemp, uploadFile, deleteFile, getPublicUrl } from './storage.js'
 import { extractVideoSegment } from './video-processor.js'
@@ -1249,6 +1250,7 @@ export async function executeAltPlans(planPipelineId) {
       setTimeout(() => brollPipelineProgress.delete(altPipelineId), 300_000)
       results.push({ pipelineId: altPipelineId, videoId: altVid.id, videoLabel: altLabel, status: 'failed', error: err.message })
       console.error(`[broll-pipeline] Alt plan for "${altLabel}" failed: ${err.message}`)
+      notify({ source: 'broll-alt-plan', title: 'Alt plan failed', error: err.message, meta: { pipelineId: altPipelineId, videoId: altVid.id, videoLabel: altLabel } })
     }
   }
 
@@ -1405,6 +1407,7 @@ export async function executeKeywords(planPipelineId) {
     brollPipelineProgress.set(keywordsPipelineId, { ...brollPipelineProgress.get(keywordsPipelineId), status: 'failed', error: err.message })
     setTimeout(() => brollPipelineProgress.delete(keywordsPipelineId), 300_000)
     console.error(`[broll-pipeline] Keywords failed: ${err.message}`)
+    notify({ source: 'broll-keywords', title: 'Keywords pipeline failed', error: err.message, meta: { pipelineId: keywordsPipelineId, videoId } })
     throw err
   }
 }
@@ -1686,6 +1689,7 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
       await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, error_message, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`).run(searchStrategy.id, videoId, 'analysis', 'failed', err.message, JSON.stringify({ pipelineId: searchPipelineId, stageIndex: 0, totalStages: 1 }))
     }
     console.error(`[broll-pipeline] B-Roll search failed: ${err.message}`)
+    notify({ source: 'broll-search', title: 'Search pipeline failed', error: err.message, meta: { pipelineId: searchPipelineId, videoId, completedItems } })
     throw err
   }
 }
@@ -1856,6 +1860,7 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
     brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), status: 'failed', error: err.message })
     setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
     console.error(`[broll-keywords] Failed: ${err.message}`)
+    notify({ source: 'broll-keywords', title: 'Keywords batch failed', error: err.message, meta: { pipelineId } })
     throw err
   }
 }
@@ -2025,6 +2030,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       `UPDATE broll_searches SET status = 'failed', error = ?, completed_at = NOW() WHERE batch_id = ? AND status IN ('waiting', 'running')`
     ).run(err.message, pipelineId).catch(() => {})
     console.error(`[search-batch] Failed: ${err.message}`)
+    notify({ source: 'broll-search-batch', title: 'Search batch failed', error: err.message, meta: { pipelineId } })
     throw err
   }
 }
@@ -2545,6 +2551,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
     brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), status: 'failed', error: err.message })
     setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
     console.error(`[broll-pipeline] Create strategy ${pipelineId} failed: ${err.message}`)
+    notify({ source: 'broll-create-strategy', title: 'Create strategy failed', error: err.message, meta: { pipelineId, videoId } })
     try {
       await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, error_message, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`).run(
         strategy.id, videoId, 'analysis', 'failed', err.message,
@@ -3096,6 +3103,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
     brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), status: 'failed', error: err.message })
     setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
     console.error(`[broll-pipeline] Create combined strategy ${pipelineId} failed: ${err.message}`)
+    notify({ source: 'broll-create-combined-strategy', title: 'Create combined strategy failed', error: err.message, meta: { pipelineId, videoId } })
     // Write a failed pipeline-level row so the UI can show the failure
     try {
       await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, error_message, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`).run(
