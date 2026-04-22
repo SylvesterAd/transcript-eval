@@ -6,6 +6,13 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // ── Connection ─────────────────────────────────────────────────────────
+// DATABASE_URL must point to Supavisor transaction mode (port 6543).
+// Session mode (port 5432) caps concurrent clients at pool_size (~15
+// on Nano/Micro), which we exhausted. Transaction mode returns the
+// backend to the shared pool after each transaction, so pg.Pool can
+// hold many idle clients without reserving Supabase backends.
+// Do NOT use named prepared statements (client.query({ name:...})) —
+// they break under transaction pooling.
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
   console.error('[db] FATAL: DATABASE_URL environment variable is required')
