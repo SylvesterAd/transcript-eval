@@ -26,7 +26,7 @@ export function startGpuFailurePoller() {
         .from('broll_jobs')
         .select('id, error, instance_id, request, updated_at')
         .eq('status', 'failed')
-        .gt('updated_at', lastPollTs)
+        .gte('updated_at', lastPollTs)
         .order('updated_at', { ascending: true })
         .limit(100)
 
