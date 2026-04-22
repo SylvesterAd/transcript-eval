@@ -222,7 +222,10 @@ export default function EditorView() {
 
   // Fetch token balance on mount
   useEffect(() => {
-    authFetch('/videos/user/tokens').then(r => r.json()).then(d => setTokenBalance(d.balance)).catch(() => {})
+    authFetch('/videos/user/tokens')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (typeof d?.balance === 'number') setTokenBalance(d.balance) })
+      .catch(() => {})
   }, [])
 
   // Handler: open estimation modal
@@ -832,7 +835,7 @@ export default function EditorView() {
           </div>
           <div className="flex-1" />
           <div className="flex items-center gap-4">
-            {tokenBalance !== null && (
+            {tokenBalance != null && (
               <div className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-white/5 border border-white/10">
                 <span className="material-symbols-outlined text-sm text-secondary">token</span>
                 <span className="text-xs font-bold text-on-surface-variant">{tokenBalance.toLocaleString()}</span>
