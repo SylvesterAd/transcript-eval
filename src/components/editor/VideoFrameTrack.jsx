@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo, useContext, useCallback } from 'react'
+import { useRef, useEffect, useState, useMemo, useContext, useCallback, memo } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { GROUP_COLORS } from './useEditorState.js'
 
@@ -22,7 +22,7 @@ function frameUrl(videoId, time, cfStreamUid) {
   return `/uploads/frames/${path}`
 }
 
-export default function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {
+function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {
   const { state, dispatch } = useContext(EditorContext)
   const group = track.groupId ? state.groups[track.groupId] : null
   const color = group?.color || '#acaaad'
@@ -181,12 +181,14 @@ export default function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX 
   )
 }
 
+export default memo(VideoFrameTrack)
+
 /**
  * Composite frame track — single row showing segments from multiple video sources.
  * Each segment shows frames from a different camera. Cut markers appear at transitions.
  * segments: [{start, end, videoId, offset, duration, filePath, groupId}]
  */
-export function CompositeFrameTrack({ segments, zoom, cuts, scrollRef, scrollX }) {
+function CompositeFrameTrackImpl({ segments, zoom, cuts, scrollRef, scrollX }) {
   const { state, dispatch } = useContext(EditorContext)
 
   // Viewport clipping
@@ -323,3 +325,5 @@ export function CompositeFrameTrack({ segments, zoom, cuts, scrollRef, scrollX }
     </div>
   )
 }
+
+export const CompositeFrameTrack = memo(CompositeFrameTrackImpl)

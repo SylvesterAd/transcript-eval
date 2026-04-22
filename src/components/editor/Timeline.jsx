@@ -17,6 +17,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   const prevZoomRef = useRef(state.zoom)
   const zoomAnchorRef = useRef(null) // { time, screenX } — set by wheel, null for +/- buttons
 
+  // Stable empty-cuts reference for the falsy branch of track `cuts` props
+  const EMPTY_CUTS = useMemo(() => [], [])
+
   // Merge cuts for display and refine edges using waveform
   const mergedDisplayCuts = useMemo(() => {
     if (!state.cuts.length) return []
@@ -736,7 +739,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                   <div className="flex-1 relative">
                     {isVideo
                       ? (showVideoFrames
-                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : []} scrollRef={scrollRef} scrollX={scrollX} />
+                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : EMPTY_CUTS} scrollRef={scrollRef} scrollX={scrollX} />
                           : <VideoTrack track={track} zoom={state.zoom} />)
                       : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} scrollRef={scrollRef} scrollX={scrollX} />
                     }

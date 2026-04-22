@@ -1,4 +1,4 @@
-import { useContext, useRef, useMemo, useCallback, useEffect } from 'react'
+import { useContext, useRef, useMemo, useCallback, useEffect, memo } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { GROUP_COLORS, buildSentences } from './useEditorState.js'
 import WaveformData from 'waveform-data'
@@ -136,7 +136,7 @@ function computeWordGroups(words, sentences, zoom, vStart, vEnd) {
   return result
 }
 
-export function VideoTrack({ track, zoom }) {
+function VideoTrackImpl({ track, zoom }) {
   const { state, dispatch } = useContext(EditorContext)
   const selected = state.selectedTrackIds.has(track.id)
   const group = track.groupId ? state.groups[track.groupId] : null
@@ -197,9 +197,11 @@ export function VideoTrack({ track, zoom }) {
   )
 }
 
+export const VideoTrack = memo(VideoTrackImpl)
+
 const CHUNK_W = 1000 // CSS pixels per canvas chunk
 
-export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
+function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
   const { state, dispatch } = useContext(EditorContext)
   const selected = state.selectedTrackIds.has(track.id)
   const group = track.groupId ? state.groups[track.groupId] : null
@@ -592,6 +594,8 @@ export function AudioTrack({ track, zoom, cuts, scrollRef, scrollX }) {
   )
 }
 
+export const AudioTrack = memo(AudioTrackImpl)
+
 const COMPOSITE_CHUNK_W = 1000
 
 /**
@@ -599,7 +603,7 @@ const COMPOSITE_CHUNK_W = 1000
  * Each segment draws the waveform from the corresponding audio track.
  * segments: [{start, end, videoId, offset, duration, filePath, groupId, title}]
  */
-export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX, showTranscript }) {
+function CompositeAudioTrackImpl({ segments, zoom, cuts, scrollRef, scrollX, showTranscript }) {
   const { state, dispatch } = useContext(EditorContext)
   const containerRef = useRef(null)
 
@@ -926,3 +930,5 @@ export function CompositeAudioTrack({ segments, zoom, cuts, scrollRef, scrollX, 
     </div>
   )
 }
+
+export const CompositeAudioTrack = memo(CompositeAudioTrackImpl)
