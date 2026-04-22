@@ -54,6 +54,7 @@ async function sendWithRetries(text) {
       if (res.status === 429) {
         const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10)
         await sleep(Math.max(1, retryAfter) * 1000)
+        attempt++
         continue
       }
     } catch {
@@ -72,6 +73,7 @@ function ensureDrain() {
       const summary = `⚠️ [${ENV_TAG}] ${droppedCount} alert(s) dropped (backpressure)`
       droppedCount = 0
       await sendWithRetries(summary).catch(() => {})
+      return
     }
     const next = queue.shift()
     if (!next) {
@@ -85,14 +87,18 @@ function ensureDrain() {
 }
 
 export function notify({ source, title, error, meta }) {
-  if (!WEBHOOK_URL) return
-  if (!source || !title) return
-  if (queue.length >= MAX_QUEUE) {
-    queue.shift()
-    droppedCount++
+  try {
+    if (!WEBHOOK_URL) return
+    if (!source || !title) return
+    if (queue.length >= MAX_QUEUE) {
+      queue.shift()
+      droppedCount++
+    }
+    queue.push(format({ source, title, error, meta }))
+    ensureDrain()
+  } catch (e) {
+    console.warn('[slack-notifier] notify() internal error:', e.message)
   }
-  queue.push(format({ source, title, error, meta }))
-  ensureDrain()
 }
 
 export function _internalState() {
