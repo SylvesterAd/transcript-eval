@@ -90,13 +90,30 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     setActiveVariantIdx(newIdx)
   }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements])
 
-  // Resolve inactive placements using same transcript matching as active variant
+  // Resolve inactive placements using same transcript matching as active variant.
+  // Per-pid cache keeps individual array references stable when only one variant's
+  // raw data changed, allowing React.memo in BRollTrack to skip unchanged tracks.
+  const resolvedCacheRef = useRef(new Map())
   const inactiveVariantPlacements = useMemo(() => {
-    const resolved = {}
+    const cache = resolvedCacheRef.current
+    const out = {}
+    const seen = new Set()
     for (const [pid, placements] of Object.entries(rawInactivePlacements)) {
-      resolved[pid] = matchPlacementsToTranscript(placements, transcriptWords)
+      seen.add(pid)
+      const cached = cache.get(pid)
+      if (cached && cached.raw === placements && cached.words === transcriptWords) {
+        out[pid] = cached.resolved
+        continue
+      }
+      const resolved = matchPlacementsToTranscript(placements, transcriptWords)
+      cache.set(pid, { raw: placements, words: transcriptWords, resolved })
+      out[pid] = resolved
     }
-    return resolved
+    // Evict stale entries for pids that no longer exist
+    for (const pid of cache.keys()) {
+      if (!seen.has(pid)) cache.delete(pid)
+    }
+    return out
   }, [rawInactivePlacements, transcriptWords])
 
   // Apply pending selection after variant switch data loads
