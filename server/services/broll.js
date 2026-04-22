@@ -5412,7 +5412,7 @@ export async function resetBrollSearches(groupId) {
     abortedBrollPipelines.add(pid)
     const controller = pipelineAbortControllers.get(pid)
     if (controller) {
-      try { controller.abort() } catch {}
+      try { controller.abort() } catch (e) { console.warn(`[broll-reset] abort failed for ${pid}:`, e.message) }
       pipelineAbortControllers.delete(pid)
     }
     brollPipelineProgress.delete(pid)
@@ -5437,7 +5437,14 @@ export async function resetBrollSearches(groupId) {
   ).run(...videoIds)
   const bsRunsDeleted = delBs.changes || 0
 
-  console.log(`[broll-reset] group=${groupId}: searches=${searchesDeleted}, kw=${kwRunsDeleted}, bs=${bsRunsDeleted}, aborted=${pipelinesAborted}`)
+  // Second-pass cleanup: a pipeline that was mid-insert when we aborted may have
+  // finished writing a broll_searches row AFTER the first DELETE. Re-run to catch stragglers.
+  const delSearchesAgain = await db.prepare(
+    `DELETE FROM broll_searches WHERE plan_pipeline_id IN (${planPH})`
+  ).run(...planPipelineIds)
+  const stragglers = delSearchesAgain.changes || 0
 
-  return { searchesDeleted, kwRunsDeleted, bsRunsDeleted, pipelinesAborted }
+  console.log(`[broll-reset] group=${groupId}: searches=${searchesDeleted}${stragglers ? ` (+${stragglers} stragglers)` : ''}, kw=${kwRunsDeleted}, bs=${bsRunsDeleted}, aborted=${pipelinesAborted}`)
+
+  return { searchesDeleted: searchesDeleted + stragglers, kwRunsDeleted, bsRunsDeleted, pipelinesAborted }
 }
