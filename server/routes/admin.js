@@ -161,7 +161,7 @@ router.delete('/broll-searches/:id', requireAuth, requireAdmin, async (req, res)
 
 router.post('/test-alert', requireAuth, requireAdmin, (_req, res) => {
   notify({
-    source: 'api-log',
+    source: 'admin-test',
     title: 'Test alert from admin endpoint',
     error: 'Synthetic — safe to ignore.',
   })
