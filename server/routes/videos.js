@@ -1155,6 +1155,16 @@ router.post('/groups/:id/generate-timeline', requireAuth, async (req, res) => {
   for (const v of videos) {
     const track = { videoId: v.id, title: v.title, offset: 0, duration: v.duration_seconds || 0, waveformPeaks: [] }
 
+    // For CF Stream videos, wait for the MP4 to be ready before attempting
+    // download — otherwise we hit 404s and save an empty waveform.
+    if (v.cf_stream_uid) {
+      try {
+        await waitForMp4Ready(v.cf_stream_uid, 180000)
+      } catch (err) {
+        console.error(`[generate-timeline] CF MP4 not ready for video ${v.id}: ${err.message}`)
+      }
+    }
+
     // Extract waveform
     const filePath = v.file_path
     if (filePath) {
@@ -1198,14 +1208,22 @@ router.post('/groups/:id/regenerate-waveforms', requireAuth, async (req, res) =>
   if (!group.timeline_json) return res.status(404).json({ error: 'No timeline yet' })
 
   const timeline = JSON.parse(group.timeline_json)
-  const videos = await db.prepare('SELECT id, file_path FROM videos WHERE group_id = ?').all(req.params.id)
-  const fileMap = Object.fromEntries(videos.map(v => [v.id, v.file_path]))
+  const videos = await db.prepare('SELECT id, file_path, cf_stream_uid FROM videos WHERE group_id = ?').all(req.params.id)
+  const videoMap = Object.fromEntries(videos.map(v => [v.id, v]))
 
   let updated = 0
   const tempFiles = []
   for (const track of timeline.tracks) {
-    const filePath = fileMap[track.videoId]
-    if (!filePath) continue
+    const vid = videoMap[track.videoId]
+    if (!vid?.file_path) continue
+    const filePath = vid.file_path
+    if (vid.cf_stream_uid) {
+      try {
+        await waitForMp4Ready(vid.cf_stream_uid, 180000)
+      } catch (err) {
+        console.error(`[waveform] CF MP4 not ready for video ${track.videoId}: ${err.message}`)
+      }
+    }
     let fullPath
     if (filePath.startsWith('http')) {
       try {

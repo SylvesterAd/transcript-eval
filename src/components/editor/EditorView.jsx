@@ -206,15 +206,19 @@ export default function EditorView() {
     }
   }, [groupDetail, id])
 
-  // Auto-generate timeline with waveforms if missing
+  // Auto-generate timeline with waveforms if missing, or regenerate if
+  // a previous run saved a timeline with no peaks (e.g. CF MP4 wasn't ready).
   const timelineGenRef = useRef(false)
   useEffect(() => {
     if (!groupDetail || timelineGenRef.current) return
-    if (groupDetail.timeline) return // already has timeline
     if (!groupDetail.videos?.length) return
+    const tl = groupDetail.timeline
+    const hasAnyPeaks = tl?.tracks?.some(t => t.waveformPeaks?.length > 0)
+    if (tl && hasAnyPeaks) return
     timelineGenRef.current = true
-    console.log('[editor] No timeline — generating waveforms...')
-    authFetch(`/videos/groups/${id}/generate-timeline`, { method: 'POST' })
+    const endpoint = tl ? 'regenerate-waveforms' : 'generate-timeline'
+    console.log(`[editor] ${tl ? 'Empty peaks — regenerating' : 'No timeline — generating'} waveforms...`)
+    authFetch(`/videos/groups/${id}/${endpoint}`, { method: 'POST' })
       .then(r => r.json())
       .then(() => { refetchDetail() })
       .catch(err => console.error('[editor] Timeline generation failed:', err))
