@@ -14,6 +14,7 @@ import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
+import { startGpuFailurePoller } from './services/gpu-failure-poller.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -67,4 +68,5 @@ app.listen(PORT, async () => {
   if (storageEnabled()) {
     await initBuckets()
   }
+  startGpuFailurePoller()
 })
