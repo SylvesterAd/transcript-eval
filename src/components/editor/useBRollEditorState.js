@@ -27,8 +27,6 @@ function reducer(state, action) {
   switch (action.type) {
     case 'SET_LOADING':
       return { ...state, rawPlacements: [], placements: [], selectedIndex: null, selectedResults: {}, loading: true, error: null }
-    case 'SET_DATA':
-      return { ...state, rawPlacements: action.payload.placements, selectedResults: {}, searchProgress: action.payload.searchProgress, loading: false, error: null }
     case 'SET_DATA_RESOLVED':
       return { ...state, rawPlacements: action.payload.rawPlacements, placements: action.payload.placements, selectedResults: {}, searchProgress: action.payload.searchProgress, loading: false, error: null }
     case 'SET_RESOLVED':
