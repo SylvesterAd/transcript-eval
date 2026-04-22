@@ -479,6 +479,15 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     window.addEventListener('mouseup', onUp)
   }, [visibleLayout, state.tracks, dispatch, startAutoScroll, stopAutoScroll])
 
+  // Stable per-variant onActivate factories for BRollTrack memoization
+  const variantActivators = useMemo(() => {
+    const out = []
+    for (let vi = 0; vi < brollVariantCount; vi++) {
+      out.push((selectIndex) => onVariantActivate?.(vi, selectIndex))
+    }
+    return out
+  }, [brollVariantCount, onVariantActivate])
+
   return (
     <div
       className="h-full bg-surface-container-low rounded-xl flex flex-col overflow-hidden relative border border-white/5"
@@ -655,7 +664,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                         scrollRef={scrollRef}
                         scrollX={scrollX}
                         isActive={isActiveVariant}
-                        onActivate={(selectIndex) => onVariantActivate?.(vi, selectIndex)}
+                        onActivate={variantActivators[vi]}
                         overridePlacements={!isActiveVariant ? inactiveVariantPlacements?.[variants?.[vi]?.id] : undefined}
                       />
                     </div>

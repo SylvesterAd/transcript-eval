@@ -1,10 +1,10 @@
-import { useMemo, useContext, useCallback } from 'react'
+import { useMemo, useContext, useCallback, memo } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2 } from 'lucide-react'
 
 const TRACK_H = 60
 
-export default function BRollTrack({ zoom, scrollRef, scrollX, isActive = true, onActivate, overridePlacements }) {
+function BRollTrack({ zoom, scrollRef, scrollX, isActive = true, onActivate, overridePlacements }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -187,4 +187,5 @@ export default function BRollTrack({ zoom, scrollRef, scrollX, isActive = true, 
   )
 }
 
+export default memo(BRollTrack)
 export { TRACK_H as BROLL_TRACK_H }
