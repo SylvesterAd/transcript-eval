@@ -85,6 +85,26 @@ const router = Router()
   }
 })()
 
+// ── Startup: backfill thumbnails for CF Stream videos that never got metadata ──
+// processVideoMetadata is fire-and-forget, so earlier crashes could have
+// interrupted it, leaving videos with a cf_stream_uid but no thumbnail_path.
+;(async () => {
+  try {
+    const missingThumbs = await db.prepare(
+      "SELECT id FROM videos WHERE cf_stream_uid IS NOT NULL AND (thumbnail_path IS NULL OR thumbnail_path = '')"
+    ).all()
+    if (missingThumbs.length > 0) {
+      console.log(`[startup] Backfilling metadata for ${missingThumbs.length} CF Stream video(s) missing thumbnails`)
+      for (const v of missingThumbs) {
+        setTimeout(() => processVideoMetadata(v.id).catch(err =>
+          console.error(`[startup] Metadata backfill failed for video ${v.id}:`, err.message)), 5000)
+      }
+    }
+  } catch (err) {
+    console.error('[startup] Thumbnail backfill check failed:', err.message)
+  }
+})()
+
 // ── Transcription queue with concurrency control ────────────────────────
 const TRANSCRIPTION_CONCURRENCY = 3
 const transcriptionQueue = []     // [{ videoId, resolve }]
