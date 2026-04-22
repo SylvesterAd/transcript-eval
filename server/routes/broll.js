@@ -897,34 +897,47 @@ router.post('/pipeline/clean-strategy', requireAuth, async (req, res) => {
       `SELECT id, output_text, metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
     ).all(`%"pipelineId":"${strategy_pipeline_id}"%`)
 
-    // Only process sub-runs from the last (highest) stageIndex
     const subRuns = runs.filter(r => { try { return JSON.parse(r.metadata_json || '{}').isSubRun } catch { return false } })
     const maxStage = subRuns.reduce((max, r) => { try { return Math.max(max, JSON.parse(r.metadata_json || '{}').stageIndex ?? 0) } catch { return max } }, -1)
     const lastStageRuns = subRuns.filter(r => { try { return (JSON.parse(r.metadata_json || '{}').stageIndex ?? 0) === maxStage } catch { return false } })
 
-    let cleaned = 0
+    // Parse/prep each row before acquiring a pool client so the slot
+    // isn't held during JSON work.
+    const updates = []
     for (const run of lastStageRuns) {
       try {
         const jsonMatch = run.output_text?.match(/```json\s*([\s\S]*?)```/)
         const parsed = jsonMatch ? JSON.parse(jsonMatch[1]) : JSON.parse(run.output_text || '{}')
-
-        // Strip reference-only fields
         delete parsed.matched_reference_chapter
         delete parsed.commonalities
         if (parsed.strategy) delete parsed.strategy.commonalities
-
-        // Strip from beat_strategies
         const bs = parsed.beat_strategies || parsed.beatStrategies || []
         for (const b of bs) {
           delete b.matched_reference_beat
           delete b.match_reason
         }
-
-        const newOutput = '```json\n' + JSON.stringify(parsed, null, 2) + '\n```'
-        await db.prepare('UPDATE broll_runs SET output_text = ? WHERE id = ?').run(newOutput, run.id)
-        cleaned++
+        updates.push({ id: run.id, newOutput: '```json\n' + JSON.stringify(parsed, null, 2) + '\n```' })
       } catch (err) {
-        console.error(`[clean-strategy] Failed to clean run ${run.id}:`, err.message)
+        console.error(`[clean-strategy] Failed to parse run ${run.id}:`, err.message)
+      }
+    }
+
+    // One transaction holds a single pool slot for the whole batch
+    let cleaned = 0
+    if (updates.length) {
+      const client = await db.pool.connect()
+      try {
+        await client.query('BEGIN')
+        for (const u of updates) {
+          await client.query('UPDATE broll_runs SET output_text = $1 WHERE id = $2', [u.newOutput, u.id])
+          cleaned++
+        }
+        await client.query('COMMIT')
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
       }
     }
 
