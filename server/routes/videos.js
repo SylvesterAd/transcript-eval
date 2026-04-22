@@ -465,15 +465,25 @@ router.get('/groups', requireAuth, async (req, res) => {
 
 // Get group detail with assembled transcript
 router.get('/groups/:id/detail', requireAuth, async (req, res) => {
-  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  const groupId = req.params.id
+  const userScope = isAdmin(req) ? '' : 'AND user_id = ?'
+  const userArgs = isAdmin(req) ? [] : [req.auth.userId]
+
+  // Kick off the two independent reads in parallel — pg.Pool will use
+  // two backends briefly under transaction mode and return them as
+  // soon as the SELECTs finish.
+  const [group, videos] = await Promise.all([
+    db.prepare(`SELECT * FROM video_groups WHERE id = ? ${userScope}`).get(groupId, ...userArgs),
+    db.prepare('SELECT id, title, video_type, duration_seconds, transcription_status, transcription_error, thumbnail_path, file_path, frames_status FROM videos WHERE group_id = ?').all(groupId),
+  ])
   if (!group) return res.status(404).json({ error: 'Group not found' })
-  const videos = await db.prepare('SELECT id, title, video_type, duration_seconds, transcription_status, transcription_error, thumbnail_path, file_path, frames_status FROM videos WHERE group_id = ?').all(req.params.id)
-  let relatedGroups = []
-  if (group.upload_batch_id) {
-    relatedGroups = await db.prepare(
-      'SELECT id, name, assembly_status FROM video_groups WHERE upload_batch_id = ? AND id != ?'
-    ).all(group.upload_batch_id, group.id)
-  }
+
+  const relatedGroups = group.upload_batch_id
+    ? await db.prepare(
+        'SELECT id, name, assembly_status FROM video_groups WHERE upload_batch_id = ? AND id != ?'
+      ).all(group.upload_batch_id, group.id)
+    : []
+
   res.json({
     ...group,
     videos,
