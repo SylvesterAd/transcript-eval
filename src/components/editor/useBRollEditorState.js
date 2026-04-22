@@ -83,10 +83,15 @@ function reducer(state, action) {
     }
     case 'UPDATE_PLACEMENT_POSITION': {
       const { index, timelineStart, timelineEnd } = action.payload
-      const updated = state.rawPlacements.map((p, i) =>
+      const updatedRaw = state.rawPlacements.map((p, i) =>
         i === index ? { ...p, userTimelineStart: timelineStart, userTimelineEnd: timelineEnd } : p
       )
-      return { ...state, rawPlacements: updated }
+      const updatedPlacements = state.placements.map(p =>
+        p.index === index
+          ? { ...p, timelineStart, timelineEnd, timelineDuration: timelineEnd - timelineStart }
+          : p
+      )
+      return { ...state, rawPlacements: updatedRaw, placements: updatedPlacements }
     }
     case 'HIDE_PLACEMENT': {
       const updated = state.rawPlacements.map((p, i) =>
