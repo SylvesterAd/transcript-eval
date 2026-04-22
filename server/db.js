@@ -93,6 +93,25 @@ function convertSql(sql) {
   return converted
 }
 
+// Retry on transient pool/connection errors — pgBouncer session-mode
+// rejects with "MaxClientsInSessionMode" when pool_size is saturated.
+// A short backoff usually clears this.
+async function queryWithRetry(sql, params, maxRetries = 3) {
+  let lastErr
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await pool.query(sql, params)
+    } catch (err) {
+      lastErr = err
+      const msg = err?.message || ''
+      const transient = /max clients|MaxClientsInSessionMode|ECONNREFUSED|Connection terminated|timeout/i.test(msg)
+      if (!transient || attempt === maxRetries) throw err
+      await new Promise(r => setTimeout(r, 75 * Math.pow(2, attempt)))
+    }
+  }
+  throw lastErr
+}
+
 // ── Wrapper matching previous sync API shape (now async) ───────────────
 function prepare(sql) {
   const pgSql = convertSql(sql)
@@ -105,18 +124,18 @@ function prepare(sql) {
       if (isInsert && !/RETURNING\s/i.test(pgSql)) {
         execSql = pgSql + ' RETURNING id'
       }
-      const result = await pool.query(execSql, params)
+      const result = await queryWithRetry(execSql, params)
       const lastInsertRowid = result.rows?.[0]?.id ?? null
       return { lastInsertRowid, changes: result.rowCount }
     },
 
     async get(...params) {
-      const result = await pool.query(pgSql, params)
+      const result = await queryWithRetry(pgSql, params)
       return result.rows[0] || undefined
     },
 
     async all(...params) {
-      const result = await pool.query(pgSql, params)
+      const result = await queryWithRetry(pgSql, params)
       return result.rows
     }
   }
@@ -124,7 +143,7 @@ function prepare(sql) {
 
 async function exec(sql) {
   const pgSql = convertSql(sql)
-  await pool.query(pgSql)
+  await queryWithRetry(pgSql, [])
 }
 
 function transaction(fn) {

@@ -20,7 +20,7 @@ function StatusBadge({ status }) {
 }
 
 export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
-  const { data: sources, loading, error: fetchError, refetch } = useApi(`/broll/groups/${groupId}/examples`)
+  const { data: sources, loading, error: fetchError, refetch, mutate } = useApi(`/broll/groups/${groupId}/examples`)
   const [videoUrls, setVideoUrls] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef(null)
@@ -45,17 +45,18 @@ export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
     if (!urls.length) return
     setSubmitting(true)
     try {
-      let added = 0
+      let addedCount = 0
       for (const u of urls) {
-        if (items.length + added >= MAX_REFERENCES) break
-        await apiPost(`/broll/groups/${groupId}/examples`, {
+        if (items.length + addedCount >= MAX_REFERENCES) break
+        const added = await apiPost(`/broll/groups/${groupId}/examples`, {
           kind: 'yt_video',
           source_url: u,
         })
-        added++
+        mutate(prev => [added, ...(prev || []).filter(s => s.id !== added.id)])
+        addedCount++
       }
       setVideoUrls('')
-      refetch()
+      refetch(true)
     } catch (err) {
       alert(err.message)
     } finally {
@@ -88,8 +89,10 @@ export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
           const err = await res.json().catch(() => ({ error: res.statusText }))
           throw new Error(err.error || 'Upload failed')
         }
+        const added = await res.json()
+        mutate(prev => [added, ...(prev || []).filter(s => s.id !== added.id)])
       }
-      refetch()
+      refetch(true)
     } catch (err) {
       alert(err.message)
     } finally {

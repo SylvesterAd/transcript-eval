@@ -47,7 +47,11 @@ export function useApi(path, deps = []) {
 
   useEffect(() => { refetch() }, [refetch, ...deps])
 
-  return { data, loading, error, refetch }
+  const mutate = useCallback((updater) => {
+    setData(prev => typeof updater === 'function' ? updater(prev) : updater)
+  }, [])
+
+  return { data, loading, error, refetch, mutate }
 }
 
 export async function apiPost(path, body) {
