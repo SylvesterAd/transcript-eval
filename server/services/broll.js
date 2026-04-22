@@ -1860,7 +1860,7 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
     brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), status: 'failed', error: err.message })
     setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
     console.error(`[broll-keywords] Failed: ${err.message}`)
-    notify({ source: 'broll-keywords', title: 'Keywords batch failed', error: err.message, meta: { pipelineId } })
+    notify({ source: 'broll-keywords-batch', title: 'Keywords batch failed', error: err.message, meta: { pipelineId, videoId } })
     throw err
   }
 }
