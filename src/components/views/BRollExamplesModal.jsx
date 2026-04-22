@@ -20,7 +20,7 @@ function StatusBadge({ status }) {
 }
 
 export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
-  const { data: sources, loading, refetch } = useApi(`/broll/groups/${groupId}/examples`)
+  const { data: sources, loading, error: fetchError, refetch } = useApi(`/broll/groups/${groupId}/examples`)
   const [videoUrls, setVideoUrls] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef(null)
@@ -134,6 +134,21 @@ export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
               Feed the AI with references. These examples will calibrate the AI's understanding of your b-roll selection, pacing, and transition style.
             </p>
           </header>
+
+          {fetchError && (
+            <div className="mb-5 flex items-center justify-between gap-3 bg-red-500/5 border border-red-500/30 rounded-lg px-5 py-3">
+              <div className="flex items-center gap-3">
+                <span className="material-symbols-outlined text-red-400 text-lg">error</span>
+                <span className="text-xs text-red-400/90">Couldn't load references: {fetchError}. Any examples you just added may already be saved.</span>
+              </div>
+              <button
+                onClick={() => refetch()}
+                className="px-3 py-1.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-400 text-[10px] font-bold uppercase tracking-widest transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
 
           {/* YouTube Videos Section */}
           <div className="bg-[#0e0e10] p-6 rounded-xl border border-[#48474a]/10">

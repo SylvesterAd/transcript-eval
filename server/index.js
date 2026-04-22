@@ -20,6 +20,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
 const PORT = process.env.PORT || 3001
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled promise rejection:', reason?.message || reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[process] Uncaught exception:', err?.message || err)
+})
+
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',')
   : undefined
