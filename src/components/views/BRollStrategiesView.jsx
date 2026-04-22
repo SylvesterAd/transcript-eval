@@ -20,8 +20,9 @@ const STRATEGY_TYPES = [
   { id: 'create_strategy', label: '3a. Create Strategy (per reference)' },
   { id: 'create_combined_strategy', label: '3b. Combined Strategy (best of all)' },
   { id: 'create_plan', label: '4. Create Plan (from strategy)' },
-  { id: 'keywords', label: '5. Search Keywords' },
+  { id: 'keywords_batch', label: '5. Search Keywords (Batch)' },
   { id: 'broll_search', label: '6. B-Roll Video Search' },
+  { id: 'keywords', label: 'Search Keywords (legacy)' },
   { id: 'hook_analysis', label: 'Hook Analysis (legacy)' },
   { id: 'plan', label: 'B-Roll Plan (legacy)' },
   { id: 'alt_plan', label: 'Alt Plan (legacy)' },
@@ -59,9 +60,9 @@ function kindBadge(kind) {
   if (kind === 'create_strategy') return 'border-amber-800 bg-amber-900/30 text-amber-300'
   if (kind === 'create_combined_strategy') return 'border-orange-800 bg-orange-900/30 text-orange-300'
   if (kind === 'create_plan') return 'border-emerald-800 bg-emerald-900/30 text-emerald-300'
-  if (kind === 'keywords') return 'border-purple-800 bg-purple-900/30 text-purple-300'
+  if (kind === 'keywords_batch') return 'border-purple-800 bg-purple-900/30 text-purple-300'
   if (kind === 'broll_search') return 'border-pink-800 bg-pink-900/30 text-pink-300'
-  if (kind === 'hook_analysis' || kind === 'plan' || kind === 'alt_plan') return 'border-zinc-700 bg-zinc-800/30 text-zinc-400'
+  if (kind === 'keywords' || kind === 'hook_analysis' || kind === 'plan' || kind === 'alt_plan') return 'border-zinc-700 bg-zinc-800/30 text-zinc-400'
   return 'border-zinc-700 bg-zinc-800/30 text-zinc-400'
 }
 
@@ -168,7 +169,7 @@ export default function BRollStrategiesView() {
   }, [expandedId, setSearchParams])
 
   const sortedStrategies = useMemo(() => {
-    const order = { main_analysis: 0, plan_prep: 1, create_strategy: 2, create_combined_strategy: 3, create_plan: 4, keywords: 5, broll_search: 6, hook_analysis: 90, plan: 91, alt_plan: 92 }
+    const order = { main_analysis: 0, plan_prep: 1, create_strategy: 2, create_combined_strategy: 3, create_plan: 4, keywords_batch: 5, broll_search: 6, keywords: 90, hook_analysis: 91, plan: 92, alt_plan: 93 }
     return [...(strategies || [])].sort((a, b) => {
       const byType = (order[a.strategy_kind] ?? 99) - (order[b.strategy_kind] ?? 99)
       if (byType !== 0) return byType
@@ -705,6 +706,7 @@ function StageList({ stages, stageOps, dataPrefix, insertTemplate }) {
                     <option value="reassemble">Reassemble Segments</option>
                     <option value="trim_before">Trim Before Time</option>
                     <option value="trim_ranges">Cut Ranges</option>
+                    <option value="enrich_beat_frequency">Enrich Beat Frequency</option>
                   </select>
                 </div>
                 {stage.action === 'segment' && (
@@ -747,6 +749,7 @@ function programmaticSummary(stage) {
   if (stage.action === 'reassemble') return 'Reassemble segments'
   if (stage.action === 'trim_before') return 'Trim before a detected point'
   if (stage.action === 'trim_ranges') return 'Cut ranges'
+  if (stage.action === 'enrich_beat_frequency') return 'Enrich beat frequency (from reference analysis)'
   return stage.description || 'Processing step'
 }
 

@@ -26,7 +26,7 @@ import EstimationModal from './EstimationModal.jsx'
 export const EditorContext = createContext(null)
 
 export default function EditorView() {
-  const { id, tab, placementId } = useParams()
+  const { id, tab, sub, detail } = useParams()
   const navigate = useNavigate()
   const { data: groupDetail, loading, error, refetch: refetchDetail } = useApi(`/videos/groups/${id}/detail`)
   const { data: wordTimestamps, refetch: refetchTimestamps } = useApi(`/videos/groups/${id}/word-timestamps`)
@@ -35,6 +35,24 @@ export default function EditorView() {
   const [flowRunState, setFlowRunState] = useState(null)
   const cutDragRef = useRef(false) // true during cut edge drag — blocks AI cut regeneration
   // shape: { experimentId, runId, status: 'running'|'complete'|'error', progress: {...} }
+
+  // Lightweight check: does this video have completed broll search (kw- pipeline)?
+  const videoId = groupDetail?.videos?.[0]?.id
+  const { data: videoRunsData } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
+  const hasBrollSearch = useMemo(() => {
+    if (!videoRunsData?.runs) return false
+    const pipelineMap = {}
+    for (const run of videoRunsData.runs) {
+      try {
+        const meta = JSON.parse(run.metadata_json || '{}')
+        const pid = meta.pipelineId
+        if (!pid) continue
+        if (!pipelineMap[pid]) pipelineMap[pid] = { status: 'complete' }
+        if (run.status === 'failed') pipelineMap[pid].status = 'failed'
+      } catch {}
+    }
+    return Object.entries(pipelineMap).some(([pid, p]) => pid.startsWith('kw-') && p.status === 'complete')
+  }, [videoRunsData])
 
   // Token system
   const [showEstimationModal, setShowEstimationModal] = useState(false)
@@ -187,6 +205,20 @@ export default function EditorView() {
       authFetch(`/videos/groups/${id}/extract-frames`, { method: 'POST' }).catch(() => {})
     }
   }, [groupDetail, id])
+
+  // Auto-generate timeline with waveforms if missing
+  const timelineGenRef = useRef(false)
+  useEffect(() => {
+    if (!groupDetail || timelineGenRef.current) return
+    if (groupDetail.timeline) return // already has timeline
+    if (!groupDetail.videos?.length) return
+    timelineGenRef.current = true
+    console.log('[editor] No timeline — generating waveforms...')
+    authFetch(`/videos/groups/${id}/generate-timeline`, { method: 'POST' })
+      .then(r => r.json())
+      .then(() => { refetchDetail() })
+      .catch(err => console.error('[editor] Timeline generation failed:', err))
+  }, [groupDetail, id, refetchDetail])
 
   // Fetch token balance on mount
   useEffect(() => {
@@ -760,9 +792,9 @@ export default function EditorView() {
             <span className="text-primary-fixed font-bold text-lg tracking-tight">Studio</span>
             <div className="flex items-center gap-6 h-full pl-4">
               <Link to="/" className="text-on-surface/60 hover:text-on-surface font-bold text-sm transition-colors">Projects</Link>
-              <div className="relative h-14 flex items-center">
+              <div className="relative flex flex-col items-center justify-center">
                 <span className="text-primary-fixed font-bold text-sm">Editor</span>
-                <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary-fixed shadow-[0_0_8px_rgba(206,252,0,0.4)]" />
+                <div className="w-full h-0.5 bg-primary-fixed shadow-[0_0_8px_rgba(206,252,0,0.4)] mt-1" />
               </div>
             </div>
           </div>
@@ -787,8 +819,10 @@ export default function EditorView() {
         <div className="flex flex-1 overflow-hidden">
           <EditorSidebar
             activeTab={activeTab}
+            activeSub={sub}
             assemblyStatus={groupDetail?.assembly_status}
             hasVideos={groupDetail?.videos?.length > 0}
+            hasBrollSearch={hasBrollSearch}
             onTabChange={(newTab) => {
               // Warn when leaving roughcut with progress
               const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0
@@ -797,13 +831,14 @@ export default function EditorView() {
                 return
               }
               navigate(`/editor/${id}/${newTab}`)
-              dispatch({ type: 'SET_ACTIVE_TAB', payload: newTab })
+              const tabKey = newTab.split('/')[0]
+              dispatch({ type: 'SET_ACTIVE_TAB', payload: tabKey })
             }}
           />
           {activeTab === 'assets' ? (
             <AssetsView />
           ) : activeTab === 'brolls' ? (
-            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} />
+            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} sub={sub} detail={detail} />
           ) : (
             <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} isMainMode={activeTab === 'roughcut' && state.roughCutTrackMode === 'main'} />
           )}

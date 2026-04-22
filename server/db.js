@@ -15,7 +15,7 @@ if (!DATABASE_URL) {
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  max: 5,
+  max: 15,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 })
@@ -51,6 +51,28 @@ try {
       group_id INTEGER REFERENCES video_groups(id),
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS broll_searches (
+      id SERIAL PRIMARY KEY,
+      plan_pipeline_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      chapter_index INTEGER NOT NULL,
+      placement_index INTEGER NOT NULL,
+      variant_label TEXT,
+      description TEXT,
+      brief TEXT,
+      keywords_json TEXT,
+      status TEXT NOT NULL DEFAULT 'waiting',
+      results_json TEXT,
+      num_results INTEGER DEFAULT 0,
+      error TEXT,
+      api_log_id INTEGER,
+      duration_ms INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ
+    )`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id)`)
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)

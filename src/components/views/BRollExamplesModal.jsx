@@ -29,6 +29,7 @@ export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
   const atLimit = items.length >= MAX_REFERENCES
   const hasFavorite = items.some(s => s.is_favorite)
   const hasSources = items.length > 0
+  const needsMore = items.length < 2
   const hasProcessing = items.some(s => s.status === 'pending' || s.status === 'processing')
 
   // Poll for status updates while any source is still processing
@@ -240,8 +241,16 @@ export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
             <input ref={fileInputRef} type="file" accept=".mp4,.mov" multiple className="hidden" onChange={handleFileUpload} />
           </div>
 
+          {/* Minimum references warning */}
+          {hasSources && needsMore && (
+            <div className="mt-5 flex items-center gap-3 bg-[#c180ff]/5 border border-[#c180ff]/20 rounded-lg px-5 py-3">
+              <span className="material-symbols-outlined text-[#c180ff] text-lg">add_circle</span>
+              <span className="text-xs text-[#c180ff]/80">Add at least 2 reference videos — the AI needs multiple examples to learn your b-roll style.</span>
+            </div>
+          )}
+
           {/* Favorite warning */}
-          {hasSources && !hasFavorite && (
+          {hasSources && !needsMore && !hasFavorite && (
             <div className="mt-5 flex items-center gap-3 bg-[#cefc00]/5 border border-[#cefc00]/20 rounded-lg px-5 py-3">
               <span className="material-symbols-outlined text-[#cefc00] text-lg">star</span>
               <span className="text-xs text-[#cefc00]/80">Pick a favorite reference — it will drive the main B-Roll plan. Hover over a video and click the star.</span>
@@ -265,10 +274,10 @@ export default function BRollExamplesModal({ groupId, onBack, onComplete }) {
             </div>
             <button
               onClick={() => onComplete(groupId)}
-              disabled={hasSources && !hasFavorite}
+              disabled={hasSources && (needsMore || !hasFavorite)}
               className="px-8 py-3 bg-[#cefc00] text-[#0e0e10] font-black uppercase tracking-tighter text-sm rounded shadow-[0_0_32px_rgba(206,252,0,0.2)] active:scale-95 transition-all hover:shadow-[0_0_48px_rgba(206,252,0,0.4)] disabled:opacity-40 disabled:shadow-none"
             >
-              {hasSources ? (hasFavorite ? 'Continue' : 'Pick a Favorite') : 'Skip'}
+              {hasSources ? (needsMore ? `Add ${2 - items.length} More` : hasFavorite ? 'Continue' : 'Pick a Favorite') : 'Skip'}
             </button>
           </div>
         </footer>

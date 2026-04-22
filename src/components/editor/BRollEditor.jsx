@@ -1,6 +1,8 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo, useContext } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { BRollContext, useBRollEditorState } from './useBRollEditorState.js'
+import { BRollContext, useBRollEditorState, authFetchBRollData } from './useBRollEditorState.js'
+import { EditorContext } from './EditorView.jsx'
+import { matchPlacementsToTranscript } from './brollUtils.js'
 import BRollPreview from './BRollPreview.jsx'
 import BRollDetailPanel from './BRollDetailPanel.jsx'
 import Timeline from './Timeline.jsx'
@@ -8,27 +10,118 @@ import PlaybackControls from './PlaybackControls.jsx'
 import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
 
-export default function BRollEditor({ groupId, videoId, planPipelineId }) {
-  const { id, placementId } = useParams()
+export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
+  const { id, detail } = useParams()
   const navigate = useNavigate()
-  const brollState = useBRollEditorState(planPipelineId)
+  const [activeVariantIdx, setActiveVariantIdx] = useState(0)
 
-  // Sync URL placementId → selection on mount / URL change
+  // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs
+  const variants = useMemo(() => {
+    if (planVariantsProp?.length) {
+      return planVariantsProp.map(v => ({
+        id: v.pipelineId,
+        label: v.label || `Variant ${String.fromCharCode(65 + planVariantsProp.indexOf(v))}`,
+      }))
+    }
+    if (!allPlanPipelineIds?.length) return [{ id: planPipelineId, label: 'B-Roll' }]
+    return allPlanPipelineIds.map((pid, i) => ({
+      id: pid,
+      label: `Variant ${String.fromCharCode(65 + i)}`,
+    }))
+  }, [allPlanPipelineIds, planPipelineId, planVariantsProp])
+
+  const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
+  const brollState = useBRollEditorState(activePipelineId)
+  const hasEverLoaded = useRef(false)
+  if (brollState.placements?.length) hasEverLoaded.current = true
+
+  // Load placement data for inactive variants, resolved against transcript words
+  const editorCtx = useContext(EditorContext)
+  const transcriptWords = useMemo(() => {
+    if (!editorCtx?.state?.tracks) return []
+    const audioTrack = editorCtx.state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    if (!audioTrack) return []
+    return audioTrack.transcriptWords.map(w => ({
+      word: w.word,
+      start: w.start + (audioTrack.offset || 0),
+      end: w.end + (audioTrack.offset || 0),
+    }))
+  }, [editorCtx?.state?.tracks])
+
+  const [rawInactivePlacements, setRawInactivePlacements] = useState({})
+  // Load inactive variant placements, and re-fetch while searches are running
   useEffect(() => {
-    if (placementId != null && brollState.placements?.length) {
-      const idx = parseInt(placementId)
+    if (variants.length <= 1) return
+    const inactiveIds = variants.filter((_, i) => i !== activeVariantIdx).map(v => v.id)
+    function fetchInactive() {
+      for (const pid of inactiveIds) {
+        authFetchBRollData(pid)
+          .then(data => setRawInactivePlacements(prev => ({ ...prev, [pid]: data.placements || [] })))
+          .catch(() => {})
+      }
+    }
+    fetchInactive()
+    // Re-fetch every 5s while a search is running
+    const isRunning = brollState.searchProgress?.status === 'running'
+    if (!isRunning) return
+    const interval = setInterval(fetchInactive, 5000)
+    return () => clearInterval(interval)
+  }, [variants, activeVariantIdx, brollState.searchProgress?.status])
+
+  // Cache active variant's placements into inactive cache before switching
+  const pendingSelectionRef = useRef(null)
+  const handleVariantActivate = useCallback((newIdx, selectIndex) => {
+    const currentPid = variants[activeVariantIdx]?.id
+    // Cache outgoing variant
+    if (currentPid && brollState.rawPlacements?.length) {
+      setRawInactivePlacements(prev => ({ ...prev, [currentPid]: brollState.rawPlacements }))
+    }
+    // If we have cached data for the incoming variant, seed it immediately to avoid blank frames
+    const newPid = variants[newIdx]?.id
+    const cached = newPid ? rawInactivePlacements[newPid] : null
+    if (cached?.length) {
+      // Seed synchronously — the fetch useEffect will still fire and refresh, but we won't flash empty
+      brollState.seedFromCache(cached)
+    }
+    if (selectIndex != null) pendingSelectionRef.current = selectIndex
+    setActiveVariantIdx(newIdx)
+  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements])
+
+  // Resolve inactive placements using same transcript matching as active variant
+  const inactiveVariantPlacements = useMemo(() => {
+    const resolved = {}
+    for (const [pid, placements] of Object.entries(rawInactivePlacements)) {
+      resolved[pid] = matchPlacementsToTranscript(placements, transcriptWords)
+    }
+    return resolved
+  }, [rawInactivePlacements, transcriptWords])
+
+  // Apply pending selection after variant switch data loads
+  useEffect(() => {
+    if (pendingSelectionRef.current != null && !brollState.loading && brollState.placements?.length) {
+      brollState.selectPlacement(pendingSelectionRef.current)
+      pendingSelectionRef.current = null
+    }
+  }, [brollState.loading, brollState.placements?.length])
+
+  // Sync URL detail (placementId) → selection on mount / URL change
+  useEffect(() => {
+    if (detail != null && brollState.placements?.length) {
+      const idx = parseInt(detail)
       if (!isNaN(idx) && idx !== brollState.selectedIndex) {
         brollState.selectPlacement(idx)
       }
     }
-  }, [placementId, brollState.placements?.length])
+  }, [detail, brollState.placements?.length])
 
   // Sync selection → URL
   useEffect(() => {
     const idx = brollState.selectedIndex
-    const currentUrl = idx != null ? `/editor/${id}/brolls/${idx}` : `/editor/${id}/brolls`
-    const expectedPlacementId = idx != null ? String(idx) : undefined
-    if (expectedPlacementId !== placementId) {
+    const currentUrl = idx != null ? `/editor/${id}/brolls/edit/${idx}` : `/editor/${id}/brolls/edit`
+    const expectedDetail = idx != null ? String(idx) : undefined
+    if (expectedDetail !== detail) {
       navigate(currentUrl, { replace: true })
     }
   }, [brollState.selectedIndex])
@@ -52,7 +145,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId }) {
     window.addEventListener('mouseup', onUp)
   }, [bottomH])
 
-  if (brollState.loading) {
+  if (brollState.loading && !hasEverLoaded.current) {
     return (
       <div className="flex-1 flex items-center justify-center bg-surface-dim">
         <Loader2 size={24} className="text-primary-fixed animate-spin" />
@@ -91,9 +184,20 @@ export default function BRollEditor({ groupId, videoId, planPipelineId }) {
           <div className="flex flex-col gap-2 pb-4 shrink-0" style={{ height: `${bottomH}px` }}>
             <PlaybackControls />
             <div className="flex-1 min-h-0">
-              <Timeline />
+              <Timeline
+                variants={variants}
+                activeVariantIdx={activeVariantIdx}
+                onVariantActivate={handleVariantActivate}
+                inactiveVariantPlacements={inactiveVariantPlacements}
+              />
             </div>
           </div>
+          <SearchStatusBar
+            placements={brollState.placements}
+            searchProgress={brollState.searchProgress}
+            allPlanPipelineIds={allPlanPipelineIds}
+            onRefetch={brollState.refetchEditorData}
+          />
         </main>
 
         {/* Right: detail sidebar — full height from top to bottom */}
@@ -103,9 +207,9 @@ export default function BRollEditor({ groupId, videoId, planPipelineId }) {
   )
 }
 
-function SearchStatusBar({ placements, searchProgress, planPipelineId, onResume }) {
+function SearchStatusBar({ placements, searchProgress, allPlanPipelineIds, onRefetch }) {
+  const [searching, setSearching] = useState(false)
   const [stopping, setStopping] = useState(false)
-  const [resuming, setResuming] = useState(false)
 
   const completed = placements?.filter(p => p.searchStatus === 'complete').length || 0
   const total = placements?.length || 0
@@ -115,39 +219,50 @@ function SearchStatusBar({ placements, searchProgress, planPipelineId, onResume 
   async function handleStop() {
     setStopping(true)
     try {
-      await apiPost('/broll/pipeline/stop-all', {})
+      await apiPost('/broll/pipeline/stop-all')
+      // Refetch after a short delay to pick up the failed status
+      setTimeout(() => onRefetch?.(), 1000)
     } catch (err) {
       console.error('Stop failed:', err)
     }
     setStopping(false)
   }
 
-  async function handleResume() {
-    if (!planPipelineId) return
-    setResuming(true)
+  async function handleSearchNext10() {
+    if (!allPlanPipelineIds?.length) return
+    setSearching(true)
     try {
-      await apiPost(`/broll/pipeline/${planPipelineId}/run-broll-search`, {})
+      await apiPost('/broll/pipeline/search-next-batch', {
+        plan_pipeline_ids: allPlanPipelineIds,
+        batch_size: 10,
+      })
+      // Refetch after a short delay so polling kicks in (needs searchProgress.status === 'running')
+      setTimeout(() => onRefetch?.(), 2000)
     } catch (err) {
-      console.error('Resume failed:', err)
+      console.error('Search next batch failed:', err)
     }
-    setResuming(false)
+    setSearching(false)
   }
 
   if (!total) return null
 
   if (isRunning) {
+    const phase = searchProgress.phase || 'gpu_search'
     const done = searchProgress.subDone || 0
-    const subTotal = searchProgress.subTotal || total
+    const subTotal = searchProgress.subTotal || 0
     const pct = subTotal > 0 ? Math.round((done / subTotal) * 100) : 0
+    const label = phase === 'keywords'
+      ? `Generating keywords... (${searchProgress.keywordsDone || 0}/${searchProgress.keywordsTotal || 0} variants)`
+      : searchProgress.stageName || `Searching B-Roll: ${done}/${subTotal}`
     return (
-      <div className="px-4 py-1.5 bg-teal-900/20 border-t border-teal-800/30 flex items-center gap-3">
-        <Loader2 size={12} className="text-teal-400 animate-spin shrink-0" />
-        <span className="text-xs text-teal-400 shrink-0">
-          Searching: {done}/{subTotal} ({pct}%)
-        </span>
-        <div className="flex-1 h-1 bg-teal-900/30 rounded-full overflow-hidden">
-          <div className="h-full bg-teal-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
-        </div>
+      <div className="px-4 py-1.5 bg-primary-fixed/5 border-t border-primary-fixed/10 flex items-center gap-3">
+        <Loader2 size={12} className="text-primary-fixed animate-spin shrink-0" />
+        <span className="text-xs text-primary-fixed shrink-0">{label}</span>
+        {phase === 'gpu_search' && subTotal > 0 && (
+          <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
+            <div className="h-full bg-primary-fixed rounded-full transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        )}
         <button
           onClick={handleStop}
           disabled={stopping}
@@ -160,23 +275,22 @@ function SearchStatusBar({ placements, searchProgress, planPipelineId, onResume 
     )
   }
 
-  if (pending > 0 && completed > 0) {
-    // Partially done — show resume option
+  if (pending > 0 && !isRunning) {
     return (
       <div className="px-4 py-1.5 bg-zinc-900/50 border-t border-zinc-800/50 flex items-center gap-3">
         <span className="text-xs text-zinc-400 shrink-0">
-          B-Roll: {completed}/{total} found
+          B-Roll: {completed}/{total} found · {pending} remaining
         </span>
         <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
-          <div className="h-full bg-teal-600 rounded-full" style={{ width: `${(completed / total) * 100}%` }} />
+          <div className="h-full bg-primary-fixed/60 rounded-full" style={{ width: `${(completed / total) * 100}%` }} />
         </div>
         <button
-          onClick={handleResume}
-          disabled={resuming}
-          className="flex items-center gap-1 px-3 py-1 rounded text-xs font-medium text-teal-400 hover:bg-teal-900/20 border border-teal-800/30 transition-colors disabled:opacity-40 shrink-0"
+          onClick={handleSearchNext10}
+          disabled={searching}
+          className="flex items-center gap-1 px-3 py-1 rounded text-xs font-bold text-[#cefc00] hover:bg-[#cefc00]/10 border border-[#cefc00]/30 transition-colors disabled:opacity-40 shrink-0"
         >
-          {resuming ? <Loader2 size={10} className="animate-spin" /> : null}
-          {resuming ? 'Resuming...' : 'Continue Search'}
+          {searching ? <Loader2 size={10} className="animate-spin" /> : null}
+          {searching ? 'Starting...' : 'Search next 10'}
         </button>
       </div>
     )

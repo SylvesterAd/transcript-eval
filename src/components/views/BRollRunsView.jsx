@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
-import { useApi, apiDelete, apiPost } from '../../hooks/useApi.js'
-import { ChevronDown, ChevronRight, Trash2, Copy, Check, Square, RotateCcw, ExternalLink, Play } from 'lucide-react'
+import { useApi, apiGet, apiDelete, apiPost } from '../../hooks/useApi.js'
+import { ChevronDown, ChevronRight, Trash2, Copy, Check, Square, RotateCcw, ExternalLink, Play, Loader2 } from 'lucide-react'
 
 function StatusBadge({ status }) {
   const styles = {
@@ -159,16 +159,17 @@ export default function BRollRunsView() {
       for (const si of orphanStageIndices) {
         const subs = p.subRuns.filter(sr => sr._meta.stageIndex === si)
         const first = subs[0]
+        const allSubsComplete = subs.every(sr => sr.status === 'complete')
         p.stages.push({
           id: `synthetic-${si}`,
-          status: 'interrupted',
+          status: allSubsComplete ? 'complete' : 'interrupted',
           strategy_id: first.strategy_id,
           video_id: first.video_id,
           tokens_in: subs.reduce((s, r) => s + (r.tokens_in || 0), 0),
           tokens_out: subs.reduce((s, r) => s + (r.tokens_out || 0), 0),
           cost: subs.reduce((s, r) => s + (r.cost || 0), 0),
           runtime_ms: subs.reduce((s, r) => s + (r.runtime_ms || 0), 0),
-          output_text: `${subs.length} sub-runs completed (stage interrupted before finishing)`,
+          output_text: allSubsComplete ? `${subs.length} sub-runs` : `${subs.length} sub-runs completed (stage interrupted before finishing)`,
           _meta: { ...first._meta, isSubRun: false, subIndex: undefined, subLabel: undefined },
         })
       }
@@ -560,6 +561,19 @@ function FormattedOutput({ text }) {
     return <pre className="text-xs text-zinc-300 whitespace-pre-wrap">{text}</pre>
   }
 
+  // Unwrap arrays of stringified JSON (e.g. from enrichment stages)
+  if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'string') {
+    const unwrapped = parsed.map(item => {
+      if (typeof item === 'string') { try { return JSON.parse(item) } catch {} }
+      return item
+    })
+    // Wrap in a chapters structure for cleaner display
+    const allObjects = unwrapped.every(item => item && typeof item === 'object')
+    if (allObjects) {
+      return <JsonTree data={{ total_chapters: unwrapped.length, chapters: unwrapped }} depth={0} />
+    }
+  }
+
   return <JsonTree data={parsed} depth={0} />
 }
 
@@ -776,16 +790,29 @@ function StageRow({ stage, index, subRuns = [], isSub, pipelineId, setUrlRun, ur
   const [showOutput, setShowOutput] = useState(urlShowOutput || false)
   const [showSubs, setShowSubs] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [detail, setDetail] = useState(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const hasSubRuns = subRuns.length > 0
 
-  function toggleOutput() {
+  async function toggleOutput() {
     const next = !showOutput
     setShowOutput(next)
     if (setUrlRun && pipelineId) setUrlRun(pipelineId, next ? stageIdx : null)
+    // Lazy-fetch heavy fields on first expand
+    if (next && !detail && !String(stage.id).startsWith('synthetic-')) {
+      setDetailLoading(true)
+      try {
+        const res = await apiGet(`/broll/runs/${stage.id}/detail`)
+        setDetail(res)
+      } catch {}
+      setDetailLoading(false)
+    }
   }
 
+  const fullStage = detail ? { ...stage, ...detail } : stage
+
   function copyOutput() {
-    navigator.clipboard.writeText(stage.output_text || '')
+    navigator.clipboard.writeText(fullStage.output_text || '')
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }
@@ -843,25 +870,28 @@ function StageRow({ stage, index, subRuns = [], isSub, pipelineId, setUrlRun, ur
                 </div>
               </div>
               <div className="flex-1 overflow-auto flex flex-col">
-                {stage.input_text && (
+                {detailLoading && (
+                  <div className="px-4 py-3 text-xs text-zinc-500 flex items-center gap-2"><Loader2 size={12} className="animate-spin" /> Loading...</div>
+                )}
+                {fullStage.input_text && (
                   <details className="border-b border-zinc-800">
                     <summary className="px-4 py-2 text-[10px] font-bold text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-300">Input</summary>
-                    <pre className="px-4 pb-3 text-xs text-zinc-500 whitespace-pre-wrap max-h-48 overflow-auto">{stage.input_text}</pre>
+                    <pre className="px-4 pb-3 text-xs text-zinc-500 whitespace-pre-wrap max-h-48 overflow-auto">{fullStage.input_text}</pre>
                   </details>
                 )}
-                {stage.system_instruction_used && (
+                {fullStage.system_instruction_used && (
                   <details className="border-b border-zinc-800">
                     <summary className="px-4 py-2 text-[10px] font-bold text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-300">System Instructions</summary>
-                    <pre className="px-4 pb-3 text-xs text-zinc-500 whitespace-pre-wrap max-h-48 overflow-auto">{stage.system_instruction_used}</pre>
+                    <pre className="px-4 pb-3 text-xs text-zinc-500 whitespace-pre-wrap max-h-48 overflow-auto">{fullStage.system_instruction_used}</pre>
                   </details>
                 )}
-                {stage.prompt_used && (
+                {fullStage.prompt_used && (
                   <details className="border-b border-zinc-800">
                     <summary className="px-4 py-2 text-[10px] font-bold text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-300">Prompt</summary>
-                    <pre className="px-4 pb-3 text-xs text-zinc-500 whitespace-pre-wrap max-h-48 overflow-auto">{stage.prompt_used}</pre>
+                    <pre className="px-4 pb-3 text-xs text-zinc-500 whitespace-pre-wrap max-h-48 overflow-auto">{fullStage.prompt_used}</pre>
                   </details>
                 )}
-                <OutputSection text={stage.output_text} />
+                <OutputSection text={fullStage.output_text} />
               </div>
             </div>
           </div>

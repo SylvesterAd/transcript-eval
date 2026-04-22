@@ -271,6 +271,30 @@ CREATE TABLE IF NOT EXISTS api_logs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- B-Roll Search Queue (per-placement GPU searches)
+CREATE TABLE IF NOT EXISTS broll_searches (
+  id SERIAL PRIMARY KEY,
+  plan_pipeline_id TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  chapter_index INTEGER NOT NULL,
+  placement_index INTEGER NOT NULL,
+  variant_label TEXT,
+  description TEXT,
+  brief TEXT,
+  keywords_json TEXT,
+  status TEXT NOT NULL DEFAULT 'waiting',
+  results_json TEXT,
+  num_results INTEGER DEFAULT 0,
+  error TEXT,
+  api_log_id INTEGER,
+  duration_ms INTEGER,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id);
+
 -- B-Roll Example Sets (per video group)
 CREATE TABLE IF NOT EXISTS broll_example_sets (
   id SERIAL PRIMARY KEY,

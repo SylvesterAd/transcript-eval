@@ -8,6 +8,10 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 export const BRollContext = createContext(null)
 
+export async function authFetchBRollData(planPipelineId) {
+  return authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
+}
+
 async function authFetch(path) {
   const headers = {}
   if (supabase) {
@@ -21,8 +25,12 @@ async function authFetch(path) {
 
 function reducer(state, action) {
   switch (action.type) {
+    case 'SET_LOADING':
+      return { ...state, rawPlacements: [], placements: [], selectedIndex: null, selectedResults: {}, loading: true, error: null }
     case 'SET_DATA':
-      return { ...state, rawPlacements: action.payload.placements, searchProgress: action.payload.searchProgress, loading: false, error: null }
+      return { ...state, rawPlacements: action.payload.placements, selectedResults: {}, searchProgress: action.payload.searchProgress, loading: false, error: null }
+    case 'SET_DATA_RESOLVED':
+      return { ...state, rawPlacements: action.payload.rawPlacements, placements: action.payload.placements, selectedResults: {}, searchProgress: action.payload.searchProgress, loading: false, error: null }
     case 'SET_RESOLVED':
       return { ...state, placements: action.payload }
     case 'SET_ERROR':
@@ -58,13 +66,13 @@ function reducer(state, action) {
     case 'RESET_ALL_PLACEMENTS': {
       const reset = state.rawPlacements.map(p => ({
         ...p,
-        results: [],
-        searchStatus: 'pending',
         hidden: false,
         userTimelineStart: undefined,
         userTimelineEnd: undefined,
+        results: [],
+        searchStatus: 'pending',
       }))
-      return { ...state, rawPlacements: reset, selectedResults: {} }
+      return { ...state, rawPlacements: reset, selectedResults: {}, searchProgress: null }
     }
     case 'UPDATE_PLACEMENT_POSITION': {
       const { index, timelineStart, timelineEnd } = action.payload
@@ -99,12 +107,12 @@ export function useBRollEditorState(planPipelineId) {
   const editorCtx = useContext(EditorContext)
   const pollRef = useRef(null)
 
-  // Fetch editor data on mount
-  useEffect(() => {
+  // Fetch editor data on mount or when pipeline changes (variant switch)
+  const refetchEditorData = useCallback(() => {
     if (!planPipelineId) return
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
-      .then(data => dispatch({ type: 'SET_DATA', payload: data }))
-      .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
+      .then(data => dispatch({ type: 'MERGE_SEARCH_RESULTS', payload: data }))
+      .catch(() => {})
   }, [planPipelineId])
 
   // Resolve placements against transcript words
@@ -120,13 +128,35 @@ export function useBRollEditorState(planPipelineId) {
       end: w.end + (audioTrack.offset || 0),
     }))
   }, [editorCtx?.state?.tracks])
+  const transcriptWordsRef = useRef(transcriptWords)
+  transcriptWordsRef.current = transcriptWords
 
+  // Seed cached placements synchronously (called by BRollEditor before variant switch)
+  const seedFromCache = useCallback((rawPlacements, searchProgress) => {
+    const visible = rawPlacements.filter(p => !p.hidden)
+    const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+    dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
+  }, [])
+
+  useEffect(() => {
+    if (!planPipelineId) return
+    dispatch({ type: 'SET_LOADING' })
+    authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
+      .then(data => {
+        const visible = (data.placements || []).filter(p => !p.hidden)
+        const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+        dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
+      })
+      .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
+  }, [planPipelineId])
+
+  // Re-resolve when transcript words change (rare — only on initial track load)
   useEffect(() => {
     if (!state.rawPlacements.length) return
     const visible = state.rawPlacements.filter(p => !p.hidden)
     const resolved = matchPlacementsToTranscript(visible, transcriptWords)
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
-  }, [state.rawPlacements, transcriptWords])
+  }, [transcriptWords])
 
   // Poll for progressive search updates
   useEffect(() => {
@@ -221,7 +251,9 @@ export function useBRollEditorState(planPipelineId) {
   }, [])
 
   return {
+    rawPlacements: state.rawPlacements,
     placements: state.placements,
+    seedFromCache,
     selectedIndex: state.selectedIndex,
     selectedPlacement,
     selectedResults: state.selectedResults,
@@ -236,6 +268,7 @@ export function useBRollEditorState(planPipelineId) {
     hidePlacement,
     updatePlacementPosition,
     resetAllPlacements: useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), []),
+    refetchEditorData,
     planPipelineId,
   }
 }

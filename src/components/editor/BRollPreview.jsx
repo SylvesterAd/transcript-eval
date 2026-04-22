@@ -12,11 +12,9 @@ export default function BRollPreview() {
 
   const activePlacement = useMemo(() => {
     if (!broll) return null
-    // Show the placement under the playhead, or the selected placement
-    const atTime = broll.activePlacementAtTime(state.currentTime)
-    if (atTime) return atTime
-    return broll.selectedPlacement || null
-  }, [broll, state.currentTime, broll?.selectedPlacement])
+    // Only show B-Roll when playhead is inside a placement's time range
+    return broll.activePlacementAtTime(state.currentTime)
+  }, [broll, state.currentTime])
 
   // Get the selected result for the active placement
   const activeResult = useMemo(() => {

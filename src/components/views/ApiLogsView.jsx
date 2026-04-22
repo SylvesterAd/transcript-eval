@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { useApi, apiPost } from '../../hooks/useApi.js'
-import { ChevronDown, ChevronRight, Clock, AlertCircle, CheckCircle, Copy, Check, Loader2, RotateCw } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { useApi, apiPost, apiDelete } from '../../hooks/useApi.js'
+import { ChevronDown, ChevronRight, Clock, AlertCircle, CheckCircle, Copy, Check, Loader2, RotateCw, Trash2, Search, Square } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -136,7 +137,7 @@ function LogDetail({ log, onRetry }) {
       {/* URL + Method + Retry */}
       <div className="flex items-center gap-2">
         <span className="text-xs font-mono font-bold text-blue-400">{log.method}</span>
-        <code className="text-xs text-zinc-300 font-mono flex-1 truncate">{log.url}</code>
+        <code className="text-xs text-zinc-300 font-mono flex-1 break-all">{log.url}</code>
         <RetryButton log={log} onRetry={onRetry} />
         <CopyButton text={`${log.method} ${log.url}`} />
       </div>
@@ -190,23 +191,197 @@ function ActiveStreamCard({ stream }) {
   )
 }
 
-export default function ApiLogsView() {
+function SearchStatusBadge({ status }) {
+  if (status === 'waiting') return <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" /> Waiting</span>
+  if (status === 'running') return <span className="inline-flex items-center gap-1 text-xs text-blue-400"><Loader2 size={10} className="animate-spin" /> Running</span>
+  if (status === 'complete') return <span className="inline-flex items-center gap-1 text-xs text-green-400"><CheckCircle size={12} /> Complete</span>
+  if (status === 'failed') return <span className="inline-flex items-center gap-1 text-xs text-red-400"><AlertCircle size={12} /> Failed</span>
+  if (status === 'stopped') return <span className="inline-flex items-center gap-1 text-xs text-amber-400"><Square size={10} fill="currentColor" /> Stopped</span>
+  return <span className="text-xs text-zinc-500">{status || '—'}</span>
+}
+
+function BRollSearchesTab() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [page, setPage] = useState(0)
+  const [statusFilter, setStatusFilter] = useState('')
+  const urlRunId = searchParams.get('run') ? parseInt(searchParams.get('run')) : null
+  const [expandedId, setExpandedId] = useState(urlRunId)
+  const [deleting, setDeleting] = useState(null)
+
+  function toggleExpand(id) {
+    const next = expandedId === id ? null : id
+    setExpandedId(next)
+    setSearchParams(prev => {
+      const p = new URLSearchParams(prev)
+      if (next) p.set('run', next)
+      else p.delete('run')
+      return p
+    }, { replace: true })
+  }
+  const limit = 50
+  const queryParams = `/admin/broll-searches?limit=${limit}&offset=${page * limit}${statusFilter ? `&status=${statusFilter}` : ''}`
+  const { data, loading, error, refetch } = useApi(queryParams, [page, statusFilter])
+  const { data: detail } = useApi(expandedId ? `/admin/broll-searches/${expandedId}` : null, [expandedId])
+
+  // Auto-refresh while any entries are waiting/running
+  useEffect(() => {
+    const searches = data?.searches || []
+    const hasActive = searches.some(s => s.status === 'waiting' || s.status === 'running')
+    if (!hasActive) return
+    const interval = setInterval(refetch, 3000)
+    return () => clearInterval(interval)
+  }, [data?.searches])
+
+  async function handleDelete(id, e) {
+    e.stopPropagation()
+    const entry = searches.find(s => s.id === id)
+    if (entry?.status === 'running' || entry?.status === 'waiting') {
+      if (!confirm(`This search is "${entry.status}". Deleting it will discard any results. Continue?`)) return
+    }
+    setDeleting(id)
+    try {
+      await apiDelete(`/admin/broll-searches/${id}`)
+      refetch()
+      if (expandedId === id) setExpandedId(null)
+    } catch (err) {
+      console.error('Delete failed:', err)
+    }
+    setDeleting(null)
+  }
+
+  if (loading && !data) return <div className="p-6 text-zinc-400">Loading...</div>
+  if (error) return <div className="p-6 text-red-400">Error: {error}</div>
+
+  const searches = data?.searches || []
+  const total = data?.total || 0
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-zinc-500">
+          {total} search{total !== 1 ? 'es' : ''}
+        </p>
+        <select
+          value={statusFilter}
+          onChange={e => { setStatusFilter(e.target.value); setPage(0) }}
+          className="px-3 py-1.5 rounded border border-zinc-800 bg-zinc-900 text-sm text-zinc-200 outline-none focus:border-zinc-600"
+        >
+          <option value="">All statuses</option>
+          <option value="waiting">Waiting</option>
+          <option value="running">Running</option>
+          <option value="complete">Complete</option>
+          <option value="failed">Failed</option>
+          <option value="stopped">Stopped</option>
+        </select>
+      </div>
+
+      <div className="space-y-2">
+        {searches.map(s => (
+          <div key={s.id} className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+            <button
+              onClick={() => toggleExpand(s.id)}
+              className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-zinc-800/30 transition-colors flex-wrap"
+            >
+              {expandedId === s.id ? <ChevronDown size={14} className="text-zinc-500 shrink-0" /> : <ChevronRight size={14} className="text-zinc-500 shrink-0" />}
+              <span className="text-[10px] font-mono text-zinc-600 shrink-0">#{s.id}</span>
+              <SearchStatusBadge status={s.status} />
+              {s.variant_label && <span className="text-[10px] text-primary-fixed/80 bg-primary-fixed/10 px-1.5 py-0.5 rounded shrink-0">{s.variant_label}</span>}
+              <span className="text-xs text-zinc-400 shrink-0">Ch{s.chapter_index + 1} #{s.placement_index + 1}</span>
+              <span className="text-sm text-zinc-300 flex-1 break-all">{s.description || '—'}</span>
+              {s.num_results > 0 && <span className="text-xs text-green-400/70 shrink-0">{s.num_results} results</span>}
+              {s.duration_ms != null && <span className="flex items-center gap-1 text-xs text-zinc-500 shrink-0"><Clock size={11} />{(s.duration_ms / 1000).toFixed(1)}s</span>}
+              {s.error && <span className="text-[10px] text-red-400 break-all">{s.error}</span>}
+              <span className="text-xs text-zinc-600 shrink-0">{new Date(s.created_at).toLocaleString()}</span>
+              <button
+                onClick={(e) => handleDelete(s.id, e)}
+                disabled={deleting === s.id}
+                className="p-1 rounded hover:bg-red-900/30 text-zinc-600 hover:text-red-400 transition-colors disabled:opacity-30 shrink-0"
+                title="Delete (reverts placement to pending)"
+              >
+                <Trash2 size={13} />
+              </button>
+            </button>
+
+            {expandedId === s.id && detail && (
+              <div className="px-4 pb-4 border-t border-zinc-800 space-y-3 mt-3">
+                {/* GPU target URL */}
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-mono font-bold text-blue-400">POST</span>
+                  <code className="text-zinc-300 font-mono break-all">{detail.apiLog?.url || 'https://gpu-proxy-production.up.railway.app/broll/search'}</code>
+                  <CopyButton text={detail.apiLog?.url || 'https://gpu-proxy-production.up.railway.app/broll/search'} />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 text-xs">
+                  <div><span className="text-zinc-500">ID:</span> <span className="text-zinc-300 font-mono">{detail.id}</span></div>
+                  <div><span className="text-zinc-500">Status:</span> <SearchStatusBadge status={detail.status} /></div>
+                  <div className="col-span-2"><span className="text-zinc-500">Pipeline:</span> <span className="text-zinc-300 font-mono break-all">{detail.plan_pipeline_id}</span></div>
+                  <div className="col-span-2"><span className="text-zinc-500">Batch:</span> <span className="text-zinc-300 font-mono break-all">{detail.batch_id}</span></div>
+                  <div><span className="text-zinc-500">Variant:</span> <span className="text-zinc-300">{detail.variant_label || '—'}</span></div>
+                  <div><span className="text-zinc-500">Chapter / Placement:</span> <span className="text-zinc-300">Ch{detail.chapter_index + 1} #{detail.placement_index + 1}</span></div>
+                  <div className="col-span-2"><span className="text-zinc-500">Description:</span> <span className="text-zinc-300 break-all">{detail.description || '—'}</span></div>
+                  <div><span className="text-zinc-500">Results:</span> <span className="text-zinc-300">{detail.num_results || 0}</span></div>
+                  {detail.duration_ms != null && <div><span className="text-zinc-500">Duration:</span> <span className="text-zinc-300">{(detail.duration_ms / 1000).toFixed(1)}s</span></div>}
+                  <div><span className="text-zinc-500">Created:</span> <span className="text-zinc-300">{new Date(detail.created_at).toLocaleString()}</span></div>
+                  {detail.started_at && <div><span className="text-zinc-500">Started:</span> <span className="text-zinc-300">{new Date(detail.started_at).toLocaleString()}</span></div>}
+                  {detail.completed_at && <div><span className="text-zinc-500">Completed:</span> <span className="text-zinc-300">{new Date(detail.completed_at).toLocaleString()}</span></div>}
+                  {detail.api_log_id && <div><span className="text-zinc-500">API Log:</span> <span className="text-blue-400 font-mono">#{detail.api_log_id}</span></div>}
+                </div>
+                {detail.brief && <JsonBlock label="Brief" content={detail.brief} />}
+                {detail.keywords_json && <JsonBlock label="Keywords" content={detail.keywords_json} />}
+                {detail.results_json && <JsonBlock label={`Results (${detail.num_results})`} content={detail.results_json} defaultOpen={false} />}
+                {detail.error && <div className="text-xs text-red-400 bg-red-950/30 border border-red-900/30 rounded p-2 break-all">{detail.error}</div>}
+                {detail.apiLog && (
+                  <div className="border-t border-zinc-800 pt-3">
+                    <div className="text-xs font-medium text-zinc-400 mb-2">Linked API Log #{detail.api_log_id}</div>
+                    <LogDetail log={detail.apiLog} />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+        {!searches.length && <div className="text-center py-8 text-zinc-500 text-sm">No B-Roll searches found</div>}
+      </div>
+
+      {total > limit && (
+        <div className="flex items-center justify-center gap-4 pt-2">
+          <button disabled={page === 0} onClick={() => setPage(p => p - 1)} className="px-3 py-1 text-sm rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30">Prev</button>
+          <span className="text-xs text-zinc-500">Page {page + 1} of {Math.ceil(total / limit)}</span>
+          <button disabled={(page + 1) * limit >= total} onClick={() => setPage(p => p + 1)} className="px-3 py-1 text-sm rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30">Next</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ApiLogsTab() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [page, setPage] = useState(0)
   const [sourceFilter, setSourceFilter] = useState('')
-  const [expandedId, setExpandedId] = useState(null)
+  const urlLogId = searchParams.get('log') ? parseInt(searchParams.get('log')) : null
+  const [expandedId, setExpandedId] = useState(urlLogId)
   const [activeData, setActiveData] = useState(null)
   const limit = 30
   const queryParams = `/admin/api-logs?limit=${limit}&offset=${page * limit}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}`
   const { data, loading, error, refetch } = useApi(queryParams, [page, sourceFilter])
   const { data: detail } = useApi(expandedId ? `/admin/api-logs/${expandedId}` : null, [expandedId])
 
+  function toggleExpand(id) {
+    const next = expandedId === id ? null : id
+    setExpandedId(next)
+    setSearchParams(prev => {
+      const p = new URLSearchParams(prev)
+      if (next) p.set('log', next)
+      else p.delete('log')
+      return p
+    }, { replace: true })
+  }
+
   // Poll for active streams every 2s
   useEffect(() => {
     let active = true
     async function poll() {
       try {
-        const { getAuthHeaders } = await import('../../hooks/useApi.js')
-        // Use the same auth pattern as useApi
         const { supabase } = await import('../../lib/supabaseClient.js')
         const headers = {}
         if (supabase) {
@@ -218,7 +393,6 @@ export default function ApiLogsView() {
         if (res.ok && active) {
           const d = await res.json()
           setActiveData(d)
-          // If streams just finished, refresh the completed logs list
           if (d.streams?.length === 0 && activeData?.streams?.length > 0) {
             refetch()
           }
@@ -238,15 +412,12 @@ export default function ApiLogsView() {
   const activeStreams = activeData?.streams || []
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold">API Logs</h2>
-          <p className="text-sm text-zinc-500 mt-1">
-            {total} logged request{total !== 1 ? 's' : ''}
-            {activeStreams.length > 0 && <span className="text-blue-400 ml-2">({activeStreams.length} active)</span>}
-          </p>
-        </div>
+        <p className="text-sm text-zinc-500">
+          {total} logged request{total !== 1 ? 's' : ''}
+          {activeStreams.length > 0 && <span className="text-blue-400 ml-2">({activeStreams.length} active)</span>}
+        </p>
         <input
           type="text"
           placeholder="Filter by source..."
@@ -256,7 +427,6 @@ export default function ApiLogsView() {
         />
       </div>
 
-      {/* Active streams */}
       {activeStreams.length > 0 && (
         <div className="space-y-2">
           <div className="text-xs font-medium text-blue-400 uppercase tracking-wider">Active Streams</div>
@@ -266,12 +436,11 @@ export default function ApiLogsView() {
         </div>
       )}
 
-      {/* Completed logs */}
       <div className="space-y-2">
         {logs.map(log => (
           <div key={log.id} className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
             <button
-              onClick={() => setExpandedId(expandedId === log.id ? null : log.id)}
+              onClick={() => toggleExpand(log.id)}
               className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-zinc-800/30 transition-colors"
             >
               {expandedId === log.id ? <ChevronDown size={14} className="text-zinc-500 shrink-0" /> : <ChevronRight size={14} className="text-zinc-500 shrink-0" />}
@@ -300,25 +469,44 @@ export default function ApiLogsView() {
 
       {total > limit && (
         <div className="flex items-center justify-center gap-4 pt-2">
-          <button
-            disabled={page === 0}
-            onClick={() => setPage(p => p - 1)}
-            className="px-3 py-1 text-sm rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30"
-          >
-            Prev
-          </button>
-          <span className="text-xs text-zinc-500">
-            Page {page + 1} of {Math.ceil(total / limit)}
-          </span>
-          <button
-            disabled={(page + 1) * limit >= total}
-            onClick={() => setPage(p => p + 1)}
-            className="px-3 py-1 text-sm rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30"
-          >
-            Next
-          </button>
+          <button disabled={page === 0} onClick={() => setPage(p => p - 1)} className="px-3 py-1 text-sm rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30">Prev</button>
+          <span className="text-xs text-zinc-500">Page {page + 1} of {Math.ceil(total / limit)}</span>
+          <button disabled={(page + 1) * limit >= total} onClick={() => setPage(p => p + 1)} className="px-3 py-1 text-sm rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30">Next</button>
         </div>
       )}
+    </div>
+  )
+}
+
+export default function ApiLogsView() {
+  const [searchParams] = useSearchParams()
+  const hasLogParam = searchParams.has('log')
+  const [activeTab, setActiveTab] = useState(hasLogParam ? 'api-logs' : 'broll-searches')
+
+  return (
+    <div className="p-6 space-y-4">
+      <h2 className="text-xl font-semibold">API Logs</h2>
+
+      <div className="flex gap-1 border-b border-zinc-800">
+        <button
+          onClick={() => setActiveTab('broll-searches')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'broll-searches' ? 'border-[#cefc00] text-zinc-100' : 'border-transparent text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          <span className="flex items-center gap-1.5"><Search size={13} /> B-Roll Searches</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('api-logs')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'api-logs' ? 'border-[#cefc00] text-zinc-100' : 'border-transparent text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          API Logs
+        </button>
+      </div>
+
+      {activeTab === 'broll-searches' ? <BRollSearchesTab /> : <ApiLogsTab />}
     </div>
   )
 }
