@@ -22,6 +22,30 @@ function handleUnauthorized(res) {
   }
 }
 
+async function fetchWithRetry(path, maxAttempts = 3) {
+  let lastErr
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const headers = await getAuthHeaders()
+      const res = await fetch(`${BASE}${path}`, { headers })
+      if (res.status === 401) {
+        handleUnauthorized(res)
+        throw new Error('401 Unauthorized')
+      }
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      return await res.json()
+    } catch (e) {
+      lastErr = e
+      // Don't retry auth errors — they won't succeed by retrying
+      if (e.message.startsWith('401')) break
+      if (attempt < maxAttempts) {
+        await new Promise(r => setTimeout(r, 300 * Math.pow(2, attempt - 1)))
+      }
+    }
+  }
+  throw lastErr
+}
+
 export function useApi(path, deps = []) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(!!path)
@@ -30,16 +54,7 @@ export function useApi(path, deps = []) {
   const refetch = useCallback((silent) => {
     if (!path) { setLoading(false); return }
     if (!silent) { setLoading(true); setError(null) }
-    getAuthHeaders().then(headers =>
-      fetch(`${BASE}${path}`, { headers })
-    )
-      .then(r => {
-        if (!r.ok) {
-          handleUnauthorized(r)
-          throw new Error(`${r.status} ${r.statusText}`)
-        }
-        return r.json()
-      })
+    fetchWithRetry(path)
       .then(setData)
       .catch(e => { if (!silent) setError(e.message) })
       .finally(() => { if (!silent) setLoading(false) })
