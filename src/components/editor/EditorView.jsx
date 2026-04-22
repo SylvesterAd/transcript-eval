@@ -405,13 +405,45 @@ export default function EditorView() {
   const skipRegionsRef = useRef(skipRegions)
   skipRegionsRef.current = skipRegions
 
+  // Mirror all state values that tick reads, so tick's useCallback deps can be empty
+  // and the rAF loop doesn't restart on every unrelated state change.
+  const stateRefs = useRef({
+    tracks: state.tracks,
+    playbackRate: state.playbackRate,
+    zoom: state.zoom,
+    volume: state.volume,
+    activeTab: state.activeTab,
+    roughCutTrackMode: state.roughCutTrackMode,
+    segmentVideoOverrides: state.segmentVideoOverrides,
+    segmentAudioOverrides: state.segmentAudioOverrides,
+    totalDuration,
+  })
+  stateRefs.current.tracks = state.tracks
+  stateRefs.current.playbackRate = state.playbackRate
+  stateRefs.current.zoom = state.zoom
+  stateRefs.current.volume = state.volume
+  stateRefs.current.activeTab = state.activeTab
+  stateRefs.current.roughCutTrackMode = state.roughCutTrackMode
+  stateRefs.current.segmentVideoOverrides = state.segmentVideoOverrides
+  stateRefs.current.segmentAudioOverrides = state.segmentAudioOverrides
+  stateRefs.current.totalDuration = totalDuration
+
+  // Declared before tick so tick's deps can include stopAllVideos without TDZ.
+  const stopAllVideos = useCallback(() => {
+    Object.values(videoRefs.current).forEach(el => {
+      if (el && !el.paused) el.pause()
+      if (el) el.muted = true
+    })
+  }, [])
+
   // Playback engine (rAF loop) — media-driven clock
   // Uses the master video element's currentTime as the time source instead of
   // performance.now(). This avoids constant seeking when audio output is buffered
   // (e.g. Bluetooth speakers add 100-300ms latency that desync wall clock from media time).
   const tick = useCallback(() => {
     const now = performance.now()
-    const videoTracks = state.tracks.filter(t => t.type === 'video')
+    const s = stateRefs.current
+    const videoTracks = s.tracks.filter(t => t.type === 'video')
 
     // Find master element: prefer unmuted active track, fall back to any playing track
     let masterEl = null
@@ -419,7 +451,7 @@ export default function EditorView() {
     for (const track of videoTracks) {
       const el = videoRefs.current[track.videoId]
       if (!el || el.paused || el.readyState < 2) continue
-      const audioTrack = state.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
+      const audioTrack = s.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
       const isUnmuted = audioTrack && !audioTrack.muted
       if (isUnmuted || !masterEl) {
         masterEl = el
@@ -432,7 +464,6 @@ export default function EditorView() {
     let newTime
     if (masterEl) {
       newTime = masterEl.currentTime + masterTrack.offset
-      // Keep wall-clock baseline in sync for seamless fallback
       startPlayheadTime.current = newTime
       startRealTime.current = now
     } else {
@@ -449,13 +480,13 @@ export default function EditorView() {
       } else {
         // Gap between tracks — advance via wall clock
         const elapsed = (now - startRealTime.current) / 1000
-        newTime = startPlayheadTime.current + elapsed * state.playbackRate
+        newTime = startPlayheadTime.current + elapsed * s.playbackRate
       }
     }
 
     // Stop at end
-    if (newTime >= totalDuration) {
-      dispatch({ type: 'SET_CURRENT_TIME', payload: totalDuration })
+    if (newTime >= s.totalDuration) {
+      dispatch({ type: 'SET_CURRENT_TIME', payload: s.totalDuration })
       dispatch({ type: 'PAUSE' })
       stopAllVideos()
       return
@@ -463,7 +494,7 @@ export default function EditorView() {
 
     // Skip cut regions in rough cut mode (using waveform-refined regions)
     const regions = skipRegionsRef.current
-    if (state.activeTab === 'roughcut' && regions.length > 0) {
+    if (s.activeTab === 'roughcut' && regions.length > 0) {
       const preSkipTime = newTime
       let skipping = true
       while (skipping) {
@@ -486,8 +517,8 @@ export default function EditorView() {
             if (lt >= 0 && lt <= vt.duration) el.currentTime = lt
           }
         }
-        if (newTime >= totalDuration) {
-          dispatch({ type: 'SET_CURRENT_TIME', payload: totalDuration })
+        if (newTime >= s.totalDuration) {
+          dispatch({ type: 'SET_CURRENT_TIME', payload: s.totalDuration })
           dispatch({ type: 'PAUSE' })
           stopAllVideos()
           return
@@ -497,7 +528,7 @@ export default function EditorView() {
 
     // In Main Track mode, find the active videoId at the current time
     // (the video whose segment covers the playhead — same logic as composite track)
-    const isMainMode = state.activeTab === 'roughcut' && state.roughCutTrackMode === 'main'
+    const isMainMode = s.activeTab === 'roughcut' && s.roughCutTrackMode === 'main'
     let mainActiveVideoId = null
     let mainActiveAudioId = null
     let mainSegIdx = -1
@@ -532,7 +563,7 @@ export default function EditorView() {
 
       // Apply video override
       if (mainSegIdx >= 0) {
-        const vidOv = state.segmentVideoOverrides[mainSegIdx]
+        const vidOv = s.segmentVideoOverrides[mainSegIdx]
         if (vidOv) {
           const ovTrack = videoTracks.find(t => t.videoId === vidOv)
           if (ovTrack && newTime >= ovTrack.offset && newTime < ovTrack.offset + ovTrack.duration) {
@@ -544,7 +575,7 @@ export default function EditorView() {
       // Audio override (independent of video)
       mainActiveAudioId = mainActiveVideoId
       if (mainSegIdx >= 0) {
-        const audioOv = state.segmentAudioOverrides[mainSegIdx]
+        const audioOv = s.segmentAudioOverrides[mainSegIdx]
         if (audioOv) {
           const ovTrack = videoTracks.find(t => t.videoId === audioOv)
           if (ovTrack && newTime >= ovTrack.offset && newTime < ovTrack.offset + ovTrack.duration) {
@@ -564,21 +595,21 @@ export default function EditorView() {
         if (el !== masterEl && Math.abs(el.currentTime - localTime) > 0.3) {
           el.currentTime = localTime
         }
-        el.playbackRate = state.playbackRate
+        el.playbackRate = s.playbackRate
 
+        const audioTrack = s.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
         // Audio: in Main Track mode, only unmute the active segment's video.
         // In All Tracks mode, unmute per the track's mute setting.
-        const audioTrack = state.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
         if (isMainMode) {
           if (track.videoId === mainActiveAudioId) {
             el.muted = false
-            el.volume = state.volume
+            el.volume = s.volume
           } else {
             el.muted = true
           }
         } else if (audioTrack && !audioTrack.muted) {
           el.muted = false
-          el.volume = state.volume
+          el.volume = s.volume
         } else {
           el.muted = true
         }
@@ -595,7 +626,7 @@ export default function EditorView() {
 
     // Update playhead via ref (60fps, no React re-render)
     if (playheadRef.current) {
-      const x = newTime * state.zoom
+      const x = newTime * s.zoom
       playheadRef.current.style.transform = `translateX(${x}px)`
     }
 
@@ -606,18 +637,13 @@ export default function EditorView() {
     }
 
     rafId.current = requestAnimationFrame(tick)
-  }, [state.tracks, state.playbackRate, state.zoom, state.volume, state.activeTab, state.roughCutTrackMode, state.cuts, state.segmentVideoOverrides, state.segmentAudioOverrides, totalDuration, dispatch])
-
-  const stopAllVideos = useCallback(() => {
-    Object.values(videoRefs.current).forEach(el => {
-      if (el && !el.paused) el.pause()
-      if (el) el.muted = true
-    })
-  }, [])
+  }, [dispatch, stopAllVideos])
 
   // Start/stop rAF based on isPlaying
   useEffect(() => {
     if (state.isPlaying) {
+      // Seed the rAF baseline from the current state at the moment play begins.
+      // This runs only on play-toggle, not on every tick-recreation.
       startRealTime.current = performance.now()
       startPlayheadTime.current = state.currentTime
       rafId.current = requestAnimationFrame(tick)
@@ -626,7 +652,8 @@ export default function EditorView() {
       stopAllVideos()
     }
     return () => cancelAnimationFrame(rafId.current)
-  }, [state.isPlaying, tick, stopAllVideos])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.isPlaying]) // tick is stable now (deps: dispatch + stopAllVideos, both stable); state.currentTime only read on play-start
 
   // Playback engine API exposed via ref
   useEffect(() => {
