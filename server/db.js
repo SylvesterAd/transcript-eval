@@ -22,9 +22,14 @@ if (!DATABASE_URL) {
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  max: Number(process.env.PG_POOL_MAX) || 5,
-  idleTimeoutMillis: 30000,
+  max: Number(process.env.PG_POOL_MAX) || 10,
+  min: 0,
+  idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 10000,
+  keepAlive: true,
+  statement_timeout: 30000,
+  query_timeout: 30000,
+  application_name: 'transcript-eval',
 })
 
 pool.on('error', (err) => {
