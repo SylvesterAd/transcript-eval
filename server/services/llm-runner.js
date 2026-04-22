@@ -3,6 +3,7 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import db from '../db.js'
 import { scoreOutput } from './scorer.js'
+import { notify } from './slack-notifier.js'
 import { calculateSimilarity, checkTimecodePreservation, checkPausePreservation, computeDiff, extractDeletions } from './diff-engine.js'
 import { classifyDeletions } from './classifier.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments, timecodeToSeconds } from './segmenter.js'
@@ -793,6 +794,7 @@ export async function executeRun(experimentRunId) {
   } catch (err) {
     runStageProgress.delete(experimentRunId)
     await db.prepare("UPDATE experiment_runs SET status = 'failed', error_message = ? WHERE id = ?").run(err.message || String(err), experimentRunId)
+    notify({ source: 'rough-cut', title: 'Experiment run failed', error: err.message || String(err), meta: { experimentRunId } })
     throw err
   }
 }

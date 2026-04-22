@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { requireAuth, isAdmin } from '../auth.js'
 import db from '../db.js'
 import { activeStreams, streamingFetch } from '../services/api-logger.js'
+import { notify } from '../services/slack-notifier.js'
 
 const router = Router()
 
@@ -156,6 +157,15 @@ router.delete('/broll-searches/:id', requireAuth, requireAdmin, async (req, res)
   const { changes } = await db.prepare('DELETE FROM broll_searches WHERE id = ?').run(req.params.id)
   if (!changes) return res.status(404).json({ error: 'Not found' })
   res.json({ success: true })
+})
+
+router.post('/test-alert', requireAuth, requireAdmin, (_req, res) => {
+  notify({
+    source: 'admin-test',
+    title: 'Test alert from admin endpoint',
+    error: 'Synthetic — safe to ignore.',
+  })
+  res.json({ ok: true })
 })
 
 export default router
