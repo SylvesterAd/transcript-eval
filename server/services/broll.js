@@ -2000,14 +2000,21 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
 
       try {
         const result = await searchSinglePlacement(item.pid, item.chapterIndex, item.placementIndex)
+        // If we got zero results because the GPU job is still running or failed, surface that
+        // in the row status — don't lie by marking 'complete'. UI can then show a real state.
+        const rowStatus = result.gpuJobStatus === 'running' ? 'timeout'
+          : result.gpuJobStatus === 'failed' ? 'failed'
+          : 'complete'
         await db.prepare(`
-          UPDATE broll_searches SET status = 'complete', results_json = ?, num_results = ?, duration_ms = ?, api_log_id = ?, completed_at = NOW()
+          UPDATE broll_searches SET status = ?, results_json = ?, num_results = ?, duration_ms = ?, api_log_id = ?, error = ?, completed_at = NOW()
           WHERE id = ?
         `).run(
+          rowStatus,
           JSON.stringify(result.results || []),
           (result.results || []).length,
           result.duration || null,
           result.apiLogId || null,
+          result.error || null,
           item.brollSearchId
         )
       } catch (err) {
@@ -5216,29 +5223,66 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
     searchMeta = { error: err.message }
   }
 
-  // Fallback: if still no results, check broll_search_logs (GPU proxy writes there independently)
+  // Primary recovery: if the SSE stream ended without a result (Railway's ~15 min edge-proxy
+  // cap, or the GPU proxy closing the stream early), ask the GPU proxy directly for the job
+  // status. /broll/jobs/:id is authoritative — it knows if the GPU is still running, finished,
+  // or failed, independent of any HTTP stream closing.
+  let gpuJobStatus = null // 'running' (timeout), 'failed', or null (complete or never known)
+  if (!results.length && gpuJobId) {
+    console.log(`[searchSinglePlacement] Stream ended without results — polling GPU job ${gpuJobId} directly...`)
+    try {
+      const jobResult = await _pollGpuJob(gpuJobId, GPU_KEY, 1200) // up to 20 min
+      if (jobResult?.results) {
+        results = jobResult.results
+        searchMeta = {
+          search_count: jobResult.search_count,
+          filtered_count: jobResult.filtered_count,
+          model_used: jobResult.model_used,
+          recovered: true,
+        }
+        console.log(`[searchSinglePlacement] Recovered ${results.length} results from GPU job ${gpuJobId}`)
+      } else if (jobResult?.status === 'timeout') {
+        console.warn(`[searchSinglePlacement] GPU job ${gpuJobId} still running after 20 min — giving up`)
+        gpuJobStatus = 'running'
+        searchMeta = { ...searchMeta, error: `Job ${gpuJobId}: still running after 20 min`, jobId: gpuJobId }
+      } else if (jobResult?.status === 'failed') {
+        console.warn(`[searchSinglePlacement] GPU job ${gpuJobId} failed: ${jobResult.error}`)
+        gpuJobStatus = 'failed'
+        searchMeta = { ...searchMeta, error: `Job ${gpuJobId}: ${jobResult.error || 'failed'}`, jobId: gpuJobId }
+      }
+    } catch (pollErr) {
+      console.error(`[searchSinglePlacement] GPU job polling failed: ${pollErr.message}`)
+      searchMeta = { ...searchMeta, error: pollErr.message }
+    }
+  }
+
+  // Secondary fallback: broll_search_logs by brief. Reached when we never captured a job_id
+  // from the stream, or when /broll/jobs/:id is unreachable. Short poll — the GPU proxy writes
+  // here on completion, so if the job finished we'll see it quickly.
   if (!results.length) {
-    console.log(`[searchSinglePlacement] No results yet, checking broll_search_logs by brief...`)
+    console.log(`[searchSinglePlacement] Final fallback: checking broll_search_logs by brief...`)
     await new Promise(r => setTimeout(r, 3000))
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 6; attempt++) {
       try {
         const logRow = await db.prepare(
           `SELECT results, num_results, num_candidates FROM broll_search_logs WHERE brief = ? ORDER BY id DESC LIMIT 1`
         ).get(brief)
         if (logRow?.num_results > 0) {
           results = Array.isArray(logRow.results) ? logRow.results : JSON.parse(logRow.results || '[]')
-          searchMeta = { search_count: logRow.num_candidates }
+          searchMeta = { search_count: logRow.num_candidates, recovered: true }
+          gpuJobStatus = null // recovered — clear any earlier timeout/failed state
           console.log(`[searchSinglePlacement] Got ${results.length} results from broll_search_logs fallback (attempt ${attempt + 1})`)
           break
         }
       } catch (fallbackErr) {
         console.error(`[searchSinglePlacement] fallback error:`, fallbackErr.message)
       }
-      if (attempt < 4) await new Promise(r => setTimeout(r, 5000))
+      if (attempt < 5) await new Promise(r => setTimeout(r, 5000))
     }
   }
 
-  brollPipelineProgress.set(progressId, { ...brollPipelineProgress.get(progressId), status: 'complete', gpuStage: null, gpuStatus: null })
+  const finalStatus = gpuJobStatus === 'running' ? 'timeout' : gpuJobStatus === 'failed' ? 'failed' : 'complete'
+  brollPipelineProgress.set(progressId, { ...brollPipelineProgress.get(progressId), status: finalStatus, gpuStage: null, gpuStatus: null })
   setTimeout(() => brollPipelineProgress.delete(progressId), 60_000)
 
   // Upgrade preview URLs to HD where possible
@@ -5257,5 +5301,5 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
   // Results are tracked via api_logs (streamingFetch) and broll_search_logs (GPU proxy)
   // No need to duplicate in broll_runs
 
-  return { results, ...searchMeta, duration: searchDuration, apiLogId }
+  return { results, ...searchMeta, duration: searchDuration, apiLogId, gpuJobStatus, jobId: gpuJobId }
 }
