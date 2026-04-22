@@ -87,33 +87,25 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     { major: 300,   minor: 60,    sub: 30    },
   ]
 
-  const iv = (() => {
+  const { iv, minorPx, subPx, majorMarks } = useMemo(() => {
+    let iv = INTERVALS[INTERVALS.length - 1]
     for (const entry of INTERVALS) {
-      if (entry.major * state.zoom >= 80) return entry
+      if (entry.major * state.zoom >= 80) { iv = entry; break }
     }
-    return INTERVALS[INTERVALS.length - 1]
-  })()
-
-  const minorPx = iv.minor * state.zoom
-  const subPx = iv.sub * state.zoom
-
-  // Only generate marks visible in the viewport (+ buffer)
-  const viewW = scrollRef.current?.clientWidth || 1200
-  const visStartTime = Math.max(0, (scrollX - 300) / state.zoom)
-  const visEndTime = (scrollX + viewW + 300) / state.zoom
-
-  // Snap to major interval boundaries so we always get complete tick groups
-  const firstMajor = Math.floor(visStartTime / iv.major) * iv.major
-  const lastMajor = Math.ceil(visEndTime / iv.major) * iv.major
-
-  const majorMarks = (() => {
+    const minorPx = iv.minor * state.zoom
+    const subPx = iv.sub * state.zoom
+    const viewW = scrollRef.current?.clientWidth || 1200
+    const visStartTime = Math.max(0, (scrollX - 300) / state.zoom)
+    const visEndTime = (scrollX + viewW + 300) / state.zoom
+    const firstMajor = Math.floor(visStartTime / iv.major) * iv.major
+    const lastMajor = Math.ceil(visEndTime / iv.major) * iv.major
     const marks = []
     for (let t = firstMajor; t <= Math.min(lastMajor, totalDuration + iv.major); t += iv.major) {
       const time = Math.round(t * 1000) / 1000
       marks.push({ time, label: formatTimeRuler(time, iv.major), x: time * state.zoom })
     }
-    return marks
-  })()
+    return { iv, minorPx, subPx, majorMarks: marks }
+  }, [state.zoom, scrollX, totalDuration])
 
   // Scrub on ruler click
   const handleRulerClick = useCallback((e) => {
