@@ -14,6 +14,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
   const [scrollX, setScrollX] = useState(0)
+  const [viewW, setViewW] = useState(1200)
   const prevZoomRef = useRef(state.zoom)
   const zoomAnchorRef = useRef(null) // { time, screenX } — set by wheel, null for +/- buttons
 
@@ -68,6 +69,17 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     return () => { el.removeEventListener('scroll', onScroll); cancelAnimationFrame(raf) }
   }, [])
 
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      setViewW(el.clientWidth || 1200)
+    })
+    ro.observe(el)
+    setViewW(el.clientWidth || 1200)
+    return () => ro.disconnect()
+  }, [])
+
   const contentWidth = Math.max(totalDuration * state.zoom, 800)
 
   // Adaptive 3-tier interval selection: major (labeled) → minor → sub-minor
@@ -94,7 +106,6 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     }
     const minorPx = iv.minor * state.zoom
     const subPx = iv.sub * state.zoom
-    const viewW = scrollRef.current?.clientWidth || 1200
     const visStartTime = Math.max(0, (scrollX - 300) / state.zoom)
     const visEndTime = (scrollX + viewW + 300) / state.zoom
     const firstMajor = Math.floor(visStartTime / iv.major) * iv.major
@@ -105,7 +116,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       marks.push({ time, label: formatTimeRuler(time, iv.major), x: time * state.zoom })
     }
     return { iv, minorPx, subPx, majorMarks: marks }
-  }, [state.zoom, scrollX, totalDuration])
+  }, [state.zoom, scrollX, totalDuration, viewW])
 
   // Scrub on ruler click
   const handleRulerClick = useCallback((e) => {
@@ -656,7 +667,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                     <div className={`flex-1 relative z-0 ${!isActiveVariant ? 'opacity-40' : ''}`}>
                       <BRollTrack
                         zoom={state.zoom}
-                        scrollRef={scrollRef}
+                        viewW={viewW}
                         scrollX={scrollX}
                         isActive={isActiveVariant}
                         onActivate={variantActivators[vi]}

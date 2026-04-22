@@ -4,14 +4,13 @@ import { Loader2 } from 'lucide-react'
 
 const TRACK_H = 60
 
-function BRollTrack({ zoom, scrollRef, scrollX, isActive = true, onActivate, overridePlacements }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
   const placements = overridePlacements || broll?.placements || []
   const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
 
-  const viewW = scrollRef?.current?.clientWidth || 1200
   const labelW = 144
   const buffer = 200
 
@@ -26,7 +25,7 @@ function BRollTrack({ zoom, scrollRef, scrollX, isActive = true, onActivate, ove
       const right = (p.timelineStart + p.timelineDuration) * zoom
       return right >= vStartPx && left <= vEndPx
     })
-  }, [placements, scrollX, zoom, viewW, labelW, buffer])
+  }, [placements, scrollX, zoom, viewW])
 
   // Total timeline width
   const totalWidth = useMemo(() => {
