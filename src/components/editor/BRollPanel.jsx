@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useApi, apiPost, apiPut } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
+import { useRole } from '../../contexts/RoleContext.jsx'
 import { Play, Loader2, CheckCircle, AlertCircle, RotateCcw, Search, Sparkles, Layers, Tag, Film, Star, ChevronDown, ChevronRight, Pencil, Upload, FileText, Check } from 'lucide-react'
 import BRollEditor from './BRollEditor.jsx'
 
@@ -46,6 +47,12 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
   const [savingField, setSavingField] = useState(false)
   const [progress, setProgress] = useState(null)
   const [error, setError] = useState(null)
+
+  const { isAdmin } = useRole()
+  const [resetPreview, setResetPreview] = useState(null)
+  const [resetConfirming, setResetConfirming] = useState(false)
+  const [resetLoading, setResetLoading] = useState(false)
+  const [resetError, setResetError] = useState(null)
 
   const analysisStrategy = (strategies || []).find(s => s.strategy_kind === 'main_analysis')
   const planStrategy = (strategies || []).find(s => s.strategy_kind === 'plan')
@@ -641,6 +648,38 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
     } catch (err) {
       setError(err.message)
       setRunningType(null)
+    }
+  }
+
+  async function openResetModal() {
+    setResetError(null)
+    setResetPreview(null)
+    setResetConfirming(true)
+    try {
+      const res = await authFetch(`/broll/groups/${groupId}/reset-searches/preview`)
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        throw new Error(err.error || 'Preview failed')
+      }
+      setResetPreview(await res.json())
+    } catch (err) {
+      setResetError(err.message)
+    }
+  }
+
+  async function confirmReset() {
+    setResetLoading(true)
+    setResetError(null)
+    try {
+      const res = await apiPost(`/broll/groups/${groupId}/reset-searches`)
+      console.log('[reset-searches] result:', res)
+      setResetConfirming(false)
+      setResetPreview(null)
+      refetchRuns()
+    } catch (err) {
+      setResetError(err.message)
+    } finally {
+      setResetLoading(false)
     }
   }
 
@@ -1851,6 +1890,16 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
                 </div>
               )
             })}
+            {isAdmin && activeStage === 'plan' && (hasCompletedBrollSearch || Object.keys(pipelineMap).some(pid => pid.startsWith('kw-') || pid.startsWith('bs-'))) && (
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={openResetModal}
+                  className="text-xs text-red-400 hover:text-red-300 underline underline-offset-2"
+                >
+                  Admin: Reset B-Roll Searches
+                </button>
+              </div>
+            )}
           </section>
         )}
 
@@ -2196,6 +2245,48 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
 
         </>)}
       </div>
+      {resetConfirming && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm px-6">
+          <div className="max-w-md w-full rounded-xl overflow-hidden shadow-2xl shadow-black/60 border border-outline-variant/20 p-6" style={{ background: 'rgba(25, 25, 28, 0.85)', backdropFilter: 'blur(20px)' }}>
+            <h2 className="text-lg font-bold text-zinc-100 mb-3">Reset B-Roll Searches?</h2>
+            {!resetPreview && !resetError && (
+              <p className="text-sm text-zinc-400">Loading preview…</p>
+            )}
+            {resetError && (
+              <p className="text-sm text-red-400 mb-4">{resetError}</p>
+            )}
+            {resetPreview && (
+              <div className="text-sm text-zinc-300 space-y-2 mb-4">
+                <p>This will delete:</p>
+                <ul className="list-disc ml-5 text-zinc-400 text-xs">
+                  <li>{resetPreview.searches.total} b-roll search rows ({Object.entries(resetPreview.searches.byStatus).map(([k, v]) => `${v} ${k}`).join(', ') || 'none'})</li>
+                  <li>{resetPreview.kwRuns} keyword pipeline runs</li>
+                  <li>{resetPreview.bsRuns} legacy b-roll search runs</li>
+                  <li>Abort {resetPreview.activePipelines.length} active in-memory pipelines</li>
+                </ul>
+                <p className="text-xs text-zinc-500 mt-2">Plans, strategies, analysis, and reference data are NOT touched.</p>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => { setResetConfirming(false); setResetPreview(null); setResetError(null) }}
+                disabled={resetLoading}
+                className="px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmReset}
+                disabled={resetLoading || !resetPreview}
+                className="px-3 py-1.5 text-xs bg-red-500/80 hover:bg-red-500 text-white rounded disabled:opacity-50 flex items-center gap-2"
+              >
+                {resetLoading && <Loader2 size={12} className="animate-spin" />}
+                {resetLoading ? 'Resetting…' : 'Reset'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
