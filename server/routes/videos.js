@@ -618,10 +618,12 @@ router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) 
     const subId = r.lastInsertRowid
     subGroupIds.push(subId)
 
-    for (const videoId of g.videoIds) {
-      await db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(subId, videoId)
+    if (g.videoIds?.length) {
+      const placeholders = g.videoIds.map(() => '?').join(',')
+      await db.prepare(`UPDATE videos SET group_id = ? WHERE id IN (${placeholders})`)
+        .run(subId, ...g.videoIds)
     }
-    console.log(`[confirm] Sub-group "${g.name}": ${g.videoIds.length} videos → group ${subId}`)
+    console.log(`[confirm] Sub-group "${g.name}": ${g.videoIds?.length || 0} videos → group ${subId}`)
   }
 
   // Mark project as confirmed, store sub-group mapping
