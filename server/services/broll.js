@@ -53,15 +53,21 @@ async function withStageRetry(fn, { label, abortSignal } = {}) {
 // ── Robust JSON extraction from LLM output ──
 function extractJSON(text) {
   if (!text) return null
-  // Try full ```json ... ``` fence
-  const fence = text.match(/```json\s*([\s\S]*?)```/)
+  // Try ```json ... ``` or ``` ... ``` fence
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fence) return JSON.parse(fence[1].trim())
-  // Try ``` ... ``` fence without json label
-  const fence2 = text.match(/```\s*([\s\S]*?)```/)
-  if (fence2) return JSON.parse(fence2[1].trim())
-  // Handle malformed fence: starts with "json\n" or has trailing ```
-  let cleaned = text.replace(/^json\s*\n/, '').replace(/```\s*$/, '').trim()
-  return JSON.parse(cleaned)
+  // Strip LLM / aggregation prefixes: "json\n" header, "=== Example: ... ===" wrapper
+  let cleaned = text
+    .replace(/^json\s*\n/, '')
+    .replace(/```\s*$/, '')
+    .replace(/^(={2,}[^\n]+={2,}\s*\n)+/, '')
+    .trim()
+  try { return JSON.parse(cleaned) } catch {}
+  // Last resort: slice from first { or [ to last } or ]
+  const start = cleaned.search(/[{\[]/)
+  const end = Math.max(cleaned.lastIndexOf('}'), cleaned.lastIndexOf(']'))
+  if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1))
+  throw new Error('No JSON found in text')
 }
 
 // ── Pipeline snapshots for diagnostics ──
@@ -3741,7 +3747,9 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       }
 
       const result = await runLLMCall(stage, videoFile, exTranscript, !!videoFile)
-      perVideoResults.push(`=== Example: ${ex.title || `Video #${ex.id}`} ===\n${result.text}`)
+      perVideoResults.push(vids.length > 1
+        ? `=== Example: ${ex.title || `Video #${ex.id}`} ===\n${result.text}`
+        : result.text)
       totalTokensIn += result.tokensIn || 0
       totalTokensOut += result.tokensOut || 0
       totalCost += result.cost || 0
@@ -4063,7 +4071,9 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
             perWindowResults.push(...windowResults.filter(Boolean))
 
-            allPerVideoResults.push(`=== Example: ${ex.title || `Video #${ex.id}`} ===\n${perWindowResults.join('\n')}`)
+            allPerVideoResults.push(effectiveExamples.length > 1
+              ? `=== Example: ${ex.title || `Video #${ex.id}`} ===\n${perWindowResults.join('\n')}`
+              : perWindowResults.join('\n'))
           }
           output = allPerVideoResults.join('\n\n')
         }
