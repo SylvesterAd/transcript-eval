@@ -175,6 +175,16 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     }
   }, [state.zoom, state.currentTime])
 
+  // Own the playhead transform for render-driven updates (mount, zoom change, paused seek).
+  // During playback the rAF engine in EditorView writes transform directly at 60fps — this
+  // effect must NOT fire then, or it would overwrite the live value with a 10Hz-stale one
+  // (the same class of bug this task was created to fix).
+  useLayoutEffect(() => {
+    if (!playheadRef.current) return
+    if (state.isPlaying) return
+    playheadRef.current.style.transform = `translateX(${state.currentTime * state.zoom}px)`
+  }, [state.zoom, state.currentTime, state.isPlaying, playheadRef])
+
   // Auto-scroll during playback — smooth follow, playhead stays at ~1/5 from left
   const currentTimeRef = useRef(state.currentTime)
   currentTimeRef.current = state.currentTime
@@ -214,8 +224,6 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       el.scrollLeft = playheadX - clientWidth / 3
     }
   }, [state.isPlaying, state.currentTime, state.zoom])
-
-  const playheadX = state.currentTime * state.zoom
 
   // Stable numbering: based on original load order, never changes on reorder
   const trackNumber = useCallback((track) => {
@@ -732,11 +740,14 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
             )
           })}
 
-          {/* Unified playhead — spans ruler + all tracks */}
+          {/* Unified playhead — spans ruler + all tracks.
+              Transform is owned exclusively by the rAF playback engine (EditorView tick + seek)
+              and by the zoom useLayoutEffect below. Do NOT bind transform from React render state
+              or the 60fps engine and 10Hz React will fight and the marker will jump. */}
           <div
             ref={playheadRef}
             className="absolute top-0 h-full w-[2px] bg-primary-fixed pointer-events-none z-20"
-            style={{ transform: `translateX(${playheadX}px)`, left: '9rem' }}
+            style={{ left: '9rem' }}
           >
             <div className="sticky top-1 w-3.5 h-3.5 bg-primary-fixed rotate-45 rounded-sm" style={{ marginLeft: '-6px' }} />
           </div>
