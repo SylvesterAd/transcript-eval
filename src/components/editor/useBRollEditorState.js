@@ -266,7 +266,9 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'UPDATE_PLACEMENT_POSITION', payload: { index, timelineStart, timelineEnd } })
   }, [])
 
-  return {
+  const resetAllPlacements = useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), [])
+
+  return useMemo(() => ({
     rawPlacements: state.rawPlacements,
     placements: state.placements,
     seedFromCache,
@@ -283,8 +285,14 @@ export function useBRollEditorState(planPipelineId) {
     searchPlacementCustom,
     hidePlacement,
     updatePlacementPosition,
-    resetAllPlacements: useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), []),
+    resetAllPlacements,
     refetchEditorData,
     planPipelineId,
-  }
+  }), [
+    state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
+    state.selectedResults, state.searchProgress, state.loading, state.error,
+    seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
+    searchPlacement, searchPlacementCustom, hidePlacement, updatePlacementPosition,
+    resetAllPlacements, refetchEditorData, planPipelineId,
+  ])
 }
