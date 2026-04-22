@@ -5303,3 +5303,141 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
 
   return { results, ...searchMeta, duration: searchDuration, apiLogId, gpuJobStatus, jobId: gpuJobId }
 }
+
+// ── Reset B-Roll Searches ──────────────────────────────────────────────
+// Scope helper: returns all plan pipeline IDs + video IDs for a group.
+// Used by both preview and reset so they operate on the exact same set.
+export async function computeBrollResetScope(groupId) {
+  // Include this group's videos AND any sub-groups' videos — sub-groups inherit parent plans.
+  const videos = await db.prepare(`
+    SELECT id FROM videos WHERE group_id IN (
+      SELECT id FROM video_groups WHERE id = ? OR parent_group_id = ?
+    )
+  `).all(groupId, groupId)
+  const videoIds = videos.map(v => v.id)
+  if (!videoIds.length) return { planPipelineIds: [], videoIds: [] }
+
+  const placeholders = videoIds.map(() => '?').join(',')
+  const planRuns = await db.prepare(`
+    SELECT DISTINCT (metadata_json::jsonb->>'pipelineId') AS pid
+    FROM broll_runs
+    WHERE video_id IN (${placeholders})
+      AND (metadata_json::jsonb->>'pipelineId') LIKE 'plan-%'
+  `).all(...videoIds)
+  const planPipelineIds = planRuns.map(r => r.pid).filter(Boolean)
+
+  return { planPipelineIds, videoIds }
+}
+
+// Preview: returns counts for what resetBrollSearches(groupId) would delete/abort.
+// Pure read, no mutations.
+export async function previewBrollReset(groupId) {
+  const { planPipelineIds, videoIds } = await computeBrollResetScope(groupId)
+  if (!planPipelineIds.length) {
+    return { plans: [], searches: { total: 0, byStatus: {} }, kwRuns: 0, bsRuns: 0, activePipelines: [] }
+  }
+  const planPH = planPipelineIds.map(() => '?').join(',')
+  const vidPH = videoIds.map(() => '?').join(',')
+
+  const searchRows = await db.prepare(
+    `SELECT status, COUNT(*)::int AS cnt FROM broll_searches WHERE plan_pipeline_id IN (${planPH}) GROUP BY status`
+  ).all(...planPipelineIds)
+  const byStatus = {}
+  let total = 0
+  for (const r of searchRows) { byStatus[r.status] = r.cnt; total += r.cnt }
+
+  const kwRow = await db.prepare(
+    `SELECT COUNT(*)::int AS cnt FROM broll_runs WHERE video_id IN (${vidPH}) AND (metadata_json::jsonb->>'pipelineId') LIKE 'kw-%'`
+  ).get(...videoIds)
+  const bsRow = await db.prepare(
+    `SELECT COUNT(*)::int AS cnt FROM broll_runs WHERE video_id IN (${vidPH}) AND (metadata_json::jsonb->>'pipelineId') LIKE 'bs-%'`
+  ).get(...videoIds)
+
+  // In-memory pipelines that belong to this group's plans
+  const activePipelines = []
+  for (const [pid, progress] of brollPipelineProgress.entries()) {
+    const matchesKwBs = planPipelineIds.some(planId =>
+      pid === `kw-${planId}` || pid.startsWith(`kw-${planId}-`) || pid.startsWith(`bs-${planId}-`)
+    )
+    if (matchesKwBs) {
+      activePipelines.push({ pipelineId: pid, status: progress.status, stageName: progress.stageName, kind: 'kw_or_bs' })
+      continue
+    }
+    if (pid.startsWith('search-batch-')) {
+      const row = await db.prepare(
+        `SELECT 1 FROM broll_searches WHERE batch_id = ? AND plan_pipeline_id IN (${planPH}) LIMIT 1`
+      ).get(pid, ...planPipelineIds)
+      if (row) activePipelines.push({ pipelineId: pid, status: progress.status, stageName: progress.stageName, kind: 'search-batch' })
+    }
+  }
+
+  return {
+    plans: planPipelineIds,
+    searches: { total, byStatus },
+    kwRuns: kwRow?.cnt || 0,
+    bsRuns: bsRow?.cnt || 0,
+    activePipelines,
+  }
+}
+
+// Execute reset: abort matching in-memory pipelines, delete broll_searches rows,
+// delete kw-* and bs-* broll_runs for this group's videos.
+// Leaves plans, strategies, analysis, reference data untouched.
+export async function resetBrollSearches(groupId) {
+  const { planPipelineIds, videoIds } = await computeBrollResetScope(groupId)
+  if (!planPipelineIds.length) {
+    return { searchesDeleted: 0, kwRunsDeleted: 0, bsRunsDeleted: 0, pipelinesAborted: 0 }
+  }
+  const planPH = planPipelineIds.map(() => '?').join(',')
+  const vidPH = videoIds.map(() => '?').join(',')
+
+  // 1) Collect pipeline IDs to abort
+  const pidsToRemove = []
+  for (const [pid, progress] of brollPipelineProgress.entries()) {
+    const matchesKwBs = planPipelineIds.some(planId =>
+      pid === `kw-${planId}` || pid.startsWith(`kw-${planId}-`) || pid.startsWith(`bs-${planId}-`)
+    )
+    if (matchesKwBs) { pidsToRemove.push(pid); continue }
+    if (pid.startsWith('search-batch-')) {
+      const row = await db.prepare(
+        `SELECT 1 FROM broll_searches WHERE batch_id = ? AND plan_pipeline_id IN (${planPH}) LIMIT 1`
+      ).get(pid, ...planPipelineIds)
+      if (row) pidsToRemove.push(pid)
+    }
+  }
+
+  // 2) Abort + clean up in-memory state for each
+  let pipelinesAborted = 0
+  for (const pid of pidsToRemove) {
+    abortedBrollPipelines.add(pid)
+    const controller = pipelineAbortControllers.get(pid)
+    if (controller) {
+      try { controller.abort() } catch {}
+      pipelineAbortControllers.delete(pid)
+    }
+    brollPipelineProgress.delete(pid)
+    pipelinesAborted++
+  }
+
+  // 3) Delete broll_searches rows for this group's plans
+  const delSearches = await db.prepare(
+    `DELETE FROM broll_searches WHERE plan_pipeline_id IN (${planPH})`
+  ).run(...planPipelineIds)
+  const searchesDeleted = delSearches.changes || 0
+
+  // 4) Delete kw-* broll_runs
+  const delKw = await db.prepare(
+    `DELETE FROM broll_runs WHERE video_id IN (${vidPH}) AND (metadata_json::jsonb->>'pipelineId') LIKE 'kw-%'`
+  ).run(...videoIds)
+  const kwRunsDeleted = delKw.changes || 0
+
+  // 5) Delete bs-* broll_runs (legacy b-roll search pipeline)
+  const delBs = await db.prepare(
+    `DELETE FROM broll_runs WHERE video_id IN (${vidPH}) AND (metadata_json::jsonb->>'pipelineId') LIKE 'bs-%'`
+  ).run(...videoIds)
+  const bsRunsDeleted = delBs.changes || 0
+
+  console.log(`[broll-reset] group=${groupId}: searches=${searchesDeleted}, kw=${kwRunsDeleted}, bs=${bsRunsDeleted}, aborted=${pipelinesAborted}`)
+
+  return { searchesDeleted, kwRunsDeleted, bsRunsDeleted, pipelinesAborted }
+}
