@@ -1,16 +1,16 @@
-import { useMemo, useContext, useCallback } from 'react'
+import { useMemo, useContext, useCallback, memo } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2 } from 'lucide-react'
 
 const TRACK_H = 60
 
-export default function BRollTrack({ zoom, scrollRef, scrollX }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements }) {
   const broll = useContext(BRollContext)
-  if (!broll) return null
+  if (!broll && !overridePlacements) return null
 
-  const { placements, selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll
+  const placements = overridePlacements || broll?.placements || []
+  const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
 
-  const viewW = scrollRef?.current?.clientWidth || 1200
   const labelW = 144
   const buffer = 200
 
@@ -25,7 +25,7 @@ export default function BRollTrack({ zoom, scrollRef, scrollX }) {
       const right = (p.timelineStart + p.timelineDuration) * zoom
       return right >= vStartPx && left <= vEndPx
     })
-  }, [placements, scrollX, zoom, viewW, labelW, buffer])
+  }, [placements, scrollX, zoom, viewW])
 
   // Total timeline width
   const totalWidth = useMemo(() => {
@@ -74,6 +74,11 @@ export default function BRollTrack({ zoom, scrollRef, scrollX }) {
   const handleBoxMove = useCallback((placement, e) => {
     e.preventDefault()
     e.stopPropagation()
+    // Inactive track: click activates variant + defers placement selection
+    if (!isActive) {
+      onActivate?.(placement.index)
+      return
+    }
     const startX = e.clientX
     const origStart = placement.timelineStart
     const origEnd = placement.timelineEnd
@@ -96,26 +101,29 @@ export default function BRollTrack({ zoom, scrollRef, scrollX }) {
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [zoom, getNeighborBounds, updatePlacementPosition, selectPlacement])
+  }, [zoom, getNeighborBounds, updatePlacementPosition, selectPlacement, isActive, onActivate])
 
   return (
     <div className="relative" style={{ height: TRACK_H, width: totalWidth, minWidth: '100%' }}>
       {visible.map(p => {
         const left = p.timelineStart * zoom
         const width = Math.max(p.timelineDuration * zoom, 4)
-        const isSelected = p.index === selectedIndex
-        const resultIdx = selectedResults[p.index] ?? 0
+        const isSelected = isActive && p.index === selectedIndex
+        const resultIdx = (isActive ? selectedResults?.[p.index] : null) ?? 0
         const result = p.results?.[resultIdx]
         const hasResult = p.searchStatus === 'complete' && result
         const isSearching = p.searchStatus === 'searching'
+        const isKeywordsReady = p.searchStatus === 'keywords_ready'
+        const isWaiting = p.searchStatus === 'waiting'
         const isPending = p.searchStatus === 'pending'
+        const isFailed = p.searchStatus === 'failed'
 
         return (
           <div
             key={p.index}
-            className={`absolute top-0 rounded overflow-hidden cursor-grab active:cursor-grabbing transition-shadow ${
+            className={`absolute top-0 rounded overflow-hidden ${isActive ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} transition-shadow ${
               isSelected
-                ? 'ring-2 ring-teal-400 z-10'
+                ? 'ring-2 ring-primary-fixed z-10'
                 : 'ring-1 ring-white/10 hover:ring-white/30'
             }`}
             style={{ left, width, height: TRACK_H }}
@@ -135,13 +143,25 @@ export default function BRollTrack({ zoom, scrollRef, scrollX }) {
                 </div>
               </>
             ) : isSearching ? (
-              <div className="w-full h-full bg-teal-900/30 flex items-center justify-center gap-1 pointer-events-none">
-                <Loader2 size={12} className="text-teal-400 animate-spin" />
-                {width > 60 && <span className="text-[9px] text-teal-400">Searching</span>}
+              <div className="w-full h-full bg-primary-fixed/10 flex items-center justify-center gap-1 pointer-events-none">
+                <Loader2 size={12} className="text-primary-fixed animate-spin" />
+                {width > 60 && <span className="text-[9px] text-primary-fixed">Searching</span>}
+              </div>
+            ) : isKeywordsReady ? (
+              <div className="w-full h-full bg-primary-fixed/5 flex items-center justify-center pointer-events-none">
+                {width > 50 && <span className="text-[9px] text-primary-fixed/50">Keywords</span>}
+              </div>
+            ) : isWaiting ? (
+              <div className="w-full h-full bg-primary-fixed/5 flex items-center justify-center pointer-events-none">
+                {width > 50 && <span className="text-[9px] text-primary-fixed/40">Queued</span>}
               </div>
             ) : isPending ? (
               <div className="w-full h-full bg-zinc-800/50 animate-pulse flex items-center justify-center pointer-events-none">
-                {width > 50 && <span className="text-[9px] text-zinc-500">Pending</span>}
+                {width > 50 && <span className="text-[9px] text-zinc-500">Waiting</span>}
+              </div>
+            ) : isFailed ? (
+              <div className="w-full h-full bg-red-900/20 flex items-center justify-center pointer-events-none">
+                {width > 50 && <span className="text-[9px] text-red-400/60">Failed</span>}
               </div>
             ) : (
               <div className="w-full h-full bg-zinc-800/30 flex items-center justify-center pointer-events-none">
@@ -149,16 +169,16 @@ export default function BRollTrack({ zoom, scrollRef, scrollX }) {
               </div>
             )}
 
-            {/* Left resize handle */}
-            <div
-              className="absolute left-0 top-0 h-full w-2 cursor-col-resize hover:bg-teal-400/20 z-20 transition-colors"
+            {/* Left resize handle (active track only) */}
+            {isActive && <div
+              className="absolute left-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary-fixed/20 z-20 transition-colors"
               onMouseDown={(e) => handleEdgeDrag(p, 'left', e)}
-            />
-            {/* Right resize handle */}
-            <div
-              className="absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-teal-400/20 z-20 transition-colors"
+            />}
+            {/* Right resize handle (active track only) */}
+            {isActive && <div
+              className="absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary-fixed/20 z-20 transition-colors"
               onMouseDown={(e) => handleEdgeDrag(p, 'right', e)}
-            />
+            />}
           </div>
         )
       })}
@@ -166,4 +186,5 @@ export default function BRollTrack({ zoom, scrollRef, scrollX }) {
   )
 }
 
+export default memo(BRollTrack)
 export { TRACK_H as BROLL_TRACK_H }

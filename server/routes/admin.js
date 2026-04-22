@@ -125,4 +125,37 @@ router.get('/api-logs/:id', requireAuth, requireAdmin, async (req, res) => {
   res.json(log)
 })
 
+// ── B-Roll Search Queue ──────────────────────────────────────────────
+
+router.get('/broll-searches', requireAuth, requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200)
+  const offset = parseInt(req.query.offset) || 0
+  const status = req.query.status || null
+
+  let where = ''
+  const params = []
+  if (status) { where = 'WHERE status = ?'; params.push(status) }
+
+  const rows = await db.prepare(`SELECT * FROM broll_searches ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
+  const countResult = await db.prepare(`SELECT COUNT(*) as total FROM broll_searches ${where}`).get(...params)
+
+  res.json({ searches: rows, total: parseInt(countResult.total), limit, offset })
+})
+
+router.get('/broll-searches/:id', requireAuth, requireAdmin, async (req, res) => {
+  const row = await db.prepare('SELECT * FROM broll_searches WHERE id = ?').get(req.params.id)
+  if (!row) return res.status(404).json({ error: 'Not found' })
+  let apiLog = null
+  if (row.api_log_id) {
+    apiLog = await db.prepare('SELECT * FROM api_logs WHERE id = ?').get(row.api_log_id)
+  }
+  res.json({ ...row, apiLog })
+})
+
+router.delete('/broll-searches/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { changes } = await db.prepare('DELETE FROM broll_searches WHERE id = ?').run(req.params.id)
+  if (!changes) return res.status(404).json({ error: 'Not found' })
+  res.json({ success: true })
+})
+
 export default router

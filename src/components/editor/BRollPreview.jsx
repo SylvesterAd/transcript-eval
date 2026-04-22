@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState, useMemo } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { BRollContext } from './useBRollEditorState.js'
 import RoughCutPreview from './RoughCutPreview.jsx'
@@ -8,54 +8,51 @@ export default function BRollPreview() {
   const broll = useContext(BRollContext)
   const brollVideoRef = useRef(null)
   const [showBRoll, setShowBRoll] = useState(false)
-  const lastPlacementRef = useRef(null)
 
-  const activePlacement = useMemo(() => {
-    if (!broll) return null
-    // Show the placement under the playhead, or the selected placement
-    const atTime = broll.activePlacementAtTime(state.currentTime)
-    if (atTime) return atTime
-    return broll.selectedPlacement || null
-  }, [broll, state.currentTime, broll?.selectedPlacement])
+  // Live refs so the rAF tick loop reads the latest values without re-rendering
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const brollRef = useRef(broll)
+  brollRef.current = broll
 
-  // Get the selected result for the active placement
-  const activeResult = useMemo(() => {
-    if (!activePlacement) return null
-    const resultIdx = broll?.selectedResults[activePlacement.index] ?? 0
-    return activePlacement.results?.[resultIdx] || null
-  }, [activePlacement, broll?.selectedResults])
-
-  // Switch between main video and B-Roll
   useEffect(() => {
-    if (activeResult) {
-      setShowBRoll(true)
-      // If it's a different placement or result, update video src
-      if (brollVideoRef.current) {
-        const url = activeResult.preview_url_hq || activeResult.preview_url || activeResult.url
-        if (brollVideoRef.current.src !== url) {
-          brollVideoRef.current.src = url
+    let rafId = 0
+    const tick = () => {
+      const s = stateRef.current
+      const b = brollRef.current
+      const activePlacement = b ? b.activePlacementAtTime(s.currentTime) : null
+      const resultIdx = activePlacement ? (b.selectedResults[activePlacement.index] ?? 0) : 0
+      const activeResult = activePlacement?.results?.[resultIdx] || null
+
+      if (activeResult) {
+        if (!showBRoll) setShowBRoll(true)
+        if (brollVideoRef.current) {
+          const url = activeResult.preview_url_hq || activeResult.preview_url || activeResult.url
+          if (brollVideoRef.current.src !== url) brollVideoRef.current.src = url
+          const localTime = s.currentTime - activePlacement.timelineStart
+          const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
+          if (Math.abs(brollVideoRef.current.currentTime - clampedTime) > 0.5) {
+            brollVideoRef.current.currentTime = clampedTime
+          }
+          if (s.isPlaying && brollVideoRef.current.paused) {
+            brollVideoRef.current.play().catch(() => {})
+          } else if (!s.isPlaying && !brollVideoRef.current.paused) {
+            brollVideoRef.current.pause()
+          }
         }
-        // Seek to correct position within the B-Roll clip
-        const localTime = state.currentTime - activePlacement.timelineStart
-        const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
-        if (Math.abs(brollVideoRef.current.currentTime - clampedTime) > 0.5) {
-          brollVideoRef.current.currentTime = clampedTime
-        }
-        // Sync play state
-        if (state.isPlaying && brollVideoRef.current.paused) {
-          brollVideoRef.current.play().catch(() => {})
-        } else if (!state.isPlaying && !brollVideoRef.current.paused) {
-          brollVideoRef.current.pause()
-        }
+      } else {
+        if (showBRoll) setShowBRoll(false)
+        if (brollVideoRef.current && !brollVideoRef.current.paused) brollVideoRef.current.pause()
       }
-    } else {
-      setShowBRoll(false)
-      if (brollVideoRef.current && !brollVideoRef.current.paused) {
-        brollVideoRef.current.pause()
-      }
+
+      rafId = requestAnimationFrame(tick)
     }
-    lastPlacementRef.current = activePlacement
-  }, [activeResult, activePlacement, state.currentTime, state.isPlaying])
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
+    // showBRoll in deps is deliberate: the captured value inside tick serves as the
+    // setState deduplication guard (only toggle on transitions). Re-running the effect
+    // with a fresh closure when showBRoll commits keeps that guard current.
+  }, [showBRoll])
 
   return (
     <div className="relative w-full h-full bg-black flex items-center justify-center">
@@ -72,7 +69,6 @@ export default function BRollPreview() {
         playsInline
         muted
       />
-
     </div>
   )
 }

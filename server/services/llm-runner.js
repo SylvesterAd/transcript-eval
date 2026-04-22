@@ -7,6 +7,25 @@ import { calculateSimilarity, checkTimecodePreservation, checkPausePreservation,
 import { classifyDeletions } from './classifier.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments, timecodeToSeconds } from './segmenter.js'
 
+// Global concurrency limiter for all LLM calls
+const MAX_CONCURRENT_LLM = 10
+let activeLLMCalls = 0
+const llmQueue = []
+function acquireLLMSlot() {
+  if (activeLLMCalls < MAX_CONCURRENT_LLM) {
+    activeLLMCalls++
+    return Promise.resolve()
+  }
+  return new Promise(resolve => llmQueue.push(resolve))
+}
+function releaseLLMSlot() {
+  activeLLMCalls--
+  if (llmQueue.length > 0) {
+    activeLLMCalls++
+    llmQueue.shift()()
+  }
+}
+
 /** Build a stage label: always position-based, with custom name appended if meaningful */
 function stageLabel(stage, index) {
   const custom = stage.name || ''
@@ -1136,10 +1155,19 @@ async function computeAndStoreMetrics(stageOutputId, experimentRunId, stageIndex
 /**
  * Call an LLM API with auto-retry (up to 3 attempts, 5s delay between).
  */
-const MAX_RETRIES = 3
-const RETRY_DELAY_MS = 5000
+const MAX_RETRIES = 8
+const RETRY_DELAYS = [5, 5, 5, 5, 10, 10, 30, 60] // seconds per attempt
 
-export async function callLLM({ model, systemInstruction, prompt, params, experimentId, videoFile, onProgress, abortSignal }) {
+export async function callLLM({ model, systemInstruction, prompt, params, experimentId, videoFile, onProgress, abortSignal, logPrefix }) {
+  await acquireLLMSlot()
+  try {
+    return await _callLLMInner({ model, systemInstruction, prompt, params, experimentId, videoFile, onProgress, abortSignal, logPrefix })
+  } finally {
+    releaseLLMSlot()
+  }
+}
+
+async function _callLLMInner({ model, systemInstruction, prompt, params, experimentId, videoFile, onProgress, abortSignal, logPrefix }) {
   // Log the actual request sent to the LLM
   const logDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'data', 'llm-logs')
   mkdirSync(logDir, { recursive: true })
@@ -1170,15 +1198,21 @@ export async function callLLM({ model, systemInstruction, prompt, params, experi
     if (!activeAbortControllers.has(experimentId)) activeAbortControllers.set(experimentId, new Set())
     activeAbortControllers.get(experimentId).add(controller)
   }
-  // Idle timeout: aborts only if no progress for 5 minutes (resets on each onProgress call)
+  // Idle timeout: aborts if no progress for 10 minutes.
+  // Only active when caller provides onProgress (streaming with progress updates).
+  // Without onProgress, Gemini's callGemini buffers the full response via res.text()
+  // so no progress events fire — a short timeout would kill long thinking requests.
   const idleController = new AbortController()
-  let idleTimer = setTimeout(() => idleController.abort(), 5 * 60 * 1000)
+  let idleTimer = null
   const originalOnProgress = onProgress
-  onProgress = originalOnProgress ? (status) => {
-    clearTimeout(idleTimer)
-    idleTimer = setTimeout(() => idleController.abort(), 5 * 60 * 1000)
-    originalOnProgress(status)
-  } : undefined
+  if (originalOnProgress) {
+    idleTimer = setTimeout(() => idleController.abort(), 10 * 60 * 1000)
+    onProgress = (status) => {
+      clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => idleController.abort(), 10 * 60 * 1000)
+      originalOnProgress(status)
+    }
+  }
 
   const signals = [controller.signal, idleController.signal]
   if (abortSignal) signals.push(abortSignal)
@@ -1221,13 +1255,20 @@ export async function callLLM({ model, systemInstruction, prompt, params, experi
         throw new Error('Aborted')
       }
       try {
+        const tag = logPrefix || '[llm]'
+        if (attempt === 1 && currentModel.startsWith('gemini')) {
+          const keyLabel = currentGoogleKey === googleKey ? 'PRIMARY' : 'BACKUP'
+          const keyLast4 = currentGoogleKey ? '...' + currentGoogleKey.slice(-4) : 'none'
+          console.log(`${tag} Calling ${currentModel} — key: ${keyLabel} (${keyLast4})`)
+        }
         return await callFn()
       } catch (err) {
         if (err.name === 'AbortError' || err.message === 'Aborted') throw new Error('Aborted')
         if (err.name === 'TimeoutError') throw new Error(`LLM request timed out after 5 minutes for ${currentModel}`)
         // Extract real error from Node's generic "fetch failed" wrapper
         const realMsg = err.cause ? `${err.message}: ${err.cause.message || err.cause}` : err.message
-        console.error(`[llm] Attempt ${attempt}/${MAX_RETRIES} failed for ${currentModel}: ${realMsg}`)
+        const tag = logPrefix || '[llm]'
+        console.error(`${tag} Attempt ${attempt}/${MAX_RETRIES} failed for ${currentModel}: ${realMsg}`)
 
         // Auto-fallback chain for Gemini Pro "other side closed" (thinking timeout)
         if (GEMINI_PRO_MODELS.includes(currentModel) && realMsg.includes('other side closed')) {
@@ -1255,16 +1296,23 @@ export async function callLLM({ model, systemInstruction, prompt, params, experi
           }
         }
 
-        // Switch to backup Google key on failure
-        if (currentModel.startsWith('gemini') && googleKeyBackup && currentGoogleKey !== googleKeyBackup) {
-          currentGoogleKey = googleKeyBackup
-          callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
-          console.log(`[llm] Switching to backup Google API key`)
+        // Key rotation: primary×2, backup×2, then alternate every 2
+        // Attempt 1-2: primary 5s, 3-4: backup 5s, 5-6: primary 10s, 7-8: backup 30s/60s
+        if (currentModel.startsWith('gemini') && googleKeyBackup) {
+          const useBackup = Math.floor((attempt - 1) / 2) % 2 === 1
+          const newKey = useBackup ? googleKeyBackup : googleKey
+          if (newKey !== currentGoogleKey) {
+            currentGoogleKey = newKey
+            callFn = () => callGemini({ model: currentModel, systemInstruction, prompt, params: currentParams, apiKey: currentGoogleKey, signal: combinedSignal, videoFile, onProgress })
+          }
         }
+        const keyLabel = currentGoogleKey === googleKey ? 'PRIMARY' : 'BACKUP'
+        const keyLast4 = currentGoogleKey ? '...' + currentGoogleKey.slice(-4) : 'none'
         if (attempt === MAX_RETRIES) throw new Error(realMsg)
-        console.log(`[llm] Retrying in ${RETRY_DELAY_MS / 1000}s...`)
+        const delayMs = (RETRY_DELAYS[attempt - 1] || 60) * 1000
+        console.log(`${tag} Retry ${attempt}/${MAX_RETRIES} in ${delayMs / 1000}s — key: ${keyLabel} (${keyLast4})`)
         // Check abort during retry wait
-        for (let waited = 0; waited < RETRY_DELAY_MS; waited += 500) {
+        for (let waited = 0; waited < delayMs; waited += 500) {
           if (experimentId && abortedExperiments.has(experimentId)) {
             controller.abort()
             throw new Error('Aborted')
@@ -1274,6 +1322,7 @@ export async function callLLM({ model, systemInstruction, prompt, params, experi
       }
     }
   } finally {
+    clearTimeout(idleTimer)
     // Unregister controller so it can be GC'd
     if (experimentId) {
       const controllers = activeAbortControllers.get(experimentId)

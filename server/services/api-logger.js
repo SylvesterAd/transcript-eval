@@ -212,26 +212,34 @@ export async function streamingFetch(url, opts = {}) {
   // Remove from active streams
   activeStreams.delete(streamId)
 
-  // Log the full exchange to DB
+  // Log the full exchange to DB and capture the log ID
   const responseBody = JSON.stringify({ events: allEvents, result: finalResult, error: errorEvent })
-  db.prepare(
-    `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
-  ).run(
-    method,
-    url,
-    JSON.stringify(safeHeaders),
-    requestStr,
-    responseStatus,
-    responseBody.length > 50000 ? responseBody.substring(0, 50000) + '...[truncated]' : responseBody,
-    errorEvent ? (errorEvent.error || JSON.stringify(errorEvent)) : null,
-    duration,
-    logSource || null,
-  ).catch(err => console.warn('[api-logger] Failed to log:', err.message))
-
-  if (errorEvent && !finalResult) {
-    throw new Error(errorEvent.error || JSON.stringify(errorEvent))
+  let apiLogId = null
+  try {
+    const logResult = await db.prepare(
+      `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
+    ).run(
+      method,
+      url,
+      JSON.stringify(safeHeaders),
+      requestStr,
+      responseStatus,
+      responseBody.length > 50000 ? responseBody.substring(0, 50000) + '...[truncated]' : responseBody,
+      errorEvent ? (errorEvent.error || JSON.stringify(errorEvent)) : null,
+      duration,
+      logSource || null,
+    )
+    apiLogId = logResult.lastInsertRowid
+  } catch (err) {
+    console.warn('[api-logger] Failed to log:', err.message)
   }
 
-  return { ...finalResult, events: allEvents }
+  if (errorEvent && !finalResult) {
+    const err = new Error(errorEvent.error || JSON.stringify(errorEvent))
+    err.apiLogId = apiLogId
+    throw err
+  }
+
+  return { ...finalResult, events: allEvents, apiLogId }
 }

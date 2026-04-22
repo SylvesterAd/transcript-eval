@@ -9,13 +9,17 @@ import { BRollContext } from './useBRollEditorState.js'
 const COMPOSITE_H = 80
 const COMPOSITE_AUDIO_H = 56
 
-export default function Timeline() {
+export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements }) {
   const { state, dispatch, totalDuration, playbackEngine, playheadRef } = useContext(EditorContext)
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
   const [scrollX, setScrollX] = useState(0)
+  const [viewW, setViewW] = useState(1200)
   const prevZoomRef = useRef(state.zoom)
   const zoomAnchorRef = useRef(null) // { time, screenX } — set by wheel, null for +/- buttons
+
+  // Stable empty-cuts reference for the falsy branch of track `cuts` props
+  const EMPTY_CUTS = useMemo(() => [], [])
 
   // Merge cuts for display and refine edges using waveform
   const mergedDisplayCuts = useMemo(() => {
@@ -65,6 +69,17 @@ export default function Timeline() {
     return () => { el.removeEventListener('scroll', onScroll); cancelAnimationFrame(raf) }
   }, [])
 
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      setViewW(el.clientWidth || 1200)
+    })
+    ro.observe(el)
+    setViewW(el.clientWidth || 1200)
+    return () => ro.disconnect()
+  }, [])
+
   const contentWidth = Math.max(totalDuration * state.zoom, 800)
 
   // Adaptive 3-tier interval selection: major (labeled) → minor → sub-minor
@@ -84,33 +99,24 @@ export default function Timeline() {
     { major: 300,   minor: 60,    sub: 30    },
   ]
 
-  const iv = (() => {
+  const { iv, minorPx, subPx, majorMarks } = useMemo(() => {
+    let iv = INTERVALS[INTERVALS.length - 1]
     for (const entry of INTERVALS) {
-      if (entry.major * state.zoom >= 80) return entry
+      if (entry.major * state.zoom >= 80) { iv = entry; break }
     }
-    return INTERVALS[INTERVALS.length - 1]
-  })()
-
-  const minorPx = iv.minor * state.zoom
-  const subPx = iv.sub * state.zoom
-
-  // Only generate marks visible in the viewport (+ buffer)
-  const viewW = scrollRef.current?.clientWidth || 1200
-  const visStartTime = Math.max(0, (scrollX - 300) / state.zoom)
-  const visEndTime = (scrollX + viewW + 300) / state.zoom
-
-  // Snap to major interval boundaries so we always get complete tick groups
-  const firstMajor = Math.floor(visStartTime / iv.major) * iv.major
-  const lastMajor = Math.ceil(visEndTime / iv.major) * iv.major
-
-  const majorMarks = (() => {
+    const minorPx = iv.minor * state.zoom
+    const subPx = iv.sub * state.zoom
+    const visStartTime = Math.max(0, (scrollX - 300) / state.zoom)
+    const visEndTime = (scrollX + viewW + 300) / state.zoom
+    const firstMajor = Math.floor(visStartTime / iv.major) * iv.major
+    const lastMajor = Math.ceil(visEndTime / iv.major) * iv.major
     const marks = []
     for (let t = firstMajor; t <= Math.min(lastMajor, totalDuration + iv.major); t += iv.major) {
       const time = Math.round(t * 1000) / 1000
       marks.push({ time, label: formatTimeRuler(time, iv.major), x: time * state.zoom })
     }
-    return marks
-  })()
+    return { iv, minorPx, subPx, majorMarks: marks }
+  }, [state.zoom, scrollX, totalDuration, viewW])
 
   // Scrub on ruler click
   const handleRulerClick = useCallback((e) => {
@@ -173,7 +179,17 @@ export default function Timeline() {
         el.scrollLeft = state.currentTime * state.zoom - playheadScreenX + labelW
       }
     }
-  }, [state.zoom, state.currentTime])
+  }, [state.zoom])
+
+  // Own the playhead transform for render-driven updates (mount, zoom change, paused seek).
+  // During playback the rAF engine in EditorView writes transform directly at 60fps — this
+  // effect must NOT fire then, or it would overwrite the live value with a 10Hz-stale one
+  // (the same class of bug this task was created to fix).
+  useLayoutEffect(() => {
+    if (!playheadRef.current) return
+    if (state.isPlaying) return
+    playheadRef.current.style.transform = `translateX(${state.currentTime * state.zoom}px)`
+  }, [state.zoom, state.currentTime, state.isPlaying, playheadRef])
 
   // Auto-scroll during playback — smooth follow, playhead stays at ~1/5 from left
   const currentTimeRef = useRef(state.currentTime)
@@ -215,8 +231,6 @@ export default function Timeline() {
     }
   }, [state.isPlaying, state.currentTime, state.zoom])
 
-  const playheadX = state.currentTime * state.zoom
-
   // Stable numbering: based on original load order, never changes on reorder
   const trackNumber = useCallback((track) => {
     const order = state.originalVideoOrder || []
@@ -227,6 +241,7 @@ export default function Timeline() {
 
   // Visible tracks (respects audioOnly) with layout for mixed-height drag
   const isRoughCut = state.activeTab === 'roughcut'
+  const showVideoFrames = isRoughCut || state.activeTab === 'brolls'
   const isMainMode = isRoughCut && state.roughCutTrackMode === 'main'
 
   // In MAIN mode, compute merged segments from video tracks.
@@ -324,7 +339,8 @@ export default function Timeline() {
 
   // Resolve B-Roll track position: -1 means "after last audio track"
   const broll = useContext(BRollContext)
-  const hasBrollTrack = !!broll?.placements?.length
+  const hasBrollTrack = !!broll?.placements?.length || (inactiveVariantPlacements && Object.values(inactiveVariantPlacements).some(p => p?.length > 0))
+  const brollVariantCount = variants?.length > 1 ? variants.length : 1
   const resolvedBrollPosition = useMemo(() => {
     if (!hasBrollTrack) return -2 // no B-Roll track to show
     const pos = state.brollTrackPosition
@@ -347,23 +363,28 @@ export default function Timeline() {
       const t = state.tracks[i]
       if (t.type === 'video' && ((!isRoughCut && state.audioOnly) || isMainMode)) continue
       if (t.type === 'audio' && isMainMode) continue
-      // Insert B-Roll row before this track if position matches
+      // Insert B-Roll rows before this track if position matches
       if (!brollInserted && hasBrollTrack && resolvedBrollPosition <= i) {
-        items.push({ absIdx: -1, y, h: BROLL_TRACK_H, isBroll: true })
-        y += BROLL_TRACK_H
+        for (let vi = 0; vi < brollVariantCount; vi++) {
+          items.push({ absIdx: -1 - vi, y, h: BROLL_TRACK_H, isBroll: true, variantIdx: vi })
+          y += BROLL_TRACK_H
+        }
         brollInserted = true
       }
-      const h = t.type === 'video' ? (isRoughCut ? 80 : 24) : (t.showTranscript ? 112 : 56)
+      const h = t.type === 'video' ? (showVideoFrames ? 80 : 24) : (t.showTranscript ? 112 : 56)
       items.push({ absIdx: i, y, h })
       y += h
       trackSlot++
     }
     // B-Roll at the end if not yet inserted
     if (!brollInserted && hasBrollTrack) {
-      items.push({ absIdx: -1, y, h: BROLL_TRACK_H, isBroll: true })
+      for (let vi = 0; vi < brollVariantCount; vi++) {
+        items.push({ absIdx: -1 - vi, y, h: BROLL_TRACK_H, isBroll: true, variantIdx: vi })
+        y += BROLL_TRACK_H
+      }
     }
     return items
-  }, [state.tracks, state.audioOnly, isRoughCut, isMainMode, state.compositeShowTranscript, hasBrollTrack, resolvedBrollPosition])
+  }, [state.tracks, state.audioOnly, isRoughCut, showVideoFrames, isMainMode, state.compositeShowTranscript, hasBrollTrack, resolvedBrollPosition, brollVariantCount])
 
   // Context menu
   const ctxTrack = state.contextMenu ? state.tracks.find(t => t.id === state.contextMenu.trackId) : null
@@ -463,6 +484,15 @@ export default function Timeline() {
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }, [visibleLayout, state.tracks, dispatch, startAutoScroll, stopAutoScroll])
+
+  // Stable per-variant onActivate factories for BRollTrack memoization
+  const variantActivators = useMemo(() => {
+    const out = []
+    for (let vi = 0; vi < brollVariantCount; vi++) {
+      out.push((selectIndex) => onVariantActivate?.(vi, selectIndex))
+    }
+    return out
+  }, [brollVariantCount, onVariantActivate])
 
   return (
     <div
@@ -602,26 +632,50 @@ export default function Timeline() {
             const showInsertBefore = dragState.dragging && dragState.overAbsIdx === absIdx && dragState.fromAbsIdx > absIdx
             const showInsertAfter = dragState.dragging && dragState.overAbsIdx === absIdx && dragState.fromAbsIdx < absIdx
 
-            // B-Roll track row
+            // B-Roll track row (one per variant)
             if (item.isBroll) {
+              const vi = item.variantIdx ?? 0
+              const isActiveVariant = vi === (activeVariantIdx ?? 0)
+              const variantLabel = variants?.[vi]?.label || 'B-Roll'
               return (
-                <div key="broll-track" className="relative" style={isDragSource ? { opacity: 0.5, zIndex: 30, transform: `translateY(${dragState.dy}px)`, pointerEvents: 'none' } : undefined}>
-                  {showInsertBefore && <div className="absolute top-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
+                <div key={`broll-track-${vi}`} className="relative" style={isDragSource ? { opacity: 0.5, zIndex: 30, transform: `translateY(${dragState.dy}px)`, pointerEvents: 'none' } : undefined}>
+                  {showInsertBefore && vi === 0 && <div className="absolute top-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
                   <div className="flex">
                     <div
-                      onMouseDown={(e) => handleTrackDragStart(e, -1)}
-                      className={`sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 text-[10px] font-bold z-30 bg-surface-container text-teal-400 cursor-grab active:cursor-grabbing select-none ${isDragSource ? 'ring-1 ring-teal-400 bg-teal-900/20' : ''}`}
+                      onMouseDown={isActiveVariant ? (e) => handleTrackDragStart(e, -1) : undefined}
+                      className={`sticky left-0 w-36 shrink-0 border-b border-r border-white/5 flex items-center pl-2 text-[10px] font-bold z-30 bg-surface-container select-none ${
+                        isActiveVariant ? 'text-primary-fixed cursor-grab active:cursor-grabbing' : 'text-zinc-500'
+                      } ${isDragSource && isActiveVariant ? 'ring-1 ring-primary-fixed bg-primary-fixed/10' : ''}`}
                       style={{ height: `${BROLL_TRACK_H}px` }}
                     >
-                      <span className={`material-symbols-outlined text-[12px] shrink-0 mr-1 ${isDragSource ? 'text-teal-400 opacity-100' : 'opacity-30'}`}>drag_indicator</span>
-                      <span className="material-symbols-outlined text-[12px] shrink-0 opacity-60 mr-1">movie</span>
-                      B-Roll
+                      <span className={`material-symbols-outlined text-[12px] shrink-0 mr-1 ${isDragSource ? 'text-primary-fixed opacity-100' : 'opacity-30'}`}>drag_indicator</span>
+                      <span className="truncate">{variantLabel}</span>
+                      {variants?.length > 1 && (
+                        <>
+                          <div className="h-3 w-[1px] shrink-0 bg-white/10 mx-1" />
+                          <button
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); onVariantActivate?.(vi) }}
+                            className="material-symbols-outlined text-[9px] shrink-0"
+                            style={isActiveVariant ? { fontVariationSettings: '"FILL" 1', color: '#cefc00' } : { opacity: 0.4 }}
+                          >
+                            {isActiveVariant ? 'visibility' : 'visibility_off'}
+                          </button>
+                        </>
+                      )}
                     </div>
-                    <div className="flex-1 relative z-0">
-                      <BRollTrack zoom={state.zoom} scrollRef={scrollRef} scrollX={scrollX} />
+                    <div className={`flex-1 relative z-0 ${!isActiveVariant ? 'opacity-40' : ''}`}>
+                      <BRollTrack
+                        zoom={state.zoom}
+                        viewW={viewW}
+                        scrollX={scrollX}
+                        isActive={isActiveVariant}
+                        onActivate={variantActivators[vi]}
+                        overridePlacements={!isActiveVariant ? inactiveVariantPlacements?.[variants?.[vi]?.id] : undefined}
+                      />
                     </div>
                   </div>
-                  {showInsertAfter && <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
+                  {showInsertAfter && vi === brollVariantCount - 1 && <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
                 </div>
               )
             }
@@ -687,8 +741,8 @@ export default function Timeline() {
                   </div>
                   <div className="flex-1 relative">
                     {isVideo
-                      ? (isRoughCut
-                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={mergedDisplayCuts} scrollRef={scrollRef} scrollX={scrollX} />
+                      ? (showVideoFrames
+                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : EMPTY_CUTS} scrollRef={scrollRef} scrollX={scrollX} />
                           : <VideoTrack track={track} zoom={state.zoom} />)
                       : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} scrollRef={scrollRef} scrollX={scrollX} />
                     }
@@ -701,11 +755,14 @@ export default function Timeline() {
             )
           })}
 
-          {/* Unified playhead — spans ruler + all tracks */}
+          {/* Unified playhead — spans ruler + all tracks.
+              Transform is owned exclusively by the rAF playback engine (EditorView tick + seek)
+              and by the zoom useLayoutEffect below. Do NOT bind transform from React render state
+              or the 60fps engine and 10Hz React will fight and the marker will jump. */}
           <div
             ref={playheadRef}
             className="absolute top-0 h-full w-[2px] bg-primary-fixed pointer-events-none z-20"
-            style={{ transform: `translateX(${playheadX}px)`, left: '9rem' }}
+            style={{ left: '9rem' }}
           >
             <div className="sticky top-1 w-3.5 h-3.5 bg-primary-fixed rotate-45 rounded-sm" style={{ marginLeft: '-6px' }} />
           </div>

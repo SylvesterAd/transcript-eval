@@ -26,7 +26,7 @@ import EstimationModal from './EstimationModal.jsx'
 export const EditorContext = createContext(null)
 
 export default function EditorView() {
-  const { id, tab, placementId } = useParams()
+  const { id, tab, sub, detail } = useParams()
   const navigate = useNavigate()
   const { data: groupDetail, loading, error, refetch: refetchDetail } = useApi(`/videos/groups/${id}/detail`)
   const { data: wordTimestamps, refetch: refetchTimestamps } = useApi(`/videos/groups/${id}/word-timestamps`)
@@ -35,6 +35,24 @@ export default function EditorView() {
   const [flowRunState, setFlowRunState] = useState(null)
   const cutDragRef = useRef(false) // true during cut edge drag — blocks AI cut regeneration
   // shape: { experimentId, runId, status: 'running'|'complete'|'error', progress: {...} }
+
+  // Lightweight check: does this video have completed broll search (kw- pipeline)?
+  const videoId = groupDetail?.videos?.[0]?.id
+  const { data: videoRunsData } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
+  const hasBrollSearch = useMemo(() => {
+    if (!videoRunsData?.runs) return false
+    const pipelineMap = {}
+    for (const run of videoRunsData.runs) {
+      try {
+        const meta = JSON.parse(run.metadata_json || '{}')
+        const pid = meta.pipelineId
+        if (!pid) continue
+        if (!pipelineMap[pid]) pipelineMap[pid] = { status: 'complete' }
+        if (run.status === 'failed') pipelineMap[pid].status = 'failed'
+      } catch {}
+    }
+    return Object.entries(pipelineMap).some(([pid, p]) => pid.startsWith('kw-') && p.status === 'complete')
+  }, [videoRunsData])
 
   // Token system
   const [showEstimationModal, setShowEstimationModal] = useState(false)
@@ -187,6 +205,20 @@ export default function EditorView() {
       authFetch(`/videos/groups/${id}/extract-frames`, { method: 'POST' }).catch(() => {})
     }
   }, [groupDetail, id])
+
+  // Auto-generate timeline with waveforms if missing
+  const timelineGenRef = useRef(false)
+  useEffect(() => {
+    if (!groupDetail || timelineGenRef.current) return
+    if (groupDetail.timeline) return // already has timeline
+    if (!groupDetail.videos?.length) return
+    timelineGenRef.current = true
+    console.log('[editor] No timeline — generating waveforms...')
+    authFetch(`/videos/groups/${id}/generate-timeline`, { method: 'POST' })
+      .then(r => r.json())
+      .then(() => { refetchDetail() })
+      .catch(err => console.error('[editor] Timeline generation failed:', err))
+  }, [groupDetail, id, refetchDetail])
 
   // Fetch token balance on mount
   useEffect(() => {
@@ -373,13 +405,45 @@ export default function EditorView() {
   const skipRegionsRef = useRef(skipRegions)
   skipRegionsRef.current = skipRegions
 
+  // Mirror all state values that tick reads, so tick's useCallback deps can be empty
+  // and the rAF loop doesn't restart on every unrelated state change.
+  const stateRefs = useRef({
+    tracks: state.tracks,
+    playbackRate: state.playbackRate,
+    zoom: state.zoom,
+    volume: state.volume,
+    activeTab: state.activeTab,
+    roughCutTrackMode: state.roughCutTrackMode,
+    segmentVideoOverrides: state.segmentVideoOverrides,
+    segmentAudioOverrides: state.segmentAudioOverrides,
+    totalDuration,
+  })
+  stateRefs.current.tracks = state.tracks
+  stateRefs.current.playbackRate = state.playbackRate
+  stateRefs.current.zoom = state.zoom
+  stateRefs.current.volume = state.volume
+  stateRefs.current.activeTab = state.activeTab
+  stateRefs.current.roughCutTrackMode = state.roughCutTrackMode
+  stateRefs.current.segmentVideoOverrides = state.segmentVideoOverrides
+  stateRefs.current.segmentAudioOverrides = state.segmentAudioOverrides
+  stateRefs.current.totalDuration = totalDuration
+
+  // Declared before tick so tick's deps can include stopAllVideos without TDZ.
+  const stopAllVideos = useCallback(() => {
+    Object.values(videoRefs.current).forEach(el => {
+      if (el && !el.paused) el.pause()
+      if (el) el.muted = true
+    })
+  }, [])
+
   // Playback engine (rAF loop) — media-driven clock
   // Uses the master video element's currentTime as the time source instead of
   // performance.now(). This avoids constant seeking when audio output is buffered
   // (e.g. Bluetooth speakers add 100-300ms latency that desync wall clock from media time).
   const tick = useCallback(() => {
     const now = performance.now()
-    const videoTracks = state.tracks.filter(t => t.type === 'video')
+    const s = stateRefs.current
+    const videoTracks = s.tracks.filter(t => t.type === 'video')
 
     // Find master element: prefer unmuted active track, fall back to any playing track
     let masterEl = null
@@ -387,7 +451,7 @@ export default function EditorView() {
     for (const track of videoTracks) {
       const el = videoRefs.current[track.videoId]
       if (!el || el.paused || el.readyState < 2) continue
-      const audioTrack = state.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
+      const audioTrack = s.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
       const isUnmuted = audioTrack && !audioTrack.muted
       if (isUnmuted || !masterEl) {
         masterEl = el
@@ -400,7 +464,6 @@ export default function EditorView() {
     let newTime
     if (masterEl) {
       newTime = masterEl.currentTime + masterTrack.offset
-      // Keep wall-clock baseline in sync for seamless fallback
       startPlayheadTime.current = newTime
       startRealTime.current = now
     } else {
@@ -417,13 +480,13 @@ export default function EditorView() {
       } else {
         // Gap between tracks — advance via wall clock
         const elapsed = (now - startRealTime.current) / 1000
-        newTime = startPlayheadTime.current + elapsed * state.playbackRate
+        newTime = startPlayheadTime.current + elapsed * s.playbackRate
       }
     }
 
     // Stop at end
-    if (newTime >= totalDuration) {
-      dispatch({ type: 'SET_CURRENT_TIME', payload: totalDuration })
+    if (newTime >= s.totalDuration) {
+      dispatch({ type: 'SET_CURRENT_TIME', payload: s.totalDuration })
       dispatch({ type: 'PAUSE' })
       stopAllVideos()
       return
@@ -431,7 +494,7 @@ export default function EditorView() {
 
     // Skip cut regions in rough cut mode (using waveform-refined regions)
     const regions = skipRegionsRef.current
-    if (state.activeTab === 'roughcut' && regions.length > 0) {
+    if (s.activeTab === 'roughcut' && regions.length > 0) {
       const preSkipTime = newTime
       let skipping = true
       while (skipping) {
@@ -454,8 +517,8 @@ export default function EditorView() {
             if (lt >= 0 && lt <= vt.duration) el.currentTime = lt
           }
         }
-        if (newTime >= totalDuration) {
-          dispatch({ type: 'SET_CURRENT_TIME', payload: totalDuration })
+        if (newTime >= s.totalDuration) {
+          dispatch({ type: 'SET_CURRENT_TIME', payload: s.totalDuration })
           dispatch({ type: 'PAUSE' })
           stopAllVideos()
           return
@@ -465,7 +528,7 @@ export default function EditorView() {
 
     // In Main Track mode, find the active videoId at the current time
     // (the video whose segment covers the playhead — same logic as composite track)
-    const isMainMode = state.activeTab === 'roughcut' && state.roughCutTrackMode === 'main'
+    const isMainMode = s.activeTab === 'roughcut' && s.roughCutTrackMode === 'main'
     let mainActiveVideoId = null
     let mainActiveAudioId = null
     let mainSegIdx = -1
@@ -500,7 +563,7 @@ export default function EditorView() {
 
       // Apply video override
       if (mainSegIdx >= 0) {
-        const vidOv = state.segmentVideoOverrides[mainSegIdx]
+        const vidOv = s.segmentVideoOverrides[mainSegIdx]
         if (vidOv) {
           const ovTrack = videoTracks.find(t => t.videoId === vidOv)
           if (ovTrack && newTime >= ovTrack.offset && newTime < ovTrack.offset + ovTrack.duration) {
@@ -512,7 +575,7 @@ export default function EditorView() {
       // Audio override (independent of video)
       mainActiveAudioId = mainActiveVideoId
       if (mainSegIdx >= 0) {
-        const audioOv = state.segmentAudioOverrides[mainSegIdx]
+        const audioOv = s.segmentAudioOverrides[mainSegIdx]
         if (audioOv) {
           const ovTrack = videoTracks.find(t => t.videoId === audioOv)
           if (ovTrack && newTime >= ovTrack.offset && newTime < ovTrack.offset + ovTrack.duration) {
@@ -532,21 +595,21 @@ export default function EditorView() {
         if (el !== masterEl && Math.abs(el.currentTime - localTime) > 0.3) {
           el.currentTime = localTime
         }
-        el.playbackRate = state.playbackRate
+        el.playbackRate = s.playbackRate
 
+        const audioTrack = s.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
         // Audio: in Main Track mode, only unmute the active segment's video.
         // In All Tracks mode, unmute per the track's mute setting.
-        const audioTrack = state.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
         if (isMainMode) {
           if (track.videoId === mainActiveAudioId) {
             el.muted = false
-            el.volume = state.volume
+            el.volume = s.volume
           } else {
             el.muted = true
           }
         } else if (audioTrack && !audioTrack.muted) {
           el.muted = false
-          el.volume = state.volume
+          el.volume = s.volume
         } else {
           el.muted = true
         }
@@ -563,7 +626,7 @@ export default function EditorView() {
 
     // Update playhead via ref (60fps, no React re-render)
     if (playheadRef.current) {
-      const x = newTime * state.zoom
+      const x = newTime * s.zoom
       playheadRef.current.style.transform = `translateX(${x}px)`
     }
 
@@ -574,18 +637,13 @@ export default function EditorView() {
     }
 
     rafId.current = requestAnimationFrame(tick)
-  }, [state.tracks, state.playbackRate, state.zoom, state.volume, state.activeTab, state.roughCutTrackMode, state.cuts, state.segmentVideoOverrides, state.segmentAudioOverrides, totalDuration, dispatch])
-
-  const stopAllVideos = useCallback(() => {
-    Object.values(videoRefs.current).forEach(el => {
-      if (el && !el.paused) el.pause()
-      if (el) el.muted = true
-    })
-  }, [])
+  }, [dispatch, stopAllVideos])
 
   // Start/stop rAF based on isPlaying
   useEffect(() => {
     if (state.isPlaying) {
+      // Seed the rAF baseline from the current state at the moment play begins.
+      // This runs only on play-toggle, not on every tick-recreation.
       startRealTime.current = performance.now()
       startPlayheadTime.current = state.currentTime
       rafId.current = requestAnimationFrame(tick)
@@ -594,7 +652,8 @@ export default function EditorView() {
       stopAllVideos()
     }
     return () => cancelAnimationFrame(rafId.current)
-  }, [state.isPlaying, tick, stopAllVideos])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.isPlaying]) // tick is stable now (deps: dispatch + stopAllVideos, both stable); state.currentTime only read on play-start
 
   // Playback engine API exposed via ref
   useEffect(() => {
@@ -718,6 +777,11 @@ export default function EditorView() {
     return () => window.removeEventListener('keydown', handler)
   }, [state.isPlaying, state.currentTime, state.activeTab, state.transcriptSelection, totalDuration, dispatch])
 
+  const editorContextValue = useMemo(
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading]
+  )
+
   if (loading) {
     return (
       <div className="h-screen flex items-center justify-center bg-[#0e0e10] text-on-surface-variant">
@@ -752,7 +816,7 @@ export default function EditorView() {
   }
 
   return (
-    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }}>
+    <EditorContext.Provider value={editorContextValue}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
@@ -760,9 +824,9 @@ export default function EditorView() {
             <span className="text-primary-fixed font-bold text-lg tracking-tight">Studio</span>
             <div className="flex items-center gap-6 h-full pl-4">
               <Link to="/" className="text-on-surface/60 hover:text-on-surface font-bold text-sm transition-colors">Projects</Link>
-              <div className="relative h-14 flex items-center">
+              <div className="relative flex flex-col items-center justify-center">
                 <span className="text-primary-fixed font-bold text-sm">Editor</span>
-                <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary-fixed shadow-[0_0_8px_rgba(206,252,0,0.4)]" />
+                <div className="w-full h-0.5 bg-primary-fixed shadow-[0_0_8px_rgba(206,252,0,0.4)] mt-1" />
               </div>
             </div>
           </div>
@@ -787,8 +851,10 @@ export default function EditorView() {
         <div className="flex flex-1 overflow-hidden">
           <EditorSidebar
             activeTab={activeTab}
+            activeSub={sub}
             assemblyStatus={groupDetail?.assembly_status}
             hasVideos={groupDetail?.videos?.length > 0}
+            hasBrollSearch={hasBrollSearch}
             onTabChange={(newTab) => {
               // Warn when leaving roughcut with progress
               const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0
@@ -797,13 +863,14 @@ export default function EditorView() {
                 return
               }
               navigate(`/editor/${id}/${newTab}`)
-              dispatch({ type: 'SET_ACTIVE_TAB', payload: newTab })
+              const tabKey = newTab.split('/')[0]
+              dispatch({ type: 'SET_ACTIVE_TAB', payload: tabKey })
             }}
           />
           {activeTab === 'assets' ? (
             <AssetsView />
           ) : activeTab === 'brolls' ? (
-            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} />
+            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} sub={sub} detail={detail} />
           ) : (
             <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} isMainMode={activeTab === 'roughcut' && state.roughCutTrackMode === 'main'} />
           )}

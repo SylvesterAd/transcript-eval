@@ -1,4 +1,4 @@
-import { useReducer, useEffect, useRef, useCallback } from 'react'
+import { useReducer, useEffect, useRef, useCallback, useMemo } from 'react'
 import { apiPut } from '../../hooks/useApi.js'
 
 const GROUP_COLORS = ['#cefc00', '#c180ff', '#65fde6', '#ff7351', '#48e5d0', '#dbb4ff']
@@ -692,9 +692,22 @@ export default function useEditorState() {
     }
   }, [])
 
-  const totalDuration = state.tracks.reduce((max, t) => Math.max(max, t.offset + t.duration), 0)
+  // Dep is state.tracks, not state — SET_CURRENT_TIME (and other non-track-mutating
+  // actions) return { ...state, ... } which makes state a new object but preserves the
+  // state.tracks reference. So this only re-runs on track mutations.
+  const totalDuration = useMemo(
+    () => state.tracks.reduce((max, t) => Math.max(max, t.offset + t.duration), 0),
+    [state.tracks]
+  )
 
-  return { state, dispatch, totalDuration, formatTime, canUndo, canRedo }
+  // Stable return object. Paired with Task 4's EditorContext useMemo: this keeps
+  // totalDuration's identity stable across non-track dispatches, so the context value
+  // doesn't re-memoize on every SET_CURRENT_TIME tick.
+  // dispatch: stable (useReducer guarantee). formatTime: module-scope import constant.
+  return useMemo(
+    () => ({ state, dispatch, totalDuration, formatTime, canUndo, canRedo }),
+    [state, totalDuration, canUndo, canRedo]
+  )
 }
 
 export { formatTime, formatTimeRuler, GROUP_COLORS, buildSentences }

@@ -16,6 +16,12 @@ async function getAuthHeaders(extraHeaders = {}) {
   }
 }
 
+function handleUnauthorized(res) {
+  if (res.status === 401 && supabase) {
+    supabase.auth.signOut()
+  }
+}
+
 export function useApi(path, deps = []) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(!!path)
@@ -28,7 +34,10 @@ export function useApi(path, deps = []) {
       fetch(`${BASE}${path}`, { headers })
     )
       .then(r => {
-        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
+        if (!r.ok) {
+          handleUnauthorized(r)
+          throw new Error(`${r.status} ${r.statusText}`)
+        }
         return r.json()
       })
       .then(setData)
@@ -49,6 +58,7 @@ export async function apiPost(path, body) {
     body: JSON.stringify(body)
   })
   if (!res.ok) {
+    handleUnauthorized(res)
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(err.error || res.statusText)
   }
@@ -63,6 +73,18 @@ export async function apiPut(path, body) {
     body: JSON.stringify(body)
   })
   if (!res.ok) {
+    handleUnauthorized(res)
+    const err = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(err.error || res.statusText)
+  }
+  return res.json()
+}
+
+export async function apiGet(path) {
+  const headers = await getAuthHeaders()
+  const res = await fetch(`${BASE}${path}`, { headers })
+  if (!res.ok) {
+    handleUnauthorized(res)
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(err.error || res.statusText)
   }
@@ -73,6 +95,7 @@ export async function apiDelete(path) {
   const headers = await getAuthHeaders()
   const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers })
   if (!res.ok) {
+    handleUnauthorized(res)
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(err.error || res.statusText)
   }
