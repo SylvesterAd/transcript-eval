@@ -61,7 +61,7 @@ export async function loggedFetch(url, opts = {}) {
     logSource || null,
   ).catch(err => console.warn('[api-logger] Failed to log:', err.message))
 
-  if (responseStatus >= 400 || error) {
+  if ((responseStatus && responseStatus >= 400) || error) {
     notify({
       source: 'api-log',
       title: error ? 'Fetch threw' : `HTTP ${responseStatus}`,
