@@ -750,6 +750,11 @@ export default function EditorView() {
     return () => window.removeEventListener('keydown', handler)
   }, [state.isPlaying, state.currentTime, state.activeTab, state.transcriptSelection, totalDuration, dispatch])
 
+  const editorContextValue = useMemo(
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading]
+  )
+
   if (loading) {
     return (
       <div className="h-screen flex items-center justify-center bg-[#0e0e10] text-on-surface-variant">
@@ -784,7 +789,7 @@ export default function EditorView() {
   }
 
   return (
-    <EditorContext.Provider value={{ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }}>
+    <EditorContext.Provider value={editorContextValue}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
