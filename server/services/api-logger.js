@@ -1,4 +1,5 @@
 import db from '../db.js'
+import { notify } from './slack-notifier.js'
 
 // ── Active streams (in-memory, for live UI) ──────────────────────────
 export const activeStreams = new Map()
@@ -59,6 +60,21 @@ export async function loggedFetch(url, opts = {}) {
     duration,
     logSource || null,
   ).catch(err => console.warn('[api-logger] Failed to log:', err.message))
+
+  if (responseStatus >= 400 || error) {
+    notify({
+      source: 'api-log',
+      title: error ? 'Fetch threw' : `HTTP ${responseStatus}`,
+      error: error || null,
+      meta: {
+        method,
+        url: url.length > 200 ? url.slice(0, 200) + '…' : url,
+        status: responseStatus,
+        logSource: logSource || null,
+        duration_ms: duration,
+      },
+    })
+  }
 
   if (error && !response) {
     throw new Error(error)
@@ -233,6 +249,22 @@ export async function streamingFetch(url, opts = {}) {
     apiLogId = logResult.lastInsertRowid
   } catch (err) {
     console.warn('[api-logger] Failed to log:', err.message)
+  }
+
+  if (errorEvent || (responseStatus && responseStatus >= 400)) {
+    notify({
+      source: 'api-log',
+      title: errorEvent ? 'Stream error' : `HTTP ${responseStatus}`,
+      error: errorEvent?.error || null,
+      meta: {
+        method,
+        url: url.length > 200 ? url.slice(0, 200) + '…' : url,
+        status: responseStatus,
+        logSource: logSource || null,
+        duration_ms: duration,
+        apiLogId,
+      },
+    })
   }
 
   if (errorEvent && !finalResult) {
