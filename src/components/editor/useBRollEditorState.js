@@ -103,6 +103,18 @@ function reducer(state, action) {
       )
       return { ...state, rawPlacements: updated }
     }
+    case 'LOAD_EDITOR_STATE': {
+      const { state: loaded, version } = action.payload
+      return {
+        ...state,
+        edits: loaded.edits || {},
+        userPlacements: Array.isArray(loaded.userPlacements) ? loaded.userPlacements : [],
+        undoStack: Array.isArray(loaded.undoStack) ? loaded.undoStack : [],
+        redoStack: Array.isArray(loaded.redoStack) ? loaded.redoStack : [],
+        editorStateVersion: version || 0,
+        dirty: false,
+      }
+    }
     default:
       return state
   }
@@ -116,6 +128,13 @@ const initialState = {
   searchProgress: null,
   loading: true,
   error: null,
+  // Editor state — persisted per pipeline
+  edits: {},                  // { "chapterIdx:placementIdx": { hidden?, timelineStart?, timelineEnd?, selectedResult? } }
+  userPlacements: [],          // array of user-created placements (pastes, cross-variant copies)
+  undoStack: [],               // array of action objects
+  redoStack: [],               // array of action objects
+  editorStateVersion: 0,       // for optimistic concurrency
+  dirty: false,                // true while a debounced save is pending
 }
 
 export function useBRollEditorState(planPipelineId) {
@@ -186,6 +205,20 @@ export function useBRollEditorState(planPipelineId) {
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
   }, [planPipelineId, transcriptWords])
+
+  // Load editor-state in parallel with editor-data. We do a dedicated fetch to get the
+  // full state (edits/userPlacements/undo/redo) — editor-data only merges it into placements.
+  useEffect(() => {
+    if (!planPipelineId) return
+    let cancelled = false
+    authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
+      .then(data => {
+        if (cancelled) return
+        dispatch({ type: 'LOAD_EDITOR_STATE', payload: data })
+      })
+      .catch(() => { /* non-fatal; empty state stays */ })
+    return () => { cancelled = true }
+  }, [planPipelineId])
 
   // Re-resolve when transcript words change (rare — only on initial track load)
   useEffect(() => {
@@ -310,11 +343,18 @@ export function useBRollEditorState(planPipelineId) {
     resetAllPlacements,
     refetchEditorData,
     planPipelineId,
+    edits: state.edits,
+    userPlacements: state.userPlacements,
+    undoStack: state.undoStack,
+    redoStack: state.redoStack,
+    editorStateVersion: state.editorStateVersion,
+    dirty: state.dirty,
   }), [
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
     searchPlacement, searchPlacementCustom, hidePlacement, updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
+    state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
   ])
 }
