@@ -8,7 +8,7 @@ import BRollDetailPanel from './BRollDetailPanel.jsx'
 import Timeline from './Timeline.jsx'
 import PlaybackControls from './PlaybackControls.jsx'
 import { apiPost } from '../../hooks/useApi.js'
-import { Loader2, Square } from 'lucide-react'
+import { Loader2, Square, Undo2, Redo2 } from 'lucide-react'
 
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
@@ -246,6 +246,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
           {/* Bottom: playback controls + timeline */}
           <div className="flex flex-col gap-2 pb-4 shrink-0" style={{ height: `${bottomH}px` }}>
             <PlaybackControls />
+            <UndoRedoToolbar
+              undoStack={brollState.undoStack}
+              redoStack={brollState.redoStack}
+              onUndo={brollState.undo}
+              onRedo={brollState.redo}
+            />
             <div className="flex-1 min-h-0">
               <Timeline
                 variants={variants}
@@ -368,4 +374,36 @@ function SearchStatusBar({ placements, searchProgress, allPlanPipelineIds, onRef
   }
 
   return null
+}
+
+function UndoRedoToolbar({ undoStack, redoStack, onUndo, onRedo }) {
+  const canUndo = undoStack.length > 0
+  const canRedo = redoStack.length > 0
+  const lastUndo = canUndo ? undoStack[undoStack.length - 1] : null
+  const lastRedo = canRedo ? redoStack[redoStack.length - 1] : null
+  const labelFor = (entry) => {
+    if (!entry) return ''
+    const verb = { delete: 'Delete', move: 'Move', resize: 'Resize', paste: 'Paste', 'drag-cross': 'Move between variants', reset: 'Reset', 'select-result': 'Swap result' }[entry.kind] || entry.kind
+    return verb
+  }
+  return (
+    <div className="flex items-center gap-1 px-2 py-1 border-b border-white/5 shrink-0">
+      <button
+        onClick={onUndo}
+        disabled={!canUndo}
+        title={canUndo ? `Undo: ${labelFor(lastUndo)}` : 'Nothing to undo'}
+        className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30 disabled:hover:bg-transparent"
+      >
+        <Undo2 size={14} />
+      </button>
+      <button
+        onClick={onRedo}
+        disabled={!canRedo}
+        title={canRedo ? `Redo: ${labelFor(lastRedo)}` : 'Nothing to redo'}
+        className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 disabled:opacity-30 disabled:hover:bg-transparent"
+      >
+        <Redo2 size={14} />
+      </button>
+    </div>
+  )
 }

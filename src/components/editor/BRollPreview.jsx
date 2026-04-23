@@ -27,7 +27,7 @@ export default function BRollPreview() {
       if (activeResult) {
         if (!showBRoll) setShowBRoll(true)
         if (brollVideoRef.current) {
-          const url = activeResult.preview_url_hq || activeResult.preview_url || activeResult.url
+          const url = activeResult.preview_url || activeResult.preview_url_hq || activeResult.url
           if (brollVideoRef.current.src !== url) brollVideoRef.current.src = url
           const localTime = s.currentTime - activePlacement.timelineStart
           const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
