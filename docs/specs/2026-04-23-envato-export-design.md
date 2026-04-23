@@ -428,19 +428,89 @@ Per-item manifest entry is source-tagged:
 Extension branches on `source`: calls 3-phase flow for Envato, or
 `/api/<source>-url` + direct download for Pexels/Freepik.
 
-### Integration with adpunk.ssh GPU search
+### Integration with adpunk.ssh GPU search (upstream funnel)
 
-Search results in `broll_searches.results_json` already have `source`
-(per existing project state). This spec adds two fields captured at
-search time:
+Export is the tail of a 4-stage funnel. The export spec only consumes
+the output of stage 3; stages 1-3 live in adpunk.ssh. Documented here
+so the data contract is clear.
 
-- `source_item_id` — canonical id for the source (NX9WYGQ for Envato,
-  numeric for Pexels, UUID for Freepik)
-- `licensed_url_path` — internal reference used by
-  `/api/<source>-url` to look up the item
+```
+┌── stage 1 ────────┐ ┌── stage 2 ─────┐ ┌── stage 3 ───────┐ ┌── stage 4 ───┐
+│ scrape candidates │ │ SigLIP on       │ │ video rerank     │ │ export       │
+│ (transcript-eval  │ │ poster images   │ │ (top-N only)     │ │ (this spec)  │
+│  adpunk.ssh jobs) │ │ (adpunk.ssh GPU)│ │ adpunk.ssh GPU   │ │              │
+│                   │ │                 │ │                  │ │              │
+│ per source, pull  │ │ embed ~5KB      │ │ download preview │ │ extension    │
+│ N hundred items:  │ │ posters + query │ │ mp4 (~10MB)      │ │ downloads    │
+│ - poster URLs     │ │ text; cosine    │ │ for top-N only,  │ │ licensed     │
+│ - preview URLs    │ │ similarity;     │ │ temporal embed / │ │ full files   │
+│ - source_item_id  │ │ drop low-rank   │ │ Qwen rerank;     │ │ (Envato)     │
+│ - envato_item_url │ │ (cheap on KB    │ │ produce final    │ │ + API URLs   │
+│                   │ │  image tensors) │ │ ranking          │ │ (Pexels,     │
+│                   │ │                 │ │                  │ │  Freepik)    │
+└───────────────────┘ └─────────────────┘ └──────────────────┘ └──────────────┘
+  ~500 candidates      ~500 candidates     ~20-50 shortlisted   ~N picks user
+  (broll_searches      ranked, no video    with preview video   chose in editor
+   rows created)       download yet        cached               (final export)
+```
 
-The adpunk.ssh GPU search pipeline needs to return these. (That's a
-separate ticket on the adpunk.ssh side; this spec only consumes them.)
+Stage-by-stage responsibilities:
+
+**Stage 1 — scrape (transcript-eval + adpunk.ssh):**
+For each search placement, fetch candidate items per source. Capture
+**poster-only** (no video) to keep ingest cheap:
+- Envato: HTML scrape of `elements.envato.com/stock-video/<query>`
+  (already proven: 38 items/page with poster URLs, no rate-limit).
+- Pexels: API call, poster thumbnail URL.
+- Freepik: API call, thumbnail URL.
+
+Persist per candidate: `source`, `source_item_id`, `poster_url`,
+`preview_url`, `envato_item_url` (Envato only), basic metadata
+(resolution, duration if available).
+
+**Stage 2 — SigLIP on poster images (adpunk.ssh GPU):**
+Existing: `server/worker.py`, `model_registry.py`. Download the ~5 KB
+poster images in parallel (proven 144/144 ok at 24 concurrent,
+10k/10k at 90s aggregate). Embed each image + embed the query text;
+cosine similarity; sort. Cheap: poster tensors are small, thousands per
+second on RTX 3090.
+
+Output: ranked list of candidates by image-text similarity. No videos
+downloaded yet. This is where the 90% noise gets cut.
+
+**Stage 3 — video rerank (adpunk.ssh GPU):**
+Existing: `server/qwen_reranker.py`. For top-N (20-50) from stage 2,
+download the preview mp4 (~10 MB each, proven 100% reliable, no auth).
+Sample frames, temporal embedding, Qwen reranker for semantic
+re-scoring.
+
+Output final ranking stored in `broll_searches.results_json`. Include
+per-result:
+- `source`, `source_item_id`
+- `envato_item_url` (Envato only, for export's Phase 1 resolver)
+- `poster_url`, `preview_url` (for editor UI)
+- `resolution`, `frame_rate`, `duration_seconds`
+- `rank_score`, `rank_method` (siglip+qwen)
+
+**Stage 4 — export (this spec):**
+User browses ranked results in `/editor/:id/brolls/edit` (seeing
+posters + on-hover preview videos from stage 1 cache). User picks
+final b-rolls into a variant timeline. Clicks Export → extension does
+3-phase licensed download on Envato + API-proxy download on
+Pexels/Freepik.
+
+### Stage boundary: what export requires
+
+Export's only hard contract with upstream:
+- `broll_searches.results_json` populated with `source` +
+  `source_item_id` (all sources) + `envato_item_url` (Envato).
+- Optional metadata: `resolution`, `frame_rate`, `duration_seconds`,
+  `est_size_bytes` (used by export page pre-flight for byte estimate
+  and XMEML `<samplecharacteristics>`).
+
+Stage 1-3 implementation details (scraper regexes, SigLIP model
+version, batch sizes, GPU provisioning) are out of scope for this
+spec — they belong in a separate adpunk.ssh spec.
 
 ## Download flow detail — Envato three phases
 
