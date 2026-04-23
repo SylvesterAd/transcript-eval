@@ -678,6 +678,46 @@ const signedUrl = text.match(/"downloadUrl","(https:\/\/[^"]+)"/)[1];
 **Calling this endpoint commits a license.** Never speculatively, only
 after user clicked Export.
 
+#### Resolution selection
+
+Envato items offer 1-3 resolution variants (720p, 1080p, 2K, 4K).
+**Policy:** pick the smallest file that meets a 1080p quality bar:
+
+```
+available = item.available_resolutions  // sorted ascending
+if 1080 in available:
+  pick 1080p                              // normal case
+elif any r >= 1080 in available:
+  pick min(r for r in available if r >= 1080)   // e.g., 2K if only 2K+4K
+else:
+  pick max(available)                     // accept 720p if that's all
+```
+
+Rationale: 1080p is the Premiere sequence target. Larger files waste
+disk + download time; 720p is acceptable only when the item truly has
+nothing higher.
+
+**Wire-format TBD — needs one more HAR capture.** The HAR we have
+(from a single-resolution item, ocean-NX9WYGQ) doesn't show the
+resolution picker mechanism. Two likely patterns based on standard
+flows:
+
+- **Pattern A**: available variants listed in the item-detail `.data`
+  response (`app.envato.com/stock-video/<UUID>.data`), then
+  `download.data` accepts a `resolution=1080p` (or `variantId`) param.
+- **Pattern B**: separate endpoint (e.g., `/item-variants.data`)
+  returns variants; `download.data` commits a specific variant by ID.
+
+To confirm: open an item that has multiple resolutions (e.g., any 4K
+clip), click Download, pick 1080p in the picker, capture HAR with
+Preserve log on. The `download.data` request (or a sibling) will show
+the resolution parameter shape.
+
+Implementation then: parse variants from detail response, apply
+selection rule, pass preferred variant to `download.data`. Fallback
+if unknown: call `download.data` with no variant param (gets Envato
+default, usually highest) and accept the cost.
+
 ### Phase 3: Save file
 
 ```js
@@ -1298,6 +1338,10 @@ side-by-side with the related `exports` row.
 4. **Folder-path format in `exports.folder_path`.** Include full path
    (e.g. `/Users/<user>/Downloads/.../`) or redact to
    `~/Downloads/.../`. Privacy vs. reproducibility.
+
+5. **Exact resolution-selection wire format.** See Phase 2 —
+   `download.data` resolution parameter vs. separate variants
+   endpoint. Needs one HAR capture of the picker to confirm.
 
 ## Implementation phases
 
