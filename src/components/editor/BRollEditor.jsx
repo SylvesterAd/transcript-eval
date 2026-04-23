@@ -9,6 +9,7 @@ import Timeline from './Timeline.jsx'
 import PlaybackControls from './PlaybackControls.jsx'
 import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square, Undo2, Redo2 } from 'lucide-react'
+import { scheduleBrollPreload, clearBrollPreload } from './brollPreloader.js'
 
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
@@ -214,6 +215,19 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [brollState.selectedIndex, brollState.hidePlacement, brollState.selectPlacement, brollState.undo, brollState.redo, brollState.copyPlacement, brollState.pastePlacement, brollState.selectedPlacement, editorCtx])
+
+  // Preload next few b-roll clips on the active variant and inactive variants.
+  useEffect(() => {
+    scheduleBrollPreload({
+      activePlacements: brollState.placements || [],
+      inactivePlacementsByPid: inactiveVariantPlacements || {},
+      currentTime: editorCtx?.state?.currentTime || 0,
+      selectedResultsByIndex: brollState.selectedResults || {},
+    })
+  }, [brollState.placements, inactiveVariantPlacements, editorCtx?.state?.currentTime, brollState.selectedResults])
+
+  // Clean up preload tags on unmount
+  useEffect(() => () => clearBrollPreload(), [])
 
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
