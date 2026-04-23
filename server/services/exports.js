@@ -9,14 +9,22 @@ import { ulid } from 'ulid'
 import db from '../db.js'
 // import { notify } from './slack-notifier.js'   // used by upcoming task (Task 6)
 
+export class ValidationError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ValidationError'
+    this.status = 400
+  }
+}
+
 export function mintExportId() {
   return `exp_${ulid()}`
 }
 
 export async function createExport({ userId, planPipelineId, variantLabels, manifest }) {
-  if (!planPipelineId) throw new Error('plan_pipeline_id required')
-  if (!Array.isArray(variantLabels) || variantLabels.length === 0) throw new Error('variant_labels must be a non-empty array')
-  if (!manifest || typeof manifest !== 'object') throw new Error('manifest must be an object')
+  if (!planPipelineId) throw new ValidationError('plan_pipeline_id required')
+  if (!Array.isArray(variantLabels) || variantLabels.length === 0) throw new ValidationError('variant_labels must be a non-empty array')
+  if (!manifest || typeof manifest !== 'object') throw new ValidationError('manifest must be an object')
 
   const id = mintExportId()
   const manifestJson = JSON.stringify(manifest)
@@ -33,6 +41,9 @@ export async function createExport({ userId, planPipelineId, variantLabels, mani
 export async function getExport(id, { userId } = {}) {
   const row = await db.prepare('SELECT * FROM exports WHERE id = ?').get(id)
   if (!row) return null
-  if (userId && row.user_id && row.user_id !== userId) return null   // no leaking across users
+  // If caller passed a userId, the row must match (null-owner rows are
+  // treated as inaccessible — there is no legitimate null-owner code
+  // path in Phase 1; all creates go through a requireAuth route).
+  if (userId && row.user_id !== userId) return null
   return row
 }
