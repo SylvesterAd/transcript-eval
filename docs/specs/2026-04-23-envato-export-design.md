@@ -1316,8 +1316,18 @@ side-by-side with the related `exports` row.
 - UXP Premiere plugin (one-click in-Premiere import). After XMEML path
   ships.
 - Safari / Firefox / Edge-first support. Chrome-only.
-- DaVinci Resolve, Final Cut Pro explicit targeting. XMEML works for
-  most, untested, deferred.
+- **DaVinci Resolve** — xmeml imports natively via File > Import >
+  Timeline, same as Premiere. Untested end-to-end but should work
+  with our output as-is. Explicit validation deferred.
+- **Final Cut Pro 11** — does NOT accept FCP7 xmeml (dropped long
+  ago). Needs FCPXML 1.13. Out of scope for MVP; add an FCPXML
+  generator later (same placement data, different XML schema).
+- **CapCut** — desktop/mobile do not support ANY NLE project-file
+  import (no XML, FCPXML, AAF, EDL, OTIO). Native draft format is
+  encrypted as of April 2024. Only interchange with CapCut is
+  rendered video (`.mp4`). Not addressable without a ByteDance
+  partnership; permanently out of scope unless they publish an
+  import API.
 - Server-side Envato download orchestration. Never; violates user-IP
   constraint.
 - Extension as primary login for transcript-eval. Token passed via
@@ -1413,7 +1423,14 @@ Items deferred but noted so they don't get lost:
 - **Storyblocks, Adobe Stock** as additional sources (Storyblocks has a
   clean API path already proven; Adobe Stock has the watermark-relink
   UX of dreams but cost-prohibitive).
-- **DaVinci Resolve / FCP direct export** formats beyond xmeml.
+- **FCPXML 1.13 generator** to cover Final Cut Pro 11 + give Resolve
+  users a richer alternative (FCPXML preserves more effects/keyframes
+  than xmeml). Same placement-data input, different XML emitter
+  (~400 LOC). Ship after Premiere + Resolve xmeml is stable.
+- **Resolve OTIO export** as an alternative to xmeml — Resolve 18+
+  supports OTIO import natively, cleaner round-trip than xmeml.
+  Lower priority than FCPXML since Resolve already works with
+  xmeml.
 - **Proxy / lower-res rendering** in transcript-eval server for users
   who want faster editing before licensing full files.
 - **License metadata capture** per Envato download (license ID,
