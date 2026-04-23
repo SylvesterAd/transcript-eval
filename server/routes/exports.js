@@ -3,6 +3,7 @@ import { requireAuth } from '../auth.js'
 import { mintExtToken, requireExtAuth } from '../services/ext-jwt.js'
 import { createExport, recordExportEvent, ValidationError, NotFoundError } from '../services/exports.js'
 import { getDownloadUrl as pexelsGetDownloadUrl, isEnabled as pexelsEnabled } from '../services/pexels.js'
+import { getSignedDownloadUrl as freepikGetSignedUrl, isEnabled as freepikEnabled, RateLimitError as FreepikRateLimitError } from '../services/freepik.js'
 
 const router = Router()
 
@@ -57,6 +58,21 @@ pexelsUrlRouter.post('/', requireExtAuth, async (req, res, next) => {
     res.json(result)
   } catch (err) {
     if (err instanceof NotFoundError) return res.status(404).json({ error: 'Pexels item not found' })
+    next(err)
+  }
+})
+
+export const freepikUrlRouter = Router()
+freepikUrlRouter.post('/', requireExtAuth, async (req, res, next) => {
+  try {
+    if (!freepikEnabled()) return res.status(503).json({ error: 'Freepik is not configured' })
+    const { item_id, format } = req.body || {}
+    if (!item_id) return res.status(400).json({ error: 'item_id required' })
+    const result = await freepikGetSignedUrl(item_id, format || 'mp4')
+    res.json(result)
+  } catch (err) {
+    if (err instanceof NotFoundError) return res.status(404).json({ error: 'Freepik item not found' })
+    if (err instanceof FreepikRateLimitError) return res.status(429).json({ error: 'Freepik rate limit' })
     next(err)
   }
 })
