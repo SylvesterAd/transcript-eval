@@ -108,7 +108,7 @@ function convertSql(sql) {
 // Retry on transient pool/connection errors — pgBouncer session-mode
 // rejects with "MaxClientsInSessionMode" when pool_size is saturated.
 // A short backoff usually clears this.
-async function queryWithRetry(sql, params, maxRetries = 3) {
+async function queryWithRetry(sql, params, maxRetries = 1) {
   let lastErr
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -118,7 +118,7 @@ async function queryWithRetry(sql, params, maxRetries = 3) {
       const msg = err?.message || ''
       const transient = /max clients|MaxClientsInSessionMode|ECONNREFUSED|Connection terminated|timeout/i.test(msg)
       if (!transient || attempt === maxRetries) throw err
-      await new Promise(r => setTimeout(r, 75 * Math.pow(2, attempt)))
+      await new Promise(r => setTimeout(r, 150))
     }
   }
   throw lastErr
