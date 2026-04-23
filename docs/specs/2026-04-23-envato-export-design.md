@@ -100,6 +100,73 @@ session, matching their fingerprint. The extension's downloads are click-
 equivalent actions from the user's perspective (user initiated the export,
 the extension is their proxy for clicking 300 buttons).
 
+## Authentication
+
+Two independent identity surfaces, with different mechanisms:
+
+### 1. Envato session (for downloads)
+
+The extension uses the user's existing Envato cookies — no separate login
+inside the extension. If cookies are missing or expired:
+
+- Popup shows: `Envato: ⚠ sign in required` with a "Sign in" button.
+- Button opens `https://app.envato.com/sign-in` in a new tab.
+- Extension watches `chrome.cookies.onChanged` for `envato_client_id`
+  and/or `elements.session.5` — once set, marks session healthy.
+- Any paused export queue resumes automatically.
+
+**Pre-flight check before each run:** one GET to
+`app.envato.com/download.data` with a reference itemUuid. 200 OK = proceed.
+401 = prompt user, do not start.
+
+Per-item subscription check is unnecessary — cookie-based session remains
+valid for an entire run unless Envato invalidates mid-flight (handled in
+failure modes).
+
+### 2. transcript-eval identity (for event logging + export records)
+
+Extension needs to know which transcript-eval user initiated the export.
+
+**Do NOT make the extension the primary login for transcript-eval.**
+Extension breaks = user locked out of app. Bad failure mode.
+
+**Instead:** web app mints a short-lived session token (JWT, 8h TTL) and
+passes it to the extension via `postMessage` on the first export click:
+
+```js
+// transcript-eval web app
+chrome.runtime.sendMessage(EXTENSION_ID, {
+  type: "session",
+  token: "eyJ...",       // short-lived JWT signed by server
+  user_id: "<uuid>",
+  expires_at: <epoch_ms>
+});
+```
+
+Extension stores the token in `chrome.storage.local`, uses it as
+`Authorization: Bearer` when posting to `/api/export-events`. If the token
+401s, extension asks web app to refresh via
+`postMessage({ type: "refresh_session" })`. If the web app isn't open, popup
+shows: "Open transcript-eval to continue."
+
+### Popup status surface
+
+The toolbar popup always shows combined health:
+
+```
+┌─────────────────────────────────────────────┐
+│  transcript-eval Export Helper              │
+│                                             │
+│  transcript-eval:  ✓ connected              │
+│  Envato:           ✓ subscription active    │
+│                    (unlimited33_monthly)    │
+│                                             │
+│  [ Ready for export ]                       │
+└─────────────────────────────────────────────┘
+```
+
+Each row is clickable when red — launches the respective sign-in flow.
+
 ## Download flow detail — three phases per item
 
 ### Phase 1: Resolve old ID → new platform UUID
@@ -188,6 +255,53 @@ await chrome.downloads.download({
 Envato's default filename (e.g. `ocean-2026-01-28-05-03-58-utc.mov`) is
 overridden at download time. Our filename scheme: `<seq>_<oldId>.mov`
 (e.g. `001_NX9WYGQ.mov`) so xmeml path resolution matches deterministically.
+
+## Large exports (100 GB+)
+
+A real export can be 300 items × ~150-300 MB each ≈ 30-90 GB. At typical
+home internet (100 Mbps), that's 2-4 hours. This breaks naive designs:
+
+| Problem | Mitigation |
+|---|---|
+| Signed URLs expire ~1 hour after minting | **Just-in-time URL fetching.** Don't batch-fetch 300 URLs upfront. Each worker fetches `download.data` immediately before starting its download; URL is <60s old when download begins. |
+| User closes Chrome or laptop sleeps mid-run | **Persistent queue state in `chrome.storage.local`.** Queue resumes automatically on service-worker wake. Popup shows "Resume export (203/300 remaining)?" button. |
+| macOS/Windows auto-sleep kills downloads | `chrome.power.requestKeepAwake("system")` on run start, `releaseKeepAwake()` on complete/pause. User override: "Keep awake during exports" toggle in popup. |
+| Flaky WiFi interrupts a single file mid-download | `chrome.downloads.resume(downloadId)` when `onChanged` reports `state=interrupted` with a `NETWORK_*` error. Chrome preserves byte offset. Max 3 resume attempts before marking `network_failed`. |
+| Insufficient disk space | Before run, estimate total bytes (sum of captured file sizes, or 200 MB × count fallback). Check `navigator.storage.estimate()`. Abort with clear error if insufficient + 10% buffer. |
+| 300+ parallel downloads saturate uplink or flag Envato | **Concurrency limits:** 5 parallel in Phase 1 (resolver), **3 parallel in Phases 2+3** (license + download). Three concurrent big downloads is roughly the ceiling a typical user would initiate manually. |
+| No user visibility over 4 hours | Popup shows live: `47/300 done · 12.3 GB / 89.1 GB · ETA 2h 14m · current 85 Mbps`. Per-item rows: ⏳ / ✓ / ⚠ / ✗. Pause / resume / cancel controls. |
+
+### Run state persistence
+
+Every phase transition → `chrome.storage.local.set({ [runId]: queueState })`:
+
+```
+{
+  runId,
+  started_at, updated_at,
+  items: [
+    { seq, itemId, envato_item_url, target_filename,
+      phase,            // queued | resolving | licensing | downloading | done | failed
+      download_id,      // chrome.downloads id once started
+      bytes_received,
+      error_code        // nullable
+    },
+    ...
+  ],
+  stats: { completed, failed, total_bytes_downloaded }
+}
+```
+
+Crash-safe: service worker writes state after every phase transition, so a
+Chrome restart, OS reboot, or laptop sleep cannot lose more than the current
+in-flight item.
+
+### Partial-run XML generation
+
+If a run finishes with N of 300 items complete (user cancelled, or a few
+items permanently failed): web app can still generate XML from the
+successful downloads. Missing clips appear as Premiere-offline (red) — user
+can manually relink or re-run export for just the missing items.
 
 ## Data model changes
 
@@ -401,21 +515,131 @@ Hard rules the extension enforces:
    `app.envato.com/download.data?itemUuid=...` once with a known-good
    reference item. If response is a 401/redirect-to-login, abort the run
    and prompt user to re-login.
-6. **No retries on 403/429.** Surface immediately to user, pause entire
-   run, wait for user confirmation to continue.
+6. **403 = hard stop.** Not auto-recoverable (account flagged or API
+   change). Surface immediately, Slack alert.
+7. **429 = backoff.** Honor `Retry-After` header + 20% jitter, then retry
+   once. If second 429, pause 5 min and try once more before hard stop.
+
+## Observability (admin visibility)
+
+### Event ingestion endpoint
+
+New route: `POST /api/export-events` on transcript-eval backend.
+
+Payload (single event or array of events):
+
+```
+{
+  export_id:    "exp_01JQ...",
+  user_id:      "<transcript-eval user uuid>",
+  event:        "item_failed",
+  item_id:      "NX9WYGQ",
+  phase:        "download",       // resolve | license | download | xml
+  error_code:   "envato_403",
+  http_status:  403,
+  retry_count:  2,
+  meta:         { url_host: "video-downloads.elements..." },
+  t:            1776942569000
+}
+```
+
+Auth: Bearer JWT (from postMessage handshake, see Authentication).
+
+### Event types (MVP)
+
+| Event | When | Key fields |
+|---|---|---|
+| `export_started` | User clicks Export, extension accepts manifest | total_items, est_bytes |
+| `item_resolved` | Phase 1 complete for one item | item_id, resolve_ms |
+| `item_licensed` | Phase 2 complete for one item | item_id, license_ms |
+| `item_downloaded` | Phase 3 complete for one item | item_id, bytes, download_ms |
+| `item_failed` | Any phase errored after retries exhausted | item_id, phase, error_code, http_status, retry_count |
+| `rate_limit_hit` | 429 response from Envato | retry_after_sec |
+| `session_expired` | 401 on download.data | (none) |
+| `queue_paused` / `queue_resumed` | User-initiated | reason |
+| `export_completed` | Run end (success or partial) | ok_count, fail_count, wall_seconds, total_bytes |
+
+### Storage
+
+New table: `export_events`
+
+```sql
+CREATE TABLE export_events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  export_id    TEXT NOT NULL,
+  user_id      TEXT,
+  event        TEXT NOT NULL,
+  item_id      TEXT,
+  phase        TEXT,
+  error_code   TEXT,
+  http_status  INTEGER,
+  retry_count  INTEGER,
+  meta_json    TEXT,
+  t            INTEGER NOT NULL,
+  received_at  INTEGER NOT NULL
+);
+CREATE INDEX idx_export_events_export    ON export_events(export_id, t);
+CREATE INDEX idx_export_events_failures  ON export_events(event, received_at)
+  WHERE event IN ('item_failed','rate_limit_hit','session_expired');
+```
+
+Retention: 90 days, then auto-purged by a nightly job.
+
+### Admin UI
+
+Simple list view at `/admin/exports`:
+
+- Recent exports (paginated), per-export event timeline on click.
+- Filter: `event IN ('item_failed','rate_limit_hit','session_expired')`
+  for triage.
+- Per-user view: all exports for a given `user_id` + failure rate.
+
+### Slack alerting
+
+Wire into existing `server/services/slack-notifier.js`. Fire `notify()` on:
+
+- Any `item_failed` with `error_code` in `{ envato_403, envato_429 }`.
+- Any `session_expired` (suggests Envato fingerprint change or user
+  logout).
+- Any `export_completed` where `fail_count >= 10`.
+- Pattern detector: ≥3 distinct users hitting `envato_403` within 15 min
+  → Slack with "possible Envato API change" title.
+
+Dedupe: same `{user_id, event, error_code}` within 60s collapses to one
+Slack message. Prevents floods during a mass incident.
+
+### Privacy
+
+- No video titles, search queries, or user-identifying file paths in
+  event `meta`.
+- `user_id` is a transcript-eval internal UUID — not PII.
+- User opt-out: extension setting "Send diagnostic events to transcript-eval
+  admins" (default on). Off disables `/api/export-events` posts but export
+  itself still works.
 
 ## Failure modes & handling
 
-| Failure | Extension behavior |
-|---|---|
-| Resolve phase timeout (Phase 1) | Mark item `resolve_failed`, continue rest, retry failed items at end. |
-| `download.data` returns 401 | Session expired. Pause queue, popup shows "Please log into Envato." |
-| `download.data` returns 403/429 | Pause queue. Popup shows error + "Retry later" button. Do NOT auto-retry. |
-| `chrome.downloads` error (disk full, path perm) | Pause, popup shows OS-level error. |
-| User closes browser mid-run | Service worker persists queue state to `chrome.storage.local`. On next Chrome start, popup shows "Resume export?" |
-| Envato's signed URL expires during pending download (>1h) | Re-fetch `download.data` for that item only. |
-| XML generation fails (e.g., corrupt placements) | Web app surfaces error; downloads are already on disk, user can manually relink in Premiere or retry XML-only. |
-| Clip file corrupted on disk after download | Extension checksums via `chrome.downloads.search()` + file size match; if mismatched, delete + retry that item. |
+Per-error-code behavior. **Retry semantics: exponential backoff unless
+noted; 1s → 5s → 15s → 60s; max 4 attempts.**
+
+| Trigger | Phase | Strategy |
+|---|---|---|
+| Resolver tab navigation timeout | 1 resolve | Retry once with 30s timeout. Then skip + mark `resolve_failed`; continue rest of queue. Event: `item_failed`. |
+| Resolver: UUID not found in redirect URL | 1 resolve | Item likely delisted. Skip + mark `resolve_failed`; no retry. |
+| `download.data` network error (timeout / DNS fail / 5xx) | 2 license | Exp backoff, 4 attempts. Then mark `license_failed`. |
+| `download.data` 401 | 2 license | Session expired. Pause entire queue. Popup: "Re-login to Envato". Resume on session restored. Event: `session_expired`. |
+| `download.data` 403 | 2 license | Hard stop entire run. Not auto-recoverable (account flagged or API change). Popup shows error + "Contact support". Event: `item_failed` with `error_code=envato_403` + Slack alert. |
+| `download.data` 429 | 2 license | Wait `Retry-After` + 20% jitter, retry once. On second 429, pause queue 5 min then retry once more before hard stop. Event: `rate_limit_hit`. |
+| `download.data` returns empty `downloadUrl` | 2 license | Item unavailable. Skip + mark `license_failed`; no retry. |
+| Signed CDN URL expired mid-download (403 on downloads host) | 3 download | Automatic re-fetch of `download.data` for this item, retry download once. Common on long runs. |
+| `chrome.downloads` interrupted with `NETWORK_*` error | 3 download | `chrome.downloads.resume()`. Max 3 resume attempts. Then mark `network_failed`. |
+| `chrome.downloads` interrupted with `FILE_*` error | 3 download | Disk issue. Hard stop queue, popup shows OS error + "Change folder" button. |
+| `chrome.downloads` `USER_CANCELED` | 3 download | Mark `cancelled`, do not retry, continue queue. |
+| File size mismatch after download complete | 3 download | Delete file, retry once. Then mark `integrity_failed`. |
+| User closes browser mid-run | any | Queue persisted. On next service-worker wake, popup shows "Resume export (N/M)?". |
+| Machine sleeps | any | `chrome.power.requestKeepAwake()` prevents this. If override fails, resumes when machine wakes. |
+| XML generation fails (missing fields, bad placements) | xml | Web app surfaces error; downloaded files already on disk. User can fix data + re-run XML-only. |
+| Extension not installed / not reachable | web app | Export button in web app shows "Install the transcript-eval Export Helper extension" + Web Store link. |
 
 ## Non-goals for this spec
 
@@ -428,8 +652,21 @@ Hard rules the extension enforces:
   deferred.
 - Server-side download orchestration. Never. Violates the "user's IP"
   constraint.
+- Extension as primary login provider for transcript-eval. Extension
+  receives a short-lived token for event reporting only; identity stays
+  with the web app's existing auth.
 - Rendering final output video. Export delivers placed clips in NLE; user
   still does color/audio/mastering in Premiere.
+
+## Resolved decisions
+
+- **Re-export behavior.** Default: **re-use existing files** if
+  `{envato_item_id, target_filename}` already present on disk for the
+  same run folder. Force re-download is an opt-in checkbox
+  ("Re-download all files even if already present") in the extension
+  popup before starting a run. Rationale: protect user's Envato fair-use
+  counter; re-downloads waste bandwidth and subscription quota when
+  files are unchanged.
 
 ## Open questions
 
@@ -451,28 +688,31 @@ Hard rules the extension enforces:
    items, or only at start? Trade-off: more checks = less risk of partial
    failure, but every check hits Envato.
 
-5. **Re-export behavior.** When user re-exports the same variant (e.g.,
-   after tweaking), do we re-download (Envato counter ticks again) or
-   re-use existing files? Default: re-use if same `envato_item_id`; force
-   re-download is opt-in.
-
 ## Implementation phases
 
 Each phase is a PR-sized chunk. Full plan to be written via
 `superpowers:writing-plans` after this spec is approved.
 
-1. **Manifest schema + exports table** (DB migration, server route to
-   create/read exports).
+1. **DB schemas + server routes** — `exports` table, `export_events` table,
+   routes: create/read exports, `POST /api/export-events`, JWT mint
+   endpoint for the extension handshake.
 2. **Extension MVP** — MV3 skeleton, service worker with Phase 1/2/3 for
-   a single item. Test with your Envato account.
-3. **Queue + progress UI** — concurrent resolver, sequential downloader,
-   popup UI.
-4. **XMEML generator** (pure function + unit tests).
-5. **Export button + wiring in `/editor/:id/brolls/edit`** — sends
-   manifest to extension, listens for progress/done.
-6. **Failure-mode polish** — pause/resume, session-expired detection,
-   disk errors.
-7. **Web Store submission** (docs, privacy policy, screenshots).
+   a single item, postMessage handshake with web app. Test end-to-end
+   against live Envato account.
+3. **Auth + popup status UI** — JWT storage, refresh flow, session health
+   checks for both Envato and transcript-eval, clickable sign-in rows.
+4. **Queue + progress UI** — concurrent resolver (5 parallel), 3-concurrent
+   downloader, JIT URL fetching, persistent queue state, keep-awake,
+   pause/resume/cancel.
+5. **XMEML generator** (pure function + unit tests in `server/services/`).
+6. **Export button + wiring in `/editor/:id/brolls/edit`** — sends
+   manifest, listens for progress/done, writes xmeml to the download
+   folder when extension signals complete.
+7. **Failure-mode polish** — per-error retry strategies, session-expired
+   recovery, disk errors, integrity checks, partial-run XML.
+8. **Observability wiring** — event emission from extension, backend
+   ingestion, Slack dedup + alerts, admin UI list/detail view.
+9. **Web Store submission** — copy, privacy policy, screenshots, review.
 
-Timeline estimate: 4-6 weeks to Phase 7 inclusive, assuming no surprises
+Timeline estimate: 5-7 weeks to Phase 9 inclusive, assuming no surprises
 from Envato's HTML/redirect format changing mid-build.
