@@ -4,7 +4,7 @@
 // Authorization: Bearer <token> on /api/export-events and
 // /api/<source>-url. Rotation: add new entry to EXT_JWT_KEYS, flip
 // EXT_JWT_CURRENT_KID; in-flight tokens keep working until their
-// exp, because verify tries every key in the ring.
+// exp, because verify looks up the key by the token's kid header.
 
 import { SignJWT, jwtVerify } from 'jose'
 
@@ -21,7 +21,7 @@ function loadRing() {
   if (!raw) throw new Error('EXT_JWT_KEYS env var is not set')
   let parsed
   try { parsed = JSON.parse(raw) } catch { throw new Error('EXT_JWT_KEYS must be JSON') }
-  const ring = {}
+  const ring = Object.create(null)
   for (const [kid, b64] of Object.entries(parsed)) {
     const bytes = Buffer.from(b64, 'base64')
     if (bytes.length < 32) throw new Error(`EXT_JWT_KEYS.${kid} must be ≥32 bytes of base64-encoded key material`)
@@ -59,9 +59,12 @@ export async function verifyExtToken(token) {
   // Peek at header to pick the right key without parsing the body twice
   const headerB64 = token.split('.')[0] || ''
   let header
-  try { header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8')) } catch { throw new Error('malformed token') }
+  try {
+    header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8'))
+    if (!header || typeof header !== 'object' || Array.isArray(header)) throw new Error('bad header')
+  } catch { throw new Error('malformed token') }
   const kid = header.kid
-  if (!kid || !ring[kid]) throw new Error('unknown kid')
+  if (typeof kid !== 'string' || !ring[kid]) throw new Error('unknown kid')
   const { payload } = await jwtVerify(token, ring[kid], { issuer: ISSUER, audience: AUDIENCE })
   return { userId: payload.sub, payload, kid }
 }
@@ -78,6 +81,8 @@ export async function requireExtAuth(req, res, next) {
     req.ext = await verifyExtToken(token)
     next()
   } catch (err) {
-    return res.status(401).json({ error: 'Invalid or expired token', detail: err.message })
+    const body = { error: 'Invalid or expired token' }
+    if (process.env.NODE_ENV !== 'production') body.detail = err.message
+    return res.status(401).json(body)
   }
 }
