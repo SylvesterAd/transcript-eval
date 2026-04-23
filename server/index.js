@@ -12,7 +12,7 @@ import storyblocksRouter from './routes/storyblocks.js'
 import pexelsRouter from './routes/pexels.js'
 import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
-import exportsRouter, { sessionTokenRouter, exportEventsRouter } from './routes/exports.js'
+import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter } from './routes/exports.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 import { startGpuFailurePoller } from './services/gpu-failure-poller.js'
@@ -57,6 +57,7 @@ app.use('/api/gpu', gpuRouter)
 app.use('/api/exports', exportsRouter)
 app.use('/api/session-token', sessionTokenRouter)
 app.use('/api/export-events', exportEventsRouter)
+app.use('/api/pexels-url', pexelsUrlRouter)
 
 const APP_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'dev'
 const DEPLOY_TIME = new Date().toISOString()
