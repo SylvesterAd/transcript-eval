@@ -1,6 +1,8 @@
-import { useMemo, useContext, useCallback, memo } from 'react'
+import { useMemo, useContext, useCallback, useState, memo } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2 } from 'lucide-react'
+import BRollContextMenu from './BRollContextMenu.jsx'
+import { getClipboard } from './brollClipboard.js'
 
 const TRACK_H = 60
 
@@ -10,6 +12,8 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
 
   const placements = overridePlacements || broll?.placements || []
   const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
+
+  const [menuState, setMenuState] = useState(null)
 
   const labelW = 144
   const buffer = 200
@@ -103,8 +107,46 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     window.addEventListener('mouseup', onUp)
   }, [zoom, getNeighborBounds, updatePlacementPosition, selectPlacement, isActive, onActivate])
 
+  const buildMenuItems = (menu) => {
+    const p = menu.placement
+    const hasClipboard = !!getClipboard()
+    const hasEditOverride = p && broll?.edits?.[`${p.chapterIndex}:${p.placementIndex}`]
+    const items = []
+    if (p) {
+      items.push({ label: 'Copy',   shortcut: '⌘C', onClick: () => broll.copyPlacement(p.index) })
+      items.push({ label: 'Cut',    shortcut: '⌘X', onClick: () => broll.copyPlacement(p.index, { cut: true }) })
+    }
+    items.push({
+      label: 'Paste', shortcut: '⌘V', disabled: !hasClipboard,
+      onClick: () => {
+        const targetStart = p ? p.timelineEnd + 0.05 : menu.emptyAreaTime
+        broll.pastePlacement(targetStart)
+      },
+    })
+    if (p) {
+      items.push({ divider: true })
+      items.push({ label: 'Delete', shortcut: 'Del', onClick: () => { broll.hidePlacement(p.index); broll.selectPlacement(null) } })
+      if (hasEditOverride || p.isUserPlacement) {
+        items.push({ divider: true })
+        items.push({ label: 'Reset to original', onClick: () => broll.resetPlacement(p.index) })
+      }
+    }
+    return items
+  }
+
   return (
-    <div className="relative" style={{ height: TRACK_H, width: totalWidth, minWidth: '100%' }}>
+    <div
+      className="relative"
+      style={{ height: TRACK_H, width: totalWidth, minWidth: '100%' }}
+      onContextMenu={(e) => {
+        if (e.defaultPrevented) return
+        e.preventDefault()
+        const rect = e.currentTarget.getBoundingClientRect()
+        const labelW = 144
+        const timeAtClick = ((e.clientX - rect.left) + (scrollX || 0) - labelW) / zoom
+        setMenuState({ x: e.clientX, y: e.clientY, emptyAreaTime: Math.max(0, timeAtClick) })
+      }}
+    >
       {visible.map(p => {
         const left = p.timelineStart * zoom
         const width = Math.max(p.timelineDuration * zoom, 4)
@@ -128,6 +170,10 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
             }`}
             style={{ left, width, height: TRACK_H }}
             onMouseDown={(e) => handleBoxMove(p, e)}
+            onContextMenu={(e) => {
+              e.preventDefault(); e.stopPropagation()
+              setMenuState({ x: e.clientX, y: e.clientY, placement: p })
+            }}
           >
             {hasResult ? (
               <>
@@ -182,6 +228,14 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
           </div>
         )
       })}
+      {menuState && (
+        <BRollContextMenu
+          x={menuState.x}
+          y={menuState.y}
+          onClose={() => setMenuState(null)}
+          items={buildMenuItems(menuState)}
+        />
+      )}
     </div>
   )
 }

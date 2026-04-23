@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabaseClient.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { EditorContext } from './EditorView.jsx'
 import { matchPlacementsToTranscript } from './brollUtils.js'
+import { getClipboard, setClipboard } from './brollClipboard.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -547,6 +548,75 @@ export function useBRollEditorState(planPipelineId) {
   const undo = useCallback(() => dispatch({ type: 'UNDO' }), [])
   const redo = useCallback(() => dispatch({ type: 'REDO' }), [])
 
+  const copyPlacement = useCallback((index, { cut = false } = {}) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const resultIdx = state.selectedResults[index] ?? placement.persistedSelectedResult ?? 0
+    const entry = {
+      sourcePipelineId: placement.isUserPlacement ? placement.sourcePipelineId : planPipelineId,
+      sourceChapterIndex: placement.chapterIndex ?? null,
+      sourcePlacementIndex: placement.placementIndex ?? null,
+      sourceUserPlacementId: placement.userPlacementId ?? null,
+      selectedResult: resultIdx,
+      results: JSON.parse(JSON.stringify(placement.results || [])),
+      snapshot: {
+        description: placement.description,
+        audio_anchor: placement.audio_anchor,
+        function: placement.function,
+        type_group: placement.type_group,
+        source_feel: placement.source_feel,
+        style: placement.style,
+      },
+      durationSec: placement.timelineDuration,
+      copiedAt: Date.now(),
+    }
+    setClipboard(entry)
+    if (cut) hidePlacement(index)
+  }, [state.placements, state.selectedResults, planPipelineId, hidePlacement])
+
+  const pastePlacement = useCallback((targetStartSec) => {
+    const entry = getClipboard()
+    if (!entry) return
+    const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+    const timelineStart = Math.max(0, targetStartSec)
+    const timelineEnd = timelineStart + Math.max(0.5, entry.durationSec || 1)
+    const up = {
+      id: uuid,
+      sourcePipelineId: entry.sourcePipelineId,
+      sourceChapterIndex: entry.sourceChapterIndex,
+      sourcePlacementIndex: entry.sourcePlacementIndex,
+      timelineStart, timelineEnd,
+      selectedResult: entry.selectedResult,
+      results: entry.results,
+      snapshot: entry.snapshot,
+    }
+    const action = {
+      id: generateActionId(),
+      ts: Date.now(),
+      kind: 'paste',
+      userPlacementId: uuid,
+      before: { userPlacementDelete: true },
+      after:  { userPlacementCreate: up },
+    }
+    dispatch({ type: 'APPLY_ACTION', payload: action })
+  }, [])
+
+  const resetPlacement = useCallback((index) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    if (!placementKey) return
+    const prev = state.edits[placementKey]
+    if (!prev) return
+    dispatch({ type: 'APPLY_ACTION', payload: {
+      id: generateActionId(), ts: Date.now(), kind: 'reset', placementKey,
+      before: { editsSlot: prev },
+      after:  { editsSlot: null },
+    }})
+  }, [state.placements, state.edits])
+
   const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd, opts = {}) => {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
@@ -617,6 +687,9 @@ export function useBRollEditorState(planPipelineId) {
     hidePlacement,
     undo,
     redo,
+    copyPlacement,
+    pastePlacement,
+    resetPlacement,
     updatePlacementPosition,
     resetAllPlacements,
     refetchEditorData,
@@ -632,7 +705,9 @@ export function useBRollEditorState(planPipelineId) {
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
-    searchPlacement, searchPlacementCustom, hidePlacement, undo, redo, updatePlacementPosition,
+    searchPlacement, searchPlacementCustom, hidePlacement, undo, redo,
+    copyPlacement, pastePlacement, resetPlacement,
+    updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
     flushSave,
