@@ -471,10 +471,36 @@ Persist per candidate: `source`, `source_item_id`, `poster_url`,
 
 Validated prototypes in `/tmp/envato-test/` during spec work:
 
-- **Method.** `GET elements.envato.com/stock-video/<query>` returns a
-  server-rendered HTML page with 38 item grid cards. One regex pair
-  per card captures: item detail URL (old 7-char ID format), preview
-  mp4 UUID, poster image URL (multiple widths, pre-signed).
+- **Method.** `GET elements.envato.com/stock-video/stock-footage/<query>`
+  returns a server-rendered HTML page with 37+ item grid cards (pure
+  single-video items). One regex pair per card captures: item detail
+  URL (old 7-char ID format), preview mp4 UUID, poster image URL
+  (multiple widths, pre-signed).
+- **Exclude ZIP-delivered items at URL level.** Envato's `stock-video`
+  root bundles multiple subcategories. Only `stock-footage` delivers
+  single .mov/.mp4 files; `motion-graphics` delivers AE/Premiere
+  template .zip bundles, which we can't usefully place in the Premiere
+  timeline. Using the subcategory path in the URL excludes them at
+  scrape time.
+
+  Verified counts for query "ocean":
+    - `/stock-video/ocean`                → 40 items (mixed)
+    - `/stock-video/stock-footage/ocean`  → **37 items (use this)**
+    - `/stock-video/motion-graphics/ocean` → 27 items (ZIPs — skip)
+
+  Other subcategories (`b-roll`, `vj-loops`, `resolume`, etc.) are
+  lower priority; stick with `stock-footage` at launch. If product
+  later wants looped/VJ content, add those subcategories with the
+  same URL pattern.
+
+- **Secondary safety net.** If a non-stock-footage item ever slips
+  through (e.g., Envato moves an item between categories), detect at
+  Phase 2 by inspecting the `response-content-disposition` param in
+  the Remix `download.data` response. If the target filename ends in
+  `.zip`, **abort before saving to disk** and mark the item
+  `unsupported_filetype`. Downside: the license has already been
+  committed by that point. Worth a Slack alert so we can tighten the
+  URL filter.
 - **Stealth.** `curl_cffi` impersonating `chrome124` — real Chrome
   TLS fingerprint, HTTP/3 to Cloudflare, full Chrome header set
   (Sec-Ch-Ua-*, Sec-Fetch-*, Accept-* with br/zstd). Indistinguishable
@@ -1127,6 +1153,7 @@ Retry semantics: exponential backoff unless noted; 1s → 5s → 15s →
 | `download.data` 403 (generic) | 2 license | Hard stop. Not auto-recoverable. Popup + Slack. Event: `item_failed`, `error_code=envato_403`. |
 | `download.data` 429 | 2 license | `Retry-After` + 20% jitter, 1 retry. On second 429, pause 5 min + 1 final retry before hard stop. Event: `rate_limit_hit`. |
 | `download.data` empty `downloadUrl` | 2 license | Item unavailable. Skip, no retry. |
+| `download.data` `downloadUrl` filename ends in `.zip` | 2 license | Motion-graphics template leaked past the stock-footage URL filter. Abort before download, mark `unsupported_filetype`. Slack alert so we can tighten filter. License has already been committed (regrettable). |
 | `/api/pexels-url` or `/api/freepik-url` 404 | 2 license | Item removed upstream. Skip. Event: `item_unavailable`. |
 | `/api/freepik-url` 429 | 2 license | Our Freepik quota hit. Pause 5 min, retry once. If still 429, hard stop. Admin Slack. |
 | Signed CDN URL expired mid-download | 3 download | Auto-refetch URL for this item, retry download once. |
