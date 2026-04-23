@@ -559,6 +559,20 @@ export function useBRollEditorState(planPipelineId) {
     }
   }, [state.rawPlacements, planPipelineId])
 
+  const searchUserPlacement = useCallback(async (userPlacementId, overrides = {}) => {
+    if (!planPipelineId) return
+    try {
+      await apiPost(`/broll/pipeline/${planPipelineId}/search-user-placement`, {
+        userPlacementId, ...overrides,
+      })
+      // Reload editor-state to pick up new results on the userPlacement
+      const data = await authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
+      dispatch({ type: 'LOAD_EDITOR_STATE', payload: data })
+    } catch (err) {
+      console.error('[broll] user placement search failed:', err.message)
+    }
+  }, [planPipelineId])
+
   const hidePlacement = useCallback((index) => {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
@@ -797,6 +811,7 @@ export function useBRollEditorState(planPipelineId) {
     activePlacementAtTime,
     searchPlacement,
     searchPlacementCustom,
+    searchUserPlacement,
     hidePlacement,
     undo,
     redo,
@@ -819,7 +834,7 @@ export function useBRollEditorState(planPipelineId) {
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
-    searchPlacement, searchPlacementCustom, hidePlacement, undo, redo,
+    searchPlacement, searchPlacementCustom, searchUserPlacement, hidePlacement, undo, redo,
     copyPlacement, pastePlacement, resetPlacement, dragCrossPlacement,
     updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,

@@ -25,7 +25,13 @@ export default function BRollDetailPanel() {
 
   async function handleRetry() {
     setRetrying(true)
-    try { await broll.searchPlacement(selectedIndex) } catch {}
+    try {
+      if (placement.isUserPlacement) {
+        await broll.searchUserPlacement(placement.userPlacementId)
+      } else {
+        await broll.searchPlacement(selectedIndex)
+      }
+    } catch {}
     setRetrying(false)
   }
 
