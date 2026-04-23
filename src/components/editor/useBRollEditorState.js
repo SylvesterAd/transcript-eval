@@ -28,7 +28,11 @@ function reducer(state, action) {
     case 'SET_LOADING':
       return { ...state, rawPlacements: [], placements: [], selectedIndex: null, selectedResults: {}, loading: true, error: null }
     case 'SET_DATA_RESOLVED':
-      return { ...state, rawPlacements: action.payload.rawPlacements, placements: action.payload.placements, selectedResults: {}, searchProgress: action.payload.searchProgress, loading: false, error: null }
+      // Clearing selectedIndex is required on variant switches: the old variant's
+      // index would otherwise resolve against the new variant's placements and open
+      // the wrong placement. The pending-selection effect in BRollEditor re-applies
+      // the correct index when the user clicked an inactive-variant b-roll.
+      return { ...state, rawPlacements: action.payload.rawPlacements, placements: action.payload.placements, selectedIndex: null, selectedResults: {}, searchProgress: action.payload.searchProgress, loading: false, error: null }
     case 'SET_RESOLVED':
       return { ...state, placements: action.payload }
     case 'SET_ERROR':

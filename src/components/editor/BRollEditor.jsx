@@ -120,13 +120,15 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     return out
   }, [rawInactivePlacements, transcriptWords])
 
-  // Apply pending selection after variant switch data loads
+  // Apply pending selection after variant switch data loads.
+  // activeVariantIdx is a dep because loading/length alone can be unchanged across
+  // switches between variants with identical placement counts (common for alt plans).
   useEffect(() => {
     if (pendingSelectionRef.current != null && !brollState.loading && brollState.placements?.length) {
       brollState.selectPlacement(pendingSelectionRef.current)
       pendingSelectionRef.current = null
     }
-  }, [brollState.loading, brollState.placements?.length])
+  }, [activeVariantIdx, brollState.loading, brollState.placements?.length])
 
   // Sync URL detail (placementId) → selection on mount / URL change
   useEffect(() => {
