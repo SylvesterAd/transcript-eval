@@ -4,7 +4,7 @@
   --muted:    #6b7280;
   --border:   #e5e7eb;
   --ok:       #16a34a;
-  --warn:     #d97706;
+  --warn:     #b45309;
   --banner-bg: #f3f4f6;
   --link:     #2563eb;
 }
@@ -85,6 +85,11 @@ main {
 
 .row.clickable:hover {
   background: #fafafa;
+}
+
+.row.clickable:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: -2px;
 }
 
 footer {

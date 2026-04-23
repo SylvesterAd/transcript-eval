@@ -12,9 +12,20 @@ function setRow(rowEl, statusEl, detailEl, state) {
   if (state.onClick) {
     rowEl.classList.add('clickable')
     rowEl.onclick = state.onClick
+    rowEl.setAttribute('role', 'button')
+    rowEl.setAttribute('tabindex', '0')
+    rowEl.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        state.onClick()
+      }
+    }
   } else {
     rowEl.classList.remove('clickable')
     rowEl.onclick = null
+    rowEl.onkeydown = null
+    rowEl.removeAttribute('role')
+    rowEl.removeAttribute('tabindex')
   }
 }
 
