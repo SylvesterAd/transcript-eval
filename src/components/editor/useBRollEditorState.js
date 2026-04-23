@@ -149,18 +149,6 @@ function reducer(state, action) {
       }))
       return { ...state, rawPlacements: reset, selectedResults: {}, searchProgress: null }
     }
-    case 'UPDATE_PLACEMENT_POSITION': {
-      const { index, timelineStart, timelineEnd } = action.payload
-      const updatedRaw = state.rawPlacements.map((p, i) =>
-        i === index ? { ...p, userTimelineStart: timelineStart, userTimelineEnd: timelineEnd } : p
-      )
-      const updatedPlacements = state.placements.map(p =>
-        p.index === index
-          ? { ...p, timelineStart, timelineEnd, timelineDuration: timelineEnd - timelineStart }
-          : p
-      )
-      return { ...state, rawPlacements: updatedRaw, placements: updatedPlacements }
-    }
     case 'HIDE_PLACEMENT': {
       const updated = state.rawPlacements.map((p, i) =>
         i === action.payload ? { ...p, hidden: true } : p
@@ -510,9 +498,39 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'HIDE_PLACEMENT', payload: index })
   }, [])
 
-  const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd) => {
-    dispatch({ type: 'UPDATE_PLACEMENT_POSITION', payload: { index, timelineStart, timelineEnd } })
-  }, [])
+  const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd, opts = {}) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    const userPlacementId = placement.userPlacementId || null
+
+    if (placementKey) {
+      const prev = state.edits[placementKey] || {}
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: opts.kind || 'move',
+        placementKey,
+        before: { editsSlot: { timelineStart: prev.timelineStart, timelineEnd: prev.timelineEnd } },
+        after:  { editsSlot: { timelineStart, timelineEnd } },
+      }
+      dispatch({ type: 'APPLY_ACTION', payload: entry })
+    } else if (userPlacementId) {
+      const up = state.userPlacements.find(u => u.id === userPlacementId)
+      if (!up) return
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: opts.kind || 'move',
+        userPlacementId,
+        before: { userPlacementPatch: { timelineStart: up.timelineStart, timelineEnd: up.timelineEnd } },
+        after:  { userPlacementPatch: { timelineStart, timelineEnd } },
+      }
+      dispatch({ type: 'APPLY_ACTION', payload: entry })
+    }
+  }, [state.placements, state.edits, state.userPlacements])
 
   const resetAllPlacements = useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), [])
 
