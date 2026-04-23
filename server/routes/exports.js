@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { requireAuth } from '../auth.js'
-import { createExport, ValidationError } from '../services/exports.js'
-import { mintExtToken } from '../services/ext-jwt.js'
+import { mintExtToken, requireExtAuth } from '../services/ext-jwt.js'
+import { createExport, recordExportEvent, ValidationError, NotFoundError } from '../services/exports.js'
 
 const router = Router()
 
@@ -29,6 +29,19 @@ sessionTokenRouter.post('/', requireAuth, async (req, res, next) => {
     const result = await mintExtToken(userId)
     res.json(result)
   } catch (err) {
+    next(err)
+  }
+})
+
+export const exportEventsRouter = Router()
+exportEventsRouter.post('/', requireExtAuth, async (req, res, next) => {
+  try {
+    await recordExportEvent({ userId: req.ext?.userId || null, body: req.body })
+    res.status(202).json({ ok: true })
+  } catch (err) {
+    if (err instanceof ValidationError || err instanceof NotFoundError) {
+      return res.status(err.status).json({ error: err.message })
+    }
     next(err)
   }
 })
