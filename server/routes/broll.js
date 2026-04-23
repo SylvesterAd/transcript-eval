@@ -42,6 +42,7 @@ import {
   executeKeywordsBatch,
   getBRollEditorData,
   searchSinglePlacement,
+  searchUserPlacement,
   executePlanPrep,
   executeCreateStrategy,
   executeCreatePlan,
@@ -758,6 +759,21 @@ router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, r
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
     const result = await searchSinglePlacement(pipelineId, chapterIndex, placementIndex, overrides)
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/pipeline/:pipelineId/search-user-placement', requireAuth, async (req, res) => {
+  try {
+    const { userPlacementId, description, style, sources } = req.body || {}
+    if (!userPlacementId) return res.status(400).json({ error: 'userPlacementId required' })
+    const overrides = {}
+    if (description) overrides.description = description
+    if (style) overrides.style = style
+    if (sources) overrides.sources = sources
+    const result = await searchUserPlacement(req.params.pipelineId, userPlacementId, overrides)
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })

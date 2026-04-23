@@ -5407,6 +5407,63 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
   return { results, ...searchMeta, duration: searchDuration, apiLogId, gpuJobStatus, jobId: gpuJobId }
 }
 
+export async function searchUserPlacement(planPipelineId, userPlacementId, overrides = {}) {
+  const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
+  const GPU_KEY = process.env.GPU_INTERNAL_KEY
+  if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')
+
+  const loaded = await loadBrollEditorState(planPipelineId)
+  const up = (loaded.state.userPlacements || []).find(u => u.id === userPlacementId)
+  if (!up) throw new Error(`userPlacement ${userPlacementId} not found on pipeline ${planPipelineId}`)
+
+  const desc = overrides.description || up.snapshot?.description
+  let styleStr
+  if (overrides.style) {
+    styleStr = overrides.style
+  } else {
+    const s = up.snapshot?.style || {}
+    const parts = []
+    if (s.colors) parts.push(`colors: ${s.colors}`)
+    if (s.temperature) parts.push(`temperature: ${s.temperature}`)
+    if (s.motion) parts.push(`motion: ${s.motion}`)
+    if (s.framing) parts.push(`framing: ${s.framing}`)
+    if (s.lighting) parts.push(`lighting: ${s.lighting}`)
+    styleStr = parts.join('; ')
+  }
+
+  const brief = [
+    desc ? `# ${desc}` : '',
+    styleStr ? `## Style: ${styleStr}` : '',
+  ].filter(Boolean).join('\n')
+
+  const sources = overrides.sources?.length ? overrides.sources : ['pexels', 'storyblocks']
+  const requestBody = { keywords: [], brief, sources, max_results: 10 }
+
+  const res = await fetch(GPU_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
+    body: JSON.stringify(requestBody),
+  })
+  if (!res.ok) throw new Error(`GPU search failed: ${res.status}`)
+  const data = await res.json()
+  const results = (data.results || []).map(r => r.preview_url_hq ? r : { ...r, preview_url_hq: upgradePreviewUrl(r.preview_url) })
+
+  // Persist back: replace the userPlacement's results, reset selectedResult to 0.
+  // Retry up to 2x on 409 conflict.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const latest = await loadBrollEditorState(planPipelineId)
+    const updatedUps = (latest.state.userPlacements || []).map(u =>
+      u.id === userPlacementId ? { ...u, results, selectedResult: 0 } : u
+    )
+    const nextState = { ...latest.state, userPlacements: updatedUps }
+    const save = await saveBrollEditorState(planPipelineId, nextState, latest.version)
+    if (save.status === 'ok') break
+    if (attempt === 1) console.warn('[searchUserPlacement] save conflicted twice, giving up')
+  }
+
+  return { results, searchStatus: results.length ? 'complete' : 'no_results' }
+}
+
 // ── Reset B-Roll Searches ──────────────────────────────────────────────
 // Scope helper: returns all plan pipeline IDs + video IDs for a group.
 // Used by both preview and reset so they operate on the exact same set.
