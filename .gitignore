@@ -9,3 +9,7 @@ server/services/.venv/
 .DS_Store
 server/eval.db
 .worktrees/
+
+# Extension dev artifacts
+.secrets/
+extension/dist/
