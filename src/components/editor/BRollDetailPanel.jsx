@@ -135,7 +135,7 @@ export default function BRollDetailPanel() {
             <div className="grid grid-cols-2 gap-2">
               {placement.results.map((r, i) => (
                 <BRollOptionThumbnail
-                  key={r.id || i}
+                  key={`${placement.index}-${i}`}
                   result={r}
                   isSelected={i === resultIdx}
                   onSelect={() => selectResult(selectedIndex, i)}
