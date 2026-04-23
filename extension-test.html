@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Extension Test Harness</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      max-width: 760px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #1a1a1a;
+      line-height: 1.5;
+    }
+    h1 { font-size: 20px; }
+    h2 { font-size: 15px; margin-top: 28px; }
+    fieldset { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 16px; margin: 12px 0; }
+    legend { font-weight: 600; padding: 0 6px; font-size: 13px; }
+    label { display: block; font-size: 13px; margin: 6px 0 2px; color: #374151; }
+    input[type="text"] { width: 100%; padding: 6px 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; border: 1px solid #d1d5db; border-radius: 4px; box-sizing: border-box; }
+    button { padding: 6px 12px; font-size: 13px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; margin-right: 6px; }
+    button:hover { background: #f9fafb; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    pre { background: #f3f4f6; padding: 10px 12px; border-radius: 4px; font-size: 12px; overflow-x: auto; margin: 6px 0; max-height: 260px; overflow-y: auto; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .status-ok { color: #16a34a; font-weight: 500; }
+    .status-err { color: #dc2626; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <h1>transcript-eval Export Helper — Test Harness</h1>
+  <p class="muted">
+    Send <code>chrome.runtime.sendMessage</code> calls to the extension and display replies.
+    This page must be loaded from <code>http://localhost:5173</code> — the extension's
+    <code>externally_connectable</code> entry whitelists that origin.
+  </p>
+
+  <fieldset>
+    <legend>Extension ID</legend>
+    <label for="ext-id">Paste the 32-char ID from <code>extension/.extension-id</code>:</label>
+    <input type="text" id="ext-id" placeholder="abcdefghijklmnopqrstuvwxyzabcdef" autocomplete="off">
+    <p class="muted">Saved to localStorage under <code>ext_test_id</code>.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>1. Ping</legend>
+    <div class="row">
+      <button id="btn-ping">Send {type:"ping"}</button>
+    </div>
+    <pre id="out-ping">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Session</legend>
+    <div class="row">
+      <button id="btn-session">Send {type:"session", token:"mock…", user_id:"mock-user-00000000-0000", expires_at: now+1h}</button>
+      <button id="btn-session-expired">Send expired session (expires_at: now-1h)</button>
+    </div>
+    <pre id="out-session">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>3. Unknown type</legend>
+    <div class="row">
+      <button id="btn-unknown">Send {type:"noop"} — expect error</button>
+      <button id="btn-bad-version">Send {type:"ping", version:99} — expect unsupported_version</button>
+    </div>
+    <pre id="out-unknown">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>4. End-to-end happy path</legend>
+    <div class="row">
+      <button id="btn-run-all">Run all checks</button>
+      <span id="run-status"></span>
+    </div>
+    <pre id="out-run">(not run yet)</pre>
+  </fieldset>
+
+  <script type="module">
+    const idInput = document.getElementById('ext-id')
+    idInput.value = localStorage.getItem('ext_test_id') || ''
+    idInput.addEventListener('input', () => {
+      localStorage.setItem('ext_test_id', idInput.value.trim())
+    })
+
+    function getExtId() {
+      const id = idInput.value.trim()
+      if (!id || id.length !== 32 || !/^[a-p]+$/.test(id)) {
+        throw new Error('Paste a valid 32-char extension ID (letters a-p only).')
+      }
+      return id
+    }
+
+    function send(msg) {
+      return new Promise((resolve, reject) => {
+        try {
+          const id = getExtId()
+          if (!chrome?.runtime?.sendMessage) {
+            reject(new Error('chrome.runtime.sendMessage is undefined — is this page loaded in Chrome with the extension installed?'))
+            return
+          }
+          chrome.runtime.sendMessage(id, msg, (response) => {
+            const err = chrome.runtime.lastError
+            if (err) {
+              reject(new Error(err.message))
+              return
+            }
+            resolve(response)
+          })
+        } catch (e) {
+          reject(e)
+        }
+      })
+    }
+
+    function pretty(x) {
+      try { return JSON.stringify(x, null, 2) } catch { return String(x) }
+    }
+
+    async function showResult(outId, promise) {
+      const out = document.getElementById(outId)
+      out.textContent = '…'
+      try {
+        const r = await promise
+        out.textContent = pretty(r)
+      } catch (e) {
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    document.getElementById('btn-ping').onclick = () => showResult('out-ping', send({ type: 'ping', version: 1 }))
+
+    document.getElementById('btn-session').onclick = () => showResult('out-session', send({
+      type: 'session', version: 1,
+      token: 'mock.jwt.token',
+      kid: 'k1',
+      user_id: 'mock-user-00000000-0000',
+      expires_at: Date.now() + 60 * 60 * 1000,
+    }))
+
+    document.getElementById('btn-session-expired').onclick = () => showResult('out-session', send({
+      type: 'session', version: 1,
+      token: 'mock.jwt.token.expired',
+      kid: 'k1',
+      user_id: 'mock-user-00000000-0000',
+      expires_at: Date.now() - 60 * 60 * 1000,
+    }))
+
+    document.getElementById('btn-unknown').onclick = () => showResult('out-unknown', send({ type: 'noop', version: 1 }))
+    document.getElementById('btn-bad-version').onclick = () => showResult('out-unknown', send({ type: 'ping', version: 99 }))
+
+    document.getElementById('btn-run-all').onclick = async () => {
+      const status = document.getElementById('run-status')
+      const out = document.getElementById('out-run')
+      const log = []
+      let ok = true
+
+      function check(label, cond, details) {
+        log.push(`${cond ? 'PASS' : 'FAIL'} — ${label}`)
+        if (details) log.push('       ' + details)
+        if (!cond) ok = false
+      }
+
+      try {
+        const ping1 = await send({ type: 'ping', version: 1 })
+        check('initial ping returns pong', ping1?.type === 'pong', `got ${pretty(ping1)}`)
+        check('ext_version present', typeof ping1?.ext_version === 'string')
+        check('has_jwt is false initially', ping1?.has_jwt === false, `has_jwt=${ping1?.has_jwt}`)
+
+        const session1 = await send({
+          type: 'session', version: 1,
+          token: 'mock.jwt.token',
+          kid: 'k1',
+          user_id: 'mock-user-00000000-0000',
+          expires_at: Date.now() + 60 * 60 * 1000,
+        })
+        check('session returns {ok:true}', session1?.ok === true, `got ${pretty(session1)}`)
+
+        const ping2 = await send({ type: 'ping', version: 1 })
+        check('post-session ping has has_jwt=true', ping2?.has_jwt === true)
+        check('post-session ping has a jwt_expires_at number', typeof ping2?.jwt_expires_at === 'number')
+
+        const unknown = await send({ type: 'noop', version: 1 })
+        check('unknown type returns error', unknown?.error === 'unknown_type')
+
+        const badVer = await send({ type: 'ping', version: 99 })
+        check('unsupported version returns error', badVer?.error === 'unsupported_version')
+      } catch (e) {
+        log.push('EXCEPTION: ' + (e.message || e))
+        ok = false
+      }
+
+      status.textContent = ok ? 'ALL PASS' : 'FAILURES'
+      status.className = ok ? 'status-ok' : 'status-err'
+      out.textContent = log.join('\n')
+    }
+  </script>
+</body>
+</html>
