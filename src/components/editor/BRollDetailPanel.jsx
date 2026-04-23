@@ -141,30 +141,14 @@ export default function BRollDetailPanel() {
             Other Options ({placement.results.length})
           </div>
           <div className="grid grid-cols-2 gap-1.5">
-            {placement.results.map((r, i) => {
-              const thumb = r.thumbnail_url || r.preview_url || r.url
-              return (
-                <button
-                  key={r.id || i}
-                  onClick={() => selectResult(selectedIndex, i)}
-                  className={`relative rounded overflow-hidden aspect-video transition-all ${
-                    i === resultIdx
-                      ? 'ring-2 ring-teal-400 scale-[1.02]'
-                      : 'ring-1 ring-white/10 hover:ring-white/25 opacity-70 hover:opacity-100'
-                  }`}
-                >
-                  {thumb ? (
-                    <img src={thumb} alt={r.title || ''} className="w-full h-full object-cover" loading="lazy" />
-                  ) : (
-                    <div className="w-full h-full bg-zinc-800 flex items-center justify-center text-zinc-600 text-[9px]">No thumb</div>
-                  )}
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-1 py-0.5 flex items-center gap-1">
-                    <span className="text-[8px] text-white/70 capitalize">{r.source}</span>
-                    {r.duration > 0 && <span className="text-[8px] text-white/50">{r.duration}s</span>}
-                  </div>
-                </button>
-              )
-            })}
+            {placement.results.map((r, i) => (
+              <BRollOptionThumbnail
+                key={r.id || i}
+                result={r}
+                isSelected={i === resultIdx}
+                onSelect={() => selectResult(selectedIndex, i)}
+              />
+            ))}
           </div>
         </div>
       )}
@@ -287,6 +271,30 @@ function EditModal({ placement, index, onSearch, onClose }) {
         </div>
       </div>
     </div>
+  )
+}
+
+function BRollOptionThumbnail({ result, isSelected, onSelect }) {
+  const thumb = result.thumbnail_url || result.preview_url || result.url
+  return (
+    <button
+      onClick={onSelect}
+      className={`relative rounded overflow-hidden aspect-video transition-all ${
+        isSelected
+          ? 'ring-2 ring-teal-400 scale-[1.02]'
+          : 'ring-1 ring-white/10 hover:ring-white/25 opacity-70 hover:opacity-100'
+      }`}
+    >
+      {thumb ? (
+        <img src={thumb} alt={result.title || ''} className="w-full h-full object-cover" loading="lazy" />
+      ) : (
+        <div className="w-full h-full bg-zinc-800 flex items-center justify-center text-zinc-600 text-[9px]">No thumb</div>
+      )}
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-1 py-0.5 flex items-center gap-1">
+        <span className="text-[8px] text-white/70 capitalize">{result.source}</span>
+        {result.duration > 0 && <span className="text-[8px] text-white/50">{result.duration}s</span>}
+      </div>
+    </button>
   )
 }
 
