@@ -167,6 +167,28 @@ function reducer(state, action) {
       const newUndoStack = [...state.undoStack, entry].slice(-MAX_UNDO)
       return { ...applied, undoStack: newUndoStack, redoStack: [] }
     }
+    case 'APPLY_ACTION_COALESCE': {
+      const entry = action.payload
+      if (!state.undoStack.length) {
+        // No previous action to coalesce with — behave like APPLY_ACTION
+        const applied = applyMutation(state, entry, 'after')
+        const newUndoStack = [...state.undoStack, entry].slice(-MAX_UNDO)
+        return { ...applied, undoStack: newUndoStack, redoStack: [] }
+      }
+      const last = state.undoStack[state.undoStack.length - 1]
+      // Build merged entry: keep last's before, take current's after, bump ts
+      const merged = {
+        ...last,
+        ts: entry.ts,
+        after: entry.after,
+      }
+      const applied = applyMutation(state, merged, 'after')
+      return {
+        ...applied,
+        undoStack: [...state.undoStack.slice(0, -1), merged],
+        redoStack: [],
+      }
+    }
     case 'UNDO': {
       const stack = state.undoStack
       if (!stack.length) return state
@@ -533,6 +555,8 @@ export function useBRollEditorState(planPipelineId) {
       : null
     const userPlacementId = placement.userPlacementId || null
 
+    const COALESCE_KINDS = new Set(['move', 'resize'])
+
     if (placementKey) {
       const prev = state.edits[placementKey] || {}
       const entry = {
@@ -543,7 +567,14 @@ export function useBRollEditorState(planPipelineId) {
         before: { editsSlot: { timelineStart: prev.timelineStart, timelineEnd: prev.timelineEnd } },
         after:  { editsSlot: { timelineStart, timelineEnd } },
       }
-      dispatch({ type: 'APPLY_ACTION', payload: entry })
+      const last = state.undoStack[state.undoStack.length - 1]
+      const sameTarget = last
+        && COALESCE_KINDS.has(entry.kind)
+        && (last.kind === entry.kind)
+        && (last.placementKey === entry.placementKey)
+        && (last.userPlacementId === entry.userPlacementId)
+        && (Date.now() - (last.ts || 0) < 800)
+      dispatch({ type: sameTarget ? 'APPLY_ACTION_COALESCE' : 'APPLY_ACTION', payload: entry })
     } else if (userPlacementId) {
       const up = state.userPlacements.find(u => u.id === userPlacementId)
       if (!up) return
@@ -555,9 +586,16 @@ export function useBRollEditorState(planPipelineId) {
         before: { userPlacementPatch: { timelineStart: up.timelineStart, timelineEnd: up.timelineEnd } },
         after:  { userPlacementPatch: { timelineStart, timelineEnd } },
       }
-      dispatch({ type: 'APPLY_ACTION', payload: entry })
+      const last = state.undoStack[state.undoStack.length - 1]
+      const sameTarget = last
+        && COALESCE_KINDS.has(entry.kind)
+        && (last.kind === entry.kind)
+        && (last.placementKey === entry.placementKey)
+        && (last.userPlacementId === entry.userPlacementId)
+        && (Date.now() - (last.ts || 0) < 800)
+      dispatch({ type: sameTarget ? 'APPLY_ACTION_COALESCE' : 'APPLY_ACTION', payload: entry })
     }
-  }, [state.placements, state.edits, state.userPlacements])
+  }, [state.placements, state.edits, state.userPlacements, state.undoStack])
 
   const resetAllPlacements = useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), [])
 
