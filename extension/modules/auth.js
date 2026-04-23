@@ -2,7 +2,7 @@
 // nothing persists in service worker memory because MV3 service
 // workers are terminated aggressively. Every caller reads fresh.
 
-const STORAGE_KEY = 'jwt'
+const STORAGE_KEY = 'te:jwt'
 
 // Shape returned by POST /api/session-token and by the web app's
 // {type:"session"} message:
@@ -14,7 +14,7 @@ export async function getJwt() {
 }
 
 export async function setJwt(jwt) {
-  if (!jwt || typeof jwt !== 'object') throw new Error('setJwt: jwt must be an object')
+  if (!jwt || typeof jwt !== 'object' || Array.isArray(jwt)) throw new Error('setJwt: jwt must be an object')
   const { token, kid, user_id, expires_at } = jwt
   if (typeof token !== 'string' || !token) throw new Error('setJwt: token must be a non-empty string')
   if (typeof kid !== 'string' || !kid) throw new Error('setJwt: kid must be a non-empty string')
