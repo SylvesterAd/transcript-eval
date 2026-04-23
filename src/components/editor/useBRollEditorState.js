@@ -6,6 +6,15 @@ import { matchPlacementsToTranscript } from './brollUtils.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
+// Editor-state action kinds. Each APPLY_ACTION payload is of this shape:
+//   { id: string, ts: number, kind: string, ...action-specific fields }
+// `before` and `after` capture just the mutated slots so the action can be reversed.
+const MAX_UNDO = 50
+
+function generateActionId() {
+  return 'act_' + (crypto.randomUUID?.() || (Math.random().toString(36).slice(2) + Date.now().toString(36))).slice(0, 12)
+}
+
 export const BRollContext = createContext(null)
 
 export async function authFetchBRollData(planPipelineId, signal) {
@@ -21,6 +30,44 @@ async function authFetch(path, signal) {
   const res = await fetch(`${API_BASE}${path}`, { headers, signal })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
+}
+
+// Applies just the mutation side of an action to the reducer's editor-state slots.
+// Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
+function applyMutation(state, entry, side /* 'before' | 'after' */) {
+  const patch = entry[side] || {}
+  let nextEdits = state.edits
+  let nextUserPlacements = state.userPlacements
+
+  if (entry.placementKey != null) {
+    // Mutation targets an original placement's `edits[key]` slot.
+    const key = entry.placementKey
+    if (patch.editsSlot === null) {
+      // Delete the edits slot entirely (e.g. "reset to original")
+      nextEdits = { ...nextEdits }
+      delete nextEdits[key]
+    } else if (patch.editsSlot) {
+      nextEdits = { ...nextEdits, [key]: { ...(nextEdits[key] || {}), ...patch.editsSlot } }
+    }
+  }
+
+  if (entry.userPlacementId != null) {
+    // Mutation targets a userPlacement.
+    if (patch.userPlacementDelete) {
+      nextUserPlacements = nextUserPlacements.filter(up => up.id !== entry.userPlacementId)
+    } else if (patch.userPlacementCreate) {
+      // Only create if not already present (avoid dup on repeated redo)
+      if (!nextUserPlacements.some(up => up.id === entry.userPlacementId)) {
+        nextUserPlacements = [...nextUserPlacements, patch.userPlacementCreate]
+      }
+    } else if (patch.userPlacementPatch) {
+      nextUserPlacements = nextUserPlacements.map(up =>
+        up.id === entry.userPlacementId ? { ...up, ...patch.userPlacementPatch } : up
+      )
+    }
+  }
+
+  return { ...state, edits: nextEdits, userPlacements: nextUserPlacements, dirty: true }
 }
 
 function reducer(state, action) {
@@ -114,6 +161,12 @@ function reducer(state, action) {
         editorStateVersion: version || 0,
         dirty: false,
       }
+    }
+    case 'APPLY_ACTION': {
+      const entry = action.payload
+      const applied = applyMutation(state, entry, 'after')
+      const newUndoStack = [...state.undoStack, entry].slice(-MAX_UNDO)
+      return { ...applied, undoStack: newUndoStack, redoStack: [] }
     }
     default:
       return state
