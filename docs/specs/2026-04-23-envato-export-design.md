@@ -705,79 +705,40 @@ after user clicked Export.
 
 #### Resolution selection
 
-Envato items offer 1-3 resolution variants (720p, 1080p, 2K, 4K).
-**Policy:** pick the smallest file that meets a 1080p quality bar:
+**MVP: always highest resolution.** Envato items offer 1-3 resolution
+variants (720p, 1080p, 2K, 4K). `download.data` without an
+`assetUuid` param returns Envato's default, which is **always the
+highest available** for that item. Good enough for launch:
 
-```
-available = item.available_resolutions  // sorted ascending
-if 1080 in available:
-  pick 1080p                              // normal case
-elif any r >= 1080 in available:
-  pick min(r for r in available if r >= 1080)   // e.g., 2K if only 2K+4K
-else:
-  pick max(available)                     // accept 720p if that's all
-```
+- Simple — no variant list to fetch, no selection logic.
+- Always works — never misses items with only 720p.
+- Tradeoff: larger files (4K items = ~4× a 1080p equivalent). Users
+  with bandwidth / disk constraints may notice; acceptable for MVP.
 
-Rationale: 1080p is the Premiere sequence target. Larger files waste
-disk + download time; 720p is acceptable only when the item truly has
-nothing higher.
+**MVP: no variant param needed.** Call `download.data` with just
+`itemUuid` + `itemType` (no `assetUuid`) → returns the item's
+highest-resolution variant. Confirmed behavior.
 
-**Wire format confirmed** (HARs from a 4K+2K item, Apr 2026):
-
-Each resolution is a separate **asset** with its own UUID. The
-`download.data` endpoint takes an additional `assetUuid` query param
-to select which variant to license/download:
+**Wire format documented for future optimization.** If we ever want
+per-variant control (e.g., to prefer 1080p over 4K for bandwidth
+reasons), each resolution is a separate asset with its own UUID.
+`download.data` accepts an optional `assetUuid` param:
 
 ```
 GET app.envato.com/download.data
     ?itemUuid=<ITEM_UUID>
     &itemType=stock-video
-    &assetUuid=<ASSET_UUID>     ← resolution selector
+    &assetUuid=<ASSET_UUID>     ← optional resolution selector
     &_routes=routes/download/route
 ```
 
-Observed from HARs:
-- 4K variant: `assetUuid=eb09a1d0-...-ac7b57`  →  `source.mp4`
-- 2K variant: `assetUuid=ceb15baf-...-810b05`  →  `hd.mov`
-- Single `itemUuid` (`9c084a63-...`) for both.
+Confirmed from HARs on item `9c084a63-...`:
+- 4K: `assetUuid=eb09a1d0-...` → `source.mp4`
+- 2K: `assetUuid=ceb15baf-...` → `hd.mov`
 
-Omitting `assetUuid` (as the first ocean HAR did) returns Envato's
-default — typically the highest resolution.
-
-Response shape is identical to non-variant case: Remix streaming JSON
-with `downloadUrl` at index 7. Filename in the `response-content-
-disposition` tells us what we actually got (`.mp4` vs `.mov` differs
-even by variant).
-
-**Still unknown: where the variant list comes from.** The HARs we
-have capture post-picker (user had variants already loaded). Neither
-`download.data` nor the item-detail `.data` response contains the
-variants list. The endpoint that populates the picker fires earlier
-(likely on item page load or on "open download modal" click) and we
-don't have it captured yet.
-
-**Temporary MVP strategy until variant endpoint is known:**
-
-1. Call `download.data` **without** `assetUuid` → returns Envato's
-   default variant (usually highest).
-2. Inspect the `response-content-disposition` filename to see what
-   resolution we got (Envato filenames sometimes indicate it;
-   otherwise extract width/height from the file after download).
-3. Accept this as good-enough for MVP. Users with 4K items get 4K
-   downloads — larger files but always work.
-
-**Optimization path once we have the variant endpoint:**
-
-1. Fetch variants list (endpoint TBD — one more HAR capture: open
-   item page fresh, click Download once, capture the XHR that
-   populates the resolution picker **before** user clicks any
-   specific resolution).
-2. Apply the selection rule (prefer 1080p; else smallest ≥1080p;
-   else max).
-3. Pass chosen `assetUuid` to `download.data`.
-
-This upgrade is incremental — same code path, just passes an
-additional param once we know how to get the list.
+Where the list of available assetUuids is fetched (picker source)
+remains unknown — out of scope for MVP, deferred to "Known future
+work".
 
 ### Phase 3: Save file
 
@@ -1400,9 +1361,6 @@ side-by-side with the related `exports` row.
    (e.g. `/Users/<user>/Downloads/.../`) or redact to
    `~/Downloads/.../`. Privacy vs. reproducibility.
 
-5. **Exact resolution-selection wire format.** See Phase 2 —
-   `download.data` resolution parameter vs. separate variants
-   endpoint. Needs one HAR capture of the picker to confirm.
 
 ## Implementation phases
 
@@ -1447,6 +1405,11 @@ Items deferred but noted so they don't get lost:
 
 - **UXP Premiere plugin** for one-click import (eliminates XMEML step
   for users who install it).
+- **Smart resolution selection** — prefer 1080p over 4K to save
+  bandwidth and disk. Needs the variant-listing endpoint (picker
+  source, one more HAR capture to find). Wire format for the
+  selection itself is already known (`&assetUuid=<UUID>` on
+  `download.data`).
 - **Storyblocks, Adobe Stock** as additional sources (Storyblocks has a
   clean API path already proven; Adobe Stock has the watermark-relink
   UX of dreams but cost-prohibitive).
