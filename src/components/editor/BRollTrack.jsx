@@ -1,6 +1,6 @@
 import { useMemo, useContext, useCallback, useState, memo } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Copy } from 'lucide-react'
 import BRollContextMenu from './BRollContextMenu.jsx'
 import { getClipboard } from './brollClipboard.js'
 
@@ -283,6 +283,12 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
             ) : (
               <div className="w-full h-full bg-zinc-800/30 flex items-center justify-center pointer-events-none">
                 {width > 50 && <span className="text-[9px] text-zinc-600">No results</span>}
+              </div>
+            )}
+
+            {p.isUserPlacement && (
+              <div className="absolute top-1 right-1 z-10 bg-black/50 rounded p-0.5 pointer-events-none" title="Copied clip">
+                <Copy size={8} className="text-white/70" />
               </div>
             )}
 
