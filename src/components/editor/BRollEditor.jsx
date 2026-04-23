@@ -170,6 +170,33 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         return
       }
 
+      // CMD/Ctrl + C → copy selected
+      if (mod && (e.key === 'c' || e.key === 'C') && brollState.selectedIndex != null) {
+        e.preventDefault()
+        brollState.copyPlacement(brollState.selectedIndex)
+        return
+      }
+      // CMD/Ctrl + X → cut selected
+      if (mod && (e.key === 'x' || e.key === 'X') && brollState.selectedIndex != null) {
+        e.preventDefault()
+        brollState.copyPlacement(brollState.selectedIndex, { cut: true })
+        return
+      }
+      // CMD/Ctrl + V → paste after selected OR at playhead
+      if (mod && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault()
+        let targetStart
+        if (brollState.selectedPlacement) {
+          targetStart = brollState.selectedPlacement.timelineEnd + 0.05
+        } else if (editorCtx?.state?.currentTime != null) {
+          targetStart = editorCtx.state.currentTime
+        } else {
+          targetStart = 0
+        }
+        brollState.pastePlacement(targetStart)
+        return
+      }
+
       // CMD/Ctrl + Z (without Shift) → undo
       if (mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault()
@@ -186,7 +213,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [brollState.selectedIndex, brollState.hidePlacement, brollState.selectPlacement, brollState.undo, brollState.redo])
+  }, [brollState.selectedIndex, brollState.hidePlacement, brollState.selectPlacement, brollState.undo, brollState.redo, brollState.copyPlacement, brollState.pastePlacement, brollState.selectedPlacement, editorCtx])
 
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
