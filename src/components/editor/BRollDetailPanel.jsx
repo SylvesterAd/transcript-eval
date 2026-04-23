@@ -292,6 +292,7 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
     if (playing && videoRef.current) {
       videoRef.current.play().catch(() => setPlaying(false))
     }
+    return () => { videoRef.current?.pause() }
   }, [playing])
 
   function handleKeyDown(e) {
