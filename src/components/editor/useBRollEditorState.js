@@ -665,6 +665,71 @@ export function useBRollEditorState(planPipelineId) {
     }})
   }, [state.placements, state.edits])
 
+  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, mode }) => {
+    const placement = state.placements.find(p => p.index === sourceIndex)
+    if (!placement) return
+    const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
+    const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+    const actionId = generateActionId()
+    const up = {
+      id: uuid,
+      sourcePipelineId: planPipelineId,
+      sourceChapterIndex: placement.chapterIndex ?? null,
+      sourcePlacementIndex: placement.placementIndex ?? null,
+      timelineStart: targetStartSec,
+      timelineEnd: targetStartSec + Math.max(0.5, placement.timelineDuration || 1),
+      selectedResult: resultIdx,
+      results: JSON.parse(JSON.stringify(placement.results || [])),
+      snapshot: {
+        description: placement.description,
+        audio_anchor: placement.audio_anchor,
+        function: placement.function,
+        type_group: placement.type_group,
+        source_feel: placement.source_feel,
+        style: placement.style,
+      },
+    }
+
+    // Write to target pipeline's editor-state with optimistic concurrency.
+    try {
+      const remote = await authFetch(`/broll/pipeline/${targetPipelineId}/editor-state`)
+      const next = {
+        edits: remote.state?.edits || {},
+        userPlacements: [...(remote.state?.userPlacements || []), up],
+        undoStack: [...(remote.state?.undoStack || []), {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
+          before: { userPlacementDelete: true }, after: { userPlacementCreate: up },
+        }].slice(-MAX_UNDO),
+        redoStack: [],
+      }
+      await authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
+    } catch (err) {
+      console.error('[broll-drag-cross] Failed to write target:', err.message)
+      return
+    }
+
+    // Source side: if mode === 'move', hide the original (or remove the userPlacement).
+    if (mode === 'move') {
+      const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+        ? `${placement.chapterIndex}:${placement.placementIndex}`
+        : null
+      if (placementKey) {
+        const prev = state.edits[placementKey] || {}
+        dispatch({ type: 'APPLY_ACTION', payload: {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', placementKey,
+          before: { editsSlot: { hidden: !!prev.hidden } },
+          after:  { editsSlot: { hidden: true } },
+        }})
+      } else if (placement.userPlacementId) {
+        dispatch({ type: 'APPLY_ACTION', payload: {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: placement.userPlacementId,
+          before: { userPlacementCreate: state.userPlacements.find(u => u.id === placement.userPlacementId) },
+          after:  { userPlacementDelete: true },
+        }})
+      }
+    }
+  }, [state.placements, state.selectedResults, state.edits, state.userPlacements, planPipelineId])
+
   const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd, opts = {}) => {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
@@ -738,6 +803,7 @@ export function useBRollEditorState(planPipelineId) {
     copyPlacement,
     pastePlacement,
     resetPlacement,
+    dragCrossPlacement,
     updatePlacementPosition,
     resetAllPlacements,
     refetchEditorData,
@@ -754,7 +820,7 @@ export function useBRollEditorState(planPipelineId) {
     state.selectedResults, state.searchProgress, state.loading, state.error,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
     searchPlacement, searchPlacementCustom, hidePlacement, undo, redo,
-    copyPlacement, pastePlacement, resetPlacement,
+    copyPlacement, pastePlacement, resetPlacement, dragCrossPlacement,
     updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,

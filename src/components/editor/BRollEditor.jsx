@@ -285,6 +285,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 activeVariantIdx={activeVariantIdx}
                 onVariantActivate={handleVariantActivate}
                 inactiveVariantPlacements={inactiveVariantPlacements}
+                onCrossDrop={brollState.dragCrossPlacement}
               />
             </div>
           </div>

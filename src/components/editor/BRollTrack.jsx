@@ -6,7 +6,7 @@ import { getClipboard } from './brollClipboard.js'
 
 const TRACK_H = 60
 
-function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, onCrossDrop }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -78,34 +78,105 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
   const handleBoxMove = useCallback((placement, e) => {
     e.preventDefault()
     e.stopPropagation()
-    // Inactive track: click activates variant + defers placement selection
+
     if (!isActive) {
       onActivate?.(placement.index)
       return
     }
+
     const startX = e.clientX
+    const startY = e.clientY
     const origStart = placement.timelineStart
     const origEnd = placement.timelineEnd
     const duration = origEnd - origStart
     const { prevEnd, nextStart } = getNeighborBounds(placement)
     let moved = false
+    let crossMode = null
+
+    // Variant row lookup for hit-testing. Query once per drag start.
+    const variantRows = (variants || []).map((v, vi) => {
+      const row = document.querySelector(`[data-broll-variant="${vi}"]`)
+      return row ? { vi, rect: row.getBoundingClientRect(), variant: v } : null
+    }).filter(Boolean)
+
+    // Ghost element that follows the cursor
+    const ghost = document.createElement('div')
+    ghost.style.position = 'fixed'
+    ghost.style.pointerEvents = 'none'
+    ghost.style.zIndex = '999'
+    ghost.style.opacity = '0.6'
+    ghost.style.background = 'rgba(206,252,0,0.3)'
+    ghost.style.border = '1px solid #cefc00'
+    ghost.style.borderRadius = '4px'
+    ghost.style.width = Math.max(60, duration * zoom) + 'px'
+    ghost.style.height = '60px'
+    document.body.appendChild(ghost)
+
+    // Yellow insertion marker on the target row
+    const marker = document.createElement('div')
+    marker.style.position = 'fixed'
+    marker.style.pointerEvents = 'none'
+    marker.style.zIndex = '998'
+    marker.style.height = '60px'
+    marker.style.width = '2px'
+    marker.style.background = '#cefc00'
+    marker.style.boxShadow = '0 0 6px rgba(206,252,0,0.7)'
+    marker.style.display = 'none'
+    document.body.appendChild(marker)
 
     const onMove = (ev) => {
       const dx = ev.clientX - startX
-      if (!moved && Math.abs(dx) < 3) return
+      if (!moved && Math.abs(dx) < 3 && Math.abs(ev.clientY - startY) < 3) return
       moved = true
-      const dt = dx / zoom
-      const newStart = Math.max(prevEnd, Math.min(origStart + dt, nextStart - duration))
-      updatePlacementPosition(placement.index, newStart, newStart + duration)
+
+      ghost.style.left = (ev.clientX - 20) + 'px'
+      ghost.style.top = (ev.clientY - 30) + 'px'
+
+      // Detect the variant row under the cursor
+      let overRow = null
+      for (const row of variantRows) {
+        if (ev.clientY >= row.rect.top && ev.clientY <= row.rect.bottom) { overRow = row; break }
+      }
+
+      if (overRow && overRow.vi !== (activeVariantIdx ?? 0)) {
+        const labelW = 144
+        const trackLeft = overRow.rect.left + labelW
+        const timeAtPointer = (ev.clientX - trackLeft) / zoom
+        const dropStart = Math.max(0, timeAtPointer - duration / 2)
+        crossMode = { variantIdx: overRow.vi, dropStart, variant: overRow.variant }
+        marker.style.display = 'block'
+        marker.style.left = (trackLeft + dropStart * zoom) + 'px'
+        marker.style.top = overRow.rect.top + 'px'
+      } else {
+        crossMode = null
+        marker.style.display = 'none'
+        // In-variant drag (original behavior)
+        const dt = dx / zoom
+        const newStart = Math.max(prevEnd, Math.min(origStart + dt, nextStart - duration))
+        updatePlacementPosition(placement.index, newStart, newStart + duration)
+      }
     }
-    const onUp = () => {
+    const onUp = (ev) => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
-      if (!moved) selectPlacement(placement.index)
+      if (ghost.parentNode) ghost.parentNode.removeChild(ghost)
+      if (marker.parentNode) marker.parentNode.removeChild(marker)
+
+      if (!moved) { selectPlacement(placement.index); return }
+
+      if (crossMode) {
+        const mode = ev.altKey ? 'copy' : 'move'
+        onCrossDrop?.({
+          sourceIndex: placement.index,
+          targetPipelineId: crossMode.variant.id,
+          targetStartSec: crossMode.dropStart,
+          mode,
+        })
+      }
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [zoom, getNeighborBounds, updatePlacementPosition, selectPlacement, isActive, onActivate])
+  }, [zoom, getNeighborBounds, updatePlacementPosition, selectPlacement, isActive, onActivate, variants, activeVariantIdx, onCrossDrop])
 
   const buildMenuItems = (menu) => {
     const p = menu.placement

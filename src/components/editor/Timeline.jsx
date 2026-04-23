@@ -9,7 +9,7 @@ import { BRollContext } from './useBRollEditorState.js'
 const COMPOSITE_H = 80
 const COMPOSITE_AUDIO_H = 56
 
-export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements }) {
+export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop }) {
   const { state, dispatch, totalDuration, playbackEngine, playheadRef } = useContext(EditorContext)
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
@@ -638,7 +638,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
               const isActiveVariant = vi === (activeVariantIdx ?? 0)
               const variantLabel = variants?.[vi]?.label || 'B-Roll'
               return (
-                <div key={`broll-track-${vi}`} className="relative" style={isDragSource ? { opacity: 0.5, zIndex: 30, transform: `translateY(${dragState.dy}px)`, pointerEvents: 'none' } : undefined}>
+                <div key={`broll-track-${vi}`} data-broll-variant={vi} className="relative" style={isDragSource ? { opacity: 0.5, zIndex: 30, transform: `translateY(${dragState.dy}px)`, pointerEvents: 'none' } : undefined}>
                   {showInsertBefore && vi === 0 && <div className="absolute top-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />}
                   <div className="flex">
                     <div
@@ -672,6 +672,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                         isActive={isActiveVariant}
                         onActivate={variantActivators[vi]}
                         overridePlacements={!isActiveVariant ? inactiveVariantPlacements?.[variants?.[vi]?.id] : undefined}
+                        variants={variants}
+                        activeVariantIdx={activeVariantIdx}
+                        onCrossDrop={onCrossDrop}
                       />
                     </div>
                   </div>
