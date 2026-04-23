@@ -151,6 +151,43 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
       navigate(currentUrl, { replace: true })
     }
   }, [brollState.selectedIndex])
+
+  // Keyboard shortcuts — delete/backspace, undo/redo
+  useEffect(() => {
+    const handler = (e) => {
+      // Ignore when user is typing in inputs
+      const tag = (e.target?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return
+
+      const isMac = navigator.platform.toLowerCase().includes('mac')
+      const mod = isMac ? e.metaKey : e.ctrlKey
+
+      // Delete / Backspace → delete selected placement
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && brollState.selectedIndex != null) {
+        e.preventDefault()
+        brollState.hidePlacement(brollState.selectedIndex)
+        brollState.selectPlacement(null)
+        return
+      }
+
+      // CMD/Ctrl + Z (without Shift) → undo
+      if (mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault()
+        brollState.undo()
+        return
+      }
+
+      // CMD/Ctrl + Shift + Z (or CMD/Ctrl + Y on Windows) → redo
+      if ((mod && e.shiftKey && (e.key === 'z' || e.key === 'Z')) || (mod && (e.key === 'y' || e.key === 'Y'))) {
+        e.preventDefault()
+        brollState.redo()
+        return
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [brollState.selectedIndex, brollState.hidePlacement, brollState.selectPlacement, brollState.undo, brollState.redo])
+
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
 
