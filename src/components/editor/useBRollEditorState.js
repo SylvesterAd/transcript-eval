@@ -149,12 +149,6 @@ function reducer(state, action) {
       }))
       return { ...state, rawPlacements: reset, selectedResults: {}, searchProgress: null }
     }
-    case 'HIDE_PLACEMENT': {
-      const updated = state.rawPlacements.map((p, i) =>
-        i === action.payload ? { ...p, hidden: true } : p
-      )
-      return { ...state, rawPlacements: updated }
-    }
     case 'LOAD_EDITOR_STATE': {
       const { state: loaded, version } = action.payload
       return {
@@ -495,8 +489,41 @@ export function useBRollEditorState(planPipelineId) {
   }, [state.rawPlacements, planPipelineId])
 
   const hidePlacement = useCallback((index) => {
-    dispatch({ type: 'HIDE_PLACEMENT', payload: index })
-  }, [])
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    const userPlacementId = placement.userPlacementId || null
+
+    if (placementKey) {
+      const prev = state.edits[placementKey] || {}
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: 'delete',
+        placementKey,
+        before: { editsSlot: { hidden: !!prev.hidden } },
+        after:  { editsSlot: { hidden: true } },
+      }
+      dispatch({ type: 'APPLY_ACTION', payload: entry })
+    } else if (userPlacementId) {
+      const up = state.userPlacements.find(u => u.id === userPlacementId)
+      if (!up) return
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: 'delete',
+        userPlacementId,
+        before: { userPlacementCreate: up },
+        after:  { userPlacementDelete: true },
+      }
+      dispatch({ type: 'APPLY_ACTION', payload: entry })
+    }
+  }, [state.placements, state.edits, state.userPlacements])
+
+  const undo = useCallback(() => dispatch({ type: 'UNDO' }), [])
+  const redo = useCallback(() => dispatch({ type: 'REDO' }), [])
 
   const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd, opts = {}) => {
     const placement = state.placements.find(p => p.index === index)
@@ -550,6 +577,8 @@ export function useBRollEditorState(planPipelineId) {
     searchPlacement,
     searchPlacementCustom,
     hidePlacement,
+    undo,
+    redo,
     updatePlacementPosition,
     resetAllPlacements,
     refetchEditorData,
@@ -565,7 +594,7 @@ export function useBRollEditorState(planPipelineId) {
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
-    searchPlacement, searchPlacementCustom, hidePlacement, updatePlacementPosition,
+    searchPlacement, searchPlacementCustom, hidePlacement, undo, redo, updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
     flushSave,
