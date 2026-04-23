@@ -168,6 +168,53 @@ function reducer(state, action) {
       const newUndoStack = [...state.undoStack, entry].slice(-MAX_UNDO)
       return { ...applied, undoStack: newUndoStack, redoStack: [] }
     }
+    case 'UNDO': {
+      const stack = state.undoStack
+      if (!stack.length) return state
+      const entry = stack[stack.length - 1]
+      const applied = applyMutation(state, entry, 'before')
+      return {
+        ...applied,
+        undoStack: stack.slice(0, -1),
+        redoStack: [...state.redoStack, entry],
+      }
+    }
+    case 'REDO': {
+      const stack = state.redoStack
+      if (!stack.length) return state
+      const entry = stack[stack.length - 1]
+      const applied = applyMutation(state, entry, 'after')
+      return {
+        ...applied,
+        redoStack: stack.slice(0, -1),
+        undoStack: [...state.undoStack, entry].slice(-MAX_UNDO),
+      }
+    }
+    case 'MERGE_REMOTE_STATE': {
+      // Used after a 409: replace base with remote state, then replay any pending
+      // local actions (undoStack entries whose ids are NOT in the remote stack).
+      const { state: remoteState, version } = action.payload
+      const remoteUndo = Array.isArray(remoteState.undoStack) ? remoteState.undoStack : []
+      const remoteIds = new Set(remoteUndo.map(e => e.id))
+      const pending = state.undoStack.filter(e => !remoteIds.has(e.id))
+      let next = {
+        ...state,
+        edits: remoteState.edits || {},
+        userPlacements: Array.isArray(remoteState.userPlacements) ? remoteState.userPlacements : [],
+        undoStack: remoteUndo,
+        redoStack: Array.isArray(remoteState.redoStack) ? remoteState.redoStack : [],
+        editorStateVersion: version,
+        dirty: pending.length > 0,
+      }
+      for (const entry of pending) {
+        next = applyMutation(next, entry, 'after')
+        next = { ...next, undoStack: [...next.undoStack, entry].slice(-MAX_UNDO) }
+      }
+      return next
+    }
+    case 'SAVE_SUCCESS': {
+      return { ...state, editorStateVersion: action.payload.version, dirty: false }
+    }
     default:
       return state
   }
