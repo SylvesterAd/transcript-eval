@@ -218,7 +218,24 @@ function reducer(state, action) {
       const { state: remoteState, version } = action.payload
       const remoteUndo = Array.isArray(remoteState.undoStack) ? remoteState.undoStack : []
       const remoteIds = new Set(remoteUndo.map(e => e.id))
-      const pending = state.undoStack.filter(e => !remoteIds.has(e.id))
+      // Collect targets the remote has also mutated — we'll skip any local pending
+      // entry that targets the same key/userPlacement to avoid corrupting shared state
+      // via mis-captured `before` snapshots.
+      const remoteTargets = new Set()
+      for (const e of remoteUndo) {
+        if (e.placementKey) remoteTargets.add('pk:' + e.placementKey)
+        if (e.userPlacementId) remoteTargets.add('up:' + e.userPlacementId)
+      }
+      const pending = state.undoStack.filter(e => {
+        if (remoteIds.has(e.id)) return false
+        const keyTag = e.placementKey ? 'pk:' + e.placementKey : null
+        const upTag  = e.userPlacementId ? 'up:' + e.userPlacementId : null
+        if ((keyTag && remoteTargets.has(keyTag)) || (upTag && remoteTargets.has(upTag))) {
+          console.warn('[broll-merge] dropping pending action — remote also mutated', e.kind, e.placementKey || e.userPlacementId)
+          return false
+        }
+        return true
+      })
       let next = {
         ...state,
         edits: remoteState.edits || {},
