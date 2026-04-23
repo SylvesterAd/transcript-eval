@@ -109,15 +109,22 @@ export async function recordExportEvent({ userId, body }) {
 
   let metaJson = null
   if (meta != null) {
-    if (typeof meta !== 'object') throw new ValidationError('meta must be an object')
-    metaJson = JSON.stringify(meta)
+    if (typeof meta !== 'object' || Array.isArray(meta)) throw new ValidationError('meta must be an object')
+    try {
+      metaJson = JSON.stringify(meta)
+    } catch {
+      throw new ValidationError('meta not JSON-serializable')
+    }
     if (Buffer.byteLength(metaJson, 'utf8') > META_MAX_BYTES) throw new ValidationError('meta too large (max 4 KB)')
   }
 
   // Ownership check: the export must exist and belong to this user.
   const row = await db.prepare('SELECT id, user_id, status FROM exports WHERE id = ?').get(export_id)
-  if (!row) throw new NotFoundError('export_id not found')
-  if (userId && row.user_id && row.user_id !== userId) throw new NotFoundError('export_id not owned by caller')
+  // Collapse missing-vs-not-owned to the same 404 message so the endpoint
+  // can't be used to enumerate valid export_ids.
+  if (!row || (userId && row.user_id && row.user_id !== userId)) {
+    throw new NotFoundError('export_id not found')
+  }
 
   const receivedAt = Date.now()
   await db.prepare(
