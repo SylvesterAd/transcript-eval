@@ -79,15 +79,6 @@ export default function BRollDetailPanel() {
         )}
       </div>
 
-      {/* Video Preview */}
-      <div className="px-4 pb-2">
-        {result ? (
-          <VideoPreview url={result.preview_url_hq || result.preview_url || result.url} thumbnail={result.thumbnail_url} />
-        ) : (
-          <SearchPrompt placement={placement} index={selectedIndex} searchPlacement={broll.searchPlacement} />
-        )}
-      </div>
-
       {/* Action buttons — Edit / Retry / Delete */}
       <div className="flex items-center gap-1.5 px-4 pb-3">
         <button
@@ -134,24 +125,28 @@ export default function BRollDetailPanel() {
         </div>
       )}
 
-      {/* Other options */}
-      {placement.results?.length > 0 && (
-        <div className="px-4 pb-4 border-t border-white/5 pt-3">
-          <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-2">
-            Other Options ({placement.results.length})
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            {placement.results.map((r, i) => (
-              <BRollOptionThumbnail
-                key={r.id || i}
-                result={r}
-                isSelected={i === resultIdx}
-                onSelect={() => selectResult(selectedIndex, i)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Results / search state */}
+      <div className="px-4 pb-4 border-t border-white/5 pt-3">
+        {placement.results?.length > 0 ? (
+          <>
+            <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-2">
+              Other Options ({placement.results.length})
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {placement.results.map((r, i) => (
+                <BRollOptionThumbnail
+                  key={r.id || i}
+                  result={r}
+                  isSelected={i === resultIdx}
+                  onSelect={() => selectResult(selectedIndex, i)}
+                />
+              ))}
+            </div>
+          </>
+        ) : (
+          <SearchPrompt placement={placement} index={selectedIndex} searchPlacement={broll.searchPlacement} />
+        )}
+      </div>
 
       {/* Edit modal */}
       {showEditModal && (
@@ -350,52 +345,6 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-1 py-0.5 flex items-center gap-1 pointer-events-none">
         <span className="text-[8px] text-white/70 capitalize">{result.source}</span>
         {result.duration > 0 && <span className="text-[8px] text-white/50">{result.duration}s</span>}
-      </div>
-    </div>
-  )
-}
-
-function VideoPreview({ url, thumbnail }) {
-  const videoRef = useRef(null)
-  const [playing, setPlaying] = useState(false)
-  const videoSrc = url || ''
-  const hasSrc = videoSrc.length > 0
-
-  function togglePlay() {
-    if (!hasSrc || !videoRef.current) return
-    if (videoRef.current.paused) {
-      videoRef.current.play()
-      setPlaying(true)
-    } else {
-      videoRef.current.pause()
-      setPlaying(false)
-    }
-  }
-
-  if (!hasSrc && thumbnail) {
-    return (
-      <div className="rounded-lg overflow-hidden bg-black">
-        <img src={thumbnail} alt="" className="w-full aspect-video object-cover" />
-      </div>
-    )
-  }
-
-  return (
-    <div className="relative group cursor-pointer rounded-lg overflow-hidden" onClick={togglePlay}>
-      <video
-        ref={videoRef}
-        src={videoSrc}
-        poster={thumbnail}
-        className="w-full aspect-video object-cover bg-black"
-        preload="metadata"
-        playsInline
-        muted
-        onEnded={() => setPlaying(false)}
-      />
-      <div className={`absolute inset-0 flex items-center justify-center transition-opacity ${playing ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
-        <div className="w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
-          {playing ? <Pause size={16} className="text-white" /> : <Play size={16} className="text-white ml-0.5" />}
-        </div>
       </div>
     </div>
   )
