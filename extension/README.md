@@ -30,9 +30,9 @@ test harness page).
 
 If you must rotate:
 1. Delete the `key` field from `manifest.json`.
-2. `npm run ext:generate-key`.
-3. Update the web app's `EXT_ID` constant everywhere.
-4. Unpack-reload and verify the new ID.
+2. `npm run ext:generate-key` — rewrites `manifest.json`'s `key` field and `extension/.extension-id` with the new values.
+3. `chrome://extensions` → click **reload** on the Export Helper card so the new manifest takes effect.
+4. If any downstream code hard-codes the ID (none in Ext.1; web-app constants may exist in later phases), update those references too.
 
 The private key at `.secrets/extension-private-key.pem` is gitignored
 and not used by Chrome — it's kept only as a rotation artifact.
@@ -48,6 +48,10 @@ npm run dev:client
 # open http://localhost:5173/extension-test.html
 ```
 
+Vite defaults to port 5173 but falls back to 5174 if 5173 is
+occupied (e.g., another worktree running vite). Both ports are in
+the manifest's `externally_connectable` whitelist, so either works.
+
 Paste the ID from `extension/.extension-id` and click **Run all
 checks** for a fast smoke test.
 
@@ -56,6 +60,7 @@ checks** for a fast smoke test.
 ```
 extension/
 ├── manifest.json
+├── .extension-id         derived Chrome extension ID (committed, auto-written by generate-key)
 ├── service_worker.js     message router (onMessageExternal)
 ├── config.js             BACKEND_URL / EXT_VERSION / ENV
 ├── popup.html/css/js     toolbar popup (status-only)
