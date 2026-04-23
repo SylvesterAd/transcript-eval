@@ -471,59 +471,42 @@ Persist per candidate: `source`, `source_item_id`, `poster_url`,
 
 Validated prototypes in `/tmp/envato-test/` during spec work:
 
-- **Method.** `GET elements.envato.com/stock-video/<query>` returns a
-  server-rendered HTML page with ~38 item grid cards. One regex pair
-  per card captures: item detail URL (old 7-char ID format), preview
-  mp4 UUID, poster image URL (multiple widths, pre-signed). Use the
-  broad `stock-video` scope; ZIP-vs-mp4 filtering is handled at
-  license time (see below), not at scrape.
-- **File-type filtering — no reliable pre-license signal.** Envato's
-  `stock-video` category mixes items that download as single .mov/.mp4
-  with items that download as .zip (AE/Premiere templates, bundled
-  project files). Investigation during spec work confirmed there is
-  **no reliable way to distinguish them from anonymous HTML or from
-  the authenticated item-detail endpoint**:
-    - Category labels unreliable (both types can sit under "Motion
-      Graphics → Backgrounds"; e.g., `ocean-JSYT94C` is .mp4 but
-      filed under Motion Graphics).
-    - Preview URL format identical (`/files/<uuid>/video_preview_h264.mp4`
-      for both).
-    - Structured data identical (`@type:VideoObject` for both).
-    - Subcategory URL filter (`/stock-video/stock-footage/<query>`)
-      excludes some zips but also excludes many legitimate mp4 motion-
-      graphics items — false-positive rate too high.
-    - Authenticated `app.envato.com/stock-video/<UUID>.data` response
-      contains resolution / duration / fileSize but **no file
-      extension field**.
-
-- **Detection at license time.** The only reliable signal is the
-  `response-content-disposition` param in the `download.data` response
-  (filename with extension). Strategy:
-    1. Call `download.data?itemUuid=X` as usual (Phase 2).
-    2. Parse response → extract `downloadUrl`.
-    3. **Before `chrome.downloads.download()`**, inspect the
-       downloadUrl's `response-content-disposition` param. Decode the
-       filename.
-    4. If filename ends `.zip` / `.aep` / `.prproj` (known template
-       extensions): **abort**, skip the GET. Mark item
-       `unsupported_filetype` in run state. Event: `item_failed`
-       with `error_code=unsupported_filetype`.
-    5. If filename ends `.mov` / `.mp4`: proceed with download.
-  Cost: the license call has already committed against the user's
-  subscription. For a .zip item skipped this way, the user's counter
-  ticks but no disk write, no timeline breakage. Bounded waste.
-
-- **Telemetry and learning loop.** Every `unsupported_filetype` skip
-  fires a Slack alert (dedupe: once per `source_item_id` per 24h).
-  Over time we build a deny-list of known-ZIP `source_item_id`s in
-  `chrome.storage.local` and skip them at Phase 2 (don't re-license
-  items we already know are unusable). Shared across exports per
-  user.
-
-- **User visibility.** If an export run has N items marked
-  `unsupported_filetype`, the export page State F lists them with
-  reason: "Envato delivered this as a template bundle, not a video.
-  Pick a different clip." Gives user a clear path to fix.
+- **Method.** `GET elements.envato.com/stock-video/stock-footage/<query>`
+  returns a server-rendered HTML page of single-video items only.
+  One regex pair per card captures: item detail URL (old 7-char ID
+  format), preview mp4 UUID, poster image URL (multiple widths,
+  pre-signed).
+- **Exclude motion-graphics entirely.** Motion-graphics items
+  (animated backgrounds, lower-thirds, transitions, etc.) are not
+  useful b-rolls regardless of whether they download as `.zip` or
+  `.mp4` — they're designed as templates or abstract overlays, not
+  captured footage. Skip them at scrape time by using the
+  `/stock-footage/` subcategory URL. Verified counts for "ocean":
+    - `/stock-video/ocean`                 → 40 items (mixed)
+    - `/stock-video/stock-footage/ocean`   → **37 items (scrape this)**
+    - `/stock-video/motion-graphics/ocean` → 27 items (skip, never send to SigLIP)
+  Benefit: motion-graphics candidates never enter the candidate pool
+  → no poster bandwidth, no SigLIP GPU time, no UI clutter, no
+  accidental licenses.
+- **Secondary URL-pattern check in scraper.** If the item detail
+  anchor in any card contains `/motion-graphics/` in its href (edge
+  case where Envato cross-lists an item across categories), skip at
+  parse time too.
+- **Safety net for ZIP leaks past the URL filter.** Rare edge case
+  where a non-motion-graphics item still delivers as a bundle (e.g.,
+  Envato re-categorizes an item, or a stock-footage item unexpectedly
+  ships with project files). Detect at Phase 2:
+    1. After `download.data` returns, inspect the
+       `response-content-disposition` filename in the signed URL.
+    2. If it ends `.zip` / `.aep` / `.prproj`: **abort** before GET,
+       mark `unsupported_filetype`, cache the `source_item_id` in
+       `chrome.storage.local` deny-list (skipped entirely on future
+       runs — no re-license). Slack alert, dedupe once per item per
+       24h. State F lists the item with "Envato delivered this as a
+       bundle; pick a different clip."
+    3. If `.mov` / `.mp4`: proceed with download.
+  Cost of a leak: one wasted license call (no disk write). Bounded
+  and tracked via the deny-list.
 - **Stealth.** `curl_cffi` impersonating `chrome124` — real Chrome
   TLS fingerprint, HTTP/3 to Cloudflare, full Chrome header set
   (Sec-Ch-Ua-*, Sec-Fetch-*, Accept-* with br/zstd). Indistinguishable
