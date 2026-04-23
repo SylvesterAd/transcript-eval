@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "description": "Export your transcript-eval projects to Premiere with b-rolls from your own subscription accounts.",
   "minimum_chrome_version": "120",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "externally_connectable": {
     "matches": [
       "http://localhost:5173/*",
@@ -17,5 +19,6 @@
   },
   "action": {
     "default_popup": "popup.html"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs1oTPILcX4mdGNOtDx+vZlIecVnLcjexW1Iokz0OPiM5j73AYlR5eg/wnxXaK5K82EuXp0bqZ4MQw8HfGEEAuwXjF45UiztoJwRdXjM5OwFoebJH2xepum6y7s84Oa+EHOUA6MFhmLcQY7STJaiPp1KPYIQSUaDEVZWYsMF9Gj3bbE4XewyUhJDoL6vIvcfl/mghia480FJGln+nQQipPebBoYLcszLYQTRh2lMEyn2vyX3GdbQWyO88vONm4Mohx2S1ma1CSr0DjooJNhmBwlNYTZLpPsaGkPqFAdk0NMY1EaOvhgPZix5RqB2y/ajGtlBgWWhASL0pNJRfNFpgxwIDAQAB"
 }

@@ -10,7 +10,8 @@
     "start": "node server/index.js",
     "build": "if [ \"$RAILWAY_ENVIRONMENT\" ]; then echo 'Railway: skip frontend build'; else vite build; fi",
     "seed": "node server/seed/import-benchmark.js",
-    "seed:strategies": "node server/seed/create-strategies.js"
+    "seed:strategies": "node server/seed/create-strategies.js",
+    "ext:generate-key": "node extension/scripts/generate-key.mjs"
   },
   "dependencies": {
     "@dnd-kit/react": "^0.3.2",
