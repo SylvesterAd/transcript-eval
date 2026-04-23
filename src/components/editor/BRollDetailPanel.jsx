@@ -273,7 +273,9 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
   const videoRef = useRef(null)
   const [playing, setPlaying] = useState(false)
   const thumb = result.thumbnail_url || result.preview_url || result.url
-  const videoUrl = result.preview_url_hq || result.preview_url || result.url
+  // Prefer SD preview_url for thumbnails — preview_url_hq is sometimes a server-side guess
+  // (Pexels 1080p URL doesn't exist for every video), so trying it first causes 403s.
+  const videoUrl = result.preview_url || result.preview_url_hq || result.url
   const hasVideo = !!videoUrl && videoUrl !== thumb
 
   function togglePlay(e) {
@@ -281,7 +283,12 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
     const v = videoRef.current
     if (!v) return
     if (v.paused) {
-      v.play().then(() => setPlaying(true)).catch(() => {})
+      const promise = v.play()
+      if (promise) {
+        promise.then(() => setPlaying(true)).catch(() => {})
+      } else {
+        setPlaying(true)
+      }
     } else {
       v.pause()
       setPlaying(false)
