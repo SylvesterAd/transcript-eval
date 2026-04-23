@@ -275,26 +275,77 @@ function EditModal({ placement, index, onSearch, onClose }) {
 }
 
 function BRollOptionThumbnail({ result, isSelected, onSelect }) {
+  const videoRef = useRef(null)
+  const [playing, setPlaying] = useState(false)
   const thumb = result.thumbnail_url || result.preview_url || result.url
+  const videoUrl = result.preview_url_hq || result.preview_url || result.url
+  const hasVideo = !!videoUrl && videoUrl !== thumb
+
+  function togglePlay(e) {
+    e.stopPropagation()
+    if (!videoRef.current) return
+    if (videoRef.current.paused) {
+      videoRef.current.play().catch(() => {})
+      setPlaying(true)
+    } else {
+      videoRef.current.pause()
+      setPlaying(false)
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onSelect()
+    }
+  }
+
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
-      className={`relative rounded overflow-hidden aspect-video transition-all ${
+      onKeyDown={handleKeyDown}
+      className={`relative rounded overflow-hidden aspect-video cursor-pointer transition-all group ${
         isSelected
           ? 'ring-2 ring-teal-400 scale-[1.02]'
           : 'ring-1 ring-white/10 hover:ring-white/25 opacity-70 hover:opacity-100'
       }`}
     >
-      {thumb ? (
-        <img src={thumb} alt={result.title || ''} className="w-full h-full object-cover" loading="lazy" />
+      {playing && hasVideo ? (
+        <video
+          ref={videoRef}
+          src={videoUrl}
+          poster={thumb}
+          className="w-full h-full object-cover bg-black pointer-events-none"
+          playsInline
+          muted
+          onEnded={() => setPlaying(false)}
+        />
+      ) : thumb ? (
+        <img src={thumb} alt={result.title || ''} className="w-full h-full object-cover pointer-events-none" loading="lazy" />
       ) : (
-        <div className="w-full h-full bg-zinc-800 flex items-center justify-center text-zinc-600 text-[9px]">No thumb</div>
+        <div className="w-full h-full bg-zinc-800 flex items-center justify-center text-zinc-600 text-[9px] pointer-events-none">No thumb</div>
       )}
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-1 py-0.5 flex items-center gap-1">
+
+      {hasVideo && (
+        <button
+          type="button"
+          onClick={togglePlay}
+          aria-label={playing ? 'Pause preview' : 'Play preview'}
+          className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/60 backdrop-blur-sm flex items-center justify-center z-10 transition-opacity ${
+            playing ? 'opacity-0 group-hover:opacity-100' : 'opacity-90 hover:opacity-100'
+          }`}
+        >
+          {playing ? <Pause size={14} className="text-white" /> : <Play size={14} className="text-white ml-0.5" />}
+        </button>
+      )}
+
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-1 py-0.5 flex items-center gap-1 pointer-events-none">
         <span className="text-[8px] text-white/70 capitalize">{result.source}</span>
         {result.duration > 0 && <span className="text-[8px] text-white/50">{result.duration}s</span>}
       </div>
-    </button>
+    </div>
   )
 }
 
