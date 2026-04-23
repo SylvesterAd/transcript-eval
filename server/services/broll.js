@@ -5449,16 +5449,19 @@ export async function searchUserPlacement(planPipelineId, userPlacementId, overr
   const results = (data.results || []).map(r => r.preview_url_hq ? r : { ...r, preview_url_hq: upgradePreviewUrl(r.preview_url) })
 
   // Persist back: replace the userPlacement's results, reset selectedResult to 0.
-  // Retry up to 2x on 409 conflict.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Retry up to 3x on 409 conflict.
+  let saved = false
+  for (let attempt = 0; attempt < 3; attempt++) {
     const latest = await loadBrollEditorState(planPipelineId)
     const updatedUps = (latest.state.userPlacements || []).map(u =>
       u.id === userPlacementId ? { ...u, results, selectedResult: 0 } : u
     )
     const nextState = { ...latest.state, userPlacements: updatedUps }
     const save = await saveBrollEditorState(planPipelineId, nextState, latest.version)
-    if (save.status === 'ok') break
-    if (attempt === 1) console.warn('[searchUserPlacement] save conflicted twice, giving up')
+    if (save.status === 'ok') { saved = true; break }
+  }
+  if (!saved) {
+    throw new Error('Failed to persist search results after conflicts; please retry')
   }
 
   return { results, searchStatus: results.length ? 'complete' : 'no_results' }
