@@ -109,18 +109,51 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
     return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration }
   })
 
-  // Step 2: Fix overlaps — audio_anchor position has priority.
-  // Sort by timelineStart, then trim earlier placement's end if it overlaps
-  // the next placement's anchor-based start.
-  const sorted = [...resolved].sort((a, b) => a.timelineStart - b.timelineStart)
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const curr = sorted[i]
-    const next = sorted[i + 1]
-    if (curr.timelineEnd > next.timelineStart) {
-      // Trim current placement's end to where the next one starts
-      curr.timelineEnd = next.timelineStart
-      curr.timelineDuration = Math.max(0, curr.timelineEnd - curr.timelineStart)
+  // Step 2: Two-pass soft displacement.
+  // Fixed clips (user-edited OR user-created) are immovable landmarks;
+  // free clips flow left-to-right through the gaps, clipped by fixed neighbors.
+  for (const p of resolved) {
+    const hasEditsOverride = editsByKey && p.chapterIndex != null && p.placementIndex != null
+      && editsByKey[`${p.chapterIndex}:${p.placementIndex}`]?.timelineStart != null
+    p.isFixed = !!p.isUserPlacement || hasEditsOverride
+    p.naturalStart = p.timelineStart
+    p.naturalEnd   = p.timelineEnd
+  }
+
+  const sorted = [...resolved].sort((a, b) => a.naturalStart - b.naturalStart)
+
+  // Pass 1: fixed clips stay at natural positions
+  for (const p of sorted) {
+    if (p.isFixed) {
+      p.timelineStart = p.naturalStart
+      p.timelineEnd   = p.naturalEnd
     }
+  }
+
+  // Pass 2: walk free clips, clipped by the next fixed clip to their right
+  let prevEnd = 0
+  for (let i = 0; i < sorted.length; i++) {
+    const c = sorted[i]
+    if (c.isFixed) {
+      prevEnd = Math.max(prevEnd, c.timelineEnd)
+      continue
+    }
+    let rightBoundary = Infinity
+    for (let j = i + 1; j < sorted.length; j++) {
+      if (sorted[j].isFixed) { rightBoundary = sorted[j].naturalStart; break }
+    }
+    const naturalDur = Math.max(0, c.naturalEnd - c.naturalStart)
+    let timelineStart = Math.max(c.naturalStart, prevEnd)
+    let timelineEnd   = Math.min(timelineStart + naturalDur, rightBoundary)
+    if (timelineEnd - timelineStart < 0.5) {
+      // Squeezed out past the fixed clip
+      timelineStart = rightBoundary
+      timelineEnd   = rightBoundary + naturalDur
+    }
+    c.timelineStart   = timelineStart
+    c.timelineEnd     = timelineEnd
+    c.timelineDuration = Math.max(0, timelineEnd - timelineStart)
+    prevEnd = Math.max(prevEnd, timelineEnd)
   }
 
   return sorted

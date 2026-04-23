@@ -294,11 +294,29 @@ export function useBRollEditorState(planPipelineId) {
   const editsRef = useRef(state.edits)
   editsRef.current = state.edits
 
+  const userPlacementsRef = useRef(state.userPlacements)
+  userPlacementsRef.current = state.userPlacements
+
   // Seed cached placements synchronously. Called by BRollEditor BEFORE setActiveVariantIdx,
   // so the pipelineId passed here is the INCOMING one.
   const seedFromCache = useCallback((pipelineId, rawPlacements, searchProgress) => {
     const visible = rawPlacements.filter(p => !p.hidden)
-    const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current, editsRef.current)
+    const resolved = matchPlacementsToTranscript(
+      [...visible, ...userPlacementsRef.current.map(up => ({
+        ...(up.snapshot || {}),
+        index: `user:${up.id}`,
+        userPlacementId: up.id,
+        isUserPlacement: true,
+        userTimelineStart: up.timelineStart,
+        userTimelineEnd: up.timelineEnd,
+        results: up.results,
+        searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+        chapterIndex: null,
+        placementIndex: null,
+      }))],
+      transcriptWordsRef.current,
+      editsRef.current,
+    )
     seededPipelineIdRef.current = pipelineId
     dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
   }, [])
@@ -325,7 +343,22 @@ export function useBRollEditorState(planPipelineId) {
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
       .then(data => {
         const visible = (data.placements || []).filter(p => !p.hidden)
-        const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current, editsRef.current)
+        const resolved = matchPlacementsToTranscript(
+          [...visible, ...userPlacementsRef.current.map(up => ({
+            ...(up.snapshot || {}),
+            index: `user:${up.id}`,
+            userPlacementId: up.id,
+            isUserPlacement: true,
+            userTimelineStart: up.timelineStart,
+            userTimelineEnd: up.timelineEnd,
+            results: up.results,
+            searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+            chapterIndex: null,
+            placementIndex: null,
+          }))],
+          transcriptWordsRef.current,
+          editsRef.current,
+        )
         dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
@@ -350,7 +383,22 @@ export function useBRollEditorState(planPipelineId) {
     if (!state.rawPlacements.length) return
     if (!transcriptWords.length) return
     const visible = state.rawPlacements.filter(p => !p.hidden)
-    const resolved = matchPlacementsToTranscript(visible, transcriptWords, editsRef.current)
+    const resolved = matchPlacementsToTranscript(
+      [...visible, ...userPlacementsRef.current.map(up => ({
+        ...(up.snapshot || {}),
+        index: `user:${up.id}`,
+        userPlacementId: up.id,
+        isUserPlacement: true,
+        userTimelineStart: up.timelineStart,
+        userTimelineEnd: up.timelineEnd,
+        results: up.results,
+        searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+        chapterIndex: null,
+        placementIndex: null,
+      }))],
+      transcriptWords,
+      editsRef.current,
+    )
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
   }, [transcriptWords])
 
