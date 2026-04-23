@@ -5141,7 +5141,52 @@ export async function getBRollEditorData(planPipelineId) {
     // Don't report 'running' — let the UI show "Search next 10" button to resume.
   }
 
-  return { placements, searchProgress, totalPlacements: placements.length }
+  // 4. Merge user edits from broll_editor_state (hidden, manual positions, selected result, userPlacements)
+  let editorState = {}, editorVersion = 0
+  try {
+    const loaded = await loadBrollEditorState(planPipelineId)
+    editorState = loaded.state || {}
+    editorVersion = loaded.version
+  } catch (err) {
+    console.error('[getBRollEditorData] Failed to load editor-state:', err.message)
+  }
+
+  const edits = editorState.edits || {}
+  const userPlacements = Array.isArray(editorState.userPlacements) ? editorState.userPlacements : []
+
+  const editedPlacements = []
+  for (const p of placements) {
+    const key = `${p.chapterIndex}:${p.placementIndex}`
+    const e = edits[key]
+    if (e?.hidden) continue
+    if (e?.timelineStart != null && e?.timelineEnd != null) {
+      p.userTimelineStart = e.timelineStart
+      p.userTimelineEnd = e.timelineEnd
+    }
+    if (e?.selectedResult != null) {
+      p.persistedSelectedResult = e.selectedResult
+    }
+    editedPlacements.push(p)
+  }
+
+  for (const up of userPlacements) {
+    editedPlacements.push({
+      index: `user:${up.id}`,
+      userPlacementId: up.id,
+      isUserPlacement: true,
+      sourcePipelineId: up.sourcePipelineId,
+      chapterIndex: up.sourceChapterIndex ?? null,
+      placementIndex: up.sourcePlacementIndex ?? null,
+      userTimelineStart: up.timelineStart,
+      userTimelineEnd: up.timelineEnd,
+      persistedSelectedResult: up.selectedResult,
+      results: up.results || [],
+      searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+      ...(up.snapshot || {}),
+    })
+  }
+
+  return { placements: editedPlacements, searchProgress, totalPlacements: editedPlacements.length, editorStateVersion: editorVersion }
 }
 
 /**
