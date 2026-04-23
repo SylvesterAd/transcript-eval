@@ -105,9 +105,11 @@ function convertSql(sql) {
   return converted
 }
 
-// Retry on transient pool/connection errors — pgBouncer session-mode
-// rejects with "MaxClientsInSessionMode" when pool_size is saturated.
-// A short backoff usually clears this.
+// Retry once on transient TCP/connection blips (ECONNREFUSED, terminated,
+// timeout). Supavisor transaction mode handles concurrency natively, so
+// this is defense-in-depth against genuine network hiccups — not pool
+// saturation. The `max clients` patterns are kept in the regex as a
+// safety net in case the DATABASE_URL ever slips back to port 5432.
 async function queryWithRetry(sql, params, maxRetries = 1) {
   let lastErr
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -118,6 +120,7 @@ async function queryWithRetry(sql, params, maxRetries = 1) {
       const msg = err?.message || ''
       const transient = /max clients|MaxClientsInSessionMode|ECONNREFUSED|Connection terminated|timeout/i.test(msg)
       if (!transient || attempt === maxRetries) throw err
+      console.warn(`[db] queryWithRetry transient (${msg}) — retrying in 150ms`)
       await new Promise(r => setTimeout(r, 150))
     }
   }
@@ -158,24 +161,7 @@ async function exec(sql) {
   await queryWithRetry(pgSql, [])
 }
 
-function transaction(fn) {
-  return async (...args) => {
-    const client = await pool.connect()
-    try {
-      await client.query('BEGIN')
-      const result = await fn(...args)
-      await client.query('COMMIT')
-      return result
-    } catch (e) {
-      await client.query('ROLLBACK')
-      throw e
-    } finally {
-      client.release()
-    }
-  }
-}
-
 // No-op save for backward compatibility (PostgreSQL persists automatically)
 function save() {}
 
-export default { prepare, exec, transaction, save, pool }
+export default { prepare, exec, save, pool }
