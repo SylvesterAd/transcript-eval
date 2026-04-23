@@ -109,6 +109,8 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         out[pid] = cached.resolved
         continue
       }
+      // TODO: inactive variant edits — currently inactive variants don't have their edits applied
+      //       because fetching per-pipeline editor-state for all variants is not yet wired up.
       const resolved = matchPlacementsToTranscript(placements, transcriptWords)
       cache.set(pid, { raw: placements, words: transcriptWords, resolved })
       out[pid] = resolved

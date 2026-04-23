@@ -28,18 +28,24 @@ function normalize(text) {
  * @param {Array} words - transcript words [{word, start, end}, ...]
  * @returns {Array} placements with timelineStart, timelineEnd, timelineDuration added
  */
-export function matchPlacementsToTranscript(placements, words) {
+export function matchPlacementsToTranscript(placements, words, editsByKey = null) {
   if (!placements?.length || !words?.length) return placements || []
 
   // Step 1: Position each placement independently based on audio_anchor
   const resolved = placements.map(p => {
-    // User has manually positioned this placement — their position wins
-    if (p.userTimelineStart != null && p.userTimelineEnd != null) {
+    // Prefer editsByKey lookup if provided; fall back to inline userTimelineStart/End
+    const editKey = p.chapterIndex != null && p.placementIndex != null
+      ? `${p.chapterIndex}:${p.placementIndex}`
+      : null
+    const edit = editKey && editsByKey ? editsByKey[editKey] : null
+    const uStart = edit?.timelineStart ?? p.userTimelineStart
+    const uEnd   = edit?.timelineEnd   ?? p.userTimelineEnd
+    if (uStart != null && uEnd != null) {
       return {
         ...p,
-        timelineStart: p.userTimelineStart,
-        timelineEnd: p.userTimelineEnd,
-        timelineDuration: p.userTimelineEnd - p.userTimelineStart,
+        timelineStart: uStart,
+        timelineEnd: uEnd,
+        timelineDuration: uEnd - uStart,
       }
     }
 

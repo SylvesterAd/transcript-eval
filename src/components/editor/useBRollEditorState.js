@@ -286,11 +286,14 @@ export function useBRollEditorState(planPipelineId) {
   const transcriptWordsRef = useRef(transcriptWords)
   transcriptWordsRef.current = transcriptWords
 
+  const editsRef = useRef(state.edits)
+  editsRef.current = state.edits
+
   // Seed cached placements synchronously. Called by BRollEditor BEFORE setActiveVariantIdx,
   // so the pipelineId passed here is the INCOMING one.
   const seedFromCache = useCallback((pipelineId, rawPlacements, searchProgress) => {
     const visible = rawPlacements.filter(p => !p.hidden)
-    const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+    const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current, editsRef.current)
     seededPipelineIdRef.current = pipelineId
     dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
   }, [])
@@ -317,7 +320,7 @@ export function useBRollEditorState(planPipelineId) {
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
       .then(data => {
         const visible = (data.placements || []).filter(p => !p.hidden)
-        const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+        const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current, editsRef.current)
         dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
@@ -342,7 +345,7 @@ export function useBRollEditorState(planPipelineId) {
     if (!state.rawPlacements.length) return
     if (!transcriptWords.length) return
     const visible = state.rawPlacements.filter(p => !p.hidden)
-    const resolved = matchPlacementsToTranscript(visible, transcriptWords)
+    const resolved = matchPlacementsToTranscript(visible, transcriptWords, editsRef.current)
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
   }, [transcriptWords])
 
