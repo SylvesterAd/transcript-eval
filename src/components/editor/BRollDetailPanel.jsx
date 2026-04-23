@@ -145,6 +145,7 @@ export default function BRollDetailPanel() {
                   result={r}
                   isSelected={i === resultIdx}
                   onSelect={() => selectResult(selectedIndex, i)}
+                  eager={i < 4}
                 />
               ))}
             </div>
@@ -275,7 +276,7 @@ function EditModal({ placement, index, onSearch, onClose }) {
   )
 }
 
-function BRollOptionThumbnail({ result, isSelected, onSelect }) {
+function BRollOptionThumbnail({ result, isSelected, onSelect, eager = false }) {
   const videoRef = useRef(null)
   const [playing, setPlaying] = useState(false)
   const thumb = result.thumbnail_url || result.preview_url || result.url
@@ -326,7 +327,7 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
           src={videoUrl}
           poster={thumb}
           className="w-full h-full object-cover bg-black pointer-events-none"
-          preload="metadata"
+          preload={eager ? 'auto' : 'metadata'}
           playsInline
           muted
           onEnded={() => setPlaying(false)}
