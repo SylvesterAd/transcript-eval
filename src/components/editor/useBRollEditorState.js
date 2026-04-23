@@ -728,7 +728,7 @@ export function useBRollEditorState(planPipelineId) {
         edits: remote.state?.edits || {},
         userPlacements: [...(remote.state?.userPlacements || []), up],
         undoStack: [...(remote.state?.undoStack || []), {
-          id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
+          id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
           before: { userPlacementDelete: true }, after: { userPlacementCreate: up },
         }].slice(-MAX_UNDO),
         redoStack: [],
