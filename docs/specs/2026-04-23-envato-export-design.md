@@ -1322,12 +1322,25 @@ side-by-side with the related `exports` row.
 - **Final Cut Pro 11** — does NOT accept FCP7 xmeml (dropped long
   ago). Needs FCPXML 1.13. Out of scope for MVP; add an FCPXML
   generator later (same placement data, different XML schema).
-- **CapCut** — desktop/mobile do not support ANY NLE project-file
-  import (no XML, FCPXML, AAF, EDL, OTIO). Native draft format is
-  encrypted as of April 2024. Only interchange with CapCut is
-  rendered video (`.mp4`). Not addressable without a ByteDance
-  partnership; permanently out of scope unless they publish an
-  import API.
+- **CapCut** — no project-file import of any standard format (XML,
+  FCPXML, AAF, EDL, OTIO). Native draft format (`draft_content.json`)
+  has been AES-encrypted since CapCut ~5.9 / Apr 2024; no public
+  decrypt exists as of Apr 2026. Community tools (`pyJianYingDraft`,
+  `pyCapCut`, `emosheeep/capcut-export`) only work with pre-encryption
+  versions — require users to pin an old CapCut install, not viable
+  for consumer shipping.
+
+  Realistic interchange paths if we ever want CapCut support:
+  - **Rendered MP4 only** (what every automation shop does —
+    Remotion / Creatomate / JSON2Video style). Needs a server-side
+    renderer; not in this spec.
+  - **MP4 + sidecar SRT** — CapCut Desktop/Web imports SRT as
+    editable caption layers atop a provided video. Lightweight
+    "project-lite" path for a future lane if transcript-eval adds
+    server-side rendering.
+
+  Permanently out of scope for this spec; no path via an export helper
+  extension.
 - Server-side Envato download orchestration. Never; violates user-IP
   constraint.
 - Extension as primary login for transcript-eval. Token passed via
