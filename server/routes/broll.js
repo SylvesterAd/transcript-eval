@@ -727,7 +727,12 @@ router.get('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) =
 
 router.put('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) => {
   try {
-    const { state, version } = req.body || {}
+    let body = req.body || {}
+    // sendBeacon may deliver as text/plain; fall back to JSON-parse if we got a string
+    if (req.query.beacon && typeof body === 'string') {
+      try { body = JSON.parse(body) } catch {}
+    }
+    const { state, version } = body
     if (state == null || typeof version !== 'number') {
       return res.status(400).json({ error: 'state and numeric version required' })
     }

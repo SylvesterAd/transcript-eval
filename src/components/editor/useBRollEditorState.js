@@ -32,6 +32,23 @@ async function authFetch(path, signal) {
   return res.json()
 }
 
+async function authPut(path, body, signal) {
+  const headers = { 'Content-Type': 'application/json' }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  const res = await fetch(`${API_BASE}${path}`, { method: 'PUT', headers, body: JSON.stringify(body), signal })
+  if (res.status === 409) {
+    const parsed = await res.json().catch(() => ({}))
+    const err = new Error('conflict')
+    err.conflict = parsed
+    throw err
+  }
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
 // Applies just the mutation side of an action to the reducer's editor-state slots.
 // Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
 function applyMutation(state, entry, side /* 'before' | 'after' */) {
@@ -343,6 +360,79 @@ export function useBRollEditorState(planPipelineId) {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [planPipelineId, state.searchProgress?.status])
 
+  // Refs for debounced save
+  const saveTimerRef = useRef(null)
+  const savingRef = useRef(false)
+  const pendingSaveRef = useRef(false)
+  const savePayloadRef = useRef(null)
+
+  const flushSave = useCallback(async () => {
+    if (!planPipelineId) return
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null }
+    if (savingRef.current) {
+      // A save is already in flight — flag a follow-up
+      pendingSaveRef.current = true
+      return
+    }
+    const payload = savePayloadRef.current
+    if (!payload) return
+    savingRef.current = true
+    try {
+      const res = await authPut(`/broll/pipeline/${planPipelineId}/editor-state`, payload)
+      dispatch({ type: 'SAVE_SUCCESS', payload: { version: res.version } })
+    } catch (err) {
+      if (err.conflict) {
+        dispatch({ type: 'MERGE_REMOTE_STATE', payload: err.conflict })
+        pendingSaveRef.current = true
+      } else {
+        console.error('[broll-editor-state] save failed:', err.message)
+      }
+    } finally {
+      savingRef.current = false
+      if (pendingSaveRef.current) {
+        pendingSaveRef.current = false
+        setTimeout(() => flushSave(), 100)
+      }
+    }
+  }, [planPipelineId])
+
+  // Keep savePayloadRef fresh
+  useEffect(() => {
+    savePayloadRef.current = {
+      state: {
+        edits: state.edits,
+        userPlacements: state.userPlacements,
+        undoStack: state.undoStack,
+        redoStack: state.redoStack,
+      },
+      version: state.editorStateVersion,
+    }
+  }, [state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion])
+
+  // Debounced save on dirty
+  useEffect(() => {
+    if (!state.dirty || !planPipelineId) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => flushSave(), 500)
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
+  }, [state.dirty, planPipelineId, flushSave])
+
+  // beforeunload — sendBeacon the pending save so edits aren't lost on tab close
+  useEffect(() => {
+    const handler = (e) => {
+      if (!state.dirty) return
+      const payload = savePayloadRef.current
+      if (payload && navigator.sendBeacon) {
+        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+        navigator.sendBeacon(`${API_BASE}/broll/pipeline/${planPipelineId}/editor-state?beacon=1`, blob)
+      }
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [state.dirty, planPipelineId])
+
   const selectPlacement = useCallback((index) => {
     dispatch({ type: 'SELECT_PLACEMENT', payload: index })
   }, [])
@@ -449,6 +539,7 @@ export function useBRollEditorState(planPipelineId) {
     redoStack: state.redoStack,
     editorStateVersion: state.editorStateVersion,
     dirty: state.dirty,
+    flushSave,
   }), [
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
@@ -456,5 +547,6 @@ export function useBRollEditorState(planPipelineId) {
     searchPlacement, searchPlacementCustom, hidePlacement, updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
+    flushSave,
   ])
 }
