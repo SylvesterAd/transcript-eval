@@ -722,26 +722,62 @@ Rationale: 1080p is the Premiere sequence target. Larger files waste
 disk + download time; 720p is acceptable only when the item truly has
 nothing higher.
 
-**Wire-format TBD — needs one more HAR capture.** The HAR we have
-(from a single-resolution item, ocean-NX9WYGQ) doesn't show the
-resolution picker mechanism. Two likely patterns based on standard
-flows:
+**Wire format confirmed** (HARs from a 4K+2K item, Apr 2026):
 
-- **Pattern A**: available variants listed in the item-detail `.data`
-  response (`app.envato.com/stock-video/<UUID>.data`), then
-  `download.data` accepts a `resolution=1080p` (or `variantId`) param.
-- **Pattern B**: separate endpoint (e.g., `/item-variants.data`)
-  returns variants; `download.data` commits a specific variant by ID.
+Each resolution is a separate **asset** with its own UUID. The
+`download.data` endpoint takes an additional `assetUuid` query param
+to select which variant to license/download:
 
-To confirm: open an item that has multiple resolutions (e.g., any 4K
-clip), click Download, pick 1080p in the picker, capture HAR with
-Preserve log on. The `download.data` request (or a sibling) will show
-the resolution parameter shape.
+```
+GET app.envato.com/download.data
+    ?itemUuid=<ITEM_UUID>
+    &itemType=stock-video
+    &assetUuid=<ASSET_UUID>     ← resolution selector
+    &_routes=routes/download/route
+```
 
-Implementation then: parse variants from detail response, apply
-selection rule, pass preferred variant to `download.data`. Fallback
-if unknown: call `download.data` with no variant param (gets Envato
-default, usually highest) and accept the cost.
+Observed from HARs:
+- 4K variant: `assetUuid=eb09a1d0-...-ac7b57`  →  `source.mp4`
+- 2K variant: `assetUuid=ceb15baf-...-810b05`  →  `hd.mov`
+- Single `itemUuid` (`9c084a63-...`) for both.
+
+Omitting `assetUuid` (as the first ocean HAR did) returns Envato's
+default — typically the highest resolution.
+
+Response shape is identical to non-variant case: Remix streaming JSON
+with `downloadUrl` at index 7. Filename in the `response-content-
+disposition` tells us what we actually got (`.mp4` vs `.mov` differs
+even by variant).
+
+**Still unknown: where the variant list comes from.** The HARs we
+have capture post-picker (user had variants already loaded). Neither
+`download.data` nor the item-detail `.data` response contains the
+variants list. The endpoint that populates the picker fires earlier
+(likely on item page load or on "open download modal" click) and we
+don't have it captured yet.
+
+**Temporary MVP strategy until variant endpoint is known:**
+
+1. Call `download.data` **without** `assetUuid` → returns Envato's
+   default variant (usually highest).
+2. Inspect the `response-content-disposition` filename to see what
+   resolution we got (Envato filenames sometimes indicate it;
+   otherwise extract width/height from the file after download).
+3. Accept this as good-enough for MVP. Users with 4K items get 4K
+   downloads — larger files but always work.
+
+**Optimization path once we have the variant endpoint:**
+
+1. Fetch variants list (endpoint TBD — one more HAR capture: open
+   item page fresh, click Download once, capture the XHR that
+   populates the resolution picker **before** user clicks any
+   specific resolution).
+2. Apply the selection rule (prefer 1080p; else smallest ≥1080p;
+   else max).
+3. Pass chosen `assetUuid` to `download.data`.
+
+This upgrade is incremental — same code path, just passes an
+additional param once we know how to get the list.
 
 ### Phase 3: Save file
 
