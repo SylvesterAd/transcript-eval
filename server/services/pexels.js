@@ -1,3 +1,5 @@
+import { NotFoundError } from './errors.js'
+
 const API_KEY = process.env.PEXELS_API_KEY
 const BASE = 'https://api.pexels.com'
 
@@ -67,9 +69,11 @@ export function pickBestVideoFile(video, preferredResolution = '1080p') {
   if (!files.length) return null
   const wanted = RESOLUTION_HEIGHT[preferredResolution] || 1080
 
+  // mp4 only — HLS playlists and thumbnails would silently end up in the
+  // extension's downloads folder as broken files that Premiere can't relink.
   const mp4s = files.filter(f => (f.file_type || '').toLowerCase() === 'video/mp4' && f.link)
-  const pool = mp4s.length ? mp4s : files.filter(f => f.link)
-  if (!pool.length) return null
+  if (!mp4s.length) return null
+  const pool = mp4s
 
   const underOrEqual = pool.filter(f => (f.height || 0) <= wanted)
   const chosen = underOrEqual.length
@@ -81,14 +85,20 @@ export function pickBestVideoFile(video, preferredResolution = '1080p') {
 // Fetch the video from Pexels and choose the best download URL.
 // Returns { url, filename, size_bytes, resolution } per the API contract.
 export async function getDownloadUrl(itemId, preferredResolution = '1080p') {
-  const video = await getVideo(itemId)
-  if (!video || !video.id) throw new Error('Pexels item not found')
+  let video
+  try {
+    video = await getVideo(itemId)
+  } catch (err) {
+    // apiGet throws "Pexels <status>: <body>" — rewrap upstream 404 as NotFoundError.
+    if (/^Pexels 404/.test(err.message || '')) throw new NotFoundError('Pexels item not found')
+    throw err
+  }
+  if (!video || !video.id) throw new NotFoundError('Pexels item not found')
   const file = pickBestVideoFile(video, preferredResolution)
-  if (!file) throw new Error('Pexels item has no downloadable video files')
-  const ext = (file.file_type || 'video/mp4').split('/').pop() || 'mp4'
+  if (!file) throw new NotFoundError('Pexels item has no downloadable video files')
   return {
     url: file.link,
-    filename: `pexels_${video.id}.${ext}`,
+    filename: `pexels_${video.id}.mp4`,
     size_bytes: null,  // Pexels doesn't return size; extension derives from Content-Length at download time
     resolution: { width: file.width || video.width || null, height: file.height || video.height || null },
   }

@@ -9,21 +9,8 @@ import { ulid } from 'ulid'
 import db from '../db.js'
 import { notify } from './slack-notifier.js'
 
-export class ValidationError extends Error {
-  constructor(message) {
-    super(message)
-    this.name = 'ValidationError'
-    this.status = 400
-  }
-}
-
-export class NotFoundError extends Error {
-  constructor(message) {
-    super(message)
-    this.name = 'NotFoundError'
-    this.status = 404
-  }
-}
+import { ValidationError, NotFoundError } from './errors.js'
+export { ValidationError, NotFoundError }
 
 export function mintExportId() {
   return `exp_${ulid()}`

@@ -56,12 +56,7 @@ pexelsUrlRouter.post('/', requireExtAuth, async (req, res, next) => {
     const result = await pexelsGetDownloadUrl(item_id, preferred_resolution || '1080p')
     res.json(result)
   } catch (err) {
-    const msg = err.message || ''
-    // Pexels upstream 404 (apiGet formats as "Pexels 404: ...") OR our
-    // in-service "not found" messages all map to HTTP 404.
-    if (/^Pexels 404/.test(msg) || msg === 'Pexels item not found' || msg === 'Pexels item has no downloadable video files') {
-      return res.status(404).json({ error: 'Pexels item not found' })
-    }
+    if (err instanceof NotFoundError) return res.status(404).json({ error: 'Pexels item not found' })
     next(err)
   }
 })
