@@ -315,3 +315,11 @@ CREATE TABLE IF NOT EXISTS broll_example_sources (
   is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- B-Roll editor state: persisted per-pipeline user edits, user placements, undo/redo
+CREATE TABLE IF NOT EXISTS broll_editor_state (
+  plan_pipeline_id TEXT PRIMARY KEY,
+  state_json       TEXT    NOT NULL DEFAULT '{}',
+  version          INTEGER NOT NULL DEFAULT 1,
+  updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
