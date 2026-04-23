@@ -50,6 +50,8 @@ import {
   loadExampleVideos,
   previewBrollReset,
   resetBrollSearches,
+  loadBrollEditorState,
+  saveBrollEditorState,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -709,6 +711,31 @@ router.get('/pipeline/:pipelineId/editor-data', requireAuth, async (req, res) =>
   try {
     const data = await getBRollEditorData(req.params.pipelineId)
     res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) => {
+  try {
+    const data = await loadBrollEditorState(req.params.pipelineId)
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.put('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) => {
+  try {
+    const { state, version } = req.body || {}
+    if (state == null || typeof version !== 'number') {
+      return res.status(400).json({ error: 'state and numeric version required' })
+    }
+    const result = await saveBrollEditorState(req.params.pipelineId, state, version)
+    if (result.status === 'conflict') {
+      return res.status(409).json({ state: result.state, version: result.version })
+    }
+    res.json({ version: result.version })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
