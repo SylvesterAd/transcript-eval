@@ -395,13 +395,13 @@ export function useBRollEditorState(planPipelineId) {
     return () => { cancelled = true }
   }, [planPipelineId])
 
-  // Re-resolve when transcript words change (rare — only on initial track load)
+  // Re-resolve when transcript words, edits, or userPlacements change
   useEffect(() => {
     if (!state.rawPlacements.length) return
     if (!transcriptWords.length) return
     const visible = state.rawPlacements.filter(p => !p.hidden)
     const resolved = matchPlacementsToTranscript(
-      [...visible, ...userPlacementsRef.current.map(up => ({
+      [...visible, ...state.userPlacements.map(up => ({
         ...(up.snapshot || {}),
         index: `user:${up.id}`,
         userPlacementId: up.id,
@@ -414,10 +414,10 @@ export function useBRollEditorState(planPipelineId) {
         placementIndex: null,
       }))],
       transcriptWords,
-      editsRef.current,
+      state.edits,
     )
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
-  }, [transcriptWords])
+  }, [transcriptWords, state.edits, state.userPlacements, state.rawPlacements])
 
   // Poll for progressive search updates
   useEffect(() => {
