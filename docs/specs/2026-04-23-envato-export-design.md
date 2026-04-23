@@ -492,6 +492,31 @@ Validated prototypes in `/tmp/envato-test/` during spec work:
   anchor in any card contains `/motion-graphics/` in its href (edge
   case where Envato cross-lists an item across categories), skip at
   parse time too.
+
+- **Orientation filter.** Envato supports orientation at the URL
+  level — useful because b-roll target platforms differ by aspect:
+
+  - `/stock-video/stock-footage/<query>` (no suffix)        → all orientations
+  - `/stock-video/stock-footage/<query>/orientation-horizontal` → 16:9 (YouTube, TV)
+  - `/stock-video/stock-footage/<query>/orientation-vertical`   → 9:16 (TikTok, Reels, Shorts)
+
+  The scraper takes `orientation` as a parameter driven by the
+  transcript-eval project's target platform. Default: `horizontal`.
+  Value `any` drops the suffix (includes both). Passing the right
+  orientation at scrape time means SigLIP never ranks clips of the
+  wrong aspect, and the editor only surfaces correctly-framed
+  candidates.
+
+  Data source: transcript-eval should store a per-project
+  `target_orientation` field (horizontal | vertical | any).
+  Defaults to horizontal if unset. The scraper URL-builder reads it
+  when composing per-placement search requests.
+
+  Resolution filter (also a URL segment, e.g.
+  `/resolution-1080p-(full-hd)`) is lower priority — candidates from
+  all resolutions enter the pool; the resolution-selection rule at
+  download time (see Phase 2) picks which variant to fetch for the
+  final export.
 - **Safety net for ZIP leaks past the URL filter.** Rare edge case
   where a non-motion-graphics item still delivers as a bundle (e.g.,
   Envato re-categorizes an item, or a stock-footage item unexpectedly
