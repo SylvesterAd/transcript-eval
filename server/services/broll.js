@@ -4843,6 +4843,64 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 // ── B-Roll Editor Data ────────────────────────────────────────────────
 
 /**
+ * Load the editor state blob for a plan pipeline.
+ * Returns { state, version } — empty object and version 0 if no row yet.
+ */
+export async function loadBrollEditorState(planPipelineId) {
+  const row = await db.prepare(
+    `SELECT state_json, version FROM broll_editor_state WHERE plan_pipeline_id = ?`
+  ).get(planPipelineId)
+  if (!row) return { state: {}, version: 0 }
+  let state = {}
+  try { state = JSON.parse(row.state_json || '{}') } catch {}
+  return { state, version: row.version }
+}
+
+/**
+ * Save the editor state blob with optimistic concurrency.
+ * If expectedVersion does not match the current row's version, returns
+ * { status: 'conflict', state, version } without writing.
+ * On success returns { status: 'ok', version: newVersion }.
+ */
+export async function saveBrollEditorState(planPipelineId, state, expectedVersion) {
+  const client = await db.pool.connect()
+  try {
+    await client.query('BEGIN')
+    const cur = await client.query(
+      `SELECT state_json, version FROM broll_editor_state WHERE plan_pipeline_id = $1 FOR UPDATE`,
+      [planPipelineId],
+    )
+    const currentVersion = cur.rows[0]?.version || 0
+    if (currentVersion !== expectedVersion) {
+      await client.query('ROLLBACK')
+      let currentState = {}
+      try { currentState = JSON.parse(cur.rows[0]?.state_json || '{}') } catch {}
+      return { status: 'conflict', state: currentState, version: currentVersion }
+    }
+    const nextVersion = currentVersion + 1
+    const stateJson = JSON.stringify(state || {})
+    if (cur.rows.length === 0) {
+      await client.query(
+        `INSERT INTO broll_editor_state (plan_pipeline_id, state_json, version, updated_at) VALUES ($1, $2, $3, NOW())`,
+        [planPipelineId, stateJson, nextVersion],
+      )
+    } else {
+      await client.query(
+        `UPDATE broll_editor_state SET state_json = $1, version = $2, updated_at = NOW() WHERE plan_pipeline_id = $3`,
+        [stateJson, nextVersion, planPipelineId],
+      )
+    }
+    await client.query('COMMIT')
+    return { status: 'ok', version: nextVersion }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/**
  * Assemble all data needed for the B-Roll editor UI.
  * Loads plan placements and search results for a given plan pipeline.
  */
