@@ -53,11 +53,11 @@ function main() {
   const pubB64 = pubDer.toString('base64')
   const extId = deriveExtensionId(pubDer)
 
+  mkdirSync(SECRETS_DIR, { recursive: true })
+  writeFileSync(PRIV_OUT_PATH, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+
   manifest.key = pubB64
   writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n')
-
-  mkdirSync(SECRETS_DIR, { recursive: true })
-  writeFileSync(PRIV_OUT_PATH, privateKey.export({ type: 'pkcs8', format: 'pem' }))
 
   writeFileSync(ID_OUT_PATH, extId + '\n')
 
