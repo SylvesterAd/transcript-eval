@@ -370,13 +370,13 @@ extension downloads from those URLs + from Envato's session-bound flow.
 
 ### Source matrix
 
-| Source | URL origin | Auth to fetch URL | Extension action |
+| Source | Role at launch | URL origin | Extension action |
 |---|---|---|---|
-| Envato | User's Envato session (see Download flow detail) | Cookie-bound, user's own | 3-phase: resolve UUID, license, download |
-| Pexels | Public API call from our server; returns direct MP4 URL | Our Pexels API key (server-side) | Single `chrome.downloads.download()` |
-| Freepik | Paid API call from our server; returns signed short-lived URL | Our Freepik account key (server-side) | Single `chrome.downloads.download()` with URL refetch if expired |
-| Storyblocks (deferred) | — | — | — |
-| Adobe Stock (deferred) | — | — | — |
+| Envato | Primary (candidates + download) | User's Envato session | 3-phase: resolve UUID, license, download |
+| Pexels | Candidates + download | Public API (our key, server-side) | Single `chrome.downloads.download()` |
+| Freepik | Candidates + download | Paid API (our key, server-side) | Single `chrome.downloads.download()` with URL refetch if expired |
+| Storyblocks | **Fallback candidates only** — kicks in when Envato scraping fails; posters + previews shown in editor but Export skips these items (no download path yet) | HMAC-signed API (test keys on file) | (none — deferred) |
+| Adobe Stock | (deferred) | — | — |
 
 ### Server endpoints (non-Envato sources)
 
@@ -459,14 +459,89 @@ Stage-by-stage responsibilities:
 **Stage 1 — scrape (transcript-eval + adpunk.ssh):**
 For each search placement, fetch candidate items per source. Capture
 **poster-only** (no video) to keep ingest cheap:
-- Envato: HTML scrape of `elements.envato.com/stock-video/<query>`
-  (already proven: 38 items/page with poster URLs, no rate-limit).
+- Envato: HTML scrape of `elements.envato.com/stock-video/<query>`.
 - Pexels: API call, poster thumbnail URL.
 - Freepik: API call, thumbnail URL.
 
 Persist per candidate: `source`, `source_item_id`, `poster_url`,
 `preview_url`, `envato_item_url` (Envato only), basic metadata
 (resolution, duration if available).
+
+#### Envato scraper — approach (proven)
+
+Validated prototypes in `/tmp/envato-test/` during spec work:
+
+- **Method.** `GET elements.envato.com/stock-video/<query>` returns a
+  server-rendered HTML page with 38 item grid cards. One regex pair
+  per card captures: item detail URL (old 7-char ID format), preview
+  mp4 UUID, poster image URL (multiple widths, pre-signed).
+- **Stealth.** `curl_cffi` impersonating `chrome124` — real Chrome
+  TLS fingerprint, HTTP/3 to Cloudflare, full Chrome header set
+  (Sec-Ch-Ua-*, Sec-Fetch-*, Accept-* with br/zstd). Indistinguishable
+  from real browser at the network layer.
+- **Tested scale.** 10,000 poster images / 456 search pages in 20 min,
+  zero failures, zero Cloudflare challenges. Worked from residential
+  IP (Vilnius) and datacenter IP (Vast.ai Prague) equally.
+- **Pacing.** 0.5-3s jittered gap between search pages, 24 concurrent
+  poster downloads per page.
+
+#### Proxy pool (Oxylabs residential)
+
+Even though direct scraping worked, long-term runs from a stable IP
+risk fingerprinting. Add Oxylabs residential proxy pool:
+
+- Residential IPs routed through the scraper's HTTPS client.
+- Sticky session per run (same residential IP for ~10 min via the
+  `sessid-<id>-sesstime-10` username modifier), then rotates.
+- Country selection optional (`OXYLABS_CC=us` etc.) if some content is
+  geo-restricted.
+- Configured via env vars: `OXYLABS_USER`, `OXYLABS_PASS`,
+  `OXYLABS_CC`, `OXYLABS_HOST` (default `pr.oxylabs.io:7777`).
+- Cost estimate: Envato search page ~1.3 MB + ~30 KB of posters per
+  candidate → ~$0.02 per search placement at $8/GB. At ~500
+  placements/day, ~$10/day. Trivial.
+
+Decision: **residential proxy pool**, not Web Scraper API. Envato HTML
+is server-rendered, no captcha seen. Scraper API would be 5-10× more
+expensive for zero extra value.
+
+#### Fallback: Storyblocks when Envato scraping fails
+
+Envato is primary. If Envato scraping fails (HTTP 4xx/5xx, empty
+parse, Cloudflare challenge page), **fall back to Storyblocks search**
+for candidates:
+
+- Storyblocks uses their proper API (HMAC-signed, no scraping).
+- Test keys on file (`reference_api_keys.md` memory).
+- Returns posters + preview URLs + metadata as JSON — cleaner than
+  HTML scrape.
+- **No licensed download at launch** for Storyblocks. It enters the
+  candidate pool for SigLIP/rerank, and posters/preview videos are
+  shown in the editor, but Export skips Storyblocks items with a
+  tooltip: "Storyblocks full-file download not yet supported — pick a
+  different clip for export." Defer full integration to later spec.
+
+Fallback is per-query, not global: each placement's scraper tries
+Envato first, Storyblocks second. If both fail → empty candidates for
+that placement, surfaced in the editor as "no results".
+
+#### Parser-failure Slack alerts
+
+Scraping is brittle — Envato can change HTML at any time. To catch
+breakage immediately:
+
+- If Envato search returns HTTP 200 but regex extracts **0 items**
+  (when previous runs on similar queries yielded >20): fire Slack
+  alert immediately via existing `server/services/slack-notifier.js`.
+- Alert payload: query string, source, response status, response byte
+  length, first 500 chars of body (redacted of session cookies). Lets
+  you eyeball whether Envato redesigned the page or added a challenge.
+- Dedupe: one alert per `{source, parser_version}` per 15 min —
+  prevents flood if 100 queries fail in parallel.
+- Same treatment for Pexels/Freepik/Storyblocks JSON parsers: any
+  schema-validation failure against expected response fires alert.
+- Alert is **in addition** to the fallback — Envato parse fails →
+  Slack alert AND Storyblocks fallback runs.
 
 **Stage 2 — SigLIP on poster images (adpunk.ssh GPU):**
 Existing: `server/worker.py`, `model_registry.py`. Download the ~5 KB
@@ -1140,7 +1215,9 @@ side-by-side with the related `exports` row.
 
 ## Non-goals for this spec
 
-- Storyblocks, Adobe Stock (explicitly deferred by user).
+- Storyblocks **downloads** (full files). Storyblocks candidates via
+  fallback search are in scope; licensed download path deferred.
+- Adobe Stock (entirely deferred).
 - UXP Premiere plugin (one-click in-Premiere import). After XMEML path
   ships.
 - Safari / Firefox / Edge-first support. Chrome-only.
