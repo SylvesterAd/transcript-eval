@@ -129,10 +129,10 @@ export default function BRollDetailPanel() {
       <div className="px-4 pb-4 border-t border-white/5 pt-3">
         {placement.results?.length > 0 ? (
           <>
-            <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-2">
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">
               Other Options ({placement.results.length})
             </div>
-            <div className="grid grid-cols-2 gap-1.5">
+            <div className="grid grid-cols-2 gap-2">
               {placement.results.map((r, i) => (
                 <BRollOptionThumbnail
                   key={r.id || i}
@@ -334,11 +334,11 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
           type="button"
           onClick={togglePlay}
           aria-label={playing ? 'Pause preview' : 'Play preview'}
-          className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/60 backdrop-blur-sm flex items-center justify-center z-10 transition-opacity ${
+          className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/60 backdrop-blur-sm flex items-center justify-center z-10 transition-opacity ${
             playing ? 'opacity-0 group-hover:opacity-100' : 'opacity-90 hover:opacity-100'
           }`}
         >
-          {playing ? <Pause size={14} className="text-white" /> : <Play size={14} className="text-white ml-0.5" />}
+          {playing ? <Pause size={16} className="text-white" /> : <Play size={16} className="text-white ml-0.5" />}
         </button>
       )}
 
