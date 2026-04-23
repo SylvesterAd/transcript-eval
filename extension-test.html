@@ -164,6 +164,15 @@
       }
 
       try {
+        // Reset any previous JWT by storing an expired one, so the initial
+        // has_jwt check is deterministic regardless of storage state.
+        const reset = await send({
+          type: 'session', version: 1,
+          token: 'reset', kid: 'k1', user_id: 'reset-user',
+          expires_at: Date.now() - 3600000,
+        })
+        check('state reset: expired session stored', reset?.ok === true, `got ${pretty(reset)}`)
+
         const ping1 = await send({ type: 'ping', version: 1 })
         check('initial ping returns pong', ping1?.type === 'pong', `got ${pretty(ping1)}`)
         check('ext_version present', typeof ping1?.ext_version === 'string')
