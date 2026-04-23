@@ -1,4 +1,4 @@
-import { useRef, useState, useContext, useEffect } from 'react'
+import { useRef, useState, useContext } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Play, Pause, X, Search, Loader2, RotateCw, Pencil, Trash2 } from 'lucide-react'
 import { parseTimecode } from './brollUtils.js'
@@ -278,22 +278,15 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
 
   function togglePlay(e) {
     e.stopPropagation()
-    if (playing) {
-      videoRef.current?.pause()
-      setPlaying(false)
+    const v = videoRef.current
+    if (!v) return
+    if (v.paused) {
+      v.play().then(() => setPlaying(true)).catch(() => {})
     } else {
-      // Flip state first so the <video> element mounts. The useEffect
-      // below then calls .play() once the ref is populated.
-      setPlaying(true)
+      v.pause()
+      setPlaying(false)
     }
   }
-
-  useEffect(() => {
-    if (playing && videoRef.current) {
-      videoRef.current.play().catch(() => setPlaying(false))
-    }
-    return () => { videoRef.current?.pause() }
-  }, [playing])
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -314,12 +307,13 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
           : 'ring-1 ring-white/10 hover:ring-white/25 opacity-70 hover:opacity-100'
       }`}
     >
-      {playing && hasVideo ? (
+      {hasVideo ? (
         <video
           ref={videoRef}
           src={videoUrl}
           poster={thumb}
           className="w-full h-full object-cover bg-black pointer-events-none"
+          preload="metadata"
           playsInline
           muted
           onEnded={() => setPlaying(false)}
