@@ -17,7 +17,9 @@
 //
 // Orchestration is a bare `await` chain — Ext.2's concurrency cap is 1.
 
-import { RESOLVER_TIMEOUT_MS } from '../config.js'
+import { RESOLVER_TIMEOUT_MS, MESSAGE_VERSION } from '../config.js'
+import { checkEnvatoSessionLive } from './auth.js'
+import { broadcastToPort } from './port.js'
 
 // Matches app.envato.com/<segment>/<UUID> where UUID is the standard
 // 8-4-4-4-12 hex form. <segment> is typically "stock-video" but we
@@ -37,6 +39,24 @@ const REMIX_DOWNLOAD_URL_RE = /"downloadUrl"\s*,\s*"(https:\/\/[^"]+)"/
 // parameter with a URL-encoded "attachment; filename=..." value.
 const CONTENT_DISPOSITION_RE = /response-content-disposition=([^&]+)/
 const FILENAME_FROM_DISPOSITION_RE = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i
+
+// Called when Phase 2 returns 401. Updates the shared session flag,
+// broadcasts to the Port so the web app can react, and raises the
+// badge. Does NOT throw — the caller still throws envato_session_missing
+// so the single-download handler hard-stops. Ext.5 will add the
+// queue-pause here.
+async function handle401Envato() {
+  try {
+    await chrome.storage.local.set({ envato_session_status: 'missing' })
+  } catch {}
+  try {
+    broadcastToPort({ type: 'state', version: MESSAGE_VERSION, envato_session: 'missing' })
+  } catch {}
+  try {
+    chrome.action.setBadgeText({ text: '!' })
+    chrome.action.setBadgeBackgroundColor({ color: '#dc2626' })
+  } catch {}
+}
 
 /**
  * Phase 1. Opens `oldUrl` in a hidden tab, waits for the client-side
@@ -100,7 +120,10 @@ export async function getSignedDownloadUrl(newUuid) {
     throw new Error('envato_network_error: ' + String(err?.message || err))
   }
 
-  if (resp.status === 401) throw new Error('envato_session_missing')
+  if (resp.status === 401) {
+    await handle401Envato()
+    throw new Error('envato_session_missing')
+  }
   if (resp.status === 402) throw new Error('envato_402')
   if (resp.status === 403) throw new Error('envato_403')
   if (resp.status === 429) throw new Error('envato_429')
@@ -127,6 +150,22 @@ export async function downloadEnvato({ envatoItemUrl, itemId, runId, sanitizedFi
   if (!itemId || typeof itemId !== 'string') {
     return { ok: false, errorCode: 'bad_input', detail: 'itemId missing or non-string' }
   }
+
+  // Phase 0 — preflight session check. One GET against the reference
+  // UUID. 200 = proceed. 401 = session gone; surface immediately
+  // without spending a license or opening a tab. Non-401 errors are
+  // treated as pre-flight error (may be a transient network issue OR
+  // the reference UUID has been delisted — both require user /
+  // developer attention).
+  const preflight = await checkEnvatoSessionLive()
+  if (preflight.status === 'missing') {
+    await handle401Envato()
+    return { ok: false, errorCode: 'envato_session_missing_preflight', detail: preflight.detail || 'download.data returned 401 on reference item' }
+  }
+  if (preflight.status === 'error') {
+    return { ok: false, errorCode: 'envato_preflight_error', detail: preflight.detail || `http ${preflight.httpStatus}` }
+  }
+  console.log('[envato] phase 0 preflight OK')
 
   const t0 = Date.now()
   let newUuid
