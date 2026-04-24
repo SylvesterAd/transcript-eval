@@ -23,7 +23,9 @@
 
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative } from 'node:path'
-import { readFile, readdir, mkdir, rm, copyFile, stat } from 'node:fs/promises'
+import { readFile, readdir, mkdir, rm, copyFile, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { zipSync } from 'fflate'
 
 // ---------- Include / exclude constants (frozen) ----------
 
@@ -187,6 +189,49 @@ async function stageDist({ extRoot, outDir, verbose }) {
   return { stagedCount, bytesTotal }
 }
 
+// ---------- Zip ----------
+
+async function zipDist({ outDir, version }) {
+  // Walk outDir recursively, build fflate input map {posixPath: Uint8Array}.
+  // Sorted by key for a deterministic zip central directory.
+  const files = {}
+  async function walk(dir) {
+    const entries = await readdir(dir, { withFileTypes: true })
+    for (const ent of entries) {
+      const abs = join(dir, ent.name)
+      if (ent.isDirectory()) {
+        await walk(abs)
+      } else if (ent.isFile()) {
+        // Skip any previously-generated zip in outDir to avoid self-inclusion.
+        if (ent.name === `extension-${version}.zip`) continue
+        const rel = relative(outDir, abs).split('\\').join('/')
+        files[rel] = new Uint8Array(await readFile(abs))
+      }
+    }
+  }
+  await walk(outDir)
+
+  // Deterministic ordering: sort keys.
+  const sortedKeys = Object.keys(files).sort()
+  const sortedFiles = {}
+  for (const k of sortedKeys) sortedFiles[k] = files[k]
+
+  // Deterministic output: level 9 (max compression), ZIP-epoch mtime.
+  // Fixed timestamp at the ZIP format epoch (1980-01-01 UTC) — fflate
+  // rejects dates outside 1980-2099, so plain 0 / new Date(0) do not work.
+  // A stable "last modified" field means running the packager twice on the
+  // same inputs produces byte-identical zips. The Web Store fingerprints
+  // uploads; drift would defeat reproducible-build debugging.
+  const ZIP_EPOCH = Date.UTC(1980, 0, 1)
+  const zipBytes = zipSync(sortedFiles, { level: 9, mtime: ZIP_EPOCH })
+
+  const zipPath = join(outDir, `extension-${version}.zip`)
+  await writeFile(zipPath, zipBytes)
+
+  const sha = createHash('sha256').update(zipBytes).digest('hex')
+  return { zipPath, bytes: zipBytes.length, sha256: sha }
+}
+
 // ---------- main ----------
 
 async function main() {
@@ -225,7 +270,13 @@ async function main() {
     `[ext:package] Staged ${stagedCount} files (${bytesTotal} bytes) -> ${outDir}\n`
   )
 
-  // Task 3 will add the zip step (guarded by opts.zip).
+  if (opts.zip) {
+    const { zipPath, bytes, sha256 } = await zipDist({ outDir, version })
+    const displayPath = relative(process.cwd(), zipPath) || zipPath
+    process.stdout.write(
+      `[ext:package] Wrote ${displayPath} (${bytes} bytes, sha256=${sha256})\n`
+    )
+  }
 }
 
 // Use fileURLToPath to compare — paths with spaces are URL-encoded in
@@ -251,6 +302,7 @@ export {
   parseArgs,
   printUsage,
   stageDist,
+  zipDist,
   ROOT_INCLUDES,
   DIR_INCLUDES,
   DIR_EXCLUDES,
