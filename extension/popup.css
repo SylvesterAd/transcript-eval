@@ -87,6 +87,12 @@ main {
   background: #fafafa;
 }
 
+.row.clickable::after {
+  content: ' ›';
+  color: var(--muted);
+  font-size: 14px;
+}
+
 .row.clickable:focus-visible {
   outline: 2px solid var(--link);
   outline-offset: -2px;

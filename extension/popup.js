@@ -3,7 +3,7 @@
 // export page (per spec § "Popup UI").
 
 import { EXT_VERSION, BACKEND_URL } from './config.js'
-import { getJwt } from './modules/auth.js'
+import { getJwt, hasEnvatoSession } from './modules/auth.js'
 
 function setRow(rowEl, statusEl, detailEl, state) {
   statusEl.textContent = state.text
@@ -29,9 +29,36 @@ function setRow(rowEl, statusEl, detailEl, state) {
   }
 }
 
-async function render() {
-  document.getElementById('version').textContent = `v${EXT_VERSION}`
+async function renderEnvatoRow(statusFromStorage) {
+  const rowEn = document.getElementById('row-envato')
+  const statusEn = document.getElementById('status-envato')
+  const detailEn = document.getElementById('detail-envato')
 
+  // Trust storage when it has a value; fall back to a live cookie
+  // read for the first-run case (watcher hasn't primed storage).
+  let status = statusFromStorage
+  if (status !== 'ok' && status !== 'missing') {
+    status = (await hasEnvatoSession()) ? 'ok' : 'missing'
+  }
+
+  if (status === 'ok') {
+    setRow(rowEn, statusEn, detailEn, {
+      text: 'connected',
+      className: 'ok',
+      detail: 'session cookies present',
+    })
+  } else {
+    setRow(rowEn, statusEn, detailEn, {
+      text: 'sign in required',
+      className: 'warn',
+      detail: 'Click to open Envato sign-in',
+      onClick: () => chrome.tabs.create({ url: 'https://app.envato.com/sign-in' }),
+    })
+  }
+  return status
+}
+
+async function renderTeRow() {
   const rowTe = document.getElementById('row-te')
   const statusTe = document.getElementById('status-te')
   const detailTe = document.getElementById('detail-te')
@@ -54,21 +81,36 @@ async function render() {
       onClick: () => chrome.tabs.create({ url: BACKEND_URL }),
     })
   }
-
-  // Envato row: Ext.1 has no cookie watcher — static placeholder.
-  const rowEn = document.getElementById('row-envato')
-  const statusEn = document.getElementById('status-envato')
-  const detailEn = document.getElementById('detail-envato')
-  setRow(rowEn, statusEn, detailEn, {
-    text: 'unknown',
-    className: 'muted',
-    detail: 'Cookie check added in Ext.4',
-  })
-
-  const banner = document.getElementById('banner')
-  banner.textContent = connected
-    ? 'Ready. Start an export from transcript-eval.'
-    : 'Sign in at transcript-eval to continue.'
+  return connected
 }
+
+async function renderBanner() {
+  const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
+  const jwt = await getJwt()
+  const teOk = !!jwt && jwt.expires_at > Date.now()
+  const envOk = envato_session_status === 'ok' || (envato_session_status == null && await hasEnvatoSession())
+  const banner = document.getElementById('banner')
+  if (teOk && envOk) banner.textContent = 'Ready. Start an export from transcript-eval.'
+  else if (!teOk) banner.textContent = 'Sign in at transcript-eval to continue.'
+  else banner.textContent = 'Sign in to Envato to continue.'
+}
+
+async function render() {
+  document.getElementById('version').textContent = `v${EXT_VERSION}`
+  const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
+  await renderTeRow()
+  await renderEnvatoRow(envato_session_status)
+  await renderBanner()
+}
+
+// Live updates: if a new JWT arrives OR the cookie watcher updates
+// envato_session_status while the popup is open, re-render rather
+// than showing stale state.
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return
+  if ('te:jwt' in changes || 'envato_session_status' in changes) {
+    render()
+  }
+})
 
 render()
