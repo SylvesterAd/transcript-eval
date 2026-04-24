@@ -12,6 +12,7 @@ import storyblocksRouter from './routes/storyblocks.js'
 import pexelsRouter from './routes/pexels.js'
 import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
+import extConfigRouter from './routes/ext-config.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 import { startGpuFailurePoller } from './services/gpu-failure-poller.js'
@@ -53,6 +54,7 @@ app.use('/api/storyblocks', storyblocksRouter)
 app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/gpu', gpuRouter)
+app.use('/api/ext-config', extConfigRouter)
 
 const APP_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'dev'
 const DEPLOY_TIME = new Date().toISOString()
