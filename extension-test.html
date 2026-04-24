@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Extension Test Harness</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      max-width: 760px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #1a1a1a;
+      line-height: 1.5;
+    }
+    h1 { font-size: 20px; }
+    h2 { font-size: 15px; margin-top: 28px; }
+    fieldset { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 16px; margin: 12px 0; }
+    legend { font-weight: 600; padding: 0 6px; font-size: 13px; }
+    label { display: block; font-size: 13px; margin: 6px 0 2px; color: #374151; }
+    input[type="text"] { width: 100%; padding: 6px 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; border: 1px solid #d1d5db; border-radius: 4px; box-sizing: border-box; }
+    button { padding: 6px 12px; font-size: 13px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; margin-right: 6px; }
+    button:hover { background: #f9fafb; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    pre { background: #f3f4f6; padding: 10px 12px; border-radius: 4px; font-size: 12px; overflow-x: auto; margin: 6px 0; max-height: 260px; overflow-y: auto; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .status-ok { color: #16a34a; font-weight: 500; }
+    .status-err { color: #dc2626; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <h1>transcript-eval Export Helper — Test Harness</h1>
+  <p class="muted">
+    Send <code>chrome.runtime.sendMessage</code> calls to the extension and display replies.
+    This page must be loaded from <code>http://localhost:5173</code> — the extension's
+    <code>externally_connectable</code> entry whitelists that origin.
+  </p>
+
+  <fieldset>
+    <legend>Extension ID</legend>
+    <label for="ext-id">Paste the 32-char ID from <code>extension/.extension-id</code>:</label>
+    <input type="text" id="ext-id" placeholder="abcdefghijklmnopqrstuvwxyzabcdef" autocomplete="off">
+    <p class="muted">Saved to localStorage under <code>ext_test_id</code>.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>1. Ping</legend>
+    <div class="row">
+      <button id="btn-ping">Send {type:"ping"}</button>
+    </div>
+    <pre id="out-ping">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Session</legend>
+    <div class="row">
+      <button id="btn-session">Send {type:"session", token:"mock…", user_id:"mock-user-00000000-0000", expires_at: now+1h}</button>
+      <button id="btn-session-expired">Send expired session (expires_at: now-1h)</button>
+    </div>
+    <pre id="out-session">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>3. Unknown type</legend>
+    <div class="row">
+      <button id="btn-unknown">Send {type:"noop"} — expect error</button>
+      <button id="btn-bad-version">Send {type:"ping", version:99} — expect unsupported_version</button>
+    </div>
+    <pre id="out-unknown">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>4. End-to-end happy path</legend>
+    <div class="row">
+      <button id="btn-run-all">Run all checks</button>
+      <span id="run-status"></span>
+    </div>
+    <pre id="out-run">(not run yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>5. Envato one-shot (Ext.2)</legend>
+    <p class="muted" style="margin-top: 0;">
+      <strong>Warning:</strong> clicking this button COMMITS a real Envato license
+      (Phase 2 GET download.data). Every click ticks the fair-use counter on the
+      signed-in Envato account. Only run with a URL you actually want to download.
+    </p>
+    <label for="env-item-id">item_id (short code from the URL, e.g. <code>NX9WYGQ</code>):</label>
+    <input type="text" id="env-item-id" placeholder="NX9WYGQ" autocomplete="off">
+    <label for="env-item-url">envato_item_url (full elements.envato.com URL):</label>
+    <input type="text" id="env-item-url" placeholder="https://elements.envato.com/stock-video/some-slug-NX9WYGQ" autocomplete="off">
+    <p class="muted">
+      Fill both inputs with a real item from your Envato subscription, then click.
+      The file will appear in <code>~/Downloads/transcript-eval/envato_&lt;id&gt;.&lt;ext&gt;</code>.
+      Inputs persist to localStorage.
+    </p>
+    <div class="row">
+      <button id="btn-envato-one-shot">Run Envato single download</button>
+      <span id="envato-status"></span>
+    </div>
+    <pre id="out-envato">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>6. Source one-shot — Pexels/Freepik (Ext.3)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Calls the backend's <code>POST /api/pexels-url</code> or <code>POST /api/freepik-url</code> endpoint
+      with a Bearer JWT, then hands the signed URL to <code>chrome.downloads.download</code>.
+      Requires a valid JWT (run fieldset 2 first) and the backend running on :3001.
+      Freepik calls are billable (€0.05 per successful mint); if <code>FREEPIK_API_KEY</code> is
+      unset, the Freepik button returns <code>freepik_unconfigured</code> (503).
+    </p>
+    <label for="src-source">source:</label>
+    <select id="src-source">
+      <option value="pexels">pexels</option>
+      <option value="freepik">freepik</option>
+    </select>
+    <label for="src-item-id">item_id:</label>
+    <input type="text" id="src-item-id" placeholder="e.g. 856971 (Pexels) or freepik video id" autocomplete="off">
+    <p class="muted">
+      Pexels default: <code>856971</code> (public Pexels sample, safe for testing — the file will
+      land in <code>~/Downloads/transcript-eval/pexels_856971.mp4</code>).
+      Inputs persist to localStorage.
+    </p>
+    <div class="row">
+      <button id="btn-source-one-shot">Run source download</button>
+      <span id="source-status"></span>
+    </div>
+    <pre id="out-source">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>7. Port + Auth (Ext.4)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Exercises chrome.runtime.connect(EXT_ID). Keeps the port open so
+      the extension can push messages to this page. Disconnect via button
+      or by reloading the page.
+    </p>
+    <div class="row">
+      <button id="btn-port-connect">Connect Port</button>
+      <button id="btn-port-disconnect" disabled>Disconnect</button>
+      <span id="port-status" class="muted">idle</span>
+    </div>
+    <pre id="out-port">(no messages yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>8. Session status (Ext.4)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Live view of envato_session_status (poll every 2s). Button runs the
+      network pre-flight via debug_check_envato_session.
+    </p>
+    <div class="row">
+      <span><strong>storage.envato_session_status:</strong></span>
+      <span id="storage-envato-status">—</span>
+    </div>
+    <div class="row">
+      <button id="btn-check-envato">Run debug_check_envato_session</button>
+    </div>
+    <pre id="out-check-envato">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>9. 401 refresh simulation (Ext.4)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Sends {type:"refresh_session"} over the connected Port. Connect the
+      port first (fieldset 7), then click below. The extension normally
+      posts this itself after a 401; here you fire it manually.
+      To complete the round-trip, reply with a {type:"session"} message
+      via the existing sendMessage path (fieldset 2) or from your own code
+      — the extension will write the JWT and resolve any pending refresh
+      promise internally.
+    </p>
+    <div class="row">
+      <button id="btn-post-refresh" disabled>Post {type:"refresh_session"} via Port</button>
+    </div>
+    <pre id="out-refresh">(not sent)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>10. Queue / stress test (Ext.5)</legend>
+    <p class="muted">
+      Drives a synthetic manifest through the queue. <b>Cheap mode</b>
+      (default): 35 items (30 Pexels + 5 Freepik), ~250 MB, no Envato
+      license commits. <b>Full mode</b>: adds 15 Envato items
+      (NX9WYGQ × 15); budget the fair-use counter before clicking.
+      Live state log pushes via Port.
+    </p>
+    <div class="row">
+      <label>Target folder suffix:</label>
+      <input type="text" id="q-folder" placeholder="transcript-eval/export-stress-1" value="transcript-eval/export-stress-1" style="flex:1">
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="q-cheap-mode" checked> Cheap mode (skip Envato items; Pexels+Freepik only)</label>
+    </div>
+    <div class="row">
+      <button id="q-start">Start stress run</button>
+      <button id="q-pause">Pause</button>
+      <button id="q-resume">Resume</button>
+      <button id="q-cancel">Cancel</button>
+      <button id="q-status">Status snapshot</button>
+    </div>
+    <div class="row">
+      <button id="q-second-export">Try 2nd {type:"export"} (expect run_already_active)</button>
+    </div>
+    <pre id="q-log">(no events yet)</pre>
+  </fieldset>
+
+  <script type="module">
+    const idInput = document.getElementById('ext-id')
+    idInput.value = localStorage.getItem('ext_test_id') || ''
+    idInput.addEventListener('input', () => {
+      localStorage.setItem('ext_test_id', idInput.value.trim())
+    })
+
+    function getExtId() {
+      const id = idInput.value.trim()
+      if (!id || id.length !== 32 || !/^[a-p]+$/.test(id)) {
+        throw new Error('Paste a valid 32-char extension ID (letters a-p only).')
+      }
+      return id
+    }
+
+    function send(msg) {
+      return new Promise((resolve, reject) => {
+        try {
+          const id = getExtId()
+          if (!chrome?.runtime?.sendMessage) {
+            reject(new Error('chrome.runtime.sendMessage is undefined — is this page loaded in Chrome with the extension installed?'))
+            return
+          }
+          chrome.runtime.sendMessage(id, msg, (response) => {
+            const err = chrome.runtime.lastError
+            if (err) {
+              reject(new Error(err.message))
+              return
+            }
+            resolve(response)
+          })
+        } catch (e) {
+          reject(e)
+        }
+      })
+    }
+
+    function pretty(x) {
+      try { return JSON.stringify(x, null, 2) } catch { return String(x) }
+    }
+
+    async function showResult(outId, promise) {
+      const out = document.getElementById(outId)
+      out.textContent = '…'
+      try {
+        const r = await promise
+        out.textContent = pretty(r)
+      } catch (e) {
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    document.getElementById('btn-ping').onclick = () => showResult('out-ping', send({ type: 'ping', version: 1 }))
+
+    document.getElementById('btn-session').onclick = () => showResult('out-session', send({
+      type: 'session', version: 1,
+      token: 'mock.jwt.token',
+      kid: 'k1',
+      user_id: 'mock-user-00000000-0000',
+      expires_at: Date.now() + 60 * 60 * 1000,
+    }))
+
+    document.getElementById('btn-session-expired').onclick = () => showResult('out-session', send({
+      type: 'session', version: 1,
+      token: 'mock.jwt.token.expired',
+      kid: 'k1',
+      user_id: 'mock-user-00000000-0000',
+      expires_at: Date.now() - 60 * 60 * 1000,
+    }))
+
+    document.getElementById('btn-unknown').onclick = () => showResult('out-unknown', send({ type: 'noop', version: 1 }))
+    document.getElementById('btn-bad-version').onclick = () => showResult('out-unknown', send({ type: 'ping', version: 99 }))
+
+    document.getElementById('btn-run-all').onclick = async () => {
+      const status = document.getElementById('run-status')
+      const out = document.getElementById('out-run')
+      const log = []
+      let ok = true
+
+      function check(label, cond, details) {
+        log.push(`${cond ? 'PASS' : 'FAIL'} — ${label}`)
+        if (details) log.push('       ' + details)
+        if (!cond) ok = false
+      }
+
+      try {
+        // Reset any previous JWT by storing an expired one, so the initial
+        // has_jwt check is deterministic regardless of storage state.
+        const reset = await send({
+          type: 'session', version: 1,
+          token: 'reset', kid: 'k1', user_id: 'reset-user',
+          expires_at: Date.now() - 3600000,
+        })
+        check('state reset: expired session stored', reset?.ok === true, `got ${pretty(reset)}`)
+
+        const ping1 = await send({ type: 'ping', version: 1 })
+        check('initial ping returns pong', ping1?.type === 'pong', `got ${pretty(ping1)}`)
+        check('ext_version present', typeof ping1?.ext_version === 'string')
+        check('has_jwt is false initially', ping1?.has_jwt === false, `has_jwt=${ping1?.has_jwt}`)
+
+        const session1 = await send({
+          type: 'session', version: 1,
+          token: 'mock.jwt.token',
+          kid: 'k1',
+          user_id: 'mock-user-00000000-0000',
+          expires_at: Date.now() + 60 * 60 * 1000,
+        })
+        check('session returns {ok:true}', session1?.ok === true, `got ${pretty(session1)}`)
+
+        const ping2 = await send({ type: 'ping', version: 1 })
+        check('post-session ping has has_jwt=true', ping2?.has_jwt === true)
+        check('post-session ping has a jwt_expires_at number', typeof ping2?.jwt_expires_at === 'number')
+
+        const unknown = await send({ type: 'noop', version: 1 })
+        check('unknown type returns error', unknown?.error === 'unknown_type')
+
+        const badVer = await send({ type: 'ping', version: 99 })
+        check('unsupported version returns error', badVer?.error === 'unsupported_version')
+      } catch (e) {
+        log.push('EXCEPTION: ' + (e.message || e))
+        ok = false
+      }
+
+      status.textContent = ok ? 'ALL PASS' : 'FAILURES'
+      status.className = ok ? 'status-ok' : 'status-err'
+      out.textContent = log.join('\n')
+    }
+
+    // ---- Ext.2 Envato one-shot ----
+    const envIdInput = document.getElementById('env-item-id')
+    const envUrlInput = document.getElementById('env-item-url')
+    envIdInput.value = localStorage.getItem('ext_test_envato_item_id') || ''
+    envUrlInput.value = localStorage.getItem('ext_test_envato_item_url') || ''
+    envIdInput.addEventListener('input', () => localStorage.setItem('ext_test_envato_item_id', envIdInput.value.trim()))
+    envUrlInput.addEventListener('input', () => localStorage.setItem('ext_test_envato_item_url', envUrlInput.value.trim()))
+
+    document.getElementById('btn-envato-one-shot').onclick = async () => {
+      const status = document.getElementById('envato-status')
+      const out = document.getElementById('out-envato')
+      const itemId = envIdInput.value.trim()
+      const itemUrl = envUrlInput.value.trim()
+      if (!itemId || !itemUrl) {
+        status.textContent = 'missing input'
+        status.className = 'status-err'
+        out.textContent = 'Both item_id and envato_item_url are required.'
+        return
+      }
+      status.textContent = 'running…'
+      status.className = ''
+      out.textContent = '…'
+      try {
+        const t0 = performance.now()
+        const r = await send({
+          type: 'debug_envato_one_shot',
+          version: 1,
+          item_id: itemId,
+          envato_item_url: itemUrl,
+        })
+        const ms = Math.round(performance.now() - t0)
+        status.textContent = r?.ok ? `OK in ${ms}ms` : `FAIL in ${ms}ms`
+        status.className = r?.ok ? 'status-ok' : 'status-err'
+        out.textContent = pretty(r)
+      } catch (e) {
+        status.textContent = 'EXCEPTION'
+        status.className = 'status-err'
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    // ---- Ext.3 Source one-shot ----
+    const srcSourceSelect = document.getElementById('src-source')
+    const srcItemIdInput = document.getElementById('src-item-id')
+    srcSourceSelect.value = localStorage.getItem('ext_test_source') || 'pexels'
+    srcItemIdInput.value = localStorage.getItem('ext_test_source_item_id') || '856971'
+    srcSourceSelect.addEventListener('change', () => localStorage.setItem('ext_test_source', srcSourceSelect.value))
+    srcItemIdInput.addEventListener('input', () => localStorage.setItem('ext_test_source_item_id', srcItemIdInput.value.trim()))
+
+    document.getElementById('btn-source-one-shot').onclick = async () => {
+      const status = document.getElementById('source-status')
+      const out = document.getElementById('out-source')
+      const source = srcSourceSelect.value
+      const itemId = srcItemIdInput.value.trim()
+      if (!itemId) {
+        status.textContent = 'missing item_id'
+        status.className = 'status-err'
+        out.textContent = 'item_id is required.'
+        return
+      }
+      status.textContent = 'running…'
+      status.className = ''
+      out.textContent = '…'
+      try {
+        const t0 = performance.now()
+        const r = await send({
+          type: 'debug_source_one_shot',
+          version: 1,
+          source,
+          item_id: itemId,
+        })
+        const ms = Math.round(performance.now() - t0)
+        status.textContent = r?.ok ? `OK in ${ms}ms` : `FAIL in ${ms}ms`
+        status.className = r?.ok ? 'status-ok' : 'status-err'
+        out.textContent = pretty(r)
+      } catch (e) {
+        status.textContent = 'EXCEPTION'
+        status.className = 'status-err'
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    // ---- Ext.4 Port + Auth ----
+    let activeTestPort = null
+    const portStatusEl = document.getElementById('port-status')
+    const portOutEl = document.getElementById('out-port')
+    const btnConnect = document.getElementById('btn-port-connect')
+    const btnDisconnect = document.getElementById('btn-port-disconnect')
+    const btnPostRefresh = document.getElementById('btn-post-refresh')
+
+    function logPort(line) {
+      const ts = new Date().toISOString().slice(11, 23)
+      portOutEl.textContent = `[${ts}] ${line}\n` + portOutEl.textContent
+    }
+
+    btnConnect.onclick = () => {
+      try {
+        const id = getExtId()
+        activeTestPort = chrome.runtime.connect(id, { name: 'test-harness' })
+        portStatusEl.textContent = 'connected'
+        portStatusEl.className = 'status-ok'
+        btnConnect.disabled = true
+        btnDisconnect.disabled = false
+        btnPostRefresh.disabled = false
+        logPort('connected')
+        activeTestPort.onMessage.addListener(msg => logPort('IN  ' + pretty(msg)))
+        activeTestPort.onDisconnect.addListener(() => {
+          portStatusEl.textContent = 'disconnected'
+          portStatusEl.className = 'status-err'
+          btnConnect.disabled = false
+          btnDisconnect.disabled = true
+          btnPostRefresh.disabled = true
+          const err = chrome.runtime.lastError
+          logPort('disconnected' + (err ? ' (' + err.message + ')' : ''))
+          activeTestPort = null
+        })
+      } catch (e) {
+        logPort('EXCEPTION: ' + (e.message || e))
+      }
+    }
+
+    btnDisconnect.onclick = () => {
+      try { activeTestPort?.disconnect() } catch {}
+    }
+
+    btnPostRefresh.onclick = () => {
+      const out = document.getElementById('out-refresh')
+      if (!activeTestPort) {
+        out.textContent = 'no port — connect first'
+        return
+      }
+      try {
+        activeTestPort.postMessage({ type: 'refresh_session', version: 1 })
+        out.textContent = 'posted {type:"refresh_session", version:1}. Reply via fieldset 2 (sendMessage {type:"session",...}) to complete.'
+      } catch (e) {
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    // ---- Ext.4 Session status ----
+    const storageStatusEl = document.getElementById('storage-envato-status')
+    async function refreshStorageStatus() {
+      try {
+        const r = await send({ type: 'ping', version: 1 })
+        storageStatusEl.textContent = r?.envato_session ?? '—'
+        storageStatusEl.className = r?.envato_session === 'ok' ? 'status-ok'
+          : r?.envato_session === 'missing' ? 'status-err' : ''
+      } catch {
+        storageStatusEl.textContent = '—'
+        storageStatusEl.className = ''
+      }
+    }
+    setInterval(refreshStorageStatus, 2000)
+    refreshStorageStatus()
+
+    document.getElementById('btn-check-envato').onclick = () => showResult('out-check-envato',
+      send({ type: 'debug_check_envato_session', version: 1 })
+    )
+
+    // ------- Ext.5 Queue / stress test -------
+    let qPort = null
+    const qLog = document.getElementById('q-log')
+    function qAppend(line) {
+      qLog.textContent = (qLog.textContent === '(no events yet)' ? '' : qLog.textContent)
+        + line + '\n'
+      qLog.scrollTop = qLog.scrollHeight
+    }
+    function qConnectPort() {
+      if (qPort) return
+      try {
+        const id = getExtId()
+        qPort = chrome.runtime.connect(id, { name: 'transcript-eval-export' })
+        qPort.onMessage.addListener(m => qAppend(JSON.stringify(m)))
+        qPort.onDisconnect.addListener(() => { qPort = null; qAppend('<port disconnected>') })
+      } catch (e) {
+        qAppend('port connect error: ' + e.message)
+      }
+    }
+    function buildSyntheticManifest() {
+      const cheap = document.getElementById('q-cheap-mode').checked
+      const out = []
+      let seq = 0
+      // 30 Pexels
+      for (let i = 0; i < 30; i++) {
+        out.push({
+          source: 'pexels',
+          source_item_id: String(1000 + i),
+          target_filename: `${String(++seq).padStart(3, '0')}_pexels_${1000 + i}.mp4`,
+          envato_item_url: null,
+          est_size_bytes: 5_000_000,
+        })
+      }
+      // 15 Envato (skipped in cheap mode)
+      if (!cheap) {
+        for (let i = 0; i < 15; i++) {
+          out.push({
+            source: 'envato',
+            source_item_id: 'NX9WYGQ',
+            target_filename: `${String(++seq).padStart(3, '0')}_envato_NX9WYGQ_${i}.mov`,
+            envato_item_url: 'https://elements.envato.com/...-NX9WYGQ',
+            est_size_bytes: 50_000_000,
+          })
+        }
+      }
+      // 5 Freepik
+      for (let i = 0; i < 5; i++) {
+        out.push({
+          source: 'freepik',
+          source_item_id: `fp_${2000 + i}`,
+          target_filename: `${String(++seq).padStart(3, '0')}_freepik_${2000 + i}.mp4`,
+          envato_item_url: null,
+          est_size_bytes: 20_000_000,
+        })
+      }
+      return out
+    }
+    document.getElementById('q-start').onclick = async () => {
+      qConnectPort()
+      const folder = document.getElementById('q-folder').value.trim() || 'transcript-eval/export-stress-1'
+      const result = await send({
+        type: 'export', version: 1,
+        export_id: 'stress_' + Date.now(),
+        manifest: buildSyntheticManifest(),
+        target_folder: folder,
+        options: { variants: ['A'], force_redownload: false },
+      })
+      qAppend('startRun reply: ' + JSON.stringify(result))
+    }
+    document.getElementById('q-pause').onclick = async () => {
+      qAppend('pause: ' + JSON.stringify(await send({ type: 'pause', version: 1 })))
+    }
+    document.getElementById('q-resume').onclick = async () => {
+      qAppend('resume: ' + JSON.stringify(await send({ type: 'resume', version: 1 })))
+    }
+    document.getElementById('q-cancel').onclick = async () => {
+      qAppend('cancel: ' + JSON.stringify(await send({ type: 'cancel', version: 1 })))
+    }
+    document.getElementById('q-status').onclick = async () => {
+      qAppend('status: ' + JSON.stringify(await send({ type: 'status', version: 1 })))
+    }
+    document.getElementById('q-second-export').onclick = async () => {
+      const r = await send({
+        type: 'export', version: 1,
+        export_id: 'second_' + Date.now(),
+        manifest: [{ source: 'pexels', source_item_id: '999', target_filename: '999.mp4', envato_item_url: null }],
+        target_folder: 'transcript-eval/export-second',
+        options: { variants: [], force_redownload: false },
+      })
+      qAppend('second export reply: ' + JSON.stringify(r))
+    }
+  </script>
+</body>
+</html>

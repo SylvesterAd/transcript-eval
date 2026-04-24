@@ -8,6 +8,13 @@ const gitSha = (() => { try { return execSync('git rev-parse --short HEAD').toSt
 export default defineConfig({
   define: { '__APP_VERSION__': JSON.stringify(gitSha) },
   plugins: [react(), tailwindcss()],
+  // extension-test.html is a dev-only harness — vite's default MPA
+  // crawl would ship it in dist/. Restrict prod entries to index.html.
+  build: {
+    rollupOptions: {
+      input: { main: 'index.html' }
+    }
+  },
   server: {
     proxy: {
       '/api': {

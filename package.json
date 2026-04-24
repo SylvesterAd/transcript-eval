@@ -12,7 +12,8 @@
     "seed": "node server/seed/import-benchmark.js",
     "seed:strategies": "node server/seed/create-strategies.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "ext:generate-key": "node extension/scripts/generate-key.mjs"
   },
   "dependencies": {
     "@dnd-kit/react": "^0.3.2",
