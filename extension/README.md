@@ -290,3 +290,79 @@ Fieldsets 7–9 on `extension-test.html`:
 
 - `permissions` (added): `cookies`.
 - `host_permissions`: unchanged from Ext.3.
+
+## Ext.5 — Queue & persistence
+
+- **Permissions:** `power` added. Manifest version `0.5.0`.
+- **New modules:** `modules/queue.js` (state machine + worker pools +
+  `chrome.downloads.onChanged` routing), `modules/storage.js` (single
+  owner of `chrome.storage.local` wrappers for run state, active-run
+  lock, completed-items set, deny-list, daily counts).
+- **Message handlers:** `{type:"export"}`, `{type:"pause"}`,
+  `{type:"resume"}`, `{type:"cancel"}`, `{type:"status"}`. The
+  `debug_envato_one_shot` / `debug_source_one_shot` handlers from
+  Ext.2/3 stay intact with a DEPRECATED comment — useful for isolated
+  debugging.
+- **Concurrency:** 5 Envato resolver tabs, 5 Envato licensers, 3
+  downloaders (Envato + Pexels + Freepik share the downloader pool).
+  Tune via the constants in `config.js`.
+- **Persistence invariant:** every phase transition writes
+  `run:<runId>` to `chrome.storage.local` BEFORE broadcasting. MV3 SW
+  termination is designed-for; whatever's persisted is the truth on
+  resume.
+- **SW-wake resume:** module-top-level `autoResumeIfActiveRun`
+  rehydrates from `active_run_id` → `run:<runId>`. `chrome.runtime.
+  onStartup` + `onInstalled` also trigger it. In-flight downloads are
+  reconciled via `chrome.downloads.search({id})` and rolled back to
+  `queued` if lost.
+- **Single active run:** `active_run_id` lock enforced in
+  `startRun` via `storage.setActiveRunId` CAS. A second
+  `{type:"export"}` while the lock is held returns
+  `{ok:false, reason:'run_already_active', active_run_id}`. Cleared
+  on complete or cancel (NOT on pause — a paused run holds the lock).
+- **Keep-awake:** `chrome.power.requestKeepAwake("system")` on
+  `startRun` / `resumeRun`; `releaseKeepAwake()` on pause, cancel,
+  complete, and hard-stop (disk_failed) paths.
+- **Interrupt recovery:** `chrome.downloads.resume(id)` on NETWORK_*
+  interrupts, up to 3 attempts per item. FILE_* interrupts hard-stop
+  the whole queue (disk is hosed; no point continuing).
+  USER_CANCELED marks just that item cancelled.
+- **JIT URL fetching:** each downloader fetches its signed URL
+  (Envato: `download.data`; Pexels/Freepik: `/api/*-url`) milliseconds
+  before `chrome.downloads.download`. URL TTL (Envato ~1 h, Freepik
+  15-60 min) doesn't matter even on multi-hour runs.
+- **Port broadcast:** every state transition pushes `{type:"state"}`.
+  Per-item byte progress is coalesced to at most one `{type:"progress"}`
+  push per item per 500 ms. On `complete`, pushes `{type:"complete",
+  ok_count, fail_count, folder_path, xml_paths:[]}` (web app owns
+  XMEML generation).
+
+### Stress test
+
+Run the "Queue / stress test" fieldset on `extension-test.html`.
+Cheap mode (default): 35 items, ~250 MB, no Envato license commits.
+Full mode: adds 15 Envato items (budget 15 license commits).
+
+Acceptance gate for Ext.5: close Chrome at ~20/50 items, reopen,
+observe the run auto-resume from the persisted state. See
+`docs/superpowers/plans/2026-04-24-extension-ext5-queue-persistence.md`
+Task 12 for the full verification script.
+
+### Known Ext.5 limitations (belong to later phases)
+
+- Failure matrix (402 tier_restricted, 403 hard-stop + Slack, 429
+  Retry-After + jitter, integrity mismatch retry,
+  `unsupported_filetype` deny-list with 24 h telemetry dedupe) →
+  Ext.7.
+- Telemetry to `/api/export-events` → Ext.6. Events are emitted
+  in-process via Port only; no HTTP POST yet.
+- Daily-cap enforcement (warn at 400, hard-stop at 500 per source per
+  user) → Ext.7. Getters live in `storage.js`; the queue doesn't
+  consult them yet.
+- Diagnostic bundle (`modules/diagnostics.js`) → Ext.8.
+- Feature flags (`/api/ext-config`) → Ext.9.
+
+### Manifest changes (0.4.0 → 0.5.0)
+
+- `permissions` (added): `power`.
+- `host_permissions`: unchanged from Ext.4.
