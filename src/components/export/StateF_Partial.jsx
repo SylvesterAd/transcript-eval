@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import styled from 'styled-components'
-import { AlertCircle, RefreshCw, FileText, Download } from 'lucide-react'
+import { AlertCircle, RefreshCw, FileText, Download, MessageCircle } from 'lucide-react'
 import { getErrorLabel } from '../../lib/errorCodeLabels.js'
 import { useExportXmlKickoff, triggerXmlDownload } from '../../hooks/useExportXmlKickoff.js'
 
@@ -136,6 +136,10 @@ const RetryBtn = styled.button`
 `
 
 const XmlBtn = styled(RetryBtn)``
+
+const ReportBtn = styled(RetryBtn)`
+  color: #6b7280;
+`
 
 const XmlPanel = styled.div`
   margin-top: 16px;
@@ -324,7 +328,13 @@ export default function StateF_Partial({
           >
             <FileText size={14} /> Generate XML anyway
           </XmlBtn>
-          {/* "Report issue" stub lands in Task 5. */}
+          <ReportBtn
+            type="button"
+            disabled
+            title="Coming in Ext.8 — will auto-attach a diagnostic bundle"
+          >
+            <MessageCircle size={14} /> Report issue
+          </ReportBtn>
         </ActionRow>
         {xmlPanelShown && (
           <XmlKickoffPanel
