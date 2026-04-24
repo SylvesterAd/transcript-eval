@@ -7,17 +7,19 @@ import BRollPreview from './BRollPreview.jsx'
 import BRollDetailPanel from './BRollDetailPanel.jsx'
 import Timeline from './Timeline.jsx'
 import PlaybackControls from './PlaybackControls.jsx'
-import { apiPost, useApi } from '../../hooks/useApi.js'
+import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
 
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
   const navigate = useNavigate()
   const [activeVariantIdx, setActiveVariantIdx] = useState(0)
+  const editorCtx = useContext(EditorContext)
 
-  // Fetch the group's path_id so we can auto-skip the variant picker on hands-off.
-  const { data: groupDetail } = useApi(groupId ? `/videos/groups/${groupId}/detail` : null)
-  const pathId = groupDetail?.path_id || null
+  // Auto-hide the variant picker on the hands-off path. path_id already lives in
+  // EditorContext's groupDetail (loaded by EditorView) — read it from there
+  // instead of refetching.
+  const pathId = editorCtx?.state?.groupDetail?.path_id || null
 
   // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs.
   // For the hands-off path we hide the picker by collapsing to the first variant — the
@@ -46,7 +48,6 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   if (brollState.placements?.length) hasEverLoaded.current = true
 
   // Load placement data for inactive variants, resolved against transcript words
-  const editorCtx = useContext(EditorContext)
   const transcriptWords = useMemo(() => {
     if (!editorCtx?.state?.tracks) return []
     const audioTrack = editorCtx.state.tracks
