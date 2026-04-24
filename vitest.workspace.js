@@ -23,6 +23,14 @@ export default defineWorkspace([
     },
   },
   {
+    // Use esbuild's automatic JSX runtime so React pages under
+    // src/pages/**/*.jsx don't need to `import React from 'react'`.
+    // vite.config.js uses @vitejs/plugin-react for the dev server;
+    // vitest doesn't inherit those plugins, so we match the
+    // automatic-runtime behavior here at the workspace-project level.
+    esbuild: {
+      jsx: 'automatic',
+    },
     test: {
       name: 'web',
       environment: 'happy-dom',
