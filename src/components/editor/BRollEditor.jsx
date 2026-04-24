@@ -320,7 +320,17 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 activeVariantIdx={activeVariantIdx}
                 onVariantActivate={handleVariantActivate}
                 inactiveVariantPlacements={inactiveVariantPlacements}
-                onCrossDrop={brollState.dragCrossPlacement}
+                onCrossDrop={async (args) => {
+                  await brollState.dragCrossPlacement(args)
+                  // After successful cross-drop, refresh target's inactive cache so the
+                  // pasted clip appears immediately without waiting for variant activation.
+                  if (args.targetPipelineId !== variants[activeVariantIdx]?.id) {
+                    try {
+                      const data = await authFetchBRollData(args.targetPipelineId)
+                      setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: data.placements || [] }))
+                    } catch {}
+                  }
+                }}
               />
             </div>
           </div>
