@@ -82,6 +82,71 @@ export async function getExportResult(id, { userId } = {}) {
   }
 }
 
+// Write the post-run {variants:[...]} shape to exports.result_json.
+// Called by WebApp.1's State E handler AFTER the Chrome extension
+// signals {type:"complete"} — the web app already has placement
+// timing data from the unified manifest built at State C, so it
+// assembles the shape client-side and POSTs it here. Phase 1's
+// recordExportEvent does NOT write this shape (meta is just counts);
+// this helper is the sole writer of the XMEML-ready payload.
+//
+// Shape: { variants: [{ label, sequenceName, placements: [{
+//   seq, source, sourceItemId, filename,
+//   timelineStart, timelineDuration,
+//   width?, height?, sourceFrameRate?
+// }, ...] }, ...] }
+//
+// Ownership: same 404-collapsing rule as recordExportEvent — missing
+// row OR not-owned row both throw NotFoundError so the endpoint
+// can't be used to enumerate export IDs.
+//
+// Idempotency: repeated writes with the same shape are safe — the
+// generator is deterministic, so re-running the endpoint yields
+// identical XML. Callers SHOULD de-dupe, but the server doesn't
+// enforce it.
+export async function writeExportResult({ id, userId, variants }) {
+  if (!id || typeof id !== 'string') throw new ValidationError('export id required')
+  if (!Array.isArray(variants) || variants.length === 0) {
+    throw new ValidationError('variants must be a non-empty array')
+  }
+  for (const v of variants) {
+    if (!v || typeof v !== 'object') throw new ValidationError('each variant must be an object')
+    if (typeof v.label !== 'string' || !v.label) throw new ValidationError('variant.label must be a non-empty string')
+    if (typeof v.sequenceName !== 'string' || !v.sequenceName) {
+      throw new ValidationError('variant.sequenceName must be a non-empty string')
+    }
+    if (!Array.isArray(v.placements)) throw new ValidationError('variant.placements must be an array')
+    // The generator itself validates per-placement fields; we do a
+    // minimal shape check here so obvious client bugs surface before
+    // the generator throws.
+    for (const p of v.placements) {
+      if (!p || typeof p !== 'object') throw new ValidationError('each placement must be an object')
+      if (typeof p.seq !== 'number' || !Number.isFinite(p.seq)) {
+        throw new ValidationError('placement.seq must be a finite number')
+      }
+      if (typeof p.filename !== 'string' || !p.filename) {
+        throw new ValidationError('placement.filename must be a non-empty string')
+      }
+      if (typeof p.timelineStart !== 'number' || !Number.isFinite(p.timelineStart)) {
+        throw new ValidationError('placement.timelineStart must be a finite number')
+      }
+      if (typeof p.timelineDuration !== 'number' || !Number.isFinite(p.timelineDuration)) {
+        throw new ValidationError('placement.timelineDuration must be a finite number')
+      }
+    }
+  }
+
+  const row = await db.prepare('SELECT id, user_id FROM exports WHERE id = ?').get(id)
+  if (!row || (userId && row.user_id && row.user_id !== userId)) {
+    throw new NotFoundError('export_id not found')
+  }
+
+  const payload = JSON.stringify({ variants })
+  await db.prepare('UPDATE exports SET result_json = ? WHERE id = ?').run(payload, id)
+
+  return { ok: true }
+}
+
 const ALLOWED_EVENTS = new Set([
   'export_started', 'item_resolved', 'item_licensed', 'item_downloaded',
   'item_failed', 'rate_limit_hit', 'session_expired',
