@@ -13,3 +13,4 @@ server/eval.db
 # Extension dev artifacts
 .secrets/
 extension/dist/
+extension/scripts/*.log

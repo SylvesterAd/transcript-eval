@@ -588,3 +588,85 @@ For the `extension-test.html` harness:
   `export_enabled=false` without touching the backend env var).
 
 These are never called from production code.
+
+---
+
+## Ext.10 — Build + CI
+
+### Package the extension locally
+
+```bash
+npm run ext:package
+# → extension/dist/extension-0.9.0.zip
+```
+
+The script (`extension/scripts/package.mjs`) is deterministic — two runs
+on the same inputs produce a byte-identical zip. It uses an include-list,
+not an exclude-list: adding a new runtime file to `extension/` requires
+updating `ROOT_INCLUDES` or `DIR_INCLUDES` in `package.mjs` or the file
+will NOT ship. Developer-only files (`scripts/`, `README.md`,
+`.extension-id`, `modules/__tests__/`, `.private-key.pem`) are excluded
+unconditionally by `DIR_EXCLUDES` regexes.
+
+Flags:
+- `--out <dir>` — output directory (default `extension/dist`)
+- `--no-zip` — stage the dist tree but skip the zip step (test harness)
+- `--verbose` — log each staged file
+
+Determinism is enforced by a stable ZIP-epoch mtime (1980-01-01 UTC,
+the ZIP format's own epoch — fflate rejects dates outside 1980-2099 so
+plain Unix epoch 0 does not work) and alphabetically-sorted file input.
+
+### GitHub Actions workflow
+
+`.github/workflows/extension-build.yml` runs on:
+
+| Trigger | Behavior |
+|---------|----------|
+| Push to `main` touching `extension/**` | Build + upload workflow-run artifact (90-day retention) |
+| Tag `ext-v*` (e.g. `ext-v0.9.0`) | Build + publish GitHub Release with `.zip` attached |
+| `workflow_dispatch` (manual) | Build + upload workflow-run artifact |
+
+The `validate-dist` step in CI unzips the built archive and asserts the
+manifest parses, runtime files are present, and excluded paths are
+absent. Failure at this step means the include-list drifted — fix
+`package.mjs`, not the workflow.
+
+**Post-merge TODO:** the workflow is NOT yet a required status check.
+Flip `Extension Build` to required in GitHub repo settings once it has
+been green for a week.
+
+### Cut a tagged release
+
+```bash
+# From main, with the desired commit checked out:
+git tag ext-v0.9.0
+git push origin ext-v0.9.0
+# Workflow fires, builds, publishes GitHub Release with the zip.
+```
+
+Tag format is `ext-v<semver>` (NOT `v<semver>`) so extension releases
+don't collide with future app-wide version tags.
+
+### Cross-browser compatibility
+
+| Browser | Status | Notes |
+|---------|--------|-------|
+| Chrome 120+ | Primary | Manifest `minimum_chrome_version: "120"` enforces. |
+| Microsoft Edge | Supported | Chromium-based; same extension package works. |
+| Arc | Best-effort | Chromium-based; untested in CI. |
+| Brave | Best-effort | Strict tracker-blocking may block `/api/export-events` beacons on Envato pages. Non-fatal. |
+| Vivaldi | Best-effort | Chromium-based; untested in CI. |
+| Opera | Best-effort | Chromium-based; untested in CI. |
+| Firefox | Out of scope | Manifest V3 incompatibilities + different WebExtensions API quirks. |
+| Safari | Out of scope | Separate Safari Web Extensions pipeline required. |
+| Chrome Enterprise / managed policies | May block install | Corporate users need IT approval. Documented, not engineered around. |
+| Chromebook | Untested | Disk layout differs; treat as unsupported until tested. |
+
+### Deferred
+
+- **`.crx` signing + self-hosted distribution** — future Ext.10.5 mini-PR.
+- **Chrome Web Store auto-submission on tag** — Ext.11 (submission phase).
+- **Puppeteer-driven headless browser smoke** — future phase if beta
+  surfaces undetected MV3 loading bugs.
+- **Canary channel / second Web Store listing** — Ext.12.

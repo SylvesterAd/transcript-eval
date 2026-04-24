@@ -13,7 +13,8 @@
     "seed:strategies": "node server/seed/create-strategies.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ext:generate-key": "node extension/scripts/generate-key.mjs"
+    "ext:generate-key": "node extension/scripts/generate-key.mjs",
+    "ext:package": "node extension/scripts/package.mjs"
   },
   "dependencies": {
     "@dnd-kit/react": "^0.3.2",
