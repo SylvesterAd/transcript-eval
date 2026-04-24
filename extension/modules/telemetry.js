@@ -171,6 +171,59 @@ export async function _unshiftToQueue(entry) {
   await chrome.storage.local.set({ [STORAGE_KEY_QUEUE]: queue })
 }
 
+// ------------------- Error-code normalization -------------------
+//
+// The extension spec pins 15 error_code values for item_failed
+// telemetry. Ext.5's queue records free-form strings
+// (resolve_failed, download_failed, network_failed, disk_failed:<reason>,
+// cancelled, download_interrupt:<reason>, network_resume_failed:<msg>,
+// etc.). Ext.6 maps those strings into the enum at emit time;
+// unmappable raw strings normalize to null. Ext.7's failure-matrix
+// work will push the raw strings into well-known branches — this
+// mapper then becomes lossless.
+
+const ERROR_CODE_ENUM = Object.freeze([
+  'envato_403',
+  'envato_402_tier',
+  'envato_429',
+  'envato_session_401',
+  'envato_unavailable',
+  'envato_unsupported_filetype',
+  'freepik_404',
+  'freepik_429',
+  'freepik_unconfigured',
+  'pexels_404',
+  'network_failed',
+  'disk_failed',
+  'integrity_failed',
+  'resolve_failed',
+  'url_expired_refetch_failed',
+])
+const ERROR_CODE_SET = new Set(ERROR_CODE_ENUM)
+
+export function normalizeErrorCode(raw) {
+  if (raw == null) return null
+  const s = String(raw)
+  // Direct hit.
+  if (ERROR_CODE_SET.has(s)) return s
+  // Prefix matches for the colon-separated variants Ext.5's queue
+  // produces (e.g. "disk_failed:FILE_ACCESS_DENIED",
+  // "download_interrupt:SERVER_UNAUTHORIZED", "network_resume_failed:<msg>").
+  const beforeColon = s.split(':', 1)[0]
+  if (ERROR_CODE_SET.has(beforeColon)) return beforeColon
+  // Known Ext.5 raw strings that don't match the enum yet. Map
+  // conservatively; Ext.7 will tighten.
+  if (beforeColon === 'download_interrupt') return 'network_failed'
+  if (beforeColon === 'network_resume_failed') return 'network_failed'
+  if (beforeColon === 'license_failed') return 'envato_unavailable'
+  if (beforeColon === 'download_failed') return null
+  // Unknown — return null so the event still posts; the raw string
+  // lives in meta.raw_error for admin triage.
+  return null
+}
+
+export { ERROR_CODE_ENUM }
+
 // ------------------- Flush loop -------------------
 
 // State for the flush loop. All module-scoped so SW restarts reset

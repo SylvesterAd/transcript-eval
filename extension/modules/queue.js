@@ -30,11 +30,7 @@ import {
   getActiveRunId, setActiveRunId, clearActiveRunId,
   markCompleted,
 } from './storage.js'
-import { emit as emitTelemetry } from './telemetry.js'
-
-// Task 8 replaces this import with the real one exported from telemetry.js.
-// Keep this stub so Task 4 compiles standalone.
-function normalizeErrorCode(raw) { return raw }
+import { emit as emitTelemetry, normalizeErrorCode } from './telemetry.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
