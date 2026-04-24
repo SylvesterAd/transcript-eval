@@ -86,7 +86,15 @@ const active = { resolving: 0, licensing: 0, downloading: 0 }
 
 // ------------------- Public API -------------------
 
-export async function startRun({ runId, manifest, targetFolder, options, userId }) {
+export async function startRun({ runId, manifest, targetFolder, options, userId, _config_check_passed } = {}) {
+  // Ext.9 — defensive guard. The SW's {type:"export"} handler MUST call
+  // enforceConfigBeforeExport and pass _config_check_passed: true in
+  // params. If this flag is missing, the SW was bypassed (either a test
+  // harness or a future code path). Warn-log but PROCEED — Ext.9's
+  // contract is single-site enforcement, not defense-in-depth.
+  if (_config_check_passed !== true) {
+    console.warn('[queue] startRun called without _config_check_passed — config gate bypassed')
+  }
   if (!runId || typeof runId !== 'string') {
     return { ok: false, reason: 'bad_input', detail: 'runId required' }
   }
