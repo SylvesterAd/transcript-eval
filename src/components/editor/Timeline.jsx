@@ -700,8 +700,8 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                   {/* Sticky label — drag to reorder */}
                   <div
                     onMouseDown={(e) => handleTrackDragStart(e, absIdx)}
-                    style={isVideo ? (isRoughCut ? { height: '80px' } : undefined) : { height: track.showTranscript ? '112px' : '56px' }}
-                    className={`sticky left-0 w-36 shrink-0 ${isVideo ? 'h-6 border-b border-r border-white/10' : 'border-b border-r border-white/5'} flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none z-30 bg-surface-container ${
+                    style={isVideo ? { height: '80px' } : { height: track.showTranscript ? '112px' : '56px' }}
+                    className={`sticky left-0 w-36 shrink-0 ${isVideo ? 'border-b border-r border-white/10' : 'border-b border-r border-white/5'} flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none z-30 bg-surface-container ${
                       selected ? 'text-primary-fixed bg-primary-container/5' : 'text-on-surface-variant'
                     } ${isDragSource ? 'ring-1 ring-primary-fixed bg-primary-fixed/10' : ''}`}
                   >
