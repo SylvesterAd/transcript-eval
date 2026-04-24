@@ -45,9 +45,38 @@ const ring = []
 // Drift-check allowed-event set, derived once.
 const ALLOWED = new Set(TELEMETRY_EVENT_ENUM)
 
+// Ext.8 opt-out short-circuit — cached to keep emit() O(1). A
+// chrome.storage.onChanged listener keeps this in sync with the
+// persisted flag. emit() consults this FIRST (invariant #7 of the
+// Ext.8 plan) before any other work, including the ALLOWED drift
+// assert. Default is false — telemetry is opt-in-by-default per
+// extension spec § "Privacy + data rights".
+let optedOut = false
+;(async () => {
+  try {
+    const { telemetry_opt_out } = await chrome.storage.local.get('telemetry_opt_out')
+    optedOut = telemetry_opt_out === true
+  } catch (err) {
+    console.warn('[telemetry] initial opt-out read failed', err)
+  }
+})()
+try {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return
+    if ('telemetry_opt_out' in changes) {
+      optedOut = changes.telemetry_opt_out.newValue === true
+    }
+  })
+} catch (err) {
+  // Test harness without chrome.storage.onChanged — ignore.
+}
+
 // ------------------- Public API -------------------
 
 export function emit(event, payload) {
+  // Ext.8 opt-out: first line, before any other work. Drops silently,
+  // does NOT queue, does NOT persist, does NOT drift-assert.
+  if (optedOut) return
   // Invariant #4: drift assert. Unknown events are dropped with a
   // warn, not thrown — a typo here must not crash the queue worker.
   if (!ALLOWED.has(event)) {
@@ -84,6 +113,13 @@ export async function getBufferStats() {
     paused_for_auth: pausedForAuth,
     overflow_total: overflow || 0,
   }
+}
+
+// Ext.8 — diagnostics.buildBundle() reads the ring to combine with
+// the persisted telemetry_queue. Returns a shallow clone so callers
+// cannot mutate the live ring. See ext8 plan § "Bundle format (v1)".
+export function getRingSnapshot() {
+  return ring.slice()
 }
 
 // ------------------- Internals -------------------
