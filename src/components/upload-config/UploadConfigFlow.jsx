@@ -1,5 +1,5 @@
 // src/components/upload-config/UploadConfigFlow.jsx
-import { useEffect, useReducer } from 'react'
+import { useReducer } from 'react'
 import { apiPut } from '../../hooks/useApi.js'
 import Stepper from './Stepper.jsx'
 import StepLibraries from './steps/StepLibraries.jsx'
@@ -49,12 +49,11 @@ function reducer(state, action) {
 export default function UploadConfigFlow({ groupId, initialState, onBack, onComplete }) {
   const [current, setCurrent] = useReducerStep(0)
   const [submitted, setSubmitted] = useReducerStep(false)
+  // Lazy initializer seeds from initialState once on mount. `key={groupId}`
+  // in the parent forces a fresh mount per group, so we don't need a
+  // hydrate effect that would re-fire on every parent re-render and
+  // overwrite in-progress edits.
   const [state, dispatch] = useReducer(reducer, { ...DEFAULT_STATE, ...(initialState || {}) })
-
-  // Hydrate from DB on mount (initialState may already have it; this is a safety net)
-  useEffect(() => {
-    if (initialState) dispatch({ type: 'hydrate', payload: initialState })
-  }, [initialState])
 
   // Persist on step-forward
   async function persistCurrent() {
