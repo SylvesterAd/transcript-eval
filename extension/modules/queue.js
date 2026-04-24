@@ -505,6 +505,30 @@ async function handleDownloadEvent(item, delta) {
           filename: item.target_filename,
         },
       })
+      // Ext.7 (Task 10, uniquify-bundle extension side): emit the actual
+      // on-disk filename so the web app's XMEML path generator can match
+      // `001_envato_NX9WYGQ (1).mov` rather than the pre-uniquify name.
+      // We populate item.final_path here so it lands in the persisted
+      // state.items[] snapshot (and downstream in result_json). The
+      // web-side consumer (useExportPort handler + State F UI) is
+      // DEFERRED to a post-Wave-1 mini-PR to avoid merge conflict with
+      // the in-parallel State F / WebApp.3 branches touching
+      // src/hooks/useExportPort.js and src/pages/*.jsx.
+      try {
+        const results = await chrome.downloads.search({ id: item.download_id })
+        const actual = results && results[0]
+        const finalPath = actual?.filename || item.target_filename
+        item.final_path = finalPath
+        broadcast({
+          type: 'item_finalized',
+          item_id: item.source_item_id,
+          seq: item.seq,
+          final_path: finalPath,
+          bytes: item.bytes_received,
+        })
+      } catch (err) {
+        console.warn('[queue] item_finalized broadcast failed', err)
+      }
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
@@ -612,6 +636,11 @@ function buildInitialRunState({ runId, manifest, targetFolder, options, userId }
       integrity_retries: 0,
       signed_url_expires_at: null,
       expected_size_bytes: null,
+      // Ext.7 (Task 10): set on item_finalized from chrome.downloads.search.
+      // null until the download completes; web app reads from the
+      // persisted state.items[].final_path once State F / WebApp.3 wire
+      // the consumer (deferred — see note above at the emit site).
+      final_path: null,
     })),
     stats: { ok_count: 0, fail_count: 0, total_bytes_downloaded: 0 },
     run_state: 'running',
