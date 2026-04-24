@@ -101,6 +101,34 @@
     <pre id="out-envato">(no response yet)</pre>
   </fieldset>
 
+  <fieldset>
+    <legend>6. Source one-shot — Pexels/Freepik (Ext.3)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Calls the backend's <code>POST /api/pexels-url</code> or <code>POST /api/freepik-url</code> endpoint
+      with a Bearer JWT, then hands the signed URL to <code>chrome.downloads.download</code>.
+      Requires a valid JWT (run fieldset 2 first) and the backend running on :3001.
+      Freepik calls are billable (€0.05 per successful mint); if <code>FREEPIK_API_KEY</code> is
+      unset, the Freepik button returns <code>freepik_unconfigured</code> (503).
+    </p>
+    <label for="src-source">source:</label>
+    <select id="src-source">
+      <option value="pexels">pexels</option>
+      <option value="freepik">freepik</option>
+    </select>
+    <label for="src-item-id">item_id:</label>
+    <input type="text" id="src-item-id" placeholder="e.g. 856971 (Pexels) or freepik video id" autocomplete="off">
+    <p class="muted">
+      Pexels default: <code>856971</code> (public Pexels sample, safe for testing — the file will
+      land in <code>~/Downloads/transcript-eval/pexels_856971.mp4</code>).
+      Inputs persist to localStorage.
+    </p>
+    <div class="row">
+      <button id="btn-source-one-shot">Run source download</button>
+      <span id="source-status"></span>
+    </div>
+    <pre id="out-source">(no response yet)</pre>
+  </fieldset>
+
   <script type="module">
     const idInput = document.getElementById('ext-id')
     idInput.value = localStorage.getItem('ext_test_id') || ''
@@ -258,6 +286,47 @@
           version: 1,
           item_id: itemId,
           envato_item_url: itemUrl,
+        })
+        const ms = Math.round(performance.now() - t0)
+        status.textContent = r?.ok ? `OK in ${ms}ms` : `FAIL in ${ms}ms`
+        status.className = r?.ok ? 'status-ok' : 'status-err'
+        out.textContent = pretty(r)
+      } catch (e) {
+        status.textContent = 'EXCEPTION'
+        status.className = 'status-err'
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    // ---- Ext.3 Source one-shot ----
+    const srcSourceSelect = document.getElementById('src-source')
+    const srcItemIdInput = document.getElementById('src-item-id')
+    srcSourceSelect.value = localStorage.getItem('ext_test_source') || 'pexels'
+    srcItemIdInput.value = localStorage.getItem('ext_test_source_item_id') || '856971'
+    srcSourceSelect.addEventListener('change', () => localStorage.setItem('ext_test_source', srcSourceSelect.value))
+    srcItemIdInput.addEventListener('input', () => localStorage.setItem('ext_test_source_item_id', srcItemIdInput.value.trim()))
+
+    document.getElementById('btn-source-one-shot').onclick = async () => {
+      const status = document.getElementById('source-status')
+      const out = document.getElementById('out-source')
+      const source = srcSourceSelect.value
+      const itemId = srcItemIdInput.value.trim()
+      if (!itemId) {
+        status.textContent = 'missing item_id'
+        status.className = 'status-err'
+        out.textContent = 'item_id is required.'
+        return
+      }
+      status.textContent = 'running…'
+      status.className = ''
+      out.textContent = '…'
+      try {
+        const t0 = performance.now()
+        const r = await send({
+          type: 'debug_source_one_shot',
+          version: 1,
+          source,
+          item_id: itemId,
         })
         const ms = Math.round(performance.now() - t0)
         status.textContent = r?.ok ? `OK in ${ms}ms` : `FAIL in ${ms}ms`
