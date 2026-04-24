@@ -9,17 +9,25 @@
 // `undefined` for every reply.
 
 import { EXT_VERSION, MESSAGE_VERSION } from './config.js'
-import { getJwt, setJwt, hasValidJwt } from './modules/auth.js'
+import {
+  getJwt, setJwt, hasValidJwt,
+  hasEnvatoSession, checkEnvatoSessionLive, onEnvatoSessionChange,
+} from './modules/auth.js'
 import { downloadEnvato } from './modules/envato.js'
 import { downloadSourceItem } from './modules/sources.js'
+import { registerPortHandler, broadcastToPort } from './modules/port.js'
 
 async function handlePing() {
   const jwt = await getJwt()
+  const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
+  // If the cookie watcher hasn't fired yet (fresh SW wake), fall
+  // back to a best-effort read; still fast (no network).
+  const envatoStatus = envato_session_status || (await hasEnvatoSession() ? 'ok' : 'missing')
   return {
     type: 'pong',
     version: MESSAGE_VERSION,
     ext_version: EXT_VERSION,
-    envato_session: 'missing',   // Ext.1 has no cookie watcher yet — always "missing"
+    envato_session: envatoStatus,
     has_jwt: !!jwt && jwt.expires_at > Date.now(),
     jwt_expires_at: jwt?.expires_at ?? null,
   }
@@ -92,10 +100,54 @@ async function handleDebugSourceOneShot(msg) {
   }
 }
 
+// Ext.4 debug: fire an ad-hoc pre-flight check from the test page.
+// Useful for "did my change to ENVATO_REFERENCE_UUID work?" loops.
+async function handleDebugCheckEnvatoSession() {
+  const cookiesOk = await hasEnvatoSession()
+  const live = await checkEnvatoSessionLive()
+  return {
+    ok: true,
+    cookies_ok: cookiesOk,
+    live,
+  }
+}
+
 function isSupportedVersion(v) {
   // Accept current and N-1 per spec § "Versioning". Ext.1 only knows v1.
   return v === MESSAGE_VERSION
 }
+
+// --- Ext.4: long-lived port registration ---
+// Called once at SW boot. Future SW wake-ups re-run this file from
+// scratch, which re-registers. onConnectExternal listeners are
+// idempotent per registration call.
+registerPortHandler({
+  onConnect({ senderUrl }) { console.log('[port] connected from', senderUrl) },
+  onDisconnect({ senderUrl }) { console.log('[port] disconnected from', senderUrl) },
+  onMessage(msg, { senderUrl }) {
+    // Ext.5 will route {type:"export"|"pause"|"resume"|"cancel"}
+    // here. Ext.4 only knows {type:"session"} (handled inside
+    // port.js). Anything else is logged and dropped.
+    console.log('[port] inbound message', msg, 'from', senderUrl)
+  },
+})
+
+// --- Ext.4: Envato cookie watcher ---
+onEnvatoSessionChange(async ({ status }) => {
+  await chrome.storage.local.set({ envato_session_status: status })
+  broadcastToPort({ type: 'state', version: MESSAGE_VERSION, envato_session: status })
+  if (status === 'missing') {
+    try {
+      chrome.action.setBadgeText({ text: '!' })
+      chrome.action.setBadgeBackgroundColor({ color: '#dc2626' })
+    } catch {}
+  } else {
+    try {
+      chrome.action.setBadgeText({ text: '' })
+    } catch {}
+  }
+  console.log('[envato-cookies] status ->', status)
+})
 
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   ;(async () => {
@@ -120,6 +172,9 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         return
       case 'debug_source_one_shot':
         sendResponse(await handleDebugSourceOneShot(msg))
+        return
+      case 'debug_check_envato_session':
+        sendResponse(await handleDebugCheckEnvatoSession())
         return
       default:
         sendResponse({ error: 'unknown_type', type: msg.type })
