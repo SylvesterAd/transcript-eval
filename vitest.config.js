@@ -1,22 +1,31 @@
-// Vitest config for transcript-eval. First test harness in the project
-// — kept minimal. Tests live next to the code they test, under a
-// __tests__/ directory, to match the server/services/__tests__/ pattern
-// established by WebApp.2.
+// Vitest config for transcript-eval. Dual-environment via workspace:
+//   - Node project: server-side code (services, routes). No DOM.
+//   - Browser project: React hooks + pure frontend utilities under
+//     src/. Uses happy-dom for URL.createObjectURL + document globals.
+//
+// Both projects share `globals: false` so describe/it/expect are
+// always explicit imports — keeps tests portable and greppable.
+//
+// Vitest 1.6.x uses the `vitest.workspace.js` file (this is the
+// "shared defaults" config — workspace projects below override).
 
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    environment: 'node',        // server-side code; no DOM
-    include: ['server/**/__tests__/**/*.test.js'],
-    globals: false,             // explicit imports of describe/it/expect
+    globals: false,
     reporters: 'default',
-    watch: false,               // `npm run test:watch` opts in
+    watch: false,
     coverage: {
       provider: 'v8',
       reporter: ['text'],
-      include: ['server/services/**/*.js'],
-      exclude: ['server/services/__tests__/**', 'server/services/*.py'],
+      include: ['server/services/**/*.js', 'src/hooks/**/*.js', 'src/lib/**/*.js'],
+      exclude: [
+        'server/services/__tests__/**',
+        'server/services/*.py',
+        'src/hooks/__tests__/**',
+        'src/lib/__tests__/**',
+      ],
     },
   },
 })

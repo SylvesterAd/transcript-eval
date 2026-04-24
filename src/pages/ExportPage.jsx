@@ -8,7 +8,7 @@ import StateA_Install from '../components/export/StateA_Install.jsx'
 import StateB_Session from '../components/export/StateB_Session.jsx'
 import StateC_Summary from '../components/export/StateC_Summary.jsx'
 import StateD_InProgress from '../components/export/StateD_InProgress.jsx'
-import StateE_Complete_Placeholder from '../components/export/StateE_Complete_Placeholder.jsx'
+import StateE_Complete from '../components/export/StateE_Complete.jsx'
 import StateF_Partial_Placeholder from '../components/export/StateF_Partial_Placeholder.jsx'
 import { useExportPort } from '../hooks/useExportPort.js'
 
@@ -28,7 +28,14 @@ function reducer(state, action) {
     case 'goto':                  return { ...state, phase: action.phase }
     case 'set_extra_variants':    return { ...state, additionalVariants: action.variants }
     case 'override_session':      return { ...state, sessionOverridden: true }
-    case 'export_started':        return { ...state, phase: 'state_d', export_id: action.export_id, run_id: action.run_id || null }
+    case 'export_started':        return {
+      ...state,
+      phase: 'state_d',
+      export_id: action.export_id,
+      run_id: action.run_id || null,
+      unified_manifest: action.unified_manifest || null,
+      variant_labels: action.variant_labels || [],
+    }
     case 'export_completed': {
       const fail = action.payload?.fail_count ?? 0
       return { ...state, phase: fail > 0 ? 'state_f' : 'state_e', complete_payload: action.payload }
@@ -45,6 +52,8 @@ const initialState = {
   export_id: null,
   run_id: null,
   complete_payload: null,
+  unified_manifest: null,   // captured in onStart; needed by State E
+  variant_labels: [],       // captured in onStart; passed to State E
   error: null,
 }
 
@@ -190,6 +199,8 @@ export default function ExportPage() {
       type: 'export_started',
       export_id: exportId,
       run_id: maybeResponse?.run_id || null,
+      unified_manifest: unifiedManifest,
+      variant_labels: variantLabels,
     })
   }, [pipelineId, variant, ext])
 
@@ -247,7 +258,7 @@ export default function ExportPage() {
     )
   }
 
-  // States D / E / F — live-progress + terminal placeholders.
+  // States D / E / F — live-progress + State E XMEML + State F stub.
   if (state.phase === 'state_d' || state.phase === 'state_e' || state.phase === 'state_f') {
     return (
       <ActiveRun
@@ -256,6 +267,8 @@ export default function ExportPage() {
         expectedRunId={state.run_id}
         phase={state.phase}
         completePayload={state.complete_payload}
+        unifiedManifest={state.unified_manifest}
+        variantLabels={state.variant_labels}
         onComplete={(payload) => dispatch({ type: 'export_completed', payload })}
       />
     )
@@ -268,7 +281,10 @@ export default function ExportPage() {
 // is mounted only while we're actually in those phases. Pulling this
 // out as a child component keeps ExportPage.jsx's FSM clean — the Port
 // lifecycle lives only for the duration of the active run.
-function ActiveRun({ variant, exportId, expectedRunId, phase, completePayload, onComplete }) {
+function ActiveRun({
+  variant, exportId, expectedRunId, phase, completePayload,
+  unifiedManifest, variantLabels, onComplete,
+}) {
   const port = useExportPort({ exportId, expectedRunId })
 
   // When the Port reports completion, notify parent to transition FSM.
@@ -279,7 +295,14 @@ function ActiveRun({ variant, exportId, expectedRunId, phase, completePayload, o
   }, [port.complete, phase, onComplete])
 
   if (phase === 'state_e') {
-    return <StateE_Complete_Placeholder complete={completePayload} />
+    return (
+      <StateE_Complete
+        complete={completePayload}
+        exportId={exportId}
+        variantLabels={variantLabels}
+        unifiedManifest={unifiedManifest}
+      />
+    )
   }
   if (phase === 'state_f') {
     return <StateF_Partial_Placeholder complete={completePayload} snapshot={port.snapshot} />
