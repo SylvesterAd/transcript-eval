@@ -137,7 +137,188 @@ export function assignTracks(placements) {
   return sorted
 }
 
-// TODO(task 2+): generateXmeml(...) — implemented in subsequent tasks.
-export function generateXmeml() {
-  throw new Error('generateXmeml: not yet implemented — see task 2')
+// ----------------------------------------------------------------------
+// generateXmeml — main entry point.
+//
+// Inputs:
+//   sequenceName: string  — human-readable, e.g. "Variant C". Escaped.
+//   placements: Array<{
+//     seq: number                — monotonic; used for ids + ordering
+//     source: string             — "envato" | "pexels" | "freepik"
+//     sourceItemId: string       — upstream id; used in file id
+//     filename: string           — leaf name in media/; sanitized
+//     timelineStart: number      — seconds on timeline
+//     timelineDuration: number   — seconds
+//     width?: number             — per-file, defaults to sequenceSize.w
+//     height?: number            — per-file, defaults to sequenceSize.h
+//     sourceFrameRate?: number   — per-file, defaults to frameRate
+//   }>
+//   frameRate: number = 30       — sequence timebase
+//   sequenceSize: {w, h} = 1920x1080
+//
+// Returns: XML string (FCP7 xmeml v5). Deterministic: same inputs →
+// byte-identical output across calls and processes.
+//
+// Edge cases:
+//   - placements is empty → emit a valid <sequence> with an empty
+//     <video> (one track, no clipitems). Does NOT throw — the caller
+//     decides whether to offer XML for a zero-item run.
+//   - missing width/height/sourceFrameRate on a placement → use
+//     sequence defaults. Premiere re-reads actual file metadata on
+//     import anyway.
+//   - overlapping placements → stacked on V1/V2/... via assignTracks.
+//   - escapes every text node that could contain user-influenced
+//     data (sequenceName, filename, file id components).
+//
+// What the function is NOT:
+//   - Not a file writer. Returns a string.
+//   - Not a validator against an XMEML schema. We target the permissive
+//     subset Premiere accepts; regressions are caught by golden fixture
+//     tests in Task 5.
+
+function slugifyForId(input) {
+  // Deterministic id segment: ASCII alphanumerics + dashes. Anything
+  // else becomes -. Used for <clipitem id> and <file id> — these are
+  // XML attribute values, which don't need escaping for our allowed
+  // char set, but sanitizing avoids `"` or other terminator issues.
+  return String(input || '').replace(/[^A-Za-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function padSeq(seq) {
+  const s = String(seq)
+  return s.length >= 3 ? s : ('000' + s).slice(-3)
+}
+
+export function generateXmeml({
+  sequenceName,
+  placements,
+  frameRate = 30,
+  sequenceSize = { w: 1920, h: 1080 },
+}) {
+  if (typeof sequenceName !== 'string' || !sequenceName) {
+    throw new Error('generateXmeml: sequenceName must be a non-empty string')
+  }
+  if (!Array.isArray(placements)) {
+    throw new Error('generateXmeml: placements must be an array')
+  }
+  if (typeof frameRate !== 'number' || !Number.isFinite(frameRate) || frameRate <= 0) {
+    throw new Error('generateXmeml: frameRate must be a positive finite number')
+  }
+  const seqW = sequenceSize?.w ?? 1920
+  const seqH = sequenceSize?.h ?? 1080
+  if (!Number.isFinite(seqW) || !Number.isFinite(seqH) || seqW <= 0 || seqH <= 0) {
+    throw new Error('generateXmeml: sequenceSize.{w,h} must be positive finite numbers')
+  }
+
+  const seqSlug = slugifyForId(sequenceName).toLowerCase() || 'seq'
+
+  // Step 1: normalize each placement — integer frames, defaulted metadata,
+  // sanitized filenames.
+  const normalized = placements.map((p) => {
+    if (!p || typeof p !== 'object') {
+      throw new Error('generateXmeml: each placement must be an object')
+    }
+    if (typeof p.seq !== 'number' || !Number.isFinite(p.seq)) {
+      throw new Error(`generateXmeml: placement missing numeric seq (got ${p.seq})`)
+    }
+    if (typeof p.filename !== 'string' || !p.filename) {
+      throw new Error(`generateXmeml: placement seq=${p.seq} missing filename`)
+    }
+    const startFrame = secondsToFrames(p.timelineStart, frameRate)
+    const duration = secondsToFrames(p.timelineDuration, frameRate)
+    const endFrame = startFrame + duration
+    const width = Number.isFinite(p.width) && p.width > 0 ? p.width : seqW
+    const height = Number.isFinite(p.height) && p.height > 0 ? p.height : seqH
+    const sourceFrameRate = Number.isFinite(p.sourceFrameRate) && p.sourceFrameRate > 0
+      ? p.sourceFrameRate : frameRate
+    const cleanName = sanitizeFilename(p.filename)
+    return {
+      seq: p.seq,
+      source: p.source || '',
+      sourceItemId: p.sourceItemId || '',
+      filename: cleanName,
+      _startFrame: startFrame,
+      _endFrame: endFrame,
+      _duration: duration,
+      _width: width,
+      _height: height,
+      _sourceFrameRate: sourceFrameRate,
+    }
+  })
+
+  // Step 2: assign tracks (no-op if placements is empty).
+  const withTracks = assignTracks(normalized)
+
+  // Step 3: group by track index. Within each track, order by start
+  // frame (already done by assignTracks).
+  const tracksByIndex = new Map()
+  for (const p of withTracks) {
+    if (!tracksByIndex.has(p.trackIndex)) tracksByIndex.set(p.trackIndex, [])
+    tracksByIndex.get(p.trackIndex).push(p)
+  }
+
+  // Step 4: sequence <duration> = last end frame across all tracks.
+  // Zero if no placements.
+  let sequenceDuration = 0
+  for (const p of withTracks) {
+    if (p._endFrame > sequenceDuration) sequenceDuration = p._endFrame
+  }
+
+  // Step 5: emit. String concatenation in a single pass — no intermediate
+  // arrays, no DOM builder. 2-space indent to match the spec's example.
+  const lines = []
+  lines.push(`<?xml version="1.0" encoding="UTF-8"?>`)
+  lines.push(`<!DOCTYPE xmeml>`)
+  lines.push(`<xmeml version="5">`)
+  lines.push(`  <sequence id="seq-${slugifyForId(seqSlug)}">`)
+  lines.push(`    <name>${escapeXml(sequenceName)}</name>`)
+  lines.push(`    <duration>${sequenceDuration}</duration>`)
+  lines.push(`    <rate><timebase>${frameRate}</timebase><ntsc>FALSE</ntsc></rate>`)
+  lines.push(`    <media>`)
+  lines.push(`      <video>`)
+  lines.push(`        <format>`)
+  lines.push(`          <samplecharacteristics>`)
+  lines.push(`            <width>${seqW}</width><height>${seqH}</height>`)
+  lines.push(`            <rate><timebase>${frameRate}</timebase></rate>`)
+  lines.push(`          </samplecharacteristics>`)
+  lines.push(`        </format>`)
+
+  // Emit tracks in V1, V2, V3 order. If placements is empty, emit zero
+  // tracks inside <video> — valid xmeml, opens in Premiere as an empty
+  // video layer.
+  const trackIndices = Array.from(tracksByIndex.keys()).sort((a, b) => a - b)
+  for (const trackIdx of trackIndices) {
+    lines.push(`        <track>`)
+    for (const p of tracksByIndex.get(trackIdx)) {
+      const clipId = `clip-${seqSlug}-${padSeq(p.seq)}`
+      const fileId = `file-${slugifyForId(p.source)}-${slugifyForId(p.sourceItemId) || padSeq(p.seq)}`
+      lines.push(`          <clipitem id="${escapeXml(clipId)}">`)
+      lines.push(`            <name>${escapeXml(p.filename)}</name>`)
+      lines.push(`            <start>${p._startFrame}</start>`)
+      lines.push(`            <end>${p._endFrame}</end>`)
+      lines.push(`            <in>0</in>`)
+      lines.push(`            <out>${p._duration}</out>`)
+      lines.push(`            <file id="${escapeXml(fileId)}">`)
+      lines.push(`              <name>${escapeXml(p.filename)}</name>`)
+      lines.push(`              <pathurl>file://./media/${escapeXml(p.filename)}</pathurl>`)
+      lines.push(`              <duration>${p._duration}</duration>`)
+      lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
+      lines.push(`              <media>`)
+      lines.push(`                <video><samplecharacteristics>`)
+      lines.push(`                  <width>${p._width}</width><height>${p._height}</height>`)
+      lines.push(`                </samplecharacteristics></video>`)
+      lines.push(`              </media>`)
+      lines.push(`            </file>`)
+      lines.push(`          </clipitem>`)
+    }
+    lines.push(`        </track>`)
+  }
+
+  lines.push(`      </video>`)
+  lines.push(`    </media>`)
+  lines.push(`  </sequence>`)
+  lines.push(`</xmeml>`)
+  lines.push(``)  // trailing newline
+
+  return lines.join('\n')
 }

@@ -35,13 +35,6 @@ describe('escapeXml', () => {
   })
 })
 
-describe('generateXmeml (stub)', () => {
-  it('throws the not-yet-implemented error', async () => {
-    const { generateXmeml } = await import('../xmeml-generator.js')
-    expect(() => generateXmeml({})).toThrow(/not yet implemented/)
-  })
-})
-
 describe('sanitizeFilename', () => {
   it('passes through safe ASCII names', () => {
     expect(sanitizeFilename('001_envato_NX9WYGQ.mov')).toBe('001_envato_NX9WYGQ.mov')
