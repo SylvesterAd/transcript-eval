@@ -1,5 +1,6 @@
 import { useRef, useState, useContext } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
+import { EditorContext } from './EditorView.jsx'
 import { Play, Pause, X, Search, Loader2, RotateCw, Pencil, Trash2 } from 'lucide-react'
 import { parseTimecode } from './brollUtils.js'
 
@@ -11,6 +12,7 @@ function formatTime(s) {
 
 export default function BRollDetailPanel() {
   const broll = useContext(BRollContext)
+  const editorCtx = useContext(EditorContext)
   const [showEditModal, setShowEditModal] = useState(false)
   const [retrying, setRetrying] = useState(false)
   if (!broll) return null
@@ -36,8 +38,12 @@ export default function BRollDetailPanel() {
   }
 
   function handleDelete() {
+    const targetTime = placement?.timelineStart
     broll.hidePlacement(selectedIndex)
     broll.selectPlacement(null)
+    if (targetTime != null) {
+      editorCtx?.dispatch?.({ type: 'SET_CURRENT_TIME', payload: targetTime })
+    }
   }
 
   return (

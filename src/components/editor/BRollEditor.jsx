@@ -187,8 +187,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
       // Delete / Backspace → delete selected placement
       if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && brollState.selectedIndex != null) {
         e.preventDefault()
+        const placement = brollState.selectedPlacement
         brollState.hidePlacement(brollState.selectedIndex)
         brollState.selectPlacement(null)
+        if (placement && placement.timelineStart != null) {
+          editorCtx?.dispatch?.({ type: 'SET_CURRENT_TIME', payload: placement.timelineStart })
+        }
         return
       }
 
