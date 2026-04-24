@@ -30,6 +30,7 @@ import {
   getActiveRunId, setActiveRunId, clearActiveRunId,
   markCompleted,
 } from './storage.js'
+import { emit as emitTelemetry, normalizeErrorCode } from './telemetry.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
@@ -93,6 +94,22 @@ export async function startRun({ runId, manifest, targetFolder, options, userId 
   await acquireKeepAwake()
   // 6. Broadcast initial state
   broadcast({ type: 'state', export: snapshot() })
+  // Ext.6 telemetry: export_started. Fire-and-forget.
+  const sourceBreakdown = { envato: 0, pexels: 0, freepik: 0 }
+  let totalBytesEst = 0
+  for (const item of state.items) {
+    if (sourceBreakdown[item.source] != null) sourceBreakdown[item.source]++
+    if (typeof item.total_bytes === 'number') totalBytesEst += item.total_bytes
+  }
+  emitTelemetry('export_started', {
+    export_id: state.runId,
+    t: state.started_at,
+    meta: {
+      total_items: state.items.length,
+      total_bytes_est: totalBytesEst,
+      source_breakdown: sourceBreakdown,
+    },
+  })
   // 7. Kick worker pools
   schedule()
   return { ok: true, runId }
@@ -103,6 +120,11 @@ export async function pauseRun() {
   state.run_state = 'paused'
   await releaseKeepAwake()
   await persistAndBroadcast()
+  emitTelemetry('queue_paused', {
+    export_id: state.runId,
+    t: Date.now(),
+    meta: { reason: 'user' },
+  })
   return { ok: true }
 }
 
@@ -111,6 +133,10 @@ export async function resumeRun() {
   state.run_state = 'running'
   await acquireKeepAwake()
   await persistAndBroadcast()
+  emitTelemetry('queue_resumed', {
+    export_id: state.runId,
+    t: Date.now(),
+  })
   schedule()
   return { ok: true }
 }
@@ -124,6 +150,17 @@ export async function cancelRun() {
       try { await chrome.downloads.cancel(it.download_id) } catch {}
     }
   }
+  emitTelemetry('export_completed', {
+    export_id: state.runId,
+    t: Date.now(),
+    meta: {
+      ok_count:         state.stats.ok_count,
+      fail_count:       state.stats.fail_count,
+      wall_seconds:     Math.round((Date.now() - state.started_at) / 1000),
+      total_bytes:      state.stats.total_bytes_downloaded,
+      reason:           'cancelled',
+    },
+  })
   await releaseKeepAwake()
   // Persist the terminal state (so status requests during cleanup see
   // 'cancelled'), then delete the run record and clear the lock.
@@ -191,12 +228,21 @@ function nextItemForPhase(phaseName) {
 async function runResolver(item) {
   item.claimed = true
   item.phase = 'resolving'
+  item.resolve_started_at = Date.now()
   await persistAndBroadcast()
   try {
     const uuid = await resolveOldIdToNewUuid(item.envato_item_url)
     item.resolved_uuid = uuid
     item.phase = 'licensing'
     item.claimed = false
+    emitTelemetry('item_resolved', {
+      export_id: state.runId,
+      item_id: item.source_item_id,
+      source: 'envato',
+      phase: 'resolve',
+      t: Date.now(),
+      meta: { resolve_ms: Date.now() - (item.resolve_started_at || Date.now()) },
+    })
     await persistAndBroadcast()
   } catch (err) {
     await failItem(item, err?.message || 'resolve_failed')
@@ -206,6 +252,7 @@ async function runResolver(item) {
 async function runLicenser(item) {
   item.claimed = true
   // item.phase is already 'licensing'
+  item.license_started_at = Date.now()
   await persistAndBroadcast()
   try {
     // JIT URL fetching: we're milliseconds away from chrome.downloads.download
@@ -213,6 +260,14 @@ async function runLicenser(item) {
     item.signed_url = signedUrl
     item.phase = 'downloading'
     item.claimed = false
+    emitTelemetry('item_licensed', {
+      export_id: state.runId,
+      item_id: item.source_item_id,
+      source: 'envato',
+      phase: 'license',
+      t: Date.now(),
+      meta: { license_ms: Date.now() - (item.license_started_at || Date.now()) },
+    })
     await persistAndBroadcast()
   } catch (err) {
     await failItem(item, err?.message || 'license_failed')
@@ -227,6 +282,7 @@ async function runDownloader(item) {
     if (item.source !== 'envato' && !item.signed_url) {
       item.signed_url = await getSignedUrlForSource(item.source, item.source_item_id)
     }
+    item.download_started_at = Date.now()
     const downloadId = await chrome.downloads.download({
       url: item.signed_url,
       filename: `${state.target_folder_path}/${item.target_filename}`,
@@ -297,6 +353,18 @@ async function handleDownloadEvent(item, delta) {
           console.warn('[queue] markCompleted failed', err)
         }
       }
+      emitTelemetry('item_downloaded', {
+        export_id: state.runId,
+        item_id: item.source_item_id,
+        source: item.source,
+        phase: 'download',
+        t: Date.now(),
+        meta: {
+          bytes: item.bytes_received || 0,
+          download_ms: Date.now() - (item.download_started_at || Date.now()),
+          filename: item.target_filename,
+        },
+      })
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
@@ -310,6 +378,19 @@ async function handleDownloadInterrupt(item, delta) {
   const reason = delta.error?.current || 'UNKNOWN'
   if (reason.startsWith('NETWORK_')) {
     if (item.retries < DOWNLOAD_NETWORK_RETRY_CAP) {
+      // Ext.6 telemetry: each network retry counts as a rate_limit_hit
+      // signal. Note: chrome.downloads doesn't surface Retry-After for
+      // network interrupts; meta.retry_after_sec is null.
+      emitTelemetry('rate_limit_hit', {
+        export_id: state.runId,
+        item_id: item.source_item_id,
+        source: item.source,
+        phase: 'download',
+        t: Date.now(),
+        http_status: null,
+        retry_count: item.retries || 0,
+        meta: { retry_after_sec: null, reason: reason },
+      })
       item.retries++
       chrome.downloads.resume(item.download_id).catch(async err => {
         await failItem(item, `network_resume_failed:${err?.message}`)
@@ -372,11 +453,17 @@ function buildInitialRunState({ runId, manifest, targetFolder, options, userId }
       resolved_uuid: null,
       signed_url: null,
       claimed: false,
+      // Ext.6: timing fields for telemetry meta. Set when the phase starts.
+      resolve_started_at: null,
+      license_started_at: null,
+      download_started_at: null,
     })),
     stats: { ok_count: 0, fail_count: 0, total_bytes_downloaded: 0 },
     run_state: 'running',
     download_id_to_seq: {},
     userId, // for storage.markCompleted wiring in Task 8
+    // Ext.6: flag so we emit session_expired at most once per run.
+    session_expired_emitted: false,
   }
 }
 
@@ -433,12 +520,40 @@ function broadcastItemTransition(_item) {
 }
 
 async function failItem(item, errorCode) {
+  // Capture the phase BEFORE we flip it to 'failed' so the telemetry
+  // payload describes which stage actually failed.
+  const phaseBeforeFailure = item.phase
   item.phase = 'failed'
   item.error_code = errorCode
   item.claimed = false
   state.stats.fail_count++
   await persistAndBroadcast()
   broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'failed' })
+
+  // Ext.6 telemetry. Fire-and-forget; do not await.
+  emitTelemetry('item_failed', {
+    export_id: state.runId,
+    item_id: item.source_item_id,
+    source: item.source,
+    phase: phaseBeforeFailure === 'resolving' ? 'resolve' : phaseBeforeFailure === 'licensing' ? 'license' : 'download',
+    t: Date.now(),
+    error_code: normalizeErrorCode(errorCode),   // Task 8 lands normalizeErrorCode
+    retry_count: item.retries || 0,
+    meta: {
+      attempts: (item.retries || 0) + 1,
+      raw_error: errorCode, // keep the raw string so admin observability can triage unknowns
+    },
+  })
+
+  // Session_expired side-emit (invariant #7-adjacent; at most once per run).
+  if ((errorCode === 'envato_session_401' || String(errorCode).startsWith('envato_session_401')) && !state.session_expired_emitted) {
+    state.session_expired_emitted = true
+    emitTelemetry('session_expired', {
+      export_id: state.runId,
+      t: Date.now(),
+      source: 'envato',
+    })
+  }
 }
 
 async function finalize() {
@@ -453,6 +568,17 @@ async function finalize() {
     fail_count: state.stats.fail_count,
     folder_path: state.target_folder_path,
     xml_paths: [], // web app generates XMLs
+  })
+  emitTelemetry('export_completed', {
+    export_id: state.runId,
+    t: Date.now(),
+    meta: {
+      ok_count:         state.stats.ok_count,
+      fail_count:       state.stats.fail_count,
+      wall_seconds:     Math.round((Date.now() - state.started_at) / 1000),
+      total_bytes:      state.stats.total_bytes_downloaded,
+      reason:           'complete',
+    },
   })
   await releaseKeepAwake()
   await clearActiveRunId()
@@ -473,6 +599,17 @@ async function hardStopQueue(reason) {
       it.error_code = reason
     }
   }
+  emitTelemetry('export_completed', {
+    export_id: state.runId,
+    t: Date.now(),
+    meta: {
+      ok_count:         state.stats.ok_count,
+      fail_count:       state.stats.fail_count,
+      wall_seconds:     Math.round((Date.now() - state.started_at) / 1000),
+      total_bytes:      state.stats.total_bytes_downloaded,
+      reason:           'hard_stop:' + reason,
+    },
+  })
   await persistAndBroadcast()
   await releaseKeepAwake()
   await clearActiveRunId()

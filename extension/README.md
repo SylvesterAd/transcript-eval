@@ -366,3 +366,73 @@ Task 12 for the full verification script.
 
 - `permissions` (added): `power`.
 - `host_permissions`: unchanged from Ext.4.
+
+## Ext.6 — Telemetry
+
+- **Permissions:** unchanged from Ext.5. Manifest version `0.6.0`.
+- **New module:** `modules/telemetry.js` (~300 LOC) — owns the
+  `POST /api/export-events` emitter. Ring buffer (50) + persisted
+  overflow queue (`chrome.storage.local.telemetry_queue`, hard cap
+  500, oldest-drop with counter) + exponential-backoff retry loop
+  (2 s → 60 s, ±20 % jitter, 5 s idle interval) + Bearer-JWT attach
+  + 401-pause-until-refresh + 15-code `normalizeErrorCode` mapper.
+- **Queue integration:** `modules/queue.js` calls
+  `telemetry.emit(<event>, <payload>)` at every state transition.
+  Emits are fire-and-forget — the queue never awaits the flush.
+  10 event types per the extension spec: `export_started`,
+  `item_resolved`, `item_licensed`, `item_downloaded`, `item_failed`,
+  `rate_limit_hit`, `session_expired`, `queue_paused`, `queue_resumed`,
+  `export_completed`.
+- **Payload conventions:**
+  - `export_started` meta: `{total_items, total_bytes_est,
+    source_breakdown: {envato, pexels, freepik}}`.
+  - `export_completed` meta: `{ok_count, fail_count, wall_seconds,
+    total_bytes, reason: 'complete'|'cancelled'|'hard_stop:<code>'}`
+    — REQUIRED. Backend derives final export status from these.
+  - `item_failed`: `error_code` REQUIRED, mapped via
+    `normalizeErrorCode` to the 15-code enum; raw string preserved
+    in `meta.raw_error` for admin triage of unknown branches.
+- **Auth integration:** `modules/auth.js` gains `attachBearer(headers)`
+  (read JWT, attach `Authorization`) and an
+  `onSessionRefreshed(cb)` / `emitSessionRefreshed()` hub.
+  `refreshSessionViaPort`'s success path fires the emit so telemetry
+  unparks its flush.
+- **Invariants:** MV3 SW termination means persist-before-flush;
+  paused-for-auth is load-bearing; the 10-event enum MUST match
+  `server/services/exports.js` ALLOWED_EVENTS; `export_completed`
+  fires exactly once per run (on `finalize`, `cancelRun`, or
+  `hardStopQueue`). Full list in
+  `docs/superpowers/plans/2026-04-24-extension-ext6-telemetry.md`.
+
+### Manual verification
+
+The test harness's fieldset 11 (Ext.6) has three buttons: "Fire
+synthetic short run" (3 items; exercises emit surface), "Query buffer
+stats", and "Force flush". The DevTools Network tab's "Offline"
+checkbox is the canonical way to test offline queueing — flip on,
+fire a run, flip off, observe queue drain via Force flush or the
+5 s loop tick.
+
+Acceptance gate: complete a real 3-item run, query `export_events`
+table for the chronology; disconnect network, complete a run offline,
+reconnect, confirm queued events flush. Full step-by-step in the plan
+file's Task 9.
+
+### Known Ext.6 limitations (belong to later phases)
+
+- Opt-out switch (user-facing "Send diagnostic events" toggle) →
+  Ext.8. The emit function does NOT consult an opt-out flag today.
+- Diagnostic bundle generator (`modules/diagnostics.js`) → Ext.8.
+- Per-error retry / deny-list / Freepik TTL refetch → Ext.7. Today
+  the retry loop is uniform exponential backoff on any non-2xx-
+  non-401.
+- `/api/ext-config` consumption / kill switch → Ext.9.
+- CI packaging / Web Store work → Ext.10 / Ext.11 / Ext.12.
+
+### Manifest changes (0.5.0 → 0.6.0)
+
+- `permissions`: unchanged.
+- `host_permissions`: unchanged — `/api/export-events` is same-origin
+  to `BACKEND_URL`, which is already reachable for `/api/pexels-url` +
+  `/api/freepik-url` from Ext.3.
+- `version`: 0.5.0 → 0.6.0.

@@ -40,6 +40,20 @@ export async function getJwt() {
   return jwt || null
 }
 
+// Ext.6: helper used by modules/telemetry.js (and any future module)
+// that needs to POST to a Bearer-authenticated backend endpoint.
+// Reads the current JWT from storage and sets the Authorization
+// header. Idempotent: returns the same headers object it received.
+// Throws nothing — if no JWT, the header is simply not set and the
+// caller is responsible for treating absence as "paused for auth".
+export async function attachBearer(headers) {
+  const jwt = await getJwt()
+  if (jwt && jwt.token && jwt.expires_at > Date.now()) {
+    headers['Authorization'] = 'Bearer ' + jwt.token
+  }
+  return headers
+}
+
 export async function setJwt(jwt) {
   if (!jwt || typeof jwt !== 'object' || Array.isArray(jwt)) throw new Error('setJwt: jwt must be an object')
   const { token, kid, user_id, expires_at } = jwt
@@ -154,5 +168,35 @@ export async function refreshSessionViaPort() {
   } catch (err) {
     throw new Error('port_post_failed: ' + String(err?.message || err))
   }
-  return waitPromise
+  const result = await waitPromise
+  // Ext.6: tell subscribers (telemetry, future Ext.9) the JWT has
+  // been refreshed so they can unpark their flush loops.
+  try { emitSessionRefreshed() } catch (err) { console.warn('[auth] emitSessionRefreshed threw', err) }
+  return result
+}
+
+// Ext.6: session-refresh notification hub.
+//
+// modules/telemetry.js subscribes on load; modules/queue.js's
+// Ext.5-era refreshSessionViaPort success path emits. Single-
+// subscriber in practice, but the registry is multi-subscriber-safe
+// so future modules (e.g. an Ext.9 /api/ext-config re-fetcher) can
+// reuse without refactor.
+const sessionRefreshedSubscribers = []
+
+export function onSessionRefreshed(cb) {
+  if (typeof cb !== 'function') throw new Error('onSessionRefreshed: cb must be a function')
+  sessionRefreshedSubscribers.push(cb)
+  // Return an unsubscribe for symmetry with onEnvatoSessionChange —
+  // not currently used, but cheap.
+  return () => {
+    const idx = sessionRefreshedSubscribers.indexOf(cb)
+    if (idx >= 0) sessionRefreshedSubscribers.splice(idx, 1)
+  }
+}
+
+export function emitSessionRefreshed() {
+  for (const cb of sessionRefreshedSubscribers) {
+    try { cb() } catch (err) { console.warn('[auth] session-refreshed subscriber threw', err) }
+  }
 }
