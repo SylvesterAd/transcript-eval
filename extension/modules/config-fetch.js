@@ -134,3 +134,101 @@ export function refreshConfigOnStartup() {
 
 // Exported for tests + the awaiting-logic in enforceConfigBeforeExport.
 export function _getInFlightRefresh() { return _inFlightRefresh }
+
+// Gate a {type:"export"} message. Returns:
+//   { ok: true, effective_config, reason? }
+//   { ok: false, error_code, detail?, current?, min? }
+//
+// Ordering:
+//   1. Await any in-flight startup refresh, up to CONFIG_CHECK_AWAIT_TIMEOUT_MS.
+//   2. Read cached config (fresh or stale).
+//   3. If no cache AND no successful refresh: fall open (safe-by-default).
+//   4. Run five gates in order: export_enabled → version → per-source.
+//
+// manifest is the user's export manifest; inspected only for which
+// sources appear (so per-source kills only fire when that source is
+// actually in the run).
+export async function enforceConfigBeforeExport(manifest) {
+  // --- Step 1: await in-flight refresh (bounded) ---
+  const inflight = _inFlightRefresh
+  if (inflight) {
+    await Promise.race([
+      inflight.catch(() => undefined),
+      new Promise(resolve => setTimeout(resolve, CONFIG_CHECK_AWAIT_TIMEOUT_MS)),
+    ])
+  }
+
+  // --- Step 2: read cache ---
+  let effective_config
+  let reason = 'cache_fresh'
+  const cached = await getCachedConfig()
+  if (cached && cached.fresh) {
+    effective_config = cached.config
+  } else if (cached && !cached.fresh) {
+    // Stale cache + (no successful refresh landed). Try ONE direct fetch
+    // — cheap and often succeeds if only the startup race timed out.
+    try {
+      const fresh = await fetchConfig()
+      effective_config = fresh.config
+      reason = 'cache_refreshed_on_demand'
+    } catch (err) {
+      effective_config = cached.config
+      reason = 'cache_stale_fetch_failed'
+      console.warn('[config-fetch] using stale cache; on-demand fetch failed:', err?.message || err)
+    }
+  } else {
+    // --- Step 3: no cache at all ---
+    try {
+      const fresh = await fetchConfig()
+      effective_config = fresh.config
+      reason = 'cache_miss_fetched_on_demand'
+    } catch (err) {
+      effective_config = CONFIG_FALL_OPEN_DEFAULTS
+      reason = 'fall_open_no_cache_no_network'
+      console.warn('[config-fetch] FALL-OPEN: no cache + fetch failed:', err?.message || err)
+    }
+  }
+
+  // --- Step 4: gates ---
+  if (effective_config.export_enabled === false) {
+    return { ok: false, error_code: CONFIG_ERROR_CODES.EXPORT_DISABLED, detail: 'Export temporarily disabled' }
+  }
+  const minVersion = effective_config.min_ext_version || CONFIG_FALL_OPEN_DEFAULTS.min_ext_version
+  try {
+    if (compareSemver(EXT_VERSION, minVersion) < 0) {
+      return {
+        ok: false,
+        error_code: CONFIG_ERROR_CODES.VERSION_BELOW_MIN,
+        detail: `Extension v${EXT_VERSION} below required v${minVersion}`,
+        current: EXT_VERSION,
+        min: minVersion,
+      }
+    }
+  } catch (err) {
+    // Malformed min_ext_version from server — log and pass (fall-open spirit).
+    console.warn('[config-fetch] compareSemver failed, passing gate:', err?.message || err)
+  }
+  const sourcesInManifest = collectSources(manifest)
+  if (sourcesInManifest.has('envato') && effective_config.envato_enabled === false) {
+    return { ok: false, error_code: CONFIG_ERROR_CODES.ENVATO_DISABLED, detail: 'Envato downloads paused by transcript-eval' }
+  }
+  if (sourcesInManifest.has('pexels') && effective_config.pexels_enabled === false) {
+    return { ok: false, error_code: CONFIG_ERROR_CODES.PEXELS_DISABLED, detail: 'Pexels downloads paused by transcript-eval' }
+  }
+  if (sourcesInManifest.has('freepik') && effective_config.freepik_enabled === false) {
+    return { ok: false, error_code: CONFIG_ERROR_CODES.FREEPIK_DISABLED, detail: 'Freepik downloads paused by transcript-eval' }
+  }
+  return { ok: true, effective_config, reason }
+}
+
+// Extract the set of unique sources referenced by a manifest. Tolerant
+// of malformed manifests (returns an empty set) so a bad input doesn't
+// hide a real gate failure. Manifest shape per spec: {items: [{source}]}.
+function collectSources(manifest) {
+  const out = new Set()
+  if (!manifest || !Array.isArray(manifest.items)) return out
+  for (const item of manifest.items) {
+    if (item && typeof item.source === 'string') out.add(item.source)
+  }
+  return out
+}
