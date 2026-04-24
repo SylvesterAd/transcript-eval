@@ -34,6 +34,41 @@ const storage = multer.diskStorage({
 })
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 * 1024 } }) // 50GB limit
 
+// Default rough-cut config written on group creation. The upload-config flow
+// no longer surfaces the RoughCutConfigModal, so downstream pipeline stages
+// (which still read rough_cut_config_json) need sensible defaults out of the
+// box. Keys mirror the legacy modal: `cut` toggles what's stripped from the
+// timeline, `identify` toggles what's flagged for review.
+const DEFAULT_ROUGH_CUT_CONFIG = {
+  cut: { silences: true, false_starts: false, filler_words: true, meta_commentary: false },
+  identify: { repetition: true, lengthy: false, technical_unclear: false, irrelevance: false },
+}
+
+// Exported for unit testing. Validates the PUT /groups/:id payload shape.
+// Returns { error: string | null } — a non-null error short-circuits the
+// handler with 400. Unknown fields are silently ignored so callers can
+// piecemeal patch a subset of columns.
+export function validateGroupUpdate(body) {
+  const VALID_LIBS = ['envato', 'artlist', 'storyblocks']
+  const VALID_PATHS = ['hands-off', 'strategy-only', 'guided']
+
+  if (body.libraries !== undefined) {
+    if (!Array.isArray(body.libraries) || body.libraries.some(l => !VALID_LIBS.includes(l))) {
+      return { error: 'libraries must be an array of: ' + VALID_LIBS.join(', ') }
+    }
+  }
+  if (body.freepik_opt_in !== undefined && typeof body.freepik_opt_in !== 'boolean') {
+    return { error: 'freepik_opt_in must be boolean' }
+  }
+  if (body.audience !== undefined && (typeof body.audience !== 'object' || body.audience === null)) {
+    return { error: 'audience must be an object' }
+  }
+  if (body.path_id !== undefined && !VALID_PATHS.includes(body.path_id)) {
+    return { error: 'path_id must be one of: ' + VALID_PATHS.join(', ') }
+  }
+  return { error: null }
+}
+
 // Multer error handler wrapper
 function handleUpload(fieldConfig) {
   return (req, res, next) => {
@@ -491,6 +526,10 @@ router.get('/groups/:id/detail', requireAuth, async (req, res) => {
     assembly_details: group.assembly_details_json ? JSON.parse(group.assembly_details_json) : null,
     timeline: group.timeline_json ? JSON.parse(group.timeline_json) : null,
     rough_cut_config: group.rough_cut_config_json ? JSON.parse(group.rough_cut_config_json) : null,
+    libraries: group.libraries_json ? JSON.parse(group.libraries_json) : [],
+    freepik_opt_in: group.freepik_opt_in === null || group.freepik_opt_in === undefined ? true : !!group.freepik_opt_in,
+    audience: group.audience_json ? JSON.parse(group.audience_json) : null,
+    path_id: group.path_id || null,
     editor_state: group.editor_state_json ? JSON.parse(group.editor_state_json) : null,
     annotations: group.annotations_json ? JSON.parse(group.annotations_json) : null,
   })
@@ -2236,18 +2275,59 @@ router.post('/import-url', requireAuth, async (req, res) => {
 router.post('/groups', requireAuth, async (req, res) => {
   const { name } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
-  const result = await db.prepare('INSERT INTO video_groups (name, user_id) VALUES (?, ?)').run(name, req.auth.userId)
+  // Write DEFAULT_ROUGH_CUT_CONFIG up front — downstream pipeline stages still
+  // read rough_cut_config_json, and the new upload-config flow does not set
+  // it explicitly (the RoughCutConfigModal is gone).
+  const result = await db.prepare(
+    'INSERT INTO video_groups (name, user_id, rough_cut_config_json) VALUES (?, ?, ?)'
+  ).run(name, req.auth.userId, JSON.stringify(DEFAULT_ROUGH_CUT_CONFIG))
   const group = await db.prepare('SELECT * FROM video_groups WHERE id = ?').get(result.lastInsertRowid)
   res.status(201).json(group)
 })
 
-// Update video group
+// Update video group. Accepts a piecemeal patch — each field is optional and
+// only present fields are written. See validateGroupUpdate for the rules.
 router.put('/groups/:id', requireAuth, async (req, res) => {
-  const { rough_cut_config_json } = req.body
-  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  const validation = validateGroupUpdate(req.body)
+  if (validation.error) return res.status(400).json({ error: validation.error })
+
+  const { rough_cut_config_json, libraries, freepik_opt_in, audience, path_id } = req.body
+
+  const group = await db.prepare(
+    `SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
+  ).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
-  await db.prepare('UPDATE video_groups SET rough_cut_config_json = ? WHERE id = ?')
-    .run(JSON.stringify(rough_cut_config_json), req.params.id)
+
+  const updates = []
+  const values = []
+
+  if (rough_cut_config_json !== undefined) {
+    updates.push('rough_cut_config_json = ?')
+    values.push(JSON.stringify(rough_cut_config_json))
+  }
+  if (libraries !== undefined) {
+    updates.push('libraries_json = ?')
+    values.push(JSON.stringify(libraries))
+  }
+  if (freepik_opt_in !== undefined) {
+    updates.push('freepik_opt_in = ?')
+    values.push(freepik_opt_in)
+  }
+  if (audience !== undefined) {
+    updates.push('audience_json = ?')
+    values.push(JSON.stringify(audience))
+  }
+  if (path_id !== undefined) {
+    updates.push('path_id = ?')
+    values.push(path_id)
+  }
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'No valid fields to update' })
+  }
+
+  values.push(req.params.id)
+  await db.prepare(`UPDATE video_groups SET ${updates.join(', ')} WHERE id = ?`).run(...values)
   const updated = await db.prepare('SELECT * FROM video_groups WHERE id = ?').get(req.params.id)
   res.json(updated)
 })
