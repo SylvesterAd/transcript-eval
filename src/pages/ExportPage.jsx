@@ -7,6 +7,10 @@ import { apiPost, apiGet } from '../hooks/useApi.js'
 import StateA_Install from '../components/export/StateA_Install.jsx'
 import StateB_Session from '../components/export/StateB_Session.jsx'
 import StateC_Summary from '../components/export/StateC_Summary.jsx'
+import StateD_InProgress from '../components/export/StateD_InProgress.jsx'
+import StateE_Complete_Placeholder from '../components/export/StateE_Complete_Placeholder.jsx'
+import StateF_Partial_Placeholder from '../components/export/StateF_Partial_Placeholder.jsx'
+import { useExportPort } from '../hooks/useExportPort.js'
 
 // FSM:
 //   init     → first render, deciding which state to enter
@@ -15,15 +19,20 @@ import StateC_Summary from '../components/export/StateC_Summary.jsx'
 //              (Phase A: Ext.1 always reports 'missing'; manual override
 //               unblocks; this lives until Ext.4)
 //   state_c  → all preconditions met, summary + Start Export
-//   starting → user clicked Start Export; extension acked; placeholder
-//              for State D (in-progress) which lands in next plan
+//   state_d  → extension acked; live progress UI driven by useExportPort
+//   state_e  → terminal success (fail_count === 0); placeholder UI
+//   state_f  → terminal partial (fail_count > 0); placeholder UI
 
 function reducer(state, action) {
   switch (action.type) {
     case 'goto':                  return { ...state, phase: action.phase }
     case 'set_extra_variants':    return { ...state, additionalVariants: action.variants }
     case 'override_session':      return { ...state, sessionOverridden: true }
-    case 'export_started':        return { ...state, phase: 'starting', export_id: action.export_id }
+    case 'export_started':        return { ...state, phase: 'state_d', export_id: action.export_id, run_id: action.run_id || null }
+    case 'export_completed': {
+      const fail = action.payload?.fail_count ?? 0
+      return { ...state, phase: fail > 0 ? 'state_f' : 'state_e', complete_payload: action.payload }
+    }
     case 'set_error':             return { ...state, error: action.error }
     default:                      return state
   }
@@ -34,6 +43,8 @@ const initialState = {
   additionalVariants: [],
   sessionOverridden: false,
   export_id: null,
+  run_id: null,
+  complete_payload: null,
   error: null,
 }
 
@@ -56,18 +67,6 @@ const ErrorBox = styled.div`
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
 `
-const Starting = styled.div`
-  max-width: 640px;
-  margin: 80px auto;
-  padding: 24px 32px;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  & h1 { font-size: 18px; margin: 0 0 8px; }
-  & p { color: #6b7280; font-size: 14px; line-height: 1.5; }
-  & code { background: #f3f4f6; padding: 1px 6px; border-radius: 3px; font-size: 12px; }
-`
-
 export default function ExportPage() {
   const { id: pipelineId } = useParams()
   const [searchParams] = useSearchParams()
@@ -97,7 +96,8 @@ export default function ExportPage() {
     else if (envatoCount > 0 && !sessionOk && !state.sessionOverridden) next = 'state_b'
     else next = 'state_c'
 
-    if (next !== state.phase && state.phase !== 'starting') {
+    const activePhases = ['state_d', 'state_e', 'state_f']
+    if (next !== state.phase && !activePhases.includes(state.phase)) {
       dispatch({ type: 'goto', phase: next })
     }
   }, [preflight.ping, preflight.manifest, state.sessionOverridden, state.phase])
@@ -174,17 +174,23 @@ export default function ExportPage() {
       expires_at: tokenRow.expires_at,
     })
 
-    // 4. Send the export to the extension. Phase A is one-shot;
-    //    Ext.5 will replace this with a long-lived Port that pushes
-    //    progress back, which State D consumes (next plan).
-    await ext.sendExport({
+    // 4. Send the export to the extension. Ext.5 returns
+    //    { ok:true, run_id: '...' } on successful accept. If not
+    //    provided (older extension builds), we still transition to
+    //    State D — useExportPort will get the runId from the first
+    //    snapshot.
+    const maybeResponse = await ext.sendExport({
       export_id: exportId,
       manifest: unifiedManifest.items,
       target_folder: targetFolder,
       options: { ...options, variants: variantLabels },
     })
 
-    dispatch({ type: 'export_started', export_id: exportId })
+    dispatch({
+      type: 'export_started',
+      export_id: exportId,
+      run_id: maybeResponse?.run_id || null,
+    })
   }, [pipelineId, variant, ext])
 
   // Fail-fast on missing pipelineId.
@@ -241,17 +247,55 @@ export default function ExportPage() {
     )
   }
 
-  // Starting — placeholder. Real State D lands once Ext.5's Port
-  // is live and the next webapp plan is executed.
-  if (state.phase === 'starting') {
+  // States D / E / F — live-progress + terminal placeholders.
+  if (state.phase === 'state_d' || state.phase === 'state_e' || state.phase === 'state_f') {
     return (
-      <Starting>
-        <h1>Export started</h1>
-        <p>The Export Helper is downloading your clips. Live progress will appear here once the extension's queue is fully wired (next phase).</p>
-        <p>Export ID: <code>{state.export_id}</code></p>
-      </Starting>
+      <ActiveRun
+        variant={variant}
+        exportId={state.export_id}
+        expectedRunId={state.run_id}
+        phase={state.phase}
+        completePayload={state.complete_payload}
+        onComplete={(payload) => dispatch({ type: 'export_completed', payload })}
+      />
     )
   }
 
   return <ErrorBox>Unknown phase: {state.phase}</ErrorBox>
+}
+
+// ActiveRun wraps the State D / E / F rendering so that useExportPort
+// is mounted only while we're actually in those phases. Pulling this
+// out as a child component keeps ExportPage.jsx's FSM clean — the Port
+// lifecycle lives only for the duration of the active run.
+function ActiveRun({ variant, exportId, expectedRunId, phase, completePayload, onComplete }) {
+  const port = useExportPort({ exportId, expectedRunId })
+
+  // When the Port reports completion, notify parent to transition FSM.
+  useEffect(() => {
+    if (port.complete && phase === 'state_d') {
+      onComplete(port.complete)
+    }
+  }, [port.complete, phase, onComplete])
+
+  if (phase === 'state_e') {
+    return <StateE_Complete_Placeholder complete={completePayload} />
+  }
+  if (phase === 'state_f') {
+    return <StateF_Partial_Placeholder complete={completePayload} snapshot={port.snapshot} />
+  }
+  // state_d
+  return (
+    <StateD_InProgress
+      variant={variant}
+      snapshot={port.snapshot}
+      portStatus={port.portStatus}
+      portError={port.portError}
+      pendingAction={port.pendingAction}
+      reconnect={port.reconnect}
+      sendControl={port.sendControl}
+      mismatched={port.mismatched}
+      mismatchInfo={port.mismatchInfo}
+    />
+  )
 }
