@@ -1,14 +1,17 @@
 {
   "manifest_version": 3,
   "name": "transcript-eval Export Helper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Export your transcript-eval projects to Premiere with b-rolls from your own subscription accounts.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "tabs", "webNavigation", "downloads"],
   "host_permissions": [
     "https://elements.envato.com/*",
     "https://app.envato.com/*",
-    "https://video-downloads.elements.envatousercontent.com/*"
+    "https://video-downloads.elements.envatousercontent.com/*",
+    "https://videos.pexels.com/*",
+    "https://images.pexels.com/*",
+    "https://*.freepik.com/*"
   ],
   "externally_connectable": {
     "matches": [
