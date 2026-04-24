@@ -56,6 +56,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(TEMP_DIR, { recursive: true })
 
+// Map a video_groups.path_id to the pipeline stop flags it implies.
+//   hands-off     → full auto, no mid-run checkpoints, auto-select variants
+//   strategy-only → pause after strategy (analysis) phase
+//   guided        → pause after strategy AND after plan phases
+// null / unknown  → default to strategy-only (safer than hands-off)
+export function pathToFlags(pathId) {
+  switch (pathId) {
+    case 'hands-off':
+      return { stopAfterStrategy: false, stopAfterPlan: false, autoSelectVariants: true }
+    case 'strategy-only':
+      return { stopAfterStrategy: true,  stopAfterPlan: false, autoSelectVariants: false }
+    case 'guided':
+      return { stopAfterStrategy: true,  stopAfterPlan: true,  autoSelectVariants: false }
+    default:
+      // legacy / unset: behave as strategy-only for safety
+      return { stopAfterStrategy: true, stopAfterPlan: false, autoSelectVariants: false }
+  }
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: TEMP_DIR,
@@ -476,14 +495,22 @@ router.post('/strategies/:id/analyze', requireAuth, async (req, res) => {
 // Pipeline execution (multi-stage sequential)
 router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, res) => {
   try {
-    const { video_id, group_id, transcript_source, reference_run_id, stop_after_plan, example_video_id } = req.body || {}
+    // NOTE: `stop_after_plan` is intentionally no longer honored here — the
+    // authoritative source of checkpoint behavior is the group's stored
+    // `path_id` (A/B/C automation paths, wave-1 schema). Clients still in
+    // flight that pass `stop_after_plan` are ignored without error; the
+    // path_id lookup below fully supersedes it.
+    const { video_id, group_id, transcript_source, reference_run_id, example_video_id } = req.body || {}
     if (!video_id) return res.status(400).json({ error: 'video_id required' })
 
-    // Load editor cuts from group if available (needed for plan strategies)
+    const dbMod = (await import('../db.js')).default
+
+    // Load editor cuts + path_id from group in one lookup
     let editorCuts = null
+    let pathId = null
     if (group_id) {
-      const group = await (await import('../db.js')).default
-        .prepare('SELECT editor_state_json FROM video_groups WHERE id = ?')
+      const group = await dbMod
+        .prepare('SELECT editor_state_json, path_id FROM video_groups WHERE id = ?')
         .get(group_id)
       if (group?.editor_state_json) {
         try {
@@ -493,7 +520,9 @@ router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, 
           }
         } catch {}
       }
+      pathId = group?.path_id || null
     }
+    const { stopAfterStrategy, stopAfterPlan } = pathToFlags(pathId)
 
     const result = await executePipeline(
       req.params.id,
@@ -504,7 +533,7 @@ router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, 
       editorCuts,
       reference_run_id || null,
       null,
-      { stopAfterPlan: !!stop_after_plan, exampleVideoId: example_video_id || null },
+      { stopAfterPlan, stopAfterStrategy, exampleVideoId: example_video_id || null },
     )
     res.json(result)
   } catch (err) {

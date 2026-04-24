@@ -7,7 +7,7 @@ import BRollPreview from './BRollPreview.jsx'
 import BRollDetailPanel from './BRollDetailPanel.jsx'
 import Timeline from './Timeline.jsx'
 import PlaybackControls from './PlaybackControls.jsx'
-import { apiPost } from '../../hooks/useApi.js'
+import { apiPost, useApi } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
 
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
@@ -15,20 +15,30 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   const navigate = useNavigate()
   const [activeVariantIdx, setActiveVariantIdx] = useState(0)
 
-  // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs
+  // Fetch the group's path_id so we can auto-skip the variant picker on hands-off.
+  const { data: groupDetail } = useApi(groupId ? `/videos/groups/${groupId}/detail` : null)
+  const pathId = groupDetail?.path_id || null
+
+  // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs.
+  // For the hands-off path we hide the picker by collapsing to the first variant — the
+  // user opted out of manual variant selection, so we just auto-use variant 0.
   const variants = useMemo(() => {
+    let all
     if (planVariantsProp?.length) {
-      return planVariantsProp.map(v => ({
+      all = planVariantsProp.map(v => ({
         id: v.pipelineId,
         label: v.label || `Variant ${String.fromCharCode(65 + planVariantsProp.indexOf(v))}`,
       }))
+    } else if (!allPlanPipelineIds?.length) {
+      all = [{ id: planPipelineId, label: 'B-Roll' }]
+    } else {
+      all = allPlanPipelineIds.map((pid, i) => ({
+        id: pid,
+        label: `Variant ${String.fromCharCode(65 + i)}`,
+      }))
     }
-    if (!allPlanPipelineIds?.length) return [{ id: planPipelineId, label: 'B-Roll' }]
-    return allPlanPipelineIds.map((pid, i) => ({
-      id: pid,
-      label: `Variant ${String.fromCharCode(65 + i)}`,
-    }))
-  }, [allPlanPipelineIds, planPipelineId, planVariantsProp])
+    return pathId === 'hands-off' ? all.slice(0, 1) : all
+  }, [allPlanPipelineIds, planPipelineId, planVariantsProp, pathId])
 
   const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
   const brollState = useBRollEditorState(activePipelineId)
