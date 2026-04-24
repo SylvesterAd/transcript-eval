@@ -61,7 +61,7 @@ State D is the live-progress UI, built on a long-lived `chrome.runtime.Port`.
 |---|---|---|---|
 | **D** | user clicked Start → extension has an active run | `StateD_InProgress.jsx` | spec § State D mockup |
 | **E** | extension reports `{type:"complete"}` with `fail_count === 0` | `StateE_Complete_Placeholder.jsx` | placeholder; real UI in next plan |
-| **F** | extension reports `{type:"complete"}` with `fail_count > 0` | `StateF_Partial_Placeholder.jsx` | placeholder; real UI in next plan |
+| **F** | extension reports `{type:"complete"}` with `fail_count > 0` | `StateF_Partial.jsx` | partial-failure UI (per-failure list, retry, XML-anyway, report stub) |
 
 ### Wiring (Phase B)
 
@@ -108,6 +108,12 @@ If the extension's first snapshot carries a `runId` different from the page's ex
 
 Ext.5 throttles `{type:"progress"}` messages at ~500 ms per item (its own contract). React can render 100 updates/sec fine — the hot path is selector derivation, so `useMemo` wraps every selector call against the snapshot reference. No virtualization (`react-window` / `react-virtuoso`) — 300-item hard cap + CSS `max-height + overflow:auto` is enough.
 
-### State E/F are placeholders
+### State E/F
 
-Both components render raw dumps of the completion fields with a visible blue dashed banner. The real UI (open-folder button, XML download links, "How to import in Premiere" tutorial, per-failure diagnostics, retry) ships in the next webapp plan (Phase C / State E+F).
+- **State E** (`StateE_Complete.jsx`) — Week 4 WebApp.1 State E plan. Auto-runs `useExportXmlKickoff` on mount, downloads per-variant XML blobs, shows the folder path and a short Premiere import tutorial.
+- **State F** (`StateF_Partial.jsx`) — this plan (WebApp.1 State F). Renders the partial-failure UI:
+  - Amber "Export partial" header + summary (`N / M clips downloaded · K failed`).
+  - Per-failure list: filename + source chip + human-readable reason from `src/lib/errorCodeLabels.js` (maps the 15-code `error_code` enum from `extension/modules/telemetry.js` to user-facing strings).
+  - **"Retry failed items"** — rebuilds a filtered `unified_manifest` from the preserved `state.unified_manifest.items` (ExportPage reducer), calls the existing `onStart` ceremony (`createExport` → `sendSession` → `sendExport`), FSM transitions back to `state_d`. The extension's `finalize()` already releases the lock via `clearActiveRunId()` (queue.js:584), so a second `{type:"export"}` passes the `run_already_active` check.
+  - **"Generate XML anyway"** — mounts a child `XmlKickoffPanel` that calls `useExportXmlKickoff({autoKick:false, ...}).regenerate()` once on mount. The Week 4 hook already handles partial placements gracefully; missing clips appear offline (red) in Premiere per the design spec.
+  - **"Report issue"** — disabled stub with a "Coming in Ext.8" tooltip. Ext.8 will auto-attach the diagnostic bundle.
