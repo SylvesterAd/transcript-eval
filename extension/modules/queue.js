@@ -506,9 +506,125 @@ async function releaseKeepAwake() {
   acquiredKeepAwake = false
 }
 
-// ------------------- Auto-resume stub (real impl in Task 9) -------------------
+// ------------------- Auto-resume -------------------
+//
+// Called at module-init (every SW wake) and from chrome.runtime.
+// onStartup + onInstalled. Reads active_run_id, loads the persisted
+// RunState, rehydrates in-memory state, reconciles any in-flight
+// chrome.downloads via chrome.downloads.search, and either resumes
+// the scheduler (if the run was running before SW death) or holds
+// (if the run was paused — auto-resume NEVER auto-unpauses).
 
 export async function autoResumeIfActiveRun() {
-  // Task 9 fills this in.
-  return { resumed: false }
+  if (state) return { resumed: false, reason: 'already_in_memory' }
+  const activeId = await getActiveRunId()
+  if (!activeId) return { resumed: false, reason: 'no_active_run' }
+  const persisted = await loadRunState(activeId)
+  if (!persisted) {
+    // Lock is orphaned — clear it.
+    await clearActiveRunId()
+    return { resumed: false, reason: 'orphaned_lock' }
+  }
+  // Rehydrate in-memory state.
+  state = {
+    ...persisted,
+    download_id_to_seq: persisted.download_id_to_seq || {},
+    items: persisted.items.map(i => ({
+      ...i,
+      claimed: false,       // re-claimable
+      __settle: null,
+    })),
+  }
+  // Any item whose persisted phase is 'downloading' but whose
+  // chrome.downloads.search returns nothing got lost during SW death —
+  // roll it back to 'queued' (or 'licensing' for envato items that
+  // had already been resolved/licensed) so it re-fetches JIT.
+  await reconcileInFlightDownloads()
+  // Respect paused state — don't auto-unpause.
+  if (state.run_state === 'running') {
+    await acquireKeepAwake()
+    broadcast({ type: 'state', export: snapshot() })
+    schedule()
+  } else {
+    broadcast({ type: 'state', export: snapshot() })
+  }
+  return { resumed: true, runId: activeId, run_state: state.run_state }
+}
+
+async function reconcileInFlightDownloads() {
+  if (!state) return
+  for (const item of state.items) {
+    if (item.phase !== 'downloading' || item.download_id == null) continue
+    // Check if the download still exists and its state.
+    let results = []
+    try {
+      results = await chrome.downloads.search({ id: item.download_id })
+    } catch {
+      results = []
+    }
+    const d = results[0]
+    if (!d) {
+      // Lost — roll back.
+      item.download_id = null
+      item.signed_url = null // force JIT refetch
+      if (item.source === 'envato' && item.resolved_uuid) {
+        item.phase = 'licensing' // resolved UUID is still valid
+      } else {
+        item.phase = 'queued'
+      }
+      continue
+    }
+    if (d.state === 'complete') {
+      item.phase = 'done'
+      item.bytes_received = d.bytesReceived
+      state.stats.ok_count++
+      state.stats.total_bytes_downloaded += d.bytesReceived
+      continue
+    }
+    if (d.state === 'interrupted') {
+      // Treat like a fresh interrupt — NETWORK_* gets a resume,
+      // FILE_* hard-stops. Surface via handleDownloadInterrupt by
+      // synthesizing a delta.
+      await handleDownloadInterrupt(item, { error: { current: d.error || 'UNKNOWN' } })
+      continue
+    }
+    // state === 'in_progress' — the download survived SW death. The
+    // existing chrome.downloads.onChanged listener (registered at
+    // module top level) will pick up subsequent events. We re-mark
+    // the item as claimed so no new worker grabs it.
+    item.claimed = true
+    // Re-attach a per-item settle Promise inside a fresh worker run
+    // so the scheduler's bookkeeping stays correct. Simplest: spawn
+    // a downloader that immediately awaits waitForDownloadSettled.
+    spawnReattachedDownloader(item)
+  }
+  // Persist the rolled-back state before the scheduler starts pulling.
+  await persist()
+}
+
+function spawnReattachedDownloader(item) {
+  // Race fix (see plan "Known plan risks" §1): it is possible for the
+  // chrome.downloads.onChanged event that would settle this item to
+  // fire between `chrome.downloads.search` returning and this function
+  // running. Since item.__settle is attached INSIDE
+  // waitForDownloadSettled, any earlier listener call finds
+  // item.__settle undefined and drops it — leaving the worker dangling
+  // forever. Mitigation: after attaching __settle, re-check the item's
+  // phase; if it's already terminal (done/failed), resolve immediately.
+  active.downloading++
+  ;(async () => {
+    try {
+      const settle = waitForDownloadSettled(item)
+      // Race guard: if the onChanged listener already flipped us to
+      // terminal while we were setting up, resolve now.
+      if (item.phase === 'done' || item.phase === 'failed') {
+        item.__settle?.()
+      }
+      await settle
+    } finally {
+      active.downloading--
+      item.claimed = false
+      schedule()
+    }
+  })()
 }
