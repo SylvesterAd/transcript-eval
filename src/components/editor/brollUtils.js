@@ -31,8 +31,17 @@ function normalize(text) {
 export function matchPlacementsToTranscript(placements, words, editsByKey = null) {
   if (!placements?.length || !words?.length) return placements || []
 
+  // Step 0: Filter out placements hidden via local user-edits
+  const filtered = editsByKey
+    ? placements.filter(p => {
+        if (p.chapterIndex == null || p.placementIndex == null) return true // userPlacements are deleted by removal from state.userPlacements, not via edits[key].hidden
+        const e = editsByKey[`${p.chapterIndex}:${p.placementIndex}`]
+        return !e?.hidden
+      })
+    : placements
+
   // Step 1: Position each placement independently based on audio_anchor
-  const resolved = placements.map(p => {
+  const resolved = filtered.map(p => {
     // Prefer editsByKey lookup if provided; fall back to inline userTimelineStart/End
     const editKey = p.chapterIndex != null && p.placementIndex != null
       ? `${p.chapterIndex}:${p.placementIndex}`
