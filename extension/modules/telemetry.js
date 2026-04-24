@@ -25,7 +25,13 @@ import {
   TELEMETRY_BUFFER_SIZE,
   TELEMETRY_MAX_QUEUE_SIZE,
   TELEMETRY_EVENT_ENUM,
+  TELEMETRY_RETRY_BASE_MS,
+  TELEMETRY_RETRY_MAX_MS,
+  TELEMETRY_RETRY_JITTER,
+  TELEMETRY_FLUSH_INTERVAL_MS,
+  BACKEND_URL,
 } from '../config.js'
+import { attachBearer, onSessionRefreshed } from './auth.js'
 
 const STORAGE_KEY_QUEUE = 'telemetry_queue'
 const STORAGE_KEY_OVERFLOW_TOTAL = 'telemetry_overflow_total'
@@ -69,25 +75,13 @@ export function emit(event, payload) {
   })
 }
 
-export async function flushNow() {
-  // Task 3 fills this in.
-}
-
-export function pauseForAuthRefresh() {
-  // Task 3 fills this in.
-}
-
-export function resumeAfterAuthRefresh() {
-  // Task 3 fills this in.
-}
-
 export async function getBufferStats() {
   const { [STORAGE_KEY_QUEUE]: queue, [STORAGE_KEY_OVERFLOW_TOTAL]: overflow } =
     await chrome.storage.local.get([STORAGE_KEY_QUEUE, STORAGE_KEY_OVERFLOW_TOTAL])
   return {
     buffer_size: ring.length,
     queue_size: Array.isArray(queue) ? queue.length : 0,
-    paused_for_auth: false, // Task 3 wires this up
+    paused_for_auth: pausedForAuth,
     overflow_total: overflow || 0,
   }
 }
@@ -176,3 +170,156 @@ export async function _unshiftToQueue(entry) {
   queue.unshift(entry)
   await chrome.storage.local.set({ [STORAGE_KEY_QUEUE]: queue })
 }
+
+// ------------------- Flush loop -------------------
+
+// State for the flush loop. All module-scoped so SW restarts reset
+// (we rely on persistence for correctness, not flush-loop state).
+let pausedForAuth = false
+let flushInFlight = false
+let nextBackoffMs = TELEMETRY_RETRY_BASE_MS
+let flushIntervalHandle = null
+
+// Kick a background loop that tries to flush every
+// TELEMETRY_FLUSH_INTERVAL_MS. The loop is a no-op when the persisted
+// queue is empty. When there's work to do, we drain eagerly until
+// empty or until a failure pauses us.
+function ensureFlushLoopRunning() {
+  if (flushIntervalHandle != null) return
+  flushIntervalHandle = setInterval(() => {
+    flushNow().catch(err => {
+      console.warn('[telemetry] flush loop error', err)
+    })
+  }, TELEMETRY_FLUSH_INTERVAL_MS)
+}
+
+// Stop the loop — used only in tests to prevent timers leaking.
+// Unused in the real SW (the SW terminates and restarts, which
+// naturally clears the interval).
+function stopFlushLoop() {
+  if (flushIntervalHandle != null) {
+    clearInterval(flushIntervalHandle)
+    flushIntervalHandle = null
+  }
+}
+
+export async function flushNow() {
+  if (flushInFlight) return
+  if (pausedForAuth) return
+  flushInFlight = true
+  try {
+    const queue = await _readPersistedQueue()
+    if (queue.length === 0) return
+    // Drain eagerly: pop a batch, POST, repeat until empty or failure.
+    // We POST one event per request per the spec's schema (the endpoint
+    // accepts a single event; no bulk shape defined). Concurrency: 1.
+    while (queue.length > 0) {
+      if (pausedForAuth) return
+      const entry = queue[0]
+      const result = await postSingleEvent(entry)
+      if (result.ok) {
+        await _dropFromFrontOfQueue(1)
+        queue.shift()
+        nextBackoffMs = TELEMETRY_RETRY_BASE_MS
+      } else if (result.pauseForAuth) {
+        // 401 — leave the entry at the front, set the pause flag. The
+        // auth-refreshed callback resumes us.
+        pausedForAuth = true
+        console.warn('[telemetry] paused for auth refresh')
+        return
+      } else if (result.dropEvent) {
+        // 400 from the backend — the event shape is wrong. Drop it
+        // rather than loop forever on a permanent failure. This is a
+        // DEVELOPMENT bug signal, not a production one (the enum
+        // check in emit() should prevent 400s in production).
+        console.warn('[telemetry] dropping bad event after 400:', entry, result.detail)
+        await _dropFromFrontOfQueue(1)
+        queue.shift()
+      } else {
+        // Transient (5xx / network / timeout). Back off and return —
+        // the flush loop's next tick retries.
+        await sleep(jittered(nextBackoffMs))
+        nextBackoffMs = Math.min(nextBackoffMs * 2, TELEMETRY_RETRY_MAX_MS)
+        return
+      }
+    }
+  } finally {
+    flushInFlight = false
+  }
+}
+
+async function postSingleEvent(entry) {
+  const headers = { 'Content-Type': 'application/json' }
+  try {
+    await attachBearer(headers)
+  } catch (err) {
+    // No JWT — treat as "pause for auth" so the loop sleeps until
+    // auth comes back. Same code path as 401.
+    return { ok: false, pauseForAuth: true, detail: 'no_jwt' }
+  }
+  if (!headers['Authorization']) {
+    return { ok: false, pauseForAuth: true, detail: 'no_jwt' }
+  }
+  let resp
+  try {
+    resp = await fetch(BACKEND_URL + '/api/export-events', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(entry),
+    })
+  } catch (err) {
+    // Network error — transient, back off.
+    return { ok: false, transient: true, detail: String(err?.message || err) }
+  }
+  if (resp.status === 202 || resp.status === 200) return { ok: true }
+  if (resp.status === 401) return { ok: false, pauseForAuth: true, detail: 'http_401' }
+  if (resp.status >= 400 && resp.status < 500) {
+    // 400 / 404 / 403 / 429 — all but 429 indicate a bad client-side
+    // request. 429 we treat as transient. The backend does not
+    // currently 429 on this endpoint, but be defensive.
+    if (resp.status === 429) return { ok: false, transient: true, detail: 'http_429' }
+    return { ok: false, dropEvent: true, detail: 'http_' + resp.status }
+  }
+  // 5xx — transient.
+  return { ok: false, transient: true, detail: 'http_' + resp.status }
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms))
+}
+
+function jittered(ms) {
+  const j = ms * TELEMETRY_RETRY_JITTER
+  return Math.floor(ms + (Math.random() * 2 - 1) * j)
+}
+
+// ------------------- Auth-refresh integration -------------------
+
+export function pauseForAuthRefresh() {
+  pausedForAuth = true
+}
+
+export function resumeAfterAuthRefresh() {
+  pausedForAuth = false
+  // Eager drain on resume — don't wait for the next interval tick.
+  flushNow().catch(err => console.warn('[telemetry] post-refresh flush error', err))
+}
+
+// Subscribe to auth.js's session-refreshed event so the pause unwinds
+// automatically when the queue's Port-driven refresh completes.
+try {
+  onSessionRefreshed(() => resumeAfterAuthRefresh())
+} catch (err) {
+  // auth.js may not have onSessionRefreshed yet (during Task 3's
+  // transient import gap — see plan rationale). Log and continue;
+  // Task 5 lands the real onSessionRefreshed.
+  console.warn('[telemetry] onSessionRefreshed subscribe deferred:', err?.message)
+}
+
+// Bootstrap: start the flush loop on module load. The SW wakes, imports
+// this module, and the loop begins. Pending events from the previous
+// SW incarnation drain on the first tick.
+ensureFlushLoopRunning()
+// Also try an immediate drain — events queued from a just-concluded
+// cancelled run should flush within seconds of the SW waking up.
+flushNow().catch(err => console.warn('[telemetry] initial flush error', err))
