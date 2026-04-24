@@ -14,6 +14,7 @@ import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
 import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter, freepikUrlRouter } from './routes/exports.js'
 import exportXmlRouter from './routes/export-xml.js'
+import extConfigRouter from './routes/ext-config.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 import { startGpuFailurePoller } from './services/gpu-failure-poller.js'
@@ -61,6 +62,7 @@ app.use('/api/session-token', sessionTokenRouter)
 app.use('/api/export-events', exportEventsRouter)
 app.use('/api/pexels-url', pexelsUrlRouter)
 app.use('/api/freepik-url', freepikUrlRouter)
+app.use('/api/ext-config', extConfigRouter)
 
 const APP_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'dev'
 const DEPLOY_TIME = new Date().toISOString()
