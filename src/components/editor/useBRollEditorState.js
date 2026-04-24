@@ -656,9 +656,36 @@ export function useBRollEditorState(planPipelineId) {
   const pastePlacement = useCallback((targetStartSec) => {
     const entry = getClipboard()
     if (!entry) return
+
+    // Compute available gap at targetStartSec.
+    // Combine all current placements (originals + userPlacements) sorted by timelineStart.
+    const all = state.placements
+      .map(p => ({ start: p.timelineStart, end: p.timelineEnd }))
+      .filter(r => Number.isFinite(r.start) && Number.isFinite(r.end))
+      .sort((a, b) => a.start - b.start)
+
+    // If targetStartSec falls inside an existing placement, snap to that placement's end.
+    let effectiveStart = Math.max(0, targetStartSec)
+    const inside = all.find(r => effectiveStart >= r.start && effectiveStart < r.end)
+    if (inside) effectiveStart = inside.end + 0.05
+
+    // Find next placement starting after effectiveStart — that bounds the gap.
+    const next = all.find(r => r.start >= effectiveStart)
+    const rightBoundary = next ? next.start : Infinity
+    const gap = rightBoundary - effectiveStart
+    if (gap < 0.5) {
+      console.warn('[broll-paste] Not enough space at', targetStartSec.toFixed(2), '- gap is', gap.toFixed(2))
+      window.alert('Not enough space to paste here.')
+      return
+    }
+
+    const sourceDur = Math.max(0.5, entry.durationSec || 1)
+    const duration = Math.min(sourceDur, gap - 0.05)
+
     const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
-    const timelineStart = Math.max(0, targetStartSec)
-    const timelineEnd = timelineStart + Math.max(0.5, entry.durationSec || 1)
+    const timelineStart = effectiveStart
+    const timelineEnd = effectiveStart + duration
+
     const up = {
       id: uuid,
       sourcePipelineId: entry.sourcePipelineId,
@@ -678,7 +705,7 @@ export function useBRollEditorState(planPipelineId) {
       after:  { userPlacementCreate: up },
     }
     dispatch({ type: 'APPLY_ACTION', payload: action })
-  }, [])
+  }, [state.placements])
 
   const resetPlacement = useCallback((index) => {
     const placement = state.placements.find(p => p.index === index)
