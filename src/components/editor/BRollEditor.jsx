@@ -315,10 +315,26 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 onVariantActivate={handleVariantActivate}
                 inactiveVariantPlacements={inactiveVariantPlacements}
                 onCrossDrop={async (args) => {
-                  await brollState.dragCrossPlacement(args)
-                  // After successful cross-drop, refresh target's inactive cache so the
-                  // pasted clip appears immediately without waiting for variant activation.
-                  if (args.targetPipelineId !== variants[activeVariantIdx]?.id) {
+                  // Determine source duration and target's existing placements (for gap-fit).
+                  const sourcePlacement = brollState.placements.find(p => p.index === args.sourceIndex)
+                  const sourceDur = Math.max(0.5, sourcePlacement?.timelineDuration || 1)
+                  const targetIsActive = args.targetPipelineId === variants[activeVariantIdx]?.id
+                  const targetPlacements = targetIsActive
+                    ? brollState.placements
+                    : (inactiveVariantPlacements?.[args.targetPipelineId] || [])
+
+                  const adjusted = computeFitDropPosition(targetPlacements, args.targetStartSec, sourceDur)
+                  if (!adjusted) {
+                    window.alert('Not enough space at this drop position.')
+                    return
+                  }
+
+                  await brollState.dragCrossPlacement({
+                    ...args,
+                    targetStartSec: adjusted.start,
+                    targetDurationSec: adjusted.duration,
+                  })
+                  if (!targetIsActive) {
                     try {
                       const data = await authFetchBRollData(args.targetPipelineId)
                       setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: data.placements || [] }))
@@ -440,6 +456,49 @@ function SearchStatusBar({ placements, searchProgress, allPlanPipelineIds, onRef
     )
   }
 
+  return null
+}
+
+// Find a drop position that fits the source clip without becoming too tiny to grab.
+// If the gap to the right is < 0.5s, try shifting LEFT so the clip ends just before
+// the next clip AND is at least 0.5s wide. Returns null if no fit is possible.
+function computeFitDropPosition(placements, requestedStart, sourceDur) {
+  const MIN_DUR = 0.5
+  const sorted = [...placements]
+    .filter(p => Number.isFinite(p.timelineStart) && Number.isFinite(p.timelineEnd))
+    .sort((a, b) => a.timelineStart - b.timelineStart)
+
+  // If requestedStart falls INSIDE an existing placement, snap to its end + 0.05.
+  let start = Math.max(0, requestedStart)
+  const inside = sorted.find(r => start >= r.timelineStart && start < r.timelineEnd)
+  if (inside) start = inside.timelineEnd + 0.05
+
+  // Find left and right neighbors relative to `start`.
+  const next = sorted.find(r => r.timelineStart >= start)
+  const prevs = sorted.filter(r => r.timelineEnd <= start)
+  const prevEnd = prevs.length ? prevs[prevs.length - 1].timelineEnd : 0
+  const rightBoundary = next ? next.timelineStart : Infinity
+
+  const gapRight = rightBoundary - start
+  if (gapRight >= MIN_DUR) {
+    return { start, duration: Math.min(sourceDur, gapRight - 0.05) }
+  }
+
+  // Gap to right is too small — try shifting LEFT so the clip ends just before `next`
+  // and has at least MIN_DUR.
+  if (next) {
+    const desiredEnd = next.timelineStart - 0.05
+    const desiredDur = Math.min(sourceDur, MIN_DUR)
+    const desiredStart = desiredEnd - desiredDur
+    if (desiredStart >= prevEnd + 0.05) {
+      // Try to grow the duration toward sourceDur if there's more room
+      const maxDur = desiredEnd - (prevEnd + 0.05)
+      const dur = Math.min(sourceDur, Math.max(MIN_DUR, maxDur))
+      return { start: desiredEnd - dur, duration: dur }
+    }
+  }
+
+  // No fit possible — caller will show "no space" toast.
   return null
 }
 

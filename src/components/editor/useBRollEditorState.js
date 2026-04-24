@@ -723,19 +723,20 @@ export function useBRollEditorState(planPipelineId) {
     }})
   }, [state.placements, state.edits])
 
-  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, mode }) => {
+  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, targetDurationSec, mode }) => {
     const placement = state.placements.find(p => p.index === sourceIndex)
     if (!placement) return
     const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
     const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
     const actionId = generateActionId()
+    const dur = Math.max(0.5, targetDurationSec ?? placement.timelineDuration ?? 1)
     const up = {
       id: uuid,
       sourcePipelineId: planPipelineId,
       sourceChapterIndex: placement.chapterIndex ?? null,
       sourcePlacementIndex: placement.placementIndex ?? null,
       timelineStart: targetStartSec,
-      timelineEnd: targetStartSec + Math.max(0.5, placement.timelineDuration || 1),
+      timelineEnd: targetStartSec + dur,
       selectedResult: resultIdx,
       results: JSON.parse(JSON.stringify(placement.results || [])),
       snapshot: {
