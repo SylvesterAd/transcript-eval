@@ -172,12 +172,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       el.scrollLeft = anchor.time * state.zoom - anchor.screenX + labelW
       zoomAnchorRef.current = null
     } else {
-      // +/- buttons: keep playhead at same screen position
-      const playheadScreenX = state.currentTime * oldZoom - el.scrollLeft + labelW
+      // +/- buttons: keep playhead at the CENTER of viewport
       const viewW = el.clientWidth
-      if (playheadScreenX >= 0 && playheadScreenX <= viewW) {
-        el.scrollLeft = state.currentTime * state.zoom - playheadScreenX + labelW
-      }
+      el.scrollLeft = state.currentTime * state.zoom - viewW / 2 + labelW
     }
   }, [state.zoom])
 
