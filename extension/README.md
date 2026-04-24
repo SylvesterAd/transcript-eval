@@ -203,3 +203,90 @@ them without also updating Ext.7's mapping.
   `images.pexels.com/*`, `*.freepik.com/*`.
 - No `cookies` / `power` permissions yet — those land in Ext.4 /
   Ext.5.
+
+## Ext.4 — Auth polish (Port + Cookie Watcher + Session Recovery)
+
+Ext.4 adds the glue that keeps the extension reliable across
+session-boundary events (user signs out, JWT expires, web app
+reloads, etc.).
+
+### New permissions
+
+Ext.4 adds one permission to `manifest.json`:
+
+- `cookies` — required for `chrome.cookies.get` (pre-flight
+  convenience) and `chrome.cookies.onChanged` (reactive cookie
+  watcher).
+
+### Privacy posture for `cookies`
+
+The extension ONLY reads cookies on `.envato.com`, and only two
+of them: `envato_client_id` and `elements.session.5`. It NEVER:
+
+- writes any cookie
+- reads cookies on any other domain
+- sends cookie values to our backend or to the Port-connected web
+  app
+
+Surface the user sees: a red badge `!` on the extension icon when
+the Envato session is missing; a "sign in required" row in the
+popup that opens `https://app.envato.com/sign-in` on click.
+
+### Port (long-lived connection)
+
+The web app's export page opens a `chrome.runtime.Port` when it
+loads; it auto-disconnects when the tab closes. Only one active
+Port is tracked; a new connection replaces the previous.
+
+The extension uses the Port for:
+
+- **Outbound**: `{type:"state", envato_session:"ok"|"missing"}`
+  on cookie change; `{type:"refresh_session", version:1}` when a
+  401 needs a fresh JWT.
+- **Inbound**: `{type:"session", token, kid, user_id, expires_at}`
+  to update the stored JWT (written via `modules/auth.setJwt`).
+
+Ext.5 will extend the inbound path with `{type:"export"|"pause"|
+"resume"|"cancel"}` queue commands.
+
+### Pre-flight session check
+
+`downloadEnvato()` (Ext.2) now starts with a Phase 0 pre-flight:
+one GET to `app.envato.com/download.data?itemUuid=<REFERENCE>` with
+the user's session cookies. On 401, the run returns
+`envato_session_missing_preflight` before opening any resolver tab
+— no license, no CPU wasted.
+
+`ENVATO_REFERENCE_UUID` in `modules/auth.js` points at a stable
+Envato stock-video item. If Envato delists it, pre-flight will
+start returning `envato_preflight_error`; rotate the constant per
+the docstring in that file.
+
+### 401 recovery
+
+Two paths:
+
+- **Envato 401** (on `download.data`) → set
+  `envato_session_status = 'missing'` in storage, broadcast on
+  Port, red badge, surface `envato_session_missing` error. Queue
+  pause is Ext.5.
+- **transcript-eval 401** (on `/api/pexels-url` / `/api/freepik-url`)
+  → `refreshSessionViaPort()` posts `{type:"refresh_session"}` on
+  the Port, awaits a fresh `{type:"session", ...}` inbound within
+  10s, retries the original fetch ONCE. No port / timeout →
+  surface the 401 unchanged.
+
+### Test harness additions
+
+Fieldsets 7–9 on `extension-test.html`:
+
+- 7. Port + Auth — connect / disconnect buttons; live inbound log.
+- 8. Session status — live storage poll + manual
+  `debug_check_envato_session`.
+- 9. 401 refresh simulation — manual
+  `{type:"refresh_session"}` post over the connected Port.
+
+### Manifest changes (0.3.0 → 0.4.0)
+
+- `permissions` (added): `cookies`.
+- `host_permissions`: unchanged from Ext.3.
