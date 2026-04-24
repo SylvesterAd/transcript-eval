@@ -10,6 +10,7 @@
 
 import { EXT_VERSION, MESSAGE_VERSION } from './config.js'
 import { getJwt, setJwt, hasValidJwt } from './modules/auth.js'
+import { downloadEnvato } from './modules/envato.js'
 
 async function handlePing() {
   const jwt = await getJwt()
@@ -30,6 +31,34 @@ async function handleSession(msg) {
     return { ok: true }
   } catch (err) {
     return { ok: false, error: 'invalid_session_shape', detail: String(err?.message || err) }
+  }
+}
+
+// Ext.2 debug handler — fires the full 3-phase Envato flow for ONE
+// item. NOT user-facing; only triggered from the dev test page.
+// The message does not require a valid JWT — the debug path doesn't
+// emit telemetry yet (that lands in Ext.6). We accept it regardless
+// so a fresh Chrome profile can exercise the flow without first
+// doing a {type:"session"} round-trip.
+async function handleDebugEnvatoOneShot(msg) {
+  const { item_id, envato_item_url, run_id, sanitized_filename } = msg
+  if (typeof item_id !== 'string' || !item_id) {
+    return { ok: false, errorCode: 'bad_input', detail: 'item_id required' }
+  }
+  if (typeof envato_item_url !== 'string' || !envato_item_url) {
+    return { ok: false, errorCode: 'bad_input', detail: 'envato_item_url required' }
+  }
+  try {
+    const result = await downloadEnvato({
+      envatoItemUrl: envato_item_url,
+      itemId: item_id,
+      runId: run_id,                 // may be undefined — Ext.2 ignores it
+      sanitizedFilename: sanitized_filename, // may be undefined — default envato_<id>.<ext>
+    })
+    return result
+  } catch (err) {
+    // downloadEnvato returns rather than throwing, but be defensive.
+    return { ok: false, errorCode: 'unhandled_error', detail: String(err?.message || err) }
   }
 }
 
@@ -55,6 +84,9 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         return
       case 'session':
         sendResponse(await handleSession(msg))
+        return
+      case 'debug_envato_one_shot':
+        sendResponse(await handleDebugEnvatoOneShot(msg))
         return
       default:
         sendResponse({ error: 'unknown_type', type: msg.type })
