@@ -11,6 +11,7 @@
 import { EXT_VERSION, MESSAGE_VERSION } from './config.js'
 import { getJwt, setJwt, hasValidJwt } from './modules/auth.js'
 import { downloadEnvato } from './modules/envato.js'
+import { downloadSourceItem } from './modules/sources.js'
 
 async function handlePing() {
   const jwt = await getJwt()
@@ -62,6 +63,35 @@ async function handleDebugEnvatoOneShot(msg) {
   }
 }
 
+// Ext.3 debug handler — fires the full Pexels OR Freepik flow for
+// ONE item via the server-proxied /api/<source>-url endpoints.
+// NOT user-facing; only triggered from the dev test page.
+//
+// REQUIRES a valid JWT in chrome.storage.local (mint one via
+// {type:"session"} from the test page first). Unlike the Envato
+// debug handler, this flow posts to the backend with Bearer auth.
+async function handleDebugSourceOneShot(msg) {
+  const { source, item_id, run_id, sanitized_filename } = msg
+  if (source !== 'pexels' && source !== 'freepik') {
+    return { ok: false, errorCode: 'bad_input', detail: 'source must be "pexels" or "freepik"' }
+  }
+  if (!item_id || (typeof item_id !== 'string' && typeof item_id !== 'number')) {
+    return { ok: false, errorCode: 'bad_input', detail: 'item_id required (string or number)' }
+  }
+  try {
+    const result = await downloadSourceItem({
+      source,
+      itemId: item_id,
+      runId: run_id,                  // may be undefined — Ext.3 ignores it
+      sanitizedFilename: sanitized_filename,  // may be undefined — default <source>_<id>.<ext>
+    })
+    return result
+  } catch (err) {
+    // downloadSourceItem returns rather than throwing, but be defensive.
+    return { ok: false, errorCode: 'unhandled_error', detail: String(err?.message || err) }
+  }
+}
+
 function isSupportedVersion(v) {
   // Accept current and N-1 per spec § "Versioning". Ext.1 only knows v1.
   return v === MESSAGE_VERSION
@@ -87,6 +117,9 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         return
       case 'debug_envato_one_shot':
         sendResponse(await handleDebugEnvatoOneShot(msg))
+        return
+      case 'debug_source_one_shot':
+        sendResponse(await handleDebugSourceOneShot(msg))
         return
       default:
         sendResponse({ error: 'unknown_type', type: msg.type })
