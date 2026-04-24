@@ -22,8 +22,8 @@
 // directly, so .crx is only needed for side-loading.
 
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { dirname, join, relative } from 'node:path'
+import { readFile, readdir, mkdir, rm, copyFile, stat } from 'node:fs/promises'
 
 // ---------- Include / exclude constants (frozen) ----------
 
@@ -96,7 +96,98 @@ function parseArgs(argv) {
   return opts
 }
 
-// ---------- main (skeleton — stage + zip land in Tasks 2 + 3) ----------
+// ---------- Stage helpers ----------
+
+function isExcluded(relPath) {
+  const p = relPath.split('\\').join('/')
+  return DIR_EXCLUDES.some((rx) => rx.test(p))
+}
+
+async function walkFiles(root) {
+  // Returns absolute file paths under root (recursive), filtering out
+  // directory-level exclusions (e.g. __tests__) early to avoid traversing
+  // unnecessary subtrees.
+  const out = []
+  async function walk(dir) {
+    const entries = await readdir(dir, { withFileTypes: true })
+    for (const ent of entries) {
+      const abs = join(dir, ent.name)
+      const rel = relative(root, abs).split('\\').join('/')
+      if (isExcluded(rel)) continue
+      if (ent.isDirectory()) {
+        await walk(abs)
+      } else if (ent.isFile()) {
+        out.push(abs)
+      }
+    }
+  }
+  await walk(root)
+  return out
+}
+
+async function stageDist({ extRoot, outDir, verbose }) {
+  // Wipe + recreate out dir.
+  await rm(outDir, { recursive: true, force: true })
+  await mkdir(outDir, { recursive: true })
+
+  let stagedCount = 0
+  let bytesTotal = 0
+
+  // Root file includes (must all exist).
+  for (const name of ROOT_INCLUDES) {
+    const src = join(extRoot, name)
+    const dest = join(outDir, name)
+    try {
+      const s = await stat(src)
+      if (!s.isFile()) {
+        throw new Error(`ROOT_INCLUDES entry is not a file: ${name}`)
+      }
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        throw new Error(`Missing required root file: ${name} (at ${src})`)
+      }
+      throw err
+    }
+    await mkdir(dirname(dest), { recursive: true })
+    await copyFile(src, dest)
+    const size = (await stat(dest)).size
+    stagedCount++
+    bytesTotal += size
+    if (verbose) {
+      process.stdout.write(`[ext:package]   + ${name} (${size}B)\n`)
+    }
+  }
+
+  // Directory includes — recursive, filtered.
+  for (const dirName of DIR_INCLUDES) {
+    const dirAbs = join(extRoot, dirName)
+    let files
+    try {
+      files = await walkFiles(dirAbs)
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        throw new Error(`Missing required directory: ${dirName} (at ${dirAbs})`)
+      }
+      throw err
+    }
+    for (const absSrc of files) {
+      const relFromExt = relative(extRoot, absSrc).split('\\').join('/')
+      const dest = join(outDir, relFromExt)
+      await mkdir(dirname(dest), { recursive: true })
+      await copyFile(absSrc, dest)
+      const size = (await stat(dest)).size
+      stagedCount++
+      bytesTotal += size
+      if (verbose) {
+        process.stdout.write(`[ext:package]   + ${relFromExt} (${size}B)\n`)
+      }
+    }
+  }
+
+  return { stagedCount, bytesTotal }
+}
+
+// ---------- main ----------
 
 async function main() {
   let opts
@@ -129,7 +220,12 @@ async function main() {
     process.stdout.write(`[ext:package]   extRoot = ${extRoot}\n`)
   }
 
-  // Tasks 2 + 3 will implement stage + zip here.
+  const { stagedCount, bytesTotal } = await stageDist({ extRoot, outDir, verbose: opts.verbose })
+  process.stdout.write(
+    `[ext:package] Staged ${stagedCount} files (${bytesTotal} bytes) -> ${outDir}\n`
+  )
+
+  // Task 3 will add the zip step (guarded by opts.zip).
 }
 
 // Use fileURLToPath to compare — paths with spaces are URL-encoded in
@@ -151,4 +247,11 @@ if (isDirectRun) {
   })
 }
 
-export { parseArgs, printUsage, ROOT_INCLUDES, DIR_INCLUDES, DIR_EXCLUDES }
+export {
+  parseArgs,
+  printUsage,
+  stageDist,
+  ROOT_INCLUDES,
+  DIR_INCLUDES,
+  DIR_EXCLUDES,
+}
