@@ -25,6 +25,11 @@ import {
 import { resolveOldIdToNewUuid, getSignedDownloadUrl } from './envato.js'
 import { fetchPexelsUrl, fetchFreepikUrl } from './sources.js'
 import { broadcastToPort } from './port.js'
+import {
+  saveRunState, loadRunState, deleteRunState,
+  getActiveRunId, setActiveRunId, clearActiveRunId,
+  markCompleted,
+} from './storage.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
@@ -65,18 +70,30 @@ const active = { resolving: 0, licensing: 0, downloading: 0 }
 // ------------------- Public API -------------------
 
 export async function startRun({ runId, manifest, targetFolder, options, userId }) {
-  // 1. Check lock (Task 8 wires the real storage-backed version;
-  // this in-memory guard is the Phase-1 placeholder).
+  if (!runId || typeof runId !== 'string') {
+    return { ok: false, reason: 'bad_input', detail: 'runId required' }
+  }
+  // 1. In-memory guard (short-circuit if this SW instance still has
+  // a live run mid-flight).
   if (state && state.run_state === 'running') {
     return { ok: false, reason: 'run_already_active', active_run_id: state.runId }
   }
-  // 2. Build initial RunState
+  // 2. Persistent CAS lock — survives SW restarts. This is the
+  // authoritative single-active-run check.
+  const lockResult = await setActiveRunId(runId)
+  if (!lockResult.ok) {
+    return { ok: false, reason: 'run_already_active', active_run_id: lockResult.activeRunId }
+  }
+  // 3. Build initial RunState
   state = buildInitialRunState({ runId, manifest, targetFolder, options, userId })
-  // 3. Acquire keepAwake
+  // 4. Persist FIRST — invariant #1. If the SW dies before we
+  // broadcast, the persisted state is the truth.
+  await persist()
+  // 5. Acquire keepAwake
   await acquireKeepAwake()
-  // 4. Broadcast initial state
+  // 6. Broadcast initial state
   broadcast({ type: 'state', export: snapshot() })
-  // 5. Kick worker pools
+  // 7. Kick worker pools
   schedule()
   return { ok: true, runId }
 }
@@ -85,7 +102,7 @@ export async function pauseRun() {
   if (!state || state.run_state !== 'running') return { ok: false }
   state.run_state = 'paused'
   await releaseKeepAwake()
-  broadcast({ type: 'state', export: snapshot() })
+  await persistAndBroadcast()
   return { ok: true }
 }
 
@@ -93,7 +110,7 @@ export async function resumeRun() {
   if (!state || state.run_state !== 'paused') return { ok: false }
   state.run_state = 'running'
   await acquireKeepAwake()
-  broadcast({ type: 'state', export: snapshot() })
+  await persistAndBroadcast()
   schedule()
   return { ok: true }
 }
@@ -108,7 +125,12 @@ export async function cancelRun() {
     }
   }
   await releaseKeepAwake()
-  broadcast({ type: 'state', export: snapshot() })
+  // Persist the terminal state (so status requests during cleanup see
+  // 'cancelled'), then delete the run record and clear the lock.
+  await persistAndBroadcast()
+  const runId = state.runId
+  await deleteRunState(runId)
+  await clearActiveRunId()
   state = null
   return { ok: true }
 }
@@ -126,7 +148,13 @@ function schedule() {
   fillPool('downloading', MAX_DOWNLOAD_CONCURRENCY,        runDownloader)
   // Terminal check: if every item is done or failed, finalize.
   const everyoneDone = state.items.every(i => i.phase === 'done' || i.phase === 'failed')
-  if (everyoneDone) finalize()
+  if (everyoneDone) {
+    // finalize is async but schedule is called from sync paths; fire
+    // and forget, swallowing any errors with a log.
+    finalize().catch(err => {
+      console.error('[queue] finalize error', err)
+    })
+  }
 }
 
 function fillPool(phaseName, cap, runner) {
@@ -163,31 +191,31 @@ function nextItemForPhase(phaseName) {
 async function runResolver(item) {
   item.claimed = true
   item.phase = 'resolving'
-  broadcastItemTransition(item)
+  await persistAndBroadcast()
   try {
     const uuid = await resolveOldIdToNewUuid(item.envato_item_url)
     item.resolved_uuid = uuid
     item.phase = 'licensing'
     item.claimed = false
-    broadcastItemTransition(item)
+    await persistAndBroadcast()
   } catch (err) {
-    failItem(item, err?.message || 'resolve_failed')
+    await failItem(item, err?.message || 'resolve_failed')
   }
 }
 
 async function runLicenser(item) {
   item.claimed = true
   // item.phase is already 'licensing'
-  broadcastItemTransition(item)
+  await persistAndBroadcast()
   try {
     // JIT URL fetching: we're milliseconds away from chrome.downloads.download
     const signedUrl = await getSignedDownloadUrl(item.resolved_uuid)
     item.signed_url = signedUrl
     item.phase = 'downloading'
     item.claimed = false
-    broadcastItemTransition(item)
+    await persistAndBroadcast()
   } catch (err) {
-    failItem(item, err?.message || 'license_failed')
+    await failItem(item, err?.message || 'license_failed')
   }
 }
 
@@ -207,7 +235,7 @@ async function runDownloader(item) {
     })
     item.download_id = downloadId
     state.download_id_to_seq[downloadId] = item.seq
-    broadcastItemTransition(item)
+    await persistAndBroadcast()
     // The rest happens via chrome.downloads.onChanged — we return
     // and let the listener finalize the item on 'complete' or
     // 'interrupted'. The worker's Promise resolves when the listener
@@ -216,7 +244,7 @@ async function runDownloader(item) {
     await waitForDownloadSettled(item)
     item.claimed = false
   } catch (err) {
-    failItem(item, err?.message || 'download_failed')
+    await failItem(item, err?.message || 'download_failed')
   }
 }
 
@@ -237,10 +265,15 @@ chrome.downloads.onChanged.addListener(delta => {
   if (seq == null) return
   const item = state.items.find(i => i.seq === seq)
   if (!item) return
-  handleDownloadEvent(item, delta)
+  // The handler is async but the onChanged listener is sync — kick
+  // off the async work and catch any rejections to avoid unhandled
+  // rejections if persistence throws.
+  handleDownloadEvent(item, delta).catch(err => {
+    console.error('[queue] handleDownloadEvent error', err)
+  })
 })
 
-function handleDownloadEvent(item, delta) {
+async function handleDownloadEvent(item, delta) {
   // Byte progress — coalesced.
   if (delta.bytesReceived != null) {
     item.bytes_received = delta.bytesReceived.current
@@ -256,39 +289,47 @@ function handleDownloadEvent(item, delta) {
       item.phase = 'done'
       state.stats.ok_count++
       state.stats.total_bytes_downloaded += item.bytes_received || 0
-      broadcastItemTransition(item)
+      // Record cross-run dedup entry.
+      if (state.userId) {
+        try {
+          await markCompleted(state.userId, item.source, item.source_item_id, state.target_folder_path)
+        } catch (err) {
+          console.warn('[queue] markCompleted failed', err)
+        }
+      }
+      await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
     } else if (next === 'interrupted') {
-      handleDownloadInterrupt(item, delta)
+      await handleDownloadInterrupt(item, delta)
     }
   }
 }
 
-function handleDownloadInterrupt(item, delta) {
+async function handleDownloadInterrupt(item, delta) {
   const reason = delta.error?.current || 'UNKNOWN'
   if (reason.startsWith('NETWORK_')) {
     if (item.retries < DOWNLOAD_NETWORK_RETRY_CAP) {
       item.retries++
-      chrome.downloads.resume(item.download_id).catch(err => {
-        failItem(item, `network_resume_failed:${err?.message}`)
+      chrome.downloads.resume(item.download_id).catch(async err => {
+        await failItem(item, `network_resume_failed:${err?.message}`)
         item.__settle?.()
       })
-      broadcastItemTransition(item)
+      await persistAndBroadcast()
       return
     }
-    failItem(item, 'network_failed')
+    await failItem(item, 'network_failed')
     item.__settle?.()
   } else if (reason.startsWith('FILE_')) {
     // Disk is broken — hard stop the whole queue.
-    failItem(item, `disk_failed:${reason}`)
+    await failItem(item, `disk_failed:${reason}`)
     item.__settle?.()
-    hardStopQueue('disk_failed')
+    await hardStopQueue('disk_failed')
   } else if (reason === 'USER_CANCELED') {
-    failItem(item, 'cancelled')
+    await failItem(item, 'cancelled')
     item.__settle?.()
   } else {
-    failItem(item, `download_interrupt:${reason}`)
+    await failItem(item, `download_interrupt:${reason}`)
     item.__settle?.()
   }
 }
@@ -354,21 +395,58 @@ function snapshot() {
   }
 }
 
-function broadcastItemTransition(_item) {
+// Strip in-memory-only fields before persisting to chrome.storage.local.
+function stripInMemory(s) {
+  return {
+    ...s,
+    items: s.items.map(({ claimed, __settle, ...rest }) => rest),
+  }
+}
+
+// Persist the current RunState to chrome.storage.local. Invariant #1
+// from the plan: every phase transition calls this BEFORE broadcasting
+// to the Port. MV3 SW termination is designed-for — whatever's
+// persisted is the truth if the SW dies mid-transition.
+async function persist() {
+  if (!state) return
+  state.updated_at = Date.now()
+  await saveRunState(state.runId, stripInMemory(state))
+}
+
+// Persist then broadcast — the single write-point every phase
+// transition should use.
+async function persistAndBroadcast() {
+  await persist()
   broadcast({ type: 'state', export: snapshot() })
 }
 
-function failItem(item, errorCode) {
+// Legacy helper retained for the chrome.downloads.onChanged path,
+// where the listener is synchronous — it schedules a persist as a
+// trailing await via the inner handler promise.
+function broadcastItemTransition(_item) {
+  // No-op for now: callers that are inside async workers have been
+  // switched to `await persistAndBroadcast()`. Kept as a forwarder so
+  // any stragglers inside the synchronous chrome.downloads.onChanged
+  // handler still produce at least a Port push (persistence is added
+  // to those paths via explicit await persist() calls).
+  broadcast({ type: 'state', export: snapshot() })
+}
+
+async function failItem(item, errorCode) {
   item.phase = 'failed'
   item.error_code = errorCode
   item.claimed = false
   state.stats.fail_count++
-  broadcastItemTransition(item)
+  await persistAndBroadcast()
   broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'failed' })
 }
 
-function finalize() {
+async function finalize() {
   state.run_state = 'complete'
+  // Persist terminal state before clearing the lock so a SW crash
+  // between the two writes still leaves the run visible.
+  await persist()
+  broadcast({ type: 'state', export: snapshot() })
   broadcast({
     type: 'complete',
     ok_count: state.stats.ok_count,
@@ -376,13 +454,14 @@ function finalize() {
     folder_path: state.target_folder_path,
     xml_paths: [], // web app generates XMLs
   })
-  releaseKeepAwake()
-  // Don't null `state` — keep for {type:"status"} inspection until
-  // next startRun clears it. Task 8 also saves state here and clears
-  // active_run_id.
+  await releaseKeepAwake()
+  await clearActiveRunId()
+  // Keep run:<runId> in storage so the popup can show "last run" —
+  // cleared on next startRun via the CAS (overwrite) and the web
+  // app's post-complete acknowledge.
 }
 
-function hardStopQueue(reason) {
+async function hardStopQueue(reason) {
   state.run_state = 'cancelled'
   state.error_code = reason
   for (const it of state.items) {
@@ -394,8 +473,9 @@ function hardStopQueue(reason) {
       it.error_code = reason
     }
   }
-  broadcast({ type: 'state', export: snapshot() })
-  releaseKeepAwake()
+  await persistAndBroadcast()
+  await releaseKeepAwake()
+  await clearActiveRunId()
 }
 
 // ------------------- keepAwake -------------------
