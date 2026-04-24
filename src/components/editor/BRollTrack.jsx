@@ -92,6 +92,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     const { prevEnd, nextStart } = getNeighborBounds(placement)
     let moved = false
     let crossMode = null
+    let inVariantDispatched = false  // tracks whether we've moved the source placement in-variant during this drag
 
     // Variant row lookup for hit-testing. Query once per drag start.
     const variantRows = (variants || []).map((v, vi) => {
@@ -165,6 +166,13 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       }
 
       if (overRow && overRow.vi !== (activeVariantIdx ?? 0)) {
+        // Cross-mode active. If we previously moved the placement in-variant, revert
+        // to its drag-start position so the source doesn't end up at a weird spot
+        // (and so undo of the cross-drop returns the placement to where it started).
+        if (inVariantDispatched) {
+          updatePlacementPosition(placement.index, origStart, origEnd)
+          inVariantDispatched = false
+        }
         const trackLeft = overRow.rect.left + labelW
         const timeAtPointer = (ev.clientX - trackLeft) / zoom
         const dropStart = Math.max(0, timeAtPointer - grabOffsetSec)
@@ -179,6 +187,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         const dt = dx / zoom
         const newStart = Math.max(prevEnd, Math.min(origStart + dt, nextStart - duration))
         updatePlacementPosition(placement.index, newStart, newStart + duration)
+        inVariantDispatched = true
       }
     }
     const onUp = (ev) => {

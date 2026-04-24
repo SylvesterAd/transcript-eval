@@ -748,6 +748,32 @@ export function useBRollEditorState(planPipelineId) {
       },
     }
 
+    // Source-side: dispatch hide IMMEDIATELY for instant visual feedback.
+    // We'll revert this if the remote write fails.
+    let sourceAction = null
+    if (mode === 'move') {
+      const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+        ? `${placement.chapterIndex}:${placement.placementIndex}`
+        : null
+      if (placementKey) {
+        const prev = state.edits[placementKey] || {}
+        sourceAction = {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', placementKey,
+          before: { editsSlot: { hidden: !!prev.hidden } },
+          after:  { editsSlot: { hidden: true } },
+        }
+      } else if (placement.userPlacementId) {
+        sourceAction = {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: placement.userPlacementId,
+          before: { userPlacementCreate: state.userPlacements.find(u => u.id === placement.userPlacementId) },
+          after:  { userPlacementDelete: true },
+        }
+      }
+      if (sourceAction) {
+        dispatch({ type: 'APPLY_ACTION', payload: sourceAction })
+      }
+    }
+
     // Write to target pipeline's editor-state with optimistic concurrency.
     try {
       const remote = await authFetch(`/broll/pipeline/${targetPipelineId}/editor-state`)
@@ -763,28 +789,11 @@ export function useBRollEditorState(planPipelineId) {
       await authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
     } catch (err) {
       console.error('[broll-drag-cross] Failed to write target:', err.message)
-      return
-    }
-
-    // Source side: if mode === 'move', hide the original (or remove the userPlacement).
-    if (mode === 'move') {
-      const placementKey = placement.chapterIndex != null && placement.placementIndex != null
-        ? `${placement.chapterIndex}:${placement.placementIndex}`
-        : null
-      if (placementKey) {
-        const prev = state.edits[placementKey] || {}
-        dispatch({ type: 'APPLY_ACTION', payload: {
-          id: actionId, ts: Date.now(), kind: 'drag-cross', placementKey,
-          before: { editsSlot: { hidden: !!prev.hidden } },
-          after:  { editsSlot: { hidden: true } },
-        }})
-      } else if (placement.userPlacementId) {
-        dispatch({ type: 'APPLY_ACTION', payload: {
-          id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: placement.userPlacementId,
-          before: { userPlacementCreate: state.userPlacements.find(u => u.id === placement.userPlacementId) },
-          after:  { userPlacementDelete: true },
-        }})
+      // Revert the source-side action if we dispatched one
+      if (sourceAction) {
+        dispatch({ type: 'UNDO' })
       }
+      return
     }
   }, [state.placements, state.selectedResults, state.edits, state.userPlacements, planPipelineId])
 
