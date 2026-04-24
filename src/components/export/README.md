@@ -52,3 +52,62 @@ removal.
 - XMEML generation kickoff (WebApp.2)
 - Retry / cancel buttons (relevant to D / F)
 - Multi-tab "export already in progress" lock (D-era)
+
+## Phase B additions — State D (in-progress) + terminal placeholders
+
+State D is the live-progress UI, built on a long-lived `chrome.runtime.Port`.
+
+| State | Renders when | Component | Notes |
+|---|---|---|---|
+| **D** | user clicked Start → extension has an active run | `StateD_InProgress.jsx` | spec § State D mockup |
+| **E** | extension reports `{type:"complete"}` with `fail_count === 0` | `StateE_Complete_Placeholder.jsx` | placeholder; real UI in next plan |
+| **F** | extension reports `{type:"complete"}` with `fail_count > 0` | `StateF_Partial_Placeholder.jsx` | placeholder; real UI in next plan |
+
+### Wiring (Phase B)
+
+```
+ExportPage.jsx (FSM extended: … → state_d → state_e/state_f)
+  └─ ActiveRun (sub-component, mounted only in state_d/e/f)
+       └─ useExportPort
+            ├─ ext.openPort('export-tap')             long-lived chrome.runtime.connect
+            ├─ onMessage → progressReducer            pure state transitions
+            ├─ sendControl('pause'|'resume'|'cancel') one-shot chrome.runtime.sendMessage
+            └─ reconnect                              user-gated after 2 auto-retries
+```
+
+### Port message contract (from Ext.5)
+
+```js
+// extension → web app (broadcast to every connected Port)
+{ type:"state",    version:1, export:{ runId, items, stats, run_state, ... } }
+{ type:"progress", version:1, item_id, phase, bytes, total_bytes }
+{ type:"item_done",version:1, item_id, result:{ ok, bytes, error_code? } }
+{ type:"complete", version:1, ok_count, fail_count, folder_path, xml_paths:[] }
+
+// web app → extension (one-shot sendMessage)
+{ type:"status",   version:1 }                        // force a fresh {type:"state"}
+{ type:"pause",    version:1, export_id }
+{ type:"resume",   version:1, export_id }
+{ type:"cancel",   version:1, export_id }
+```
+
+### Reconnect policy
+
+On `port.onDisconnect` during an active run:
+1. Try reconnect immediately (attempt 1 of 2). Send `{type:"status"}` on success.
+2. If that disconnects too, wait 2s and try again (attempt 2 of 2).
+3. If both fail: render the "Disconnected from Export Helper. Reconnecting…" banner with a **manual Retry** button. Do NOT auto-poll further.
+
+The `state.complete` sentinel short-circuits reconnect — once we've received the terminal `{type:"complete"}`, the extension legitimately closed the Port and we don't need to reopen it.
+
+### Single-run-active detection
+
+If the extension's first snapshot carries a `runId` different from the page's expected `run_id` (received from `ext.sendExport`'s response), we render the **mismatch blocker**: "Another export is in progress (Variant X · running)". The user can "Cancel other run" (dispatches `{type:"cancel", export_id:<other>}`) or Refresh.
+
+### Throttle + render budget
+
+Ext.5 throttles `{type:"progress"}` messages at ~500 ms per item (its own contract). React can render 100 updates/sec fine — the hot path is selector derivation, so `useMemo` wraps every selector call against the snapshot reference. No virtualization (`react-window` / `react-virtuoso`) — 300-item hard cap + CSS `max-height + overflow:auto` is enough.
+
+### State E/F are placeholders
+
+Both components render raw dumps of the completion fields with a visible blue dashed banner. The real UI (open-folder button, XML download links, "How to import in Premiere" tutorial, per-failure diagnostics, retry) ships in the next webapp plan (Phase C / State E+F).
