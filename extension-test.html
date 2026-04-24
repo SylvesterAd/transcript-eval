@@ -180,17 +180,21 @@
   <fieldset>
     <legend>10. Queue / stress test (Ext.5)</legend>
     <p class="muted">
-      Starts a 50-item synthetic run: 30 Pexels, 15 Envato (real license
-      commits — budget), 5 Freepik. Live state log pushes via Port. Use
-      <b>Pause</b> to observe in-flight downloads continuing while new
-      pulls stop; <b>Resume</b> to pick up; <b>Cancel</b> to abort.
+      Drives a synthetic manifest through the queue. <b>Cheap mode</b>
+      (default): 35 items (30 Pexels + 5 Freepik), ~250 MB, no Envato
+      license commits. <b>Full mode</b>: adds 15 Envato items
+      (NX9WYGQ × 15); budget the fair-use counter before clicking.
+      Live state log pushes via Port.
     </p>
     <div class="row">
       <label>Target folder suffix:</label>
       <input type="text" id="q-folder" placeholder="transcript-eval/export-stress-1" value="transcript-eval/export-stress-1" style="flex:1">
     </div>
     <div class="row">
-      <button id="q-start">Start 50-item run</button>
+      <label><input type="checkbox" id="q-cheap-mode" checked> Cheap mode (skip Envato items; Pexels+Freepik only)</label>
+    </div>
+    <div class="row">
+      <button id="q-start">Start stress run</button>
       <button id="q-pause">Pause</button>
       <button id="q-resume">Resume</button>
       <button id="q-cancel">Cancel</button>
@@ -509,9 +513,10 @@
       }
     }
     function buildSyntheticManifest() {
-      // 30 Pexels + 15 Envato + 5 Freepik.
+      const cheap = document.getElementById('q-cheap-mode').checked
       const out = []
       let seq = 0
+      // 30 Pexels
       for (let i = 0; i < 30; i++) {
         out.push({
           source: 'pexels',
@@ -521,15 +526,19 @@
           est_size_bytes: 5_000_000,
         })
       }
-      for (let i = 0; i < 15; i++) {
-        out.push({
-          source: 'envato',
-          source_item_id: 'NX9WYGQ', // repeat a known real ID so license commits dedupe per 24h
-          target_filename: `${String(++seq).padStart(3, '0')}_envato_NX9WYGQ_${i}.mov`,
-          envato_item_url: 'https://elements.envato.com/...-NX9WYGQ',
-          est_size_bytes: 50_000_000,
-        })
+      // 15 Envato (skipped in cheap mode)
+      if (!cheap) {
+        for (let i = 0; i < 15; i++) {
+          out.push({
+            source: 'envato',
+            source_item_id: 'NX9WYGQ',
+            target_filename: `${String(++seq).padStart(3, '0')}_envato_NX9WYGQ_${i}.mov`,
+            envato_item_url: 'https://elements.envato.com/...-NX9WYGQ',
+            est_size_bytes: 50_000_000,
+          })
+        }
       }
+      // 5 Freepik
       for (let i = 0; i < 5; i++) {
         out.push({
           source: 'freepik',
