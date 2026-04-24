@@ -399,6 +399,13 @@ function hardStopQueue(reason) {
 }
 
 // ------------------- keepAwake -------------------
+//
+// Note on SW termination: we do NOT attempt to releaseKeepAwake on
+// SW shutdown. MV3 doesn't expose a termination hook, and Chrome
+// automatically releases keepAwake when the extension's SW is torn
+// down. If we later see the laptop stay awake after a forced SW
+// shutdown, investigate — but don't add a polyfill here before
+// confirming the bug is real.
 
 async function acquireKeepAwake() {
   if (acquiredKeepAwake) return
