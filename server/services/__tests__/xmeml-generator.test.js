@@ -1,5 +1,23 @@
 import { describe, it, expect } from 'vitest'
-import { escapeXml, sanitizeFilename, secondsToFrames, assignTracks } from '../xmeml-generator.js'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+import {
+  escapeXml,
+  sanitizeFilename,
+  secondsToFrames,
+  assignTracks,
+  generateXmeml,
+} from '../xmeml-generator.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const FIXTURES = path.join(__dirname, '__fixtures__', 'xmeml')
+
+function loadFixture(name) {
+  return readFileSync(path.join(FIXTURES, name), 'utf-8')
+}
 
 describe('escapeXml', () => {
   it('passes plain ASCII through unchanged', () => {
@@ -147,5 +165,168 @@ describe('assignTracks', () => {
       { seq: 1, t: 0 },
       { seq: 2, t: 1 },
     ])
+  })
+})
+
+describe('generateXmeml — golden fixtures', () => {
+  it('Case 1: single placement, single track, matches fixture', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant C',
+      placements: [
+        { seq: 1, source: 'envato', sourceItemId: 'NX9WYGQ',
+          filename: '001_envato_NX9WYGQ.mov',
+          timelineStart: 25.4, timelineDuration: 4.0,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    expect(xml).toBe(loadFixture('single-placement.xml'))
+  })
+
+  it('Case 2: two non-overlapping placements, both on V1', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+        { seq: 2, source: 'pexels', sourceItemId: '456',
+          filename: '002_pexels_456.mp4',
+          timelineStart: 3, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    expect(xml).toBe(loadFixture('two-non-overlapping.xml'))
+    // Structural assertion: exactly one <track> opening
+    expect((xml.match(/<track>/g) || []).length).toBe(1)
+  })
+
+  it('Case 3: three overlapping placements → V1, V2, V3', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant C',
+      placements: [
+        { seq: 1, source: 'envato', sourceItemId: 'A',
+          filename: '001_envato_A.mov',
+          timelineStart: 0, timelineDuration: 4,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+        { seq: 2, source: 'envato', sourceItemId: 'B',
+          filename: '002_envato_B.mov',
+          timelineStart: 1, timelineDuration: 4,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+        { seq: 3, source: 'envato', sourceItemId: 'C',
+          filename: '003_envato_C.mov',
+          timelineStart: 2, timelineDuration: 4,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    expect(xml).toBe(loadFixture('three-overlapping.xml'))
+    expect((xml.match(/<track>/g) || []).length).toBe(3)
+  })
+
+  it('Case 4: missing metadata falls back to sequence defaults', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant B',
+      placements: [
+        { seq: 1, source: 'freepik', sourceItemId: 'xyz',
+          filename: '001_freepik_xyz.mp4',
+          timelineStart: 0, timelineDuration: 3 },
+      ],
+    })
+    expect(xml).toBe(loadFixture('missing-metadata.xml'))
+    // Structural: emitted width/height are the sequence defaults
+    expect(xml).toContain('<width>1920</width><height>1080</height>')
+    expect(xml).toContain('<timebase>30</timebase>')
+  })
+})
+
+describe('generateXmeml — sanitization + edge cases', () => {
+  it('Case 5: filename with reserved chars is sanitized in <name> and <pathurl>', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant C',
+      placements: [
+        { seq: 1, source: 'envato', sourceItemId: 'X',
+          filename: 'bad<name>:clip|001?.mov',  // all 5 reserved chars
+          timelineStart: 0, timelineDuration: 1,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    // Reserved chars replaced with _; the raw input never appears.
+    expect(xml).not.toContain('bad<name>')
+    expect(xml).toContain('bad_name_')
+    // <name> and <pathurl> both use the sanitized form
+    expect(xml).toMatch(/<name>bad_name_[^<]*<\/name>/)
+    expect(xml).toContain('file://./media/bad_name_')
+  })
+
+  it('Case 5b: XML reserved chars in sequenceName are escaped', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant & Co <demo>',
+      placements: [],
+    })
+    expect(xml).toContain('<name>Variant &amp; Co &lt;demo&gt;</name>')
+    // Raw "Variant & Co <demo>" does NOT appear as-is
+    expect(xml).not.toContain('<name>Variant & Co <demo></name>')
+  })
+
+  it('Case 6: empty placements array → valid empty <sequence>', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Empty',
+      placements: [],
+    })
+    // Must be valid xmeml (contains the wrapper)
+    expect(xml).toMatch(/^<\?xml version="1\.0"/)
+    expect(xml).toContain('<xmeml version="5">')
+    expect(xml).toContain('<sequence ')
+    expect(xml).toContain('<duration>0</duration>')
+    // No <track> elements (zero placements → zero tracks)
+    expect(xml).not.toContain('<track>')
+    // Ends with the document close
+    expect(xml.trim().endsWith('</xmeml>')).toBe(true)
+  })
+
+  it('Case 7: determinism — two calls with the same input produce identical output', () => {
+    const input = {
+      sequenceName: 'Variant C',
+      placements: [
+        { seq: 1, source: 'envato', sourceItemId: 'A',
+          filename: '001_envato_A.mov',
+          timelineStart: 0, timelineDuration: 4,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+        { seq: 2, source: 'envato', sourceItemId: 'B',
+          filename: '002_envato_B.mov',
+          timelineStart: 1, timelineDuration: 4,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    }
+    const a = generateXmeml(input)
+    const b = generateXmeml(input)
+    expect(a).toBe(b)
+    // Also verify: byte-identical length as a pure sanity check
+    expect(Buffer.byteLength(a)).toBe(Buffer.byteLength(b))
+  })
+})
+
+describe('generateXmeml — input validation', () => {
+  it('throws on non-string sequenceName', () => {
+    expect(() => generateXmeml({ sequenceName: '', placements: [] })).toThrow()
+    expect(() => generateXmeml({ sequenceName: null, placements: [] })).toThrow()
+    expect(() => generateXmeml({ sequenceName: 123, placements: [] })).toThrow()
+  })
+
+  it('throws on non-array placements', () => {
+    expect(() => generateXmeml({ sequenceName: 'x', placements: null })).toThrow()
+    expect(() => generateXmeml({ sequenceName: 'x', placements: 'abc' })).toThrow()
+  })
+
+  it('throws on invalid frameRate', () => {
+    expect(() => generateXmeml({ sequenceName: 'x', placements: [], frameRate: 0 })).toThrow()
+    expect(() => generateXmeml({ sequenceName: 'x', placements: [], frameRate: -30 })).toThrow()
+  })
+
+  it('throws on placement missing filename', () => {
+    expect(() => generateXmeml({
+      sequenceName: 'x',
+      placements: [{ seq: 1, timelineStart: 0, timelineDuration: 1 }],
+    })).toThrow(/filename/)
   })
 })
