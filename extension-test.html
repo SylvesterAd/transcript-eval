@@ -129,6 +129,54 @@
     <pre id="out-source">(no response yet)</pre>
   </fieldset>
 
+  <fieldset>
+    <legend>7. Port + Auth (Ext.4)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Exercises chrome.runtime.connect(EXT_ID). Keeps the port open so
+      the extension can push messages to this page. Disconnect via button
+      or by reloading the page.
+    </p>
+    <div class="row">
+      <button id="btn-port-connect">Connect Port</button>
+      <button id="btn-port-disconnect" disabled>Disconnect</button>
+      <span id="port-status" class="muted">idle</span>
+    </div>
+    <pre id="out-port">(no messages yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>8. Session status (Ext.4)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Live view of envato_session_status (poll every 2s). Button runs the
+      network pre-flight via debug_check_envato_session.
+    </p>
+    <div class="row">
+      <span><strong>storage.envato_session_status:</strong></span>
+      <span id="storage-envato-status">—</span>
+    </div>
+    <div class="row">
+      <button id="btn-check-envato">Run debug_check_envato_session</button>
+    </div>
+    <pre id="out-check-envato">(no response yet)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>9. 401 refresh simulation (Ext.4)</legend>
+    <p class="muted" style="margin-top: 0;">
+      Sends {type:"refresh_session"} over the connected Port. Connect the
+      port first (fieldset 7), then click below. The extension normally
+      posts this itself after a 401; here you fire it manually.
+      To complete the round-trip, reply with a {type:"session"} message
+      via the existing sendMessage path (fieldset 2) or from your own code
+      — the extension will write the JWT and resolve any pending refresh
+      promise internally.
+    </p>
+    <div class="row">
+      <button id="btn-post-refresh" disabled>Post {type:"refresh_session"} via Port</button>
+    </div>
+    <pre id="out-refresh">(not sent)</pre>
+  </fieldset>
+
   <script type="module">
     const idInput = document.getElementById('ext-id')
     idInput.value = localStorage.getItem('ext_test_id') || ''
@@ -338,6 +386,83 @@
         out.textContent = 'ERROR: ' + (e.message || e)
       }
     }
+
+    // ---- Ext.4 Port + Auth ----
+    let activeTestPort = null
+    const portStatusEl = document.getElementById('port-status')
+    const portOutEl = document.getElementById('out-port')
+    const btnConnect = document.getElementById('btn-port-connect')
+    const btnDisconnect = document.getElementById('btn-port-disconnect')
+    const btnPostRefresh = document.getElementById('btn-post-refresh')
+
+    function logPort(line) {
+      const ts = new Date().toISOString().slice(11, 23)
+      portOutEl.textContent = `[${ts}] ${line}\n` + portOutEl.textContent
+    }
+
+    btnConnect.onclick = () => {
+      try {
+        const id = getExtId()
+        activeTestPort = chrome.runtime.connect(id, { name: 'test-harness' })
+        portStatusEl.textContent = 'connected'
+        portStatusEl.className = 'status-ok'
+        btnConnect.disabled = true
+        btnDisconnect.disabled = false
+        btnPostRefresh.disabled = false
+        logPort('connected')
+        activeTestPort.onMessage.addListener(msg => logPort('IN  ' + pretty(msg)))
+        activeTestPort.onDisconnect.addListener(() => {
+          portStatusEl.textContent = 'disconnected'
+          portStatusEl.className = 'status-err'
+          btnConnect.disabled = false
+          btnDisconnect.disabled = true
+          btnPostRefresh.disabled = true
+          const err = chrome.runtime.lastError
+          logPort('disconnected' + (err ? ' (' + err.message + ')' : ''))
+          activeTestPort = null
+        })
+      } catch (e) {
+        logPort('EXCEPTION: ' + (e.message || e))
+      }
+    }
+
+    btnDisconnect.onclick = () => {
+      try { activeTestPort?.disconnect() } catch {}
+    }
+
+    btnPostRefresh.onclick = () => {
+      const out = document.getElementById('out-refresh')
+      if (!activeTestPort) {
+        out.textContent = 'no port — connect first'
+        return
+      }
+      try {
+        activeTestPort.postMessage({ type: 'refresh_session', version: 1 })
+        out.textContent = 'posted {type:"refresh_session", version:1}. Reply via fieldset 2 (sendMessage {type:"session",...}) to complete.'
+      } catch (e) {
+        out.textContent = 'ERROR: ' + (e.message || e)
+      }
+    }
+
+    // ---- Ext.4 Session status ----
+    const storageStatusEl = document.getElementById('storage-envato-status')
+    async function refreshStorageStatus() {
+      try {
+        const r = await send({ type: 'ping', version: 1 })
+        storageStatusEl.textContent = r?.envato_session ?? '—'
+        storageStatusEl.className = r?.envato_session === 'ok' ? 'status-ok'
+          : r?.envato_session === 'missing' ? 'status-err' : ''
+      } catch {
+        storageStatusEl.textContent = '—'
+        storageStatusEl.className = ''
+      }
+    }
+    setInterval(refreshStorageStatus, 2000)
+    refreshStorageStatus()
+
+    document.getElementById('btn-check-envato').onclick = () => showResult('out-check-envato',
+      send({ type: 'debug_check_envato_session', version: 1 })
+    )
   </script>
 </body>
 </html>
