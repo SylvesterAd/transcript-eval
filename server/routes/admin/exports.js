@@ -101,4 +101,96 @@ router.get('/', requireAuth, requireAdmin, async (req, res, next) => {
   }
 })
 
+// GET /api/admin/exports/:id/events
+//
+// Returns the full export row + all events in `t ASC` order (the
+// index idx_export_events_export is ordered on (export_id, t), so
+// ASC hits the index exactly). Aggregates are computed in JS from
+// the events array — no second query — since we've already paid
+// for the events fetch.
+//
+// Response 200: {
+//   export: { id, user_id, plan_pipeline_id, variant_labels, status,
+//             manifest_json, result_json, xml_paths, folder_path,
+//             created_at, completed_at },
+//   events: [{ id, event, item_id, source, phase, error_code,
+//              http_status, retry_count, meta, t, received_at }, ...],
+//   aggregates: { fail_count, success_count, by_source: {...},
+//                 by_error_code: {...} }
+// }
+// Response 404: { error: 'export not found' }
+// Response 401/403: via requireAuth/requireAdmin
+router.get('/:id/events', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params
+    const exportRow = await db.prepare(
+      `SELECT id, user_id, plan_pipeline_id, variant_labels, status,
+              manifest_json, result_json, xml_paths, folder_path,
+              created_at, completed_at
+       FROM exports WHERE id = ?`
+    ).get(id)
+    if (!exportRow) return res.status(404).json({ error: 'export not found' })
+
+    // `t ASC` hits idx_export_events_export(export_id, t). Do not
+    // change to `received_at` — that's the server-stamp for clock-skew
+    // triage only and is not the primary sort.
+    const events = await db.prepare(
+      `SELECT id, event, item_id, source, phase, error_code,
+              http_status, retry_count, meta_json, t, received_at
+       FROM export_events
+       WHERE export_id = ?
+       ORDER BY t ASC`
+    ).all(id)
+
+    // Parse meta_json server-side so the client doesn't re-parse
+    // per row in render. Null on parse failure — the client treats
+    // meta as optional.
+    const eventsParsed = events.map(e => {
+      let meta = null
+      if (e.meta_json) {
+        try { meta = JSON.parse(e.meta_json) } catch { /* leave null */ }
+      }
+      const { meta_json, ...rest } = e
+      return { ...rest, meta }
+    })
+
+    // Aggregates: per-source and per-error_code failure rates.
+    // Only counts events with event === 'item_failed'. Per-source
+    // also counts successes so the UI can render a rate (failed /
+    // (failed + downloaded)) per source.
+    const bySource = {}
+    const byErrorCode = {}
+    let failCount = 0
+    let successCount = 0
+    for (const ev of eventsParsed) {
+      if (ev.event === 'item_failed') {
+        failCount++
+        const src = ev.source || 'unknown'
+        bySource[src] = bySource[src] || { failed: 0, succeeded: 0 }
+        bySource[src].failed++
+        const code = ev.error_code || 'unknown'
+        byErrorCode[code] = (byErrorCode[code] || 0) + 1
+      } else if (ev.event === 'item_downloaded') {
+        successCount++
+        const src = ev.source || 'unknown'
+        bySource[src] = bySource[src] || { failed: 0, succeeded: 0 }
+        bySource[src].succeeded++
+      }
+    }
+
+    res.json({
+      export: exportRow,
+      events: eventsParsed,
+      aggregates: {
+        fail_count: failCount,
+        success_count: successCount,
+        by_source: bySource,
+        by_error_code: byErrorCode,
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
 export default router
