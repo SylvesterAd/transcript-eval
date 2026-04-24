@@ -10,7 +10,45 @@
 // them. Every call requires a valid JWT from Ext.1's storage.
 
 import { BACKEND_URL, FREEPIK_URL_GRACE_MS } from '../config.js'
-import { getJwt } from './auth.js'
+import { getJwt, refreshSessionViaPort } from './auth.js'
+
+// Backend fetch with one retry on 401. Called by the Pexels + Freepik
+// URL fetchers so we avoid copy-pasting the refresh dance.
+//
+// On first 401, try a refreshSessionViaPort() round-trip. If it
+// succeeds, retry the original fetch ONCE with the (newly persisted)
+// JWT. If the refresh fails (no port / 10s timeout / disconnect),
+// re-throw the original 401. NO further retries — Ext.4 is
+// retry-once-then-surface per spec.
+export async function backendFetchWithRefresh(url, init = {}) {
+  const jwt = await getJwt()
+  const authedInit = {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      ...(jwt?.token ? { 'Authorization': `Bearer ${jwt.token}` } : {}),
+    },
+  }
+  const resp = await fetch(url, authedInit)
+  if (resp.status !== 401) return resp
+
+  // 401 path — try one refresh + retry.
+  try {
+    await refreshSessionViaPort()
+  } catch (err) {
+    // Can't recover; let the original 401 bubble up.
+    return resp
+  }
+  const freshJwt = await getJwt()
+  const retryInit = {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      ...(freshJwt?.token ? { 'Authorization': `Bearer ${freshJwt.token}` } : {}),
+    },
+  }
+  return fetch(url, retryInit)
+}
 
 // ---- public API ----
 
@@ -23,12 +61,12 @@ import { getJwt } from './auth.js'
  * Error('network_error: <detail>') on fetch failure.
  */
 export async function fetchPexelsUrl({ itemId, preferredResolution = '1080p' }) {
-  const headers = await buildAuthHeaders()
+  await ensureJwtFresh()
   let resp
   try {
-    resp = await fetch(`${BACKEND_URL}/api/pexels-url`, {
+    resp = await backendFetchWithRefresh(`${BACKEND_URL}/api/pexels-url`, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item_id: itemId, preferred_resolution: preferredResolution }),
     })
   } catch (err) {
@@ -53,12 +91,12 @@ export async function fetchPexelsUrl({ itemId, preferredResolution = '1080p' }) 
  * failure.
  */
 export async function fetchFreepikUrl({ itemId, format = 'mp4' }) {
-  const headers = await buildAuthHeaders()
+  await ensureJwtFresh()
   let resp
   try {
-    resp = await fetch(`${BACKEND_URL}/api/freepik-url`, {
+    resp = await backendFetchWithRefresh(`${BACKEND_URL}/api/freepik-url`, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item_id: itemId, format }),
     })
   } catch (err) {
@@ -147,17 +185,15 @@ export async function downloadSourceItem({ source, itemId, runId, sanitizedFilen
 
 // Reads the JWT fresh from chrome.storage.local (MV3 SWs terminate
 // aggressively — never cache). Throws 'no_jwt' if missing or
-// 'jwt_expired' if past expiry. Returns a headers object ready to
-// spread into fetch().
-async function buildAuthHeaders() {
+// 'jwt_expired' if past expiry. Fails fast before we hit the backend
+// with a known-bad token. The 401-on-backend case (JWT present and
+// not yet expired per our clock, but backend rejects — e.g. kid
+// rotation) is handled by backendFetchWithRefresh one retry path.
+async function ensureJwtFresh() {
   const jwt = await getJwt()
   if (!jwt || !jwt.token) throw new Error('no_jwt')
   if (typeof jwt.expires_at === 'number' && jwt.expires_at <= Date.now()) {
     throw new Error('jwt_expired')
-  }
-  return {
-    'Authorization': 'Bearer ' + jwt.token,
-    'Content-Type': 'application/json',
   }
 }
 
