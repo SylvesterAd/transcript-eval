@@ -13,6 +13,7 @@ import pexelsRouter from './routes/pexels.js'
 import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
 import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter, freepikUrlRouter } from './routes/exports.js'
+import adminExportsRouter from './routes/admin/exports.js'
 import exportXmlRouter from './routes/export-xml.js'
 import extConfigRouter from './routes/ext-config.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
@@ -56,6 +57,7 @@ app.use('/api/broll-searches', brollSearchesRouter)
 app.use('/api/storyblocks', storyblocksRouter)
 app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)
+app.use('/api/admin/exports', adminExportsRouter)
 app.use('/api/gpu', gpuRouter)
 app.use('/api/exports', exportsRouter)
 app.use('/api/exports', exportXmlRouter)
