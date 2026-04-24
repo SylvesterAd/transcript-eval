@@ -142,3 +142,17 @@ footer {
   color: #991b1b;
   text-decoration: underline;
 }
+
+/* Ext.8 diagnostics + opt-out rows */
+.btn-action {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  cursor: pointer;
+}
+.btn-action:disabled { opacity: 0.5; cursor: not-allowed; }
+.optout-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.optout-toggle input[type="checkbox"] { cursor: pointer; }
+.diag-row, .optout-row { margin-top: 4px; }

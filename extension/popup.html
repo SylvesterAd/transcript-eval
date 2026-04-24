@@ -23,6 +23,25 @@
       <div class="row-status" id="status-envato">—</div>
       <div class="row-detail" id="detail-envato"></div>
     </div>
+
+    <div class="row diag-row" id="row-diag">
+      <div class="row-label">Diagnostics</div>
+      <div class="row-status">
+        <button type="button" id="btn-build-bundle" class="btn-action">Export diagnostic bundle</button>
+      </div>
+      <div class="row-detail" id="detail-diag">Zip with queue + events + environment for support tickets.</div>
+    </div>
+
+    <div class="row optout-row" id="row-optout">
+      <div class="row-label">Send diagnostic events</div>
+      <div class="row-status">
+        <label class="optout-toggle">
+          <input type="checkbox" id="chk-optout-send" />
+          <span>On</span>
+        </label>
+      </div>
+      <div class="row-detail" id="detail-optout">Off disables all /api/export-events POSTs. Export still works.</div>
+    </div>
   </main>
 
   <div id="disk-error" class="disk-error" style="display:none"></div>
