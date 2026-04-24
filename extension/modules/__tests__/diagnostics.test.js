@@ -235,7 +235,7 @@ describe('buildBundle', () => {
     const unzipped = unzipSync(blob.bytes)
     const meta = JSON.parse(strFromU8(unzipped['meta.json']))
     expect(meta.schema_version).toBe(1)
-    expect(meta.ext_version).toBe('0.8.0')
+    expect(meta.ext_version).toBe('0.9.0')
     expect(meta.bundle_max_events).toBe(200)
     expect(meta.bundle_window_ms).toBe(86_400_000)
   })

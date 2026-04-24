@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.8.0'
+export const EXT_VERSION = '0.9.0'
 export const ENV = 'dev'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
@@ -163,3 +163,50 @@ export const DIAGNOSTICS_MAX_EVENTS = 200
 // Bundle schema version. Bump when changing the on-disk JSON
 // shape; WebApp.4's parser must support each prior version.
 export const DIAGNOSTICS_SCHEMA_VERSION = 1
+
+// -------- Ext.9 feature flag fetch --------
+//
+// Source of truth for /api/ext-config consumption. Keep this block
+// in sync with server/routes/ext-config.js — both share the 60s
+// TTL contract (server sets Cache-Control: public, max-age=60).
+
+// Endpoint path appended to BACKEND_URL. PUBLIC (no auth) — must stay
+// public so newly-installed extensions can gate BEFORE JWT mint.
+export const EXT_CONFIG_ENDPOINT = '/api/ext-config'
+
+// Cache TTL in ms. Fresh (<60s) → trust. Stale (>60s) + fetch failure
+// → trust stale with a warning log. No cache at all + fetch failure
+// → fall open (see CONFIG_FALL_OPEN_DEFAULTS).
+export const EXT_CONFIG_CACHE_TTL_MS = 60 * 1000
+
+// Max wait for an in-flight startup refresh when the first
+// {type:"export"} races with SW boot. Past this, fall back to
+// cached / fall-open.
+export const CONFIG_CHECK_AWAIT_TIMEOUT_MS = 5000
+
+// Fall-open defaults — what enforceConfigBeforeExport uses when no
+// cache exists AND fetch failed. Match Backend 1.5 DEFAULTS where
+// they are "on"; freepik_enabled is true here (vs false in server
+// DEFAULTS) because fall-open means "backend unreachable" — a remote
+// safety flag cannot be honored when we cannot reach the remote.
+// The user gets Freepik; if Freepik is broken upstream, the download
+// itself will fail with a clear per-item error.
+export const CONFIG_FALL_OPEN_DEFAULTS = Object.freeze({
+  min_ext_version:      '0.0.0',
+  export_enabled:       true,
+  envato_enabled:       true,
+  pexels_enabled:       true,
+  freepik_enabled:      true,
+  daily_cap_override:   null,
+  slack_alerts_enabled: false,  // client doesn't care — pass-through field
+})
+
+// Canonical error codes emitted by enforceConfigBeforeExport on reject.
+// WebApp.4 / popup key UI off these exact strings — do NOT rename.
+export const CONFIG_ERROR_CODES = Object.freeze({
+  EXPORT_DISABLED:    'export_disabled_by_config',
+  VERSION_BELOW_MIN:  'ext_version_below_min',
+  ENVATO_DISABLED:    'envato_disabled_by_config',
+  PEXELS_DISABLED:    'pexels_disabled_by_config',
+  FREEPIK_DISABLED:   'freepik_disabled_by_config',
+})
