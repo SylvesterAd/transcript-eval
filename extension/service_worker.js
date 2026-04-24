@@ -20,6 +20,7 @@ import {
   startRun, pauseRun, resumeRun, cancelRun, getRunState,
   autoResumeIfActiveRun,
 } from './modules/queue.js'
+import { getBufferStats as telemetryStats, flushNow as telemetryFlushNow } from './modules/telemetry.js'
 
 async function handlePing() {
   const jwt = await getJwt()
@@ -223,6 +224,25 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
       case 'debug_check_envato_session':
         sendResponse(await handleDebugCheckEnvatoSession())
         return
+      case 'debug_telemetry_stats': {
+        try {
+          const stats = await telemetryStats()
+          sendResponse({ ok: true, stats })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'debug_telemetry_flush': {
+        try {
+          await telemetryFlushNow()
+          const stats = await telemetryStats()
+          sendResponse({ ok: true, stats })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
       default:
         sendResponse({ error: 'unknown_type', type: msg.type })
         return
