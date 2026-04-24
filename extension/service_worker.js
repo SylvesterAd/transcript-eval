@@ -22,6 +22,12 @@ import {
 } from './modules/queue.js'
 import { getBufferStats as telemetryStats, flushNow as telemetryFlushNow } from './modules/telemetry.js'
 import { buildBundle } from './modules/diagnostics.js'
+import {
+  refreshConfigOnStartup,
+  enforceConfigBeforeExport,
+  fetchConfig,
+  getCachedConfig,
+} from './modules/config-fetch.js'
 
 async function handlePing() {
   const jwt = await getJwt()
@@ -186,6 +192,13 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
       // dispatcher to modules/queue.js.
       case 'export': {
         const { manifest, target_folder, options, export_id } = msg
+        // Ext.9 — enforce feature flags BEFORE anything else. Single site;
+        // startRun has a defensive guard only (see queue.js).
+        const gate = await enforceConfigBeforeExport(manifest)
+        if (!gate.ok) {
+          sendResponse({ ok: false, error_code: gate.error_code, detail: gate.detail, current: gate.current, min: gate.min })
+          return
+        }
         // user_id comes from the stored JWT — queue uses it for
         // completed_items keying.
         const jwt = await getJwt()
@@ -196,6 +209,9 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           targetFolder: target_folder,
           options,
           userId,
+          // Ext.9 — mark that the config gate passed so queue.startRun's
+          // defensive guard doesn't warn-log.
+          _config_check_passed: true,
         })
         sendResponse(result)
         return
@@ -253,6 +269,40 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         }
         return
       }
+      case 'debug_fetch_config': {
+        try {
+          const record = await fetchConfig()
+          sendResponse({ ok: true, record })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'debug_get_cached_config': {
+        try {
+          const cached = await getCachedConfig()
+          sendResponse({ ok: true, cached })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'debug_set_cached_config': {
+        // Test harness only — directly writes a cache record. Used to
+        // simulate export_enabled=false without touching the backend.
+        try {
+          const { config, fetched_at } = msg
+          if (!config || typeof config !== 'object') {
+            sendResponse({ ok: false, error: 'config (object) required' })
+            return
+          }
+          await chrome.storage.local.set({ cached_ext_config: { config, fetched_at: fetched_at || Date.now() } })
+          sendResponse({ ok: true })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
       case 'debug_set_telemetry_opt_out': {
         try {
           const value = msg.value === true
@@ -289,11 +339,15 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
 // check if there's an active run to resume. Task 9 fills in
 // autoResumeIfActiveRun.
 chrome.runtime.onStartup.addListener(() => {
+  // Ext.9 — fire-and-forget config refresh on Chrome startup.
+  refreshConfigOnStartup()
   autoResumeIfActiveRun().catch(err => {
     console.error('[sw] autoResumeIfActiveRun on startup failed', err)
   })
 })
 chrome.runtime.onInstalled.addListener(() => {
+  // Ext.9 — fire-and-forget config refresh on install / update.
+  refreshConfigOnStartup()
   autoResumeIfActiveRun().catch(err => {
     console.error('[sw] autoResumeIfActiveRun on install failed', err)
   })
@@ -301,6 +355,7 @@ chrome.runtime.onInstalled.addListener(() => {
 // Also try at module top level — onStartup doesn't always fire on
 // SW wake from idle (it fires on Chrome startup). The top-level call
 // covers wake-from-idle.
+refreshConfigOnStartup()  // Ext.9 — fire-and-forget, safe to call repeatedly.
 autoResumeIfActiveRun().catch(err => {
   console.error('[sw] autoResumeIfActiveRun at module-init failed', err)
 })

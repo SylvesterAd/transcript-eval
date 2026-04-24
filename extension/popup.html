@@ -12,6 +12,17 @@
   </header>
 
   <main>
+    <!-- Ext.9 — global config state banner. Hidden by default; popup.js
+         toggles the .show class based on cached config. -->
+    <div id="config-banner" class="config-banner" hidden>
+      <div class="config-banner-icon" aria-hidden="true">!</div>
+      <div class="config-banner-body">
+        <div id="config-banner-title" class="config-banner-title"></div>
+        <div id="config-banner-detail" class="config-banner-detail"></div>
+        <a id="config-banner-action" class="config-banner-action" href="#" hidden>Open Chrome Web Store</a>
+      </div>
+    </div>
+
     <div class="row" id="row-te">
       <div class="row-label">transcript-eval</div>
       <div class="row-status" id="status-te">—</div>
