@@ -432,6 +432,27 @@ async function handleDownloadEvent(item, delta) {
           console.warn('[queue] markCompleted failed', err)
         }
       }
+      // Ext.7: daily-cap increment. Happens on complete, not on
+      // license commit — a hard-stop mid-download must NOT leak a
+      // cap increment. Single write point; runDownloader's
+      // pre-check handles the subsequent skip.
+      try {
+        await incrementDailyCount(item.source)
+        const newStatus = await checkDailyCapThreshold(item.source)
+        if (newStatus === 'warn' && !state.daily_cap_warned?.[item.source]) {
+          state.daily_cap_warned = state.daily_cap_warned || {}
+          state.daily_cap_warned[item.source] = Date.now()
+          broadcast({ type: 'warn', message: `Approaching daily ${item.source} cap (400/500)` })
+        }
+        if (newStatus === 'hard_stop') {
+          // Skip further items of this source; do NOT hard-stop the
+          // whole queue (open question 3). A future item hitting the
+          // runDownloader's pre-check will fail with source_daily_cap_exceeded.
+          console.warn('[queue] daily cap hit for source:', item.source)
+        }
+      } catch (err) {
+        console.warn('[queue] daily-cap increment failed', err)
+      }
       emitTelemetry('item_downloaded', {
         export_id: state.runId,
         item_id: item.source_item_id,
