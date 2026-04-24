@@ -7,7 +7,7 @@ import strategiesRouter from './routes/strategies.js'
 import experimentsRouter from './routes/experiments.js'
 import diffsRouter from './routes/diffs.js'
 import rankingsRouter from './routes/rankings.js'
-import brollRouter from './routes/broll.js'
+import brollRouter, { brollSearchesRouter } from './routes/broll.js'
 import storyblocksRouter from './routes/storyblocks.js'
 import pexelsRouter from './routes/pexels.js'
 import adminRouter from './routes/admin.js'
@@ -49,6 +49,7 @@ app.use('/api/experiments', experimentsRouter)
 app.use('/api/diffs', diffsRouter)
 app.use('/api/rankings', rankingsRouter)
 app.use('/api/broll', brollRouter)
+app.use('/api/broll-searches', brollSearchesRouter)
 app.use('/api/storyblocks', storyblocksRouter)
 app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)
