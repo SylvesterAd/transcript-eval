@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { requireAuth } from '../auth.js'
 import { mintExtToken, requireExtAuth } from '../services/ext-jwt.js'
-import { createExport, recordExportEvent, ValidationError, NotFoundError } from '../services/exports.js'
+import { createExport, recordExportEvent, writeExportResult, ValidationError, NotFoundError } from '../services/exports.js'
 import { getDownloadUrl as pexelsGetDownloadUrl, isEnabled as pexelsEnabled } from '../services/pexels.js'
 import { getSignedDownloadUrl as freepikGetSignedUrl, isEnabled as freepikEnabled, RateLimitError as FreepikRateLimitError } from '../services/freepik.js'
 
@@ -19,6 +19,38 @@ router.post('/', requireAuth, async (req, res, next) => {
     res.status(201).json(result)
   } catch (err) {
     if (err instanceof ValidationError) return res.status(err.status).json({ error: err.message })
+    next(err)
+  }
+})
+
+// POST /api/exports/:id/result
+//
+// Writes the {variants:[{label, sequenceName, placements}, ...]} shape to
+// exports.result_json. Called by WebApp.1's State E handler AFTER the
+// extension signals {type:"complete"} — the client has the placement
+// timing data from the unified manifest built at State C, so the client
+// is the authority on what to write.
+//
+// Why not put this inside the extension telemetry flow? Phase 1's
+// recordExportEvent writes raw `meta` (counts only) to result_json;
+// coercing its shape would conflate telemetry semantics with a write
+// concern for a specific downstream consumer (XMEML). Keeping the
+// writer separate here means the extension contract doesn't have to
+// care about XMEML's input shape.
+//
+// Request body: { variants: [{ label, sequenceName, placements: [...] }, ...] }
+// Response: 200 { ok: true } | 400 { error } | 404 { error } | 500 passthrough
+router.post('/:id/result', requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.auth?.userId
+    if (!userId) return res.status(401).json({ error: 'Authentication required' })
+    const { id } = req.params
+    const { variants } = req.body || {}
+    const result = await writeExportResult({ id, userId, variants })
+    res.status(200).json(result)
+  } catch (err) {
+    if (err instanceof ValidationError) return res.status(err.status).json({ error: err.message })
+    if (err instanceof NotFoundError) return res.status(err.status).json({ error: err.message })
     next(err)
   }
 })
