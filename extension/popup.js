@@ -2,7 +2,7 @@
 // config.js, never writes. Export progress UI lives on the web app
 // export page (per spec § "Popup UI").
 
-import { EXT_VERSION, BACKEND_URL } from './config.js'
+import { EXT_VERSION, BACKEND_URL, CONFIG_ERROR_CODES } from './config.js'
 import { getJwt, hasEnvatoSession } from './modules/auth.js'
 import { buildBundle } from './modules/diagnostics.js'
 
@@ -35,6 +35,23 @@ async function renderEnvatoRow(statusFromStorage) {
   const statusEn = document.getElementById('status-envato')
   const detailEn = document.getElementById('detail-envato')
 
+  // Ext.9 — if envato_enabled=false in cached config, show the paused
+  // state instead of sign-in prompt. Users can tell "pause" from "need
+  // to sign in" by the distinct row state.
+  const { cached_ext_config } = await chrome.storage.local.get('cached_ext_config')
+  const cfg = cached_ext_config?.config
+  if (cfg && cfg.envato_enabled === false) {
+    rowEn.dataset.state = 'paused'
+    setRow(rowEn, statusEn, detailEn, {
+      text: 'paused',
+      className: 'warn',
+      detail: 'Envato downloads paused by transcript-eval',
+    })
+    return 'paused'
+  } else {
+    delete rowEn.dataset.state
+  }
+
   // Trust storage when it has a value; fall back to a live cookie
   // read for the first-run case (watcher hasn't primed storage).
   let status = statusFromStorage
@@ -57,6 +74,69 @@ async function renderEnvatoRow(statusFromStorage) {
     })
   }
   return status
+}
+
+// Ext.9 — read cached config and render the config banner near the top
+// of the popup. Three severity variants: error (global export disabled),
+// warn (ext version below min), info (per-source kill aggregate).
+async function renderConfigBanner() {
+  const banner = document.getElementById('config-banner')
+  const title  = document.getElementById('config-banner-title')
+  const detail = document.getElementById('config-banner-detail')
+  const action = document.getElementById('config-banner-action')
+  if (!banner) return
+
+  // Read cached config directly from chrome.storage.local — popup.js
+  // intentionally does NOT import config-fetch.js to keep the popup
+  // bundle small. The cache format is stable (see Ext.9 plan).
+  const { cached_ext_config } = await chrome.storage.local.get('cached_ext_config')
+  const cfg = cached_ext_config?.config
+  if (!cfg) {
+    banner.hidden = true
+    return
+  }
+
+  if (cfg.export_enabled === false) {
+    banner.hidden = false
+    banner.dataset.severity = 'error'
+    title.textContent = 'Export temporarily disabled'
+    detail.textContent = 'Check transcript-eval.com for status.'
+    action.hidden = true
+    return
+  }
+
+  // Semver compare inline (avoid importing compareSemver to keep
+  // popup bundle lean — duplication is three lines).
+  const parse = s => s.split('.').map(n => parseInt(n, 10))
+  const [ca, cb, cc] = parse(EXT_VERSION)
+  const [ma, mb, mc] = parse(cfg.min_ext_version || '0.0.0')
+  const below = (ca < ma) || (ca === ma && cb < mb) || (ca === ma && cb === mb && cc < mc)
+  if (below) {
+    banner.hidden = false
+    banner.dataset.severity = 'warn'
+    title.textContent = 'Update required'
+    detail.textContent = `v${EXT_VERSION} is below required v${cfg.min_ext_version}.`
+    action.hidden = false
+    action.href = '#'  // Ext.11 fills in the real Chrome Web Store URL.
+    return
+  }
+
+  // Per-source kill aggregate banner. Per-row updates are State C's
+  // job; popup shows an aggregate hint when State C isn't rendered.
+  const killed = []
+  if (cfg.envato_enabled === false) killed.push('Envato')
+  if (cfg.pexels_enabled === false) killed.push('Pexels')
+  if (cfg.freepik_enabled === false) killed.push('Freepik')
+  if (killed.length > 0) {
+    banner.hidden = false
+    banner.dataset.severity = 'info'
+    title.textContent = 'Some sources disabled'
+    detail.textContent = `${killed.join(', ')} paused by transcript-eval.`
+    action.hidden = true
+    return
+  }
+
+  banner.hidden = true
 }
 
 async function renderTeRow() {
@@ -196,6 +276,7 @@ async function renderOptOutRow() {
 async function render() {
   document.getElementById('version').textContent = `v${EXT_VERSION}`
   const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
+  await renderConfigBanner()  // Ext.9 — first, so banner is up top
   await renderTeRow()
   await renderEnvatoRow(envato_session_status)
   await renderBanner()
@@ -209,7 +290,7 @@ async function render() {
 // than showing stale state.
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return
-  if ('te:jwt' in changes || 'envato_session_status' in changes) {
+  if ('te:jwt' in changes || 'envato_session_status' in changes || 'cached_ext_config' in changes) {
     render()
   }
 })
