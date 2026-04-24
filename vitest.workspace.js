@@ -23,6 +23,17 @@ export default defineWorkspace([
     },
   },
   {
+    // JSX component tests (e.g. StateF_Partial.test.jsx) need JSX to
+    // transform via the automatic runtime — otherwise esbuild emits
+    // React.createElement(...) calls and components without a top-
+    // level `import React` throw "React is not defined" at render
+    // time. vitest 1.6.x doesn't inherit the vite.config.js react
+    // plugin into workspace projects; esbuild.jsx settings here do
+    // the same job without the plugin dep.
+    esbuild: {
+      jsx: 'automatic',
+      jsxImportSource: 'react',
+    },
     test: {
       name: 'web',
       environment: 'happy-dom',
