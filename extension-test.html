@@ -206,6 +206,31 @@
     <pre id="q-log">(no events yet)</pre>
   </fieldset>
 
+  <fieldset>
+    <legend>11. Telemetry (Ext.6)</legend>
+    <p class="muted">
+      Drives a 3-item synthetic run (1 Pexels + 1 Freepik + 1 bogus
+      source_item_id to trigger <code>item_failed</code>) through the
+      queue to exercise the full telemetry emit surface. Use "Query
+      stats" to see the in-memory buffer + persisted queue sizes.
+      Use "Force flush" to drain immediately rather than waiting for
+      the 5s loop tick.
+    </p>
+    <p class="muted">
+      <b>Offline test:</b> Chrome DevTools &rarr; Network tab &rarr;
+      "Offline" checkbox toggles network for the whole browser
+      (including the SW). Flip it on, fire a run, flip it off,
+      observe the queued events flush within 5s (or immediately via
+      Force flush).
+    </p>
+    <div class="row">
+      <button id="t-synthetic-run">Fire synthetic short run (3 items)</button>
+      <button id="t-stats">Query buffer stats</button>
+      <button id="t-flush">Force flush</button>
+    </div>
+    <pre id="t-log">(no events yet)</pre>
+  </fieldset>
+
   <script type="module">
     const idInput = document.getElementById('ext-id')
     idInput.value = localStorage.getItem('ext_test_id') || ''
@@ -583,6 +608,38 @@
         options: { variants: [], force_redownload: false },
       })
       qAppend('second export reply: ' + JSON.stringify(r))
+    }
+
+    // Ext.6 telemetry fieldset.
+    const tLog = document.getElementById('t-log')
+    function tAppend(line) {
+      if (tLog.textContent === '(no events yet)') tLog.textContent = ''
+      tLog.textContent += line + '\n'
+      tLog.scrollTop = tLog.scrollHeight
+    }
+    document.getElementById('t-synthetic-run').onclick = async () => {
+      const runId = 'telemetry_demo_' + Date.now()
+      const manifest = [
+        { source: 'pexels',  source_item_id: '856971', target_filename: 'pexels_856971.mp4', envato_item_url: null, est_size_bytes: 5_000_000 },
+        { source: 'freepik', source_item_id: 'fp_001', target_filename: 'freepik_fp_001.mp4', envato_item_url: null, est_size_bytes: 20_000_000 },
+        { source: 'pexels',  source_item_id: 'bogus', target_filename: 'pexels_bogus.mp4', envato_item_url: null, est_size_bytes: 1_000_000 },
+      ]
+      const result = await send({
+        type: 'export', version: 1,
+        export_id: runId,
+        manifest,
+        target_folder: 'transcript-eval/telemetry-demo',
+        options: { variants: [], force_redownload: false },
+      })
+      tAppend('startRun: ' + JSON.stringify(result))
+    }
+    document.getElementById('t-stats').onclick = async () => {
+      const r = await send({ type: 'debug_telemetry_stats', version: 1 })
+      tAppend('stats: ' + JSON.stringify(r))
+    }
+    document.getElementById('t-flush').onclick = async () => {
+      const r = await send({ type: 'debug_telemetry_flush', version: 1 })
+      tAppend('flush result: ' + JSON.stringify(r))
     }
   </script>
 </body>
