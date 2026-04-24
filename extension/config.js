@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.4.0'
+export const EXT_VERSION = '0.5.0'
 export const ENV = 'dev'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
@@ -20,10 +20,27 @@ export const MESSAGE_VERSION = 1
 // a slow network + cold Envato cache without hanging forever.
 export const RESOLVER_TIMEOUT_MS = 15000
 
-// Concurrency cap for hidden-tab resolvers. Ext.2 serves one item per
-// user click so the cap is 1; Ext.5 raises this to 5 with a real pool.
-// Keep the constant here so the bump point is a single-line edit.
+// Per-stage worker pool sizes. Ext.2/3 capped everything at 1 for
+// isolated debugging; Ext.5 is where the real queue runs concurrent
+// workers. Per the spec's "Large exports" table: 5 resolvers, 5
+// licensers, 3 downloaders. Tune here; every pool reads these.
+export const MAX_ENVATO_RESOLVER_CONCURRENCY = 5
+export const MAX_ENVATO_LICENSE_CONCURRENCY = 5
+export const MAX_DOWNLOAD_CONCURRENCY = 3
+
+// Legacy alias — Ext.2's single debug path still imports this.
+// Kept so the Ext.2 debug handler keeps working without edits.
 export const MAX_RESOLVER_CONCURRENCY = 1
+
+// Per-item progress pushes over Port are coalesced to at most one
+// push per PROGRESS_COALESCE_MS. chrome.downloads.onChanged fires
+// every few hundred ms during a single large download; without
+// coalescing, the Port gets hundreds of messages per second.
+export const PROGRESS_COALESCE_MS = 500
+
+// chrome.downloads.resume() retry cap for NETWORK_* interrupts.
+// Per the spec: three attempts, then mark the item failed.
+export const DOWNLOAD_NETWORK_RETRY_CAP = 3
 
 // Freepik signed URLs are short-lived (Phase 1 backend mints with
 // ~15 min TTL; Freepik's own TTL is 15-60 min). Ext.3 aborts the
