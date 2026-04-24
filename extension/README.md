@@ -509,3 +509,82 @@ These are never called from production code.
 - `fflate@^0.8` — 16KB, zero-dep, MIT, synchronous ZIP writer. Used
   by `diagnostics.buildBundle()` to assemble the multi-file ZIP
   without blocking on async I/O inside the MV3 SW.
+
+## Ext.9 — Feature flag fetch
+
+The extension consumes `GET /api/ext-config` (Backend 1.5, public
+endpoint) on service-worker boot and before every `{type:"export"}`
+message. Response shape:
+
+```jsonc
+{
+  "min_ext_version":       "0.1.0",
+  "export_enabled":        true,
+  "envato_enabled":        true,
+  "pexels_enabled":        true,
+  "freepik_enabled":       false,
+  "daily_cap_override":    null,
+  "slack_alerts_enabled":  true
+}
+```
+
+### Cache TTL
+
+Successful fetches are persisted to
+`chrome.storage.local.cached_ext_config` with a `fetched_at`
+timestamp. The 60-second TTL mirrors the server's
+`Cache-Control: public, max-age=60` header — within 60s, reads
+trust the cache; past 60s, reads try a refresh and fall back to
+the stale value if the refresh fails.
+
+### Semver gate
+
+`EXT_VERSION` (from `config.js`) is compared against
+`min_ext_version` (from the server) using a hand-rolled `x.y.z`
+comparator. If `EXT_VERSION < min_ext_version`, the export is
+rejected with `ext_version_below_min`, and the popup surfaces an
+"Update required" banner.
+
+### Per-source kill switches
+
+`envato_enabled` / `pexels_enabled` / `freepik_enabled` gate
+NEW exports only. A running queue is immune — kill-switch flips
+do NOT retroactively pause in-flight runs. Rejections name the
+source: `envato_disabled_by_config`, `pexels_disabled_by_config`,
+`freepik_disabled_by_config`.
+
+### Fall-open behavior
+
+- **Cache fresh (<60s)** → trust cache.
+- **Cache stale + fetch succeeds** → trust fresh response.
+- **Cache stale + fetch fails** → trust stale (warning logged).
+- **No cache + fetch succeeds** → trust fresh response.
+- **No cache + fetch fails** → FALL OPEN (all flags default true).
+  A down backend must never strand users whose download paths
+  are otherwise healthy.
+
+### Error codes
+
+The five canonical codes returned by `enforceConfigBeforeExport`:
+
+| Code                             | Meaning |
+|----------------------------------|---------|
+| `export_disabled_by_config`      | Global `export_enabled=false`. |
+| `ext_version_below_min`          | `EXT_VERSION` < `min_ext_version`. Payload includes `current` + `min`. |
+| `envato_disabled_by_config`      | Envato kill, and envato is in the manifest. |
+| `pexels_disabled_by_config`      | Pexels kill, and pexels is in the manifest. |
+| `freepik_disabled_by_config`     | Freepik kill, and freepik is in the manifest. |
+
+WebApp.4 keys its "Export disabled" UI off these exact strings —
+do not rename without a coordinated change there.
+
+### Debug handlers
+
+For the `extension-test.html` harness:
+
+- `debug_fetch_config` — trigger `fetchConfig()` manually.
+- `debug_get_cached_config` — read the current cache record.
+- `debug_set_cached_config` — inject a cache record (for simulating
+  `export_enabled=false` without touching the backend env var).
+
+These are never called from production code.
