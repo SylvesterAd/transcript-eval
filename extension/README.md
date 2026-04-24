@@ -79,3 +79,56 @@ extension/
   in Ext.5 when the queue UI is added.
 - No download flows — Ext.2 (Envato) and Ext.3 (Pexels/Freepik) add
   those.
+
+## Ext.2 — Envato single item
+
+Ext.2 adds the first real download flow: end-to-end licensed download
+of ONE Envato item via the 3-phase pipeline (resolve → license →
+download). No queue, no concurrency — just prove the pipeline.
+
+### Trigger via the dev test harness
+
+1. `npm run dev:client` (port 5173).
+2. Open `http://localhost:5173/extension-test.html`.
+3. Scroll to fieldset **"5. Envato one-shot (Ext.2)"**.
+4. Fill `item_id` (e.g. `NX9WYGQ`) and `envato_item_url` (the full
+   `https://elements.envato.com/…` URL).
+5. Click **Run Envato single download**.
+
+The file lands in `~/Downloads/transcript-eval/envato_<id>.<ext>`
+(Chrome creates the `transcript-eval/` subfolder on first download).
+Most Envato stock-video items deliver as `.mov`; a few as `.mp4`.
+
+### Caveats
+
+- **Signed in to Envato in this Chrome profile.** The resolver's
+  hidden tab and Phase 2's `fetch(..., {credentials:'include'})` both
+  rely on the Envato session cookies on `.envato.com`. If the profile
+  is signed out, Phase 2 returns 401 and the handler replies
+  `{ok:false, errorCode:"envato_session_missing"}`.
+- **License IS committed on Phase 2 success.** Every successful run
+  of the debug handler ticks the signed-in Envato account's
+  fair-use counter — same as if the user had clicked Download on
+  the Envato website. Do NOT aim this at a production Envato
+  account unless you intentionally want the license.
+- **ZIP/AEP/PRPROJ items are aborted AFTER the license commits.**
+  Phase 2.5 inspects the signed URL's content-disposition filename;
+  if it ends `.zip`/`.aep`/`.prproj`, no file is written — but the
+  license has already been spent on that item. This is bounded
+  waste; full deny-list handling lands in Ext.7.
+- **No retry / session-refresh / error matrix.** 401 / 402 / 403 /
+  429 / empty-downloadUrl surface as `errorCode: "envato_<…>"` and
+  stop. Retry policy, session refresh, and hard-stop on 403 are
+  Ext.4 + Ext.7 work.
+- **Concurrency cap = 1.** Ext.5 raises this to 5 resolvers + 3
+  downloaders.
+
+### Manifest changes (0.1.0 → 0.2.0)
+
+- `permissions`: `storage` → `storage`, `tabs`, `webNavigation`,
+  `downloads`.
+- `host_permissions` (new): `elements.envato.com/*`,
+  `app.envato.com/*`,
+  `video-downloads.elements.envatousercontent.com/*`.
+- No `cookies` / `power` permissions yet — those land in Ext.4 /
+  Ext.5.
