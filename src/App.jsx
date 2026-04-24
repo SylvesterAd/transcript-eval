@@ -18,6 +18,7 @@ import ApiLogsView from './components/views/ApiLogsView.jsx'
 import GpuPipelineView from './components/views/GpuPipelineView.jsx'
 import ProjectsView from './components/views/ProjectsView.jsx'
 import EditorView from './components/editor/EditorView.jsx'
+import ExportPage from './pages/ExportPage.jsx'
 
 class ErrorBoundary extends Component {
   state = { error: null }
@@ -171,6 +172,9 @@ export default function App() {
 
   return (
     <Routes>
+      {/* Export page — full-screen, outside UserLayout (sits between editor and extension) */}
+      <Route path="/editor/:id/export" element={<ErrorBoundary><ExportPage /></ErrorBoundary>} />
+
       {/* Editor — full-screen, outside UserLayout */}
       <Route path="/editor/:id" element={<ErrorBoundary><EditorView /></ErrorBoundary>} />
       <Route path="/editor/:id/:tab" element={<ErrorBoundary><EditorView /></ErrorBoundary>} />
