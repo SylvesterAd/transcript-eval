@@ -132,3 +132,74 @@ Most Envato stock-video items deliver as `.mov`; a few as `.mp4`.
   `video-downloads.elements.envatousercontent.com/*`.
 - No `cookies` / `power` permissions yet — those land in Ext.4 /
   Ext.5.
+
+## Ext.3 — Pexels + Freepik single item
+
+Ext.3 adds the second real download flow: end-to-end server-proxied
+download of ONE Pexels OR ONE Freepik item via the backend's
+`POST /api/pexels-url` and `POST /api/freepik-url` endpoints. No
+queue, no dedupe — just prove the server-proxied pipeline works
+end-to-end for both sources.
+
+### Trigger via the dev test harness
+
+1. Backend running on :3001 (Phase 1). `PEXELS_API_KEY` set in the
+   repo's `.env`. Optionally `FREEPIK_API_KEY` — unset triggers a
+   503 / `freepik_unconfigured` error path (also a valid test).
+2. `npm run dev:client` (port 5173).
+3. Open `http://localhost:5173/extension-test.html`.
+4. Fieldset **"2. Session"** → click **Send {type:"session", …}** to
+   mint a mock JWT into `chrome.storage.local`.
+5. Fieldset **"6. Source one-shot (Ext.3)"** → pick `pexels` from
+   the dropdown, leave `item_id` at `856971` (public Pexels sample)
+   → click **Run source download**.
+
+The file lands in `~/Downloads/transcript-eval/pexels_856971.mp4`.
+Freepik runs the same flow; the filename pattern is
+`freepik_<id>.<ext>` where `<ext>` comes from the backend-returned
+filename (typically `.mp4`).
+
+### Caveats
+
+- **Backend required.** The extension posts to `BACKEND_URL/api/
+  <source>-url`. If the backend isn't running, the handler replies
+  `{ok:false, errorCode:"network_error", detail: ...}` and stops.
+- **JWT required.** Every backend call sends `Authorization: Bearer
+  <jwt>`. If `chrome.storage.local` has no JWT (or it's expired),
+  the handler replies `{ok:false, errorCode:"no_jwt"}` or
+  `{ok:false, errorCode:"jwt_expired"}`. Mint a JWT via fieldset 2
+  before firing fieldset 6. Real 401 recovery is Ext.4.
+- **Freepik is billable.** Every successful
+  `POST /api/freepik-url` call invokes Freepik's
+  `/v1/videos/:id/download`, which costs €0.05. The test harness
+  surfaces this in the fieldset callout; don't spam the button.
+- **Freepik URL TTL.** Backend mints with a conservative 15-min
+  expiry. If somehow 14+ minutes elapse between mint and
+  `chrome.downloads.download` (near-impossible in a debug one-shot),
+  the extension aborts with `freepik_url_expired`. Full
+  refetch-on-expiry lands in Ext.5/Ext.7.
+- **`freepik_unconfigured` is a first-class fatal-for-that-item.**
+  If the backend's `FREEPIK_API_KEY` is unset, `POST /api/freepik-url`
+  returns 503 and the handler replies
+  `{ok:false, errorCode:"freepik_unconfigured"}`. The user's
+  other sources (Envato, Pexels) keep working; only Freepik items
+  fail. This is the expected path when Freepik isn't wired yet.
+
+### Error codes emitted
+
+`pexels_404`, `pexels_api_error`, `freepik_404`, `freepik_429`,
+`freepik_unconfigured`, `freepik_api_error`, `freepik_url_expired`,
+`no_jwt`, `jwt_expired`, `network_error`, `chrome_downloads_error`,
+`bad_input`, `unhandled_error`.
+
+Ext.7 adds the retry matrix keyed off these strings. Do NOT rename
+them without also updating Ext.7's mapping.
+
+### Manifest changes (0.2.0 → 0.3.0)
+
+- `permissions`: unchanged from Ext.2 (`storage`, `tabs`,
+  `webNavigation`, `downloads`).
+- `host_permissions` (added): `videos.pexels.com/*`,
+  `images.pexels.com/*`, `*.freepik.com/*`.
+- No `cookies` / `power` permissions yet — those land in Ext.4 /
+  Ext.5.
