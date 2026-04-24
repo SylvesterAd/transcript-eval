@@ -21,6 +21,7 @@ import {
   autoResumeIfActiveRun,
 } from './modules/queue.js'
 import { getBufferStats as telemetryStats, flushNow as telemetryFlushNow } from './modules/telemetry.js'
+import { buildBundle } from './modules/diagnostics.js'
 
 async function handlePing() {
   const jwt = await getJwt()
@@ -238,6 +239,37 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           await telemetryFlushNow()
           const stats = await telemetryStats()
           sendResponse({ ok: true, stats })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'debug_build_bundle': {
+        try {
+          const result = await buildBundle()
+          sendResponse({ ok: true, ...result })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'debug_set_telemetry_opt_out': {
+        try {
+          const value = msg.value === true
+          await chrome.storage.local.set({ telemetry_opt_out: value })
+          // Q3 recommendation: also clear the queue so the flip is
+          // immediate and semantically "stop sending".
+          if (value) await chrome.storage.local.remove('telemetry_queue')
+          sendResponse({ ok: true, telemetry_opt_out: value })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'debug_get_telemetry_opt_out': {
+        try {
+          const { telemetry_opt_out } = await chrome.storage.local.get('telemetry_opt_out')
+          sendResponse({ ok: true, telemetry_opt_out: telemetry_opt_out === true })
         } catch (err) {
           sendResponse({ ok: false, error: String(err?.message || err) })
         }
