@@ -176,10 +176,14 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         const trackLeft = overRow.rect.left + labelW
         const timeAtPointer = (ev.clientX - trackLeft) / zoom
         const dropStart = Math.max(0, timeAtPointer - grabOffsetSec)
+        const dropLeftPx = trackLeft + dropStart * zoom
         crossMode = { variantIdx: overRow.vi, dropStart, variant: overRow.variant }
         marker.style.display = 'block'
-        marker.style.left = (trackLeft + dropStart * zoom) + 'px'
+        marker.style.left = dropLeftPx + 'px'
         marker.style.top = overRow.rect.top + 'px'
+        // Snap ghost to the projected drop position so it visually matches the marker
+        ghost.style.left = dropLeftPx + 'px'
+        ghost.style.top = overRow.rect.top + 'px'
       } else {
         crossMode = null
         marker.style.display = 'none'
