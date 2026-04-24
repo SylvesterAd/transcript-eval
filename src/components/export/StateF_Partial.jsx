@@ -1,6 +1,8 @@
+import { useState, useEffect } from 'react'
 import styled from 'styled-components'
-import { AlertCircle, RefreshCw } from 'lucide-react'
+import { AlertCircle, RefreshCw, FileText, Download } from 'lucide-react'
 import { getErrorLabel } from '../../lib/errorCodeLabels.js'
+import { useExportXmlKickoff, triggerXmlDownload } from '../../hooks/useExportXmlKickoff.js'
 
 // State F: partial-failure UI. Renders when the extension's
 // {type:"complete"} Port message reports fail_count > 0. Reads:
@@ -133,6 +135,115 @@ const RetryBtn = styled.button`
   }
 `
 
+const XmlBtn = styled(RetryBtn)``
+
+const XmlPanel = styled.div`
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+  font-size: 13px;
+  color: #4b5563;
+`
+
+const XmlErrorBox = styled.div`
+  padding: 10px 14px;
+  border: 1px solid #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-top: 8px;
+`
+
+const XmlDownloadBtn = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #1a1a1a;
+  font-size: 12px;
+  cursor: pointer;
+  margin-top: 8px;
+  &:hover { background: #f3f4f6; }
+`
+
+// Child component — mounts ONLY when the user clicks "Generate XML
+// anyway." Calling useExportXmlKickoff conditionally would violate
+// React's rules-of-hooks; isolating it here keeps the hook's state
+// scoped to the user's explicit opt-in.
+//
+// autoKick:false disables the hook's built-in auto-run (which is
+// gated on fail_count===0 anyway — State F would never auto-kick —
+// but we pass it explicitly for clarity). We fire regenerate() once
+// on mount to kick the 3-step flow.
+function XmlKickoffPanel({ exportId, variantLabels, unifiedManifest, complete }) {
+  const kickoff = useExportXmlKickoff({
+    exportId,
+    variantLabels,
+    unifiedManifest,
+    complete,
+    autoKick: false,
+  })
+
+  // Fire once on mount.
+  useEffect(() => {
+    kickoff.regenerate()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const xmlByVariant = kickoff.xml_by_variant || {}
+  const variantsReady = kickoff.status === 'ready' && Object.keys(xmlByVariant).length > 0
+
+  function onDownloadAgain(label) {
+    const xml = xmlByVariant[label]
+    if (!xml) return
+    triggerXmlDownload(`variant-${String(label).toLowerCase()}.xml`, xml)
+  }
+
+  return (
+    <XmlPanel>
+      <div>
+        Missing clips will appear as offline (red) in Premiere. You can
+        relink them manually later.
+      </div>
+      {kickoff.status === 'posting-result' && (
+        <div style={{ marginTop: 8 }}><FileText size={14} /> Preparing XML&hellip;</div>
+      )}
+      {kickoff.status === 'generating' && (
+        <div style={{ marginTop: 8 }}><FileText size={14} /> Generating XML&hellip;</div>
+      )}
+      {kickoff.status === 'error' && (
+        <XmlErrorBox>
+          <strong>Couldn&rsquo;t generate XML.</strong>{' '}
+          {kickoff.error || 'Unknown error.'} Try again below.
+          <div style={{ marginTop: 8 }}>
+            <XmlDownloadBtn type="button" onClick={kickoff.regenerate}>
+              <RefreshCw size={14} /> Retry generate
+            </XmlDownloadBtn>
+          </div>
+        </XmlErrorBox>
+      )}
+      {variantsReady && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+          {variantLabels.map(label => xmlByVariant[label] ? (
+            <XmlDownloadBtn key={label} type="button" onClick={() => onDownloadAgain(label)}>
+              <Download size={14} /> Download variant-{String(label).toLowerCase()}.xml again
+            </XmlDownloadBtn>
+          ) : null)}
+          <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
+            XML auto-downloaded to your default downloads folder.
+          </div>
+        </div>
+      )}
+    </XmlPanel>
+  )
+}
+
 function FailedItemRow({ item }) {
   const label = getErrorLabel(item.error_code)
   return (
@@ -147,16 +258,13 @@ function FailedItemRow({ item }) {
 export default function StateF_Partial({
   complete,
   snapshot,
-  // Props wired in Tasks 3–4; unused in Task 2 but already accepted
-  // so ExportPage's prop-threading edit in Task 6 compiles:
-  // eslint-disable-next-line no-unused-vars
   exportId,
-  // eslint-disable-next-line no-unused-vars
   variantLabels,
-  // eslint-disable-next-line no-unused-vars
   unifiedManifest,
   onRetryFailed,
 }) {
+  const [xmlPanelShown, setXmlPanelShown] = useState(false)
+
   const ok = complete?.ok_count ?? 0
   const fail = complete?.fail_count ?? 0
   const total = ok + fail
@@ -209,8 +317,23 @@ export default function StateF_Partial({
           >
             <RefreshCw size={14} /> Retry failed items
           </RetryBtn>
-          {/* "Generate XML anyway" + "Report issue" land in Tasks 4–5. */}
+          <XmlBtn
+            type="button"
+            onClick={() => setXmlPanelShown(true)}
+            disabled={xmlPanelShown || !exportId || !unifiedManifest}
+          >
+            <FileText size={14} /> Generate XML anyway
+          </XmlBtn>
+          {/* "Report issue" stub lands in Task 5. */}
         </ActionRow>
+        {xmlPanelShown && (
+          <XmlKickoffPanel
+            exportId={exportId}
+            variantLabels={variantLabels || []}
+            unifiedManifest={unifiedManifest}
+            complete={complete}
+          />
+        )}
       </Card>
     </Wrap>
   )
