@@ -79,9 +79,30 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   const pendingSelectionRef = useRef(null)
   const handleVariantActivate = useCallback((newIdx, selectIndex) => {
     const currentPid = variants[activeVariantIdx]?.id
-    // Cache outgoing variant
+    // Cache outgoing variant — apply local edits and hide flags so the inactive display
+    // matches what the user just saw (avoids a visual jump from old → new position when
+    // the parallel fetchInactive refetches editor-data).
     if (currentPid && brollState.rawPlacements?.length) {
-      setRawInactivePlacements(prev => ({ ...prev, [currentPid]: brollState.rawPlacements }))
+      const edits = brollState.edits || {}
+      const snapshot = brollState.rawPlacements
+        .filter(p => {
+          if (p.chapterIndex == null || p.placementIndex == null) return true
+          return !edits[`${p.chapterIndex}:${p.placementIndex}`]?.hidden
+        })
+        .map(p => {
+          if (p.chapterIndex == null || p.placementIndex == null) return p
+          const e = edits[`${p.chapterIndex}:${p.placementIndex}`]
+          if (!e) return p
+          let next = p
+          if (e.timelineStart != null && e.timelineEnd != null) {
+            next = { ...next, userTimelineStart: e.timelineStart, userTimelineEnd: e.timelineEnd }
+          }
+          if (e.selectedResult != null) {
+            next = { ...next, persistedSelectedResult: e.selectedResult }
+          }
+          return next
+        })
+      setRawInactivePlacements(prev => ({ ...prev, [currentPid]: snapshot }))
     }
     // If we have cached data for the incoming variant, seed it immediately to avoid blank frames
     const newPid = variants[newIdx]?.id
@@ -93,7 +114,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     }
     if (selectIndex != null) pendingSelectionRef.current = selectIndex
     setActiveVariantIdx(newIdx)
-  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements])
+  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
 
   // Resolve inactive placements using same transcript matching as active variant.
   // Per-pid cache keeps individual array references stable when only one variant's
