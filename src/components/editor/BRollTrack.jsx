@@ -104,7 +104,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     const labelW = 144
     const srcRow = variantRows.find(r => r.vi === (activeVariantIdx ?? 0))
     const srcTrackLeft = srcRow ? srcRow.rect.left + labelW : 0
-    const placementLeftPx = srcTrackLeft + placement.timelineStart * zoom - (scrollX || 0)
+    const placementLeftPx = srcTrackLeft + placement.timelineStart * zoom
     const grabOffsetSec = (startX - placementLeftPx) / zoom
 
     console.log('[broll-drag] start', {
