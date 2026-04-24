@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "schema_version": 1,
+    "ext_version": "0.8.0",
+    "manifest_version": "0.8.0",
+    "generated_at": "2026-04-24T17:22:31.412Z",
+    "browser_family": "chrome",
+    "bundle_window_ms": 86400000,
+    "bundle_max_events": 200
+  },
+  "queue": {
+    "runs": [
+      {
+        "run_id": "01EXPORTABCD",
+        "created_at": 1714000000000,
+        "updated_at": 1714000123000,
+        "phase": "complete",
+        "error_code": null,
+        "stats": { "ok_count": 12, "fail_count": 1 },
+        "items": [
+          { "source": "envato", "source_item_id": "NX9WYGQ", "status": "complete", "error_code": null, "filename": "~/Downloads/transcript-eval/export-<redacted>/001_envato_NX9WYGQ.mov" }
+        ]
+      }
+    ]
+  },
+  "events": {
+    "events": [
+      { "export_id": "01EXPORTABCD", "event": "export_started", "ts": 1714000000000, "meta": {}, "ext_version": "0.8.0" },
+      { "export_id": "01EXPORTABCD", "event": "item_ok", "ts": 1714000005000, "meta": { "source": "envato", "source_item_id": "NX9WYGQ" }, "ext_version": "0.8.0" },
+      { "export_id": "01EXPORTABCD", "event": "export_completed", "ts": 1714000123000, "meta": { "ok_count": 12, "fail_count": 1 }, "ext_version": "0.8.0" }
+    ],
+    "count": 3,
+    "truncated_from": 3
+  },
+  "environment": {
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/128.0.0.0",
+    "platform": "MacIntel",
+    "cookie_presence": {
+      "has_envato_client_id": true,
+      "has_envato_user_id": true,
+      "has_elements_session": false,
+      "has_envato_session_id": true
+    },
+    "jwt_presence": {
+      "jwt_present": true,
+      "jwt_expires_at": 1714086400000,
+      "jwt_user_id_prefix": "a1b2c3d4"
+    },
+    "deny_list": { "envato": ["NX9WYGQ", "ZG6LWHK"] },
+    "daily_counts": { "2026-04-24": { "envato": 42, "pexels": 17, "freepik": 0 } },
+    "deny_list_alerted": {},
+    "telemetry_overflow_total": 0,
+    "telemetry_opt_out": false,
+    "active_run_id": null
+  }
+}
