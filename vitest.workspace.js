@@ -23,13 +23,18 @@ export default defineWorkspace([
     },
   },
   {
-    // Use esbuild's automatic JSX runtime so React pages under
-    // src/pages/**/*.jsx don't need to `import React from 'react'`.
-    // vite.config.js uses @vitejs/plugin-react for the dev server;
-    // vitest doesn't inherit those plugins, so we match the
-    // automatic-runtime behavior here at the workspace-project level.
+    // JSX component tests (ExportsList/ExportDetail from WebApp.3,
+    // StateF_Partial from State F) need the automatic JSX runtime —
+    // otherwise esbuild emits React.createElement(...) calls and
+    // components without a top-level `import React` throw
+    // "React is not defined" at render time. vitest 1.6.x does NOT
+    // inherit the vite.config.js @vitejs/plugin-react plugin into
+    // workspace projects, so we configure esbuild here directly
+    // (matches vite.config.js automatic-runtime behavior without the
+    // plugin dep).
     esbuild: {
       jsx: 'automatic',
+      jsxImportSource: 'react',
     },
     test: {
       name: 'web',
