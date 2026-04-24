@@ -3,6 +3,10 @@
 CREATE TABLE IF NOT EXISTS video_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
+  libraries_json TEXT,
+  freepik_opt_in INTEGER DEFAULT 1,
+  audience_json TEXT,
+  path_id TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
