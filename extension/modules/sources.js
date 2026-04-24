@@ -73,11 +73,29 @@ export async function fetchPexelsUrl({ itemId, preferredResolution = '1080p' }) 
     throw new Error('network_error: ' + String(err?.message || err))
   }
 
-  if (resp.status === 404) throw new Error('pexels_404')
-  if (!resp.ok) throw new Error('pexels_api_error')
+  if (resp.status === 404) {
+    const err = new Error('pexels_404')
+    err.httpStatus = 404
+    throw err
+  }
+  if (resp.status === 429) {
+    const err = new Error('pexels_429')
+    err.httpStatus = 429
+    err.retryAfter = resp.headers.get('Retry-After') || null
+    throw err
+  }
+  if (!resp.ok) {
+    const err = new Error('pexels_api_error')
+    err.httpStatus = resp.status
+    throw err
+  }
 
   const data = await resp.json().catch(() => null)
-  if (!data || !data.url) throw new Error('pexels_api_error')
+  if (!data || !data.url) {
+    const err = new Error('pexels_api_error')
+    err.httpStatus = resp.status
+    throw err
+  }
   return data  // { url, filename, size_bytes, resolution }
 }
 
@@ -103,14 +121,43 @@ export async function fetchFreepikUrl({ itemId, format = 'mp4' }) {
     throw new Error('network_error: ' + String(err?.message || err))
   }
 
-  if (resp.status === 404) throw new Error('freepik_404')
-  if (resp.status === 429) throw new Error('freepik_429')
-  if (resp.status === 503) throw new Error('freepik_unconfigured')
-  if (!resp.ok) throw new Error('freepik_api_error')
+  if (resp.status === 404) {
+    const err = new Error('freepik_404')
+    err.httpStatus = 404
+    throw err
+  }
+  if (resp.status === 429) {
+    const err = new Error('freepik_429')
+    err.httpStatus = 429
+    err.retryAfter = resp.headers.get('Retry-After') || null
+    throw err
+  }
+  if (resp.status === 503) {
+    const err = new Error('freepik_unconfigured')
+    err.httpStatus = 503
+    throw err
+  }
+  if (!resp.ok) {
+    const err = new Error('freepik_api_error')
+    err.httpStatus = resp.status
+    throw err
+  }
 
   const data = await resp.json().catch(() => null)
-  if (!data || !data.url) throw new Error('freepik_api_error')
+  if (!data || !data.url) {
+    const err = new Error('freepik_api_error')
+    err.httpStatus = resp.status
+    throw err
+  }
   return data  // { url, filename, size_bytes, expires_at }
+}
+
+// Ext.7: Freepik URL refetch on expiry. Same as fetchFreepikUrl but
+// a) the caller's intent is clear in logs, and b) future phases can
+// add refetch-specific telemetry here without touching the initial
+// fetch path.
+export async function refetchFreepikUrl(itemId, format = 'mp4') {
+  return fetchFreepikUrl({ itemId, format })
 }
 
 /**
