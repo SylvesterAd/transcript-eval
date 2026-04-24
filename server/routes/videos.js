@@ -469,6 +469,10 @@ router.get('/', requireAuth, async (req, res) => {
       COALESCE(parent.assembly_status, vg.assembly_status) AS group_assembly_status,
       COALESCE(parent.assembly_error, vg.assembly_error) AS group_assembly_error,
       COALESCE(parent.id, vg.id) AS effective_group_id,
+      COALESCE(parent.libraries_json, vg.libraries_json) AS group_libraries_json,
+      COALESCE(parent.freepik_opt_in, vg.freepik_opt_in) AS group_freepik_opt_in,
+      COALESCE(parent.audience_json, vg.audience_json) AS group_audience_json,
+      COALESCE(parent.path_id, vg.path_id) AS group_path_id,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'raw') AS has_raw,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'human_edited') AS has_human_edited
     FROM videos v
@@ -477,11 +481,19 @@ router.get('/', requireAuth, async (req, res) => {
     ${isAdmin(req) ? '' : 'WHERE vg.user_id = ?'}
     ORDER BY v.created_at DESC
   `).all(...(isAdmin(req) ? [] : [req.auth.userId]))
-  // Remap group_id to parent for project list
+  // Remap group_id to parent for project list, and parse config JSON
   for (const v of videos) {
     if (v.effective_group_id) {
       v.group_id = v.effective_group_id
     }
+    v.libraries = v.group_libraries_json ? JSON.parse(v.group_libraries_json) : []
+    v.freepik_opt_in = v.group_freepik_opt_in === null || v.group_freepik_opt_in === undefined ? true : !!v.group_freepik_opt_in
+    v.audience = v.group_audience_json ? JSON.parse(v.group_audience_json) : null
+    v.path_id = v.group_path_id || null
+    delete v.group_libraries_json
+    delete v.group_freepik_opt_in
+    delete v.group_audience_json
+    delete v.group_path_id
   }
   res.json(videos)
 })

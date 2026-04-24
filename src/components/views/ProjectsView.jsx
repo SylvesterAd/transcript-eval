@@ -1,13 +1,14 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useApi, apiDelete } from '../../hooks/useApi.js'
 import { Home, LayoutGrid, List, Film, Loader2, CheckCircle2, AlertCircle, Trash2 } from 'lucide-react'
 import UploadModal from './UploadModal.jsx'
-import RoughCutConfigModal from './RoughCutConfigModal.jsx'
+import UploadConfigFlow from '../upload-config/UploadConfigFlow.jsx'
 import ProcessingModal from './ProcessingModal.jsx'
 import BRollExamplesModal from './BRollExamplesModal.jsx'
 
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
+const CONFIG_STEPS = new Set(['libraries', 'audience', 'references', 'path'])
 
 export default function ProjectsView() {
   const { data: videos, loading, refetch } = useApi('/videos')
@@ -21,6 +22,22 @@ export default function ProjectsView() {
   const [liveFiles, setLiveFiles] = useState(null) // real-time file updates from UploadModal
   const step = searchParams.get('step')
   const groupId = searchParams.get('group') ? parseInt(searchParams.get('group')) : null
+
+  // Legacy URL redirects — old flow used ?step=config and ?step=broll-examples
+  useEffect(() => {
+    if (step === 'config') {
+      setSearchParams(
+        groupId ? { step: 'libraries', group: String(groupId) } : {},
+        { replace: true }
+      )
+    }
+    if (step === 'broll-examples') {
+      setSearchParams(
+        { step: 'references', ...(groupId ? { group: String(groupId) } : {}) },
+        { replace: true }
+      )
+    }
+  }, [step, groupId, setSearchParams])
 
   const setStep = useCallback((newStep, newGroupId, files) => {
     if (files !== undefined) filesRef.current = files
@@ -47,6 +64,11 @@ export default function ProjectsView() {
           created_at: v.created_at,
           assembly_status: v.group_assembly_status,
           isGroup: !!v.group_id,
+          // Group-level config fields (included by GET /videos when joined from video_groups).
+          libraries: v.libraries || [],
+          freepik_opt_in: v.freepik_opt_in === undefined ? true : v.freepik_opt_in,
+          audience: v.audience || null,
+          path_id: v.path_id || null,
         }
       }
       groupMap[gid].videos.push(v)
@@ -75,6 +97,16 @@ export default function ProjectsView() {
       (a, b) => new Date(b.created_at) - new Date(a.created_at)
     )
   })()
+
+  // Seed config flow with any existing saved config for the active group.
+  // Requires GET /videos to include libraries_json / audience_json / freepik_opt_in / path_id — see server/routes/videos.js list handler.
+  const currentGroup = projects.find(p => p.id === groupId) || null
+  const initialConfig = currentGroup ? {
+    libraries: currentGroup.libraries || [],
+    freepikOptIn: currentGroup.freepik_opt_in !== false,
+    audience: currentGroup.audience || undefined,
+    pathId: currentGroup.path_id || undefined,
+  } : null
 
   const handleProjectClick = (project) => {
     navigate(`/editor/${project.id}/assets`)
@@ -268,36 +300,39 @@ export default function ProjectsView() {
         </div>
       )}
 
-      {(step === 'upload' || step === 'config' || step === 'processing' || step === 'broll-examples') && (
-        <div style={{ display: step === 'upload' ? undefined : 'none' }}>
-          <UploadModal
-            onClose={() => setStep(null)}
-            onComplete={(gid, files) => setStep('config', gid, files)}
-            initialGroupId={groupId}
-            onFilesChange={(f) => { filesRef.current = f; setLiveFiles(f) }}
-          />
-        </div>
-      )}
-      {step === 'config' && (
-        <RoughCutConfigModal
-          groupId={groupId}
-          onBack={() => setStep('upload', groupId)}
-          onComplete={(gid) => setStep('broll-examples', gid)}
+      {step === 'upload' && (
+        <UploadModal
+          onClose={() => setStep(null)}
+          onComplete={(gid, files) => setStep('libraries', gid, files)}
+          initialGroupId={groupId}
+          onFilesChange={(f) => { filesRef.current = f; setLiveFiles(f) }}
         />
       )}
-      {step === 'broll-examples' && (
-        <BRollExamplesModal
+
+      {CONFIG_STEPS.has(step) && (
+        <UploadConfigFlow
+          key={groupId /* key by group so state resets when the project changes */}
           groupId={groupId}
-          onBack={() => setStep('config', groupId)}
+          initialState={initialConfig}
+          onBack={() => setStep('upload', groupId)}
           onComplete={(gid) => setStep('processing', gid)}
         />
       )}
+
+      {step === 'broll-examples' && (
+        <BRollExamplesModal
+          groupId={groupId}
+          onBack={() => setStep('libraries', groupId)}
+          onComplete={(gid) => setStep('path', gid)}
+        />
+      )}
+
       {step === 'processing' && (
         <ProcessingModal
           groupId={groupId}
           initialFiles={filesRef.current}
           liveFiles={liveFiles}
-          onBack={() => setStep('broll-examples', groupId)}
+          onBack={() => setStep('path', groupId)}
           onComplete={(gid) => {
             setStep(null); refetch(); navigate(`/editor/${gid}/assets`)
           }}
