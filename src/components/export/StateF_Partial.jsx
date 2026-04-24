@@ -1,5 +1,5 @@
 import styled from 'styled-components'
-import { AlertCircle } from 'lucide-react'
+import { AlertCircle, RefreshCw } from 'lucide-react'
 import { getErrorLabel } from '../../lib/errorCodeLabels.js'
 
 // State F: partial-failure UI. Renders when the extension's
@@ -105,6 +105,34 @@ const Reason = styled.span`
   flex: 1;
 `
 
+const ActionRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+`
+
+const RetryBtn = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #1a1a1a;
+  font-size: 13px;
+  cursor: pointer;
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  &:hover:not(:disabled) {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+  }
+`
+
 function FailedItemRow({ item }) {
   const label = getErrorLabel(item.error_code)
   return (
@@ -127,7 +155,6 @@ export default function StateF_Partial({
   variantLabels,
   // eslint-disable-next-line no-unused-vars
   unifiedManifest,
-  // eslint-disable-next-line no-unused-vars
   onRetryFailed,
 }) {
   const ok = complete?.ok_count ?? 0
@@ -136,6 +163,17 @@ export default function StateF_Partial({
   const failedItems = Array.isArray(snapshot?.items)
     ? snapshot.items.filter(it => it.phase === 'failed')
     : []
+
+  // Retry: collect source_item_ids of failed items and hand off to
+  // the caller. ExportPage rebuilds the filtered manifest from its
+  // authoritative state.unified_manifest.items (NOT from snapshot.items,
+  // which is the Port's wire view and loses envato_item_url / placements).
+  // See invariant #5 in the plan.
+  function onRetryClick() {
+    if (!onRetryFailed || failedItems.length === 0) return
+    const failedIds = new Set(failedItems.map(it => it.source_item_id).filter(Boolean))
+    onRetryFailed({ failedIds })
+  }
 
   return (
     <Wrap>
@@ -162,7 +200,17 @@ export default function StateF_Partial({
           </List>
         )}
 
-        {/* Action row lands in Tasks 3–5. */}
+        <ActionRow>
+          <RetryBtn
+            type="button"
+            onClick={onRetryClick}
+            disabled={!onRetryFailed || failedItems.length === 0}
+            title={!onRetryFailed ? 'Retry wiring unavailable — see devtools' : undefined}
+          >
+            <RefreshCw size={14} /> Retry failed items
+          </RetryBtn>
+          {/* "Generate XML anyway" + "Report issue" land in Tasks 4–5. */}
+        </ActionRow>
       </Card>
     </Wrap>
   )
