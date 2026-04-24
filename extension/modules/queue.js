@@ -21,6 +21,8 @@ import {
   PROGRESS_COALESCE_MS,
   DOWNLOAD_NETWORK_RETRY_CAP,
   MESSAGE_VERSION,
+  FREEPIK_URL_REFETCH_CAP,
+  INTEGRITY_TOLERANCE,
 } from '../config.js'
 import { resolveOldIdToNewUuid, getSignedDownloadUrl } from './envato.js'
 import { fetchPexelsUrl, fetchFreepikUrl } from './sources.js'
@@ -29,8 +31,22 @@ import {
   saveRunState, loadRunState, deleteRunState,
   getActiveRunId, setActiveRunId, clearActiveRunId,
   markCompleted,
+  isDenied,
+  addToDenyList,
+  shouldAlertForDeny,
+  markAlertEmitted,
+  incrementDailyCount,
+  checkDailyCapThreshold,
 } from './storage.js'
 import { emit as emitTelemetry, normalizeErrorCode } from './telemetry.js'
+import {
+  classifyResolverError,
+  classifyLicenseError,
+  classifySourceMintError,
+  classifyDownloadInterrupt,
+  classifyIntegrityError,
+  parseRetryAfter,
+} from './classifier.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
@@ -48,11 +64,11 @@ function broadcast(msg) {
 async function getSignedUrlForSource(source, itemId) {
   if (source === 'pexels') {
     const data = await fetchPexelsUrl({ itemId })
-    return data?.url
+    return { url: data?.url, size_bytes: data?.size_bytes || null }
   }
   if (source === 'freepik') {
     const data = await fetchFreepikUrl({ itemId })
-    return data?.url
+    return { url: data?.url, expires_at: data?.expires_at || null, size_bytes: data?.size_bytes || null }
   }
   throw new Error(`unknown source: ${source}`)
 }
@@ -245,7 +261,9 @@ async function runResolver(item) {
     })
     await persistAndBroadcast()
   } catch (err) {
-    await failItem(item, err?.message || 'resolve_failed')
+    item.resolve_attempts = (item.resolve_attempts || 0) + 1
+    const verdict = classifyResolverError(err, item)
+    await applyVerdict(item, verdict, { phase: 'resolve', err })
   }
 }
 
@@ -253,10 +271,40 @@ async function runLicenser(item) {
   item.claimed = true
   // item.phase is already 'licensing'
   item.license_started_at = Date.now()
+
+  // --- Ext.7 deny-list gate ---
+  // Read BEFORE the license GET so we don't spend a license on a
+  // known-bad filetype. Non-Envato sources don't reach this worker.
+  try {
+    if (await isDenied(item.source, item.source_item_id)) {
+      await failItem(item, 'envato_unsupported_filetype')
+      item.__settle?.()
+      // Alert dedupe: only emit once per 24h.
+      await maybeEmitDenyAlert(item, 'envato_unsupported_filetype', 'pre-deny-hit')
+      return
+    }
+  } catch (err) {
+    console.warn('[queue] deny-list read failed — proceeding', err)
+  }
+
   await persistAndBroadcast()
   try {
     // JIT URL fetching: we're milliseconds away from chrome.downloads.download
     const signedUrl = await getSignedDownloadUrl(item.resolved_uuid)
+
+    // Ext.7 post-license filetype check. Envato's own orchestrator
+    // (envato.js `downloadEnvato`) does this for single-shot; the
+    // queue does it here for the pool path.
+    const cdnFilename = extractFilenameFromSignedUrl(signedUrl)
+    if (cdnFilename && /\.(zip|aep|prproj)$/i.test(cdnFilename)) {
+      // Write to deny-list THEN emit alert (persist-before-emit).
+      await addToDenyList(item.source, item.source_item_id, `unsupported_filetype:${cdnFilename}`)
+      await failItem(item, 'envato_unsupported_filetype')
+      item.__settle?.()
+      await maybeEmitDenyAlert(item, 'envato_unsupported_filetype', cdnFilename)
+      return
+    }
+
     item.signed_url = signedUrl
     item.phase = 'downloading'
     item.claimed = false
@@ -270,17 +318,47 @@ async function runLicenser(item) {
     })
     await persistAndBroadcast()
   } catch (err) {
-    await failItem(item, err?.message || 'license_failed')
+    item.license_attempts = (item.license_attempts || 0) + 1
+    const verdict = classifyLicenseError(err, item)
+    await applyVerdict(item, verdict, { phase: 'license', err })
   }
 }
 
 async function runDownloader(item) {
   item.claimed = true
   // item.phase is 'downloading' already
+
+  // --- Ext.7 daily-cap hard-stop gate ---
+  // Check BEFORE starting a new download. The per-download-complete
+  // check at the end of handleDownloadEvent handles the "crossed the
+  // threshold mid-run" case.
+  const capStatus = await checkDailyCapThreshold(item.source).catch(() => 'ok')
+  if (capStatus === 'hard_stop') {
+    await failItem(item, `${item.source}_daily_cap_exceeded`)
+    item.__settle?.()
+    return
+  }
+  if (capStatus === 'warn' && !state.daily_cap_warned?.[item.source]) {
+    state.daily_cap_warned = state.daily_cap_warned || {}
+    state.daily_cap_warned[item.source] = Date.now()
+    broadcast({ type: 'warn', message: `Approaching daily ${item.source} cap (400/500)` })
+    await persist()
+  }
+
   try {
     // JIT URL fetch for Pexels/Freepik (they skip resolving/licensing)
     if (item.source !== 'envato' && !item.signed_url) {
-      item.signed_url = await getSignedUrlForSource(item.source, item.source_item_id)
+      try {
+        const mint = await getSignedUrlForSource(item.source, item.source_item_id)
+        item.signed_url = mint.url
+        item.signed_url_expires_at = mint.expires_at || null
+        item.expected_size_bytes = mint.size_bytes || item.total_bytes || null
+      } catch (err) {
+        item.mint_attempts = (item.mint_attempts || 0) + 1
+        const verdict = classifySourceMintError(err, item)
+        await applyVerdict(item, verdict, { phase: 'download', err })
+        return
+      }
     }
     item.download_started_at = Date.now()
     const downloadId = await chrome.downloads.download({
@@ -301,6 +379,7 @@ async function runDownloader(item) {
     item.claimed = false
   } catch (err) {
     await failItem(item, err?.message || 'download_failed')
+    item.__settle?.()
   }
 }
 
@@ -342,6 +421,46 @@ async function handleDownloadEvent(item, delta) {
   if (delta.state) {
     const next = delta.state.current
     if (next === 'complete') {
+      // Ext.7 integrity check. chrome.downloads reports bytes_received;
+      // the manifest carries est_size_bytes (stored as
+      // item.expected_size_bytes or item.total_bytes). If
+      // |actual - expected| > INTEGRITY_TOLERANCE AND > 1024 bytes
+      // absolute, retry once (delete + re-mint + re-download); second
+      // mismatch → integrity_failed. Placed BEFORE stats/daily-cap
+      // so a failed-integrity item never counts toward either.
+      const expected = item.expected_size_bytes || item.total_bytes
+      const actual = item.bytes_received || 0
+      if (expected && actual > 0) {
+        const tol = expected * INTEGRITY_TOLERANCE
+        if (Math.abs(actual - expected) > tol && Math.abs(actual - expected) > 1024) {
+          const verdict = classifyIntegrityError(item)
+          if (verdict.retry) {
+            item.integrity_retries = (item.integrity_retries || 0) + 1
+            // Delete the file so the redownload writes a fresh copy
+            // (instead of chrome uniquifying the filename).
+            try {
+              await chrome.downloads.removeFile(item.download_id)
+            } catch {}
+            // Drop the download_id mapping so future onChanged events
+            // for the old id don't re-enter this branch.
+            if (item.download_id != null) {
+              delete state.download_id_to_seq[item.download_id]
+            }
+            item.download_id = null
+            item.signed_url = null
+            item.bytes_received = 0
+            item.phase = 'downloading'
+            item.claimed = false
+            await persistAndBroadcast()
+            schedule()
+            return
+          }
+          // verdict.skip path — already retried.
+          await failItem(item, verdict.skip.error_code)
+          item.__settle?.()
+          return
+        }
+      }
       item.phase = 'done'
       state.stats.ok_count++
       state.stats.total_bytes_downloaded += item.bytes_received || 0
@@ -352,6 +471,27 @@ async function handleDownloadEvent(item, delta) {
         } catch (err) {
           console.warn('[queue] markCompleted failed', err)
         }
+      }
+      // Ext.7: daily-cap increment. Happens on complete, not on
+      // license commit — a hard-stop mid-download must NOT leak a
+      // cap increment. Single write point; runDownloader's
+      // pre-check handles the subsequent skip.
+      try {
+        await incrementDailyCount(item.source)
+        const newStatus = await checkDailyCapThreshold(item.source)
+        if (newStatus === 'warn' && !state.daily_cap_warned?.[item.source]) {
+          state.daily_cap_warned = state.daily_cap_warned || {}
+          state.daily_cap_warned[item.source] = Date.now()
+          broadcast({ type: 'warn', message: `Approaching daily ${item.source} cap (400/500)` })
+        }
+        if (newStatus === 'hard_stop') {
+          // Skip further items of this source; do NOT hard-stop the
+          // whole queue (open question 3). A future item hitting the
+          // runDownloader's pre-check will fail with source_daily_cap_exceeded.
+          console.warn('[queue] daily cap hit for source:', item.source)
+        }
+      } catch (err) {
+        console.warn('[queue] daily-cap increment failed', err)
       }
       emitTelemetry('item_downloaded', {
         export_id: state.runId,
@@ -365,6 +505,30 @@ async function handleDownloadEvent(item, delta) {
           filename: item.target_filename,
         },
       })
+      // Ext.7 (Task 10, uniquify-bundle extension side): emit the actual
+      // on-disk filename so the web app's XMEML path generator can match
+      // `001_envato_NX9WYGQ (1).mov` rather than the pre-uniquify name.
+      // We populate item.final_path here so it lands in the persisted
+      // state.items[] snapshot (and downstream in result_json). The
+      // web-side consumer (useExportPort handler + State F UI) is
+      // DEFERRED to a post-Wave-1 mini-PR to avoid merge conflict with
+      // the in-parallel State F / WebApp.3 branches touching
+      // src/hooks/useExportPort.js and src/pages/*.jsx.
+      try {
+        const results = await chrome.downloads.search({ id: item.download_id })
+        const actual = results && results[0]
+        const finalPath = actual?.filename || item.target_filename
+        item.final_path = finalPath
+        broadcast({
+          type: 'item_finalized',
+          item_id: item.source_item_id,
+          seq: item.seq,
+          final_path: finalPath,
+          bytes: item.bytes_received,
+        })
+      } catch (err) {
+        console.warn('[queue] item_finalized broadcast failed', err)
+      }
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
@@ -376,43 +540,47 @@ async function handleDownloadEvent(item, delta) {
 
 async function handleDownloadInterrupt(item, delta) {
   const reason = delta.error?.current || 'UNKNOWN'
-  if (reason.startsWith('NETWORK_')) {
-    if (item.retries < DOWNLOAD_NETWORK_RETRY_CAP) {
-      // Ext.6 telemetry: each network retry counts as a rate_limit_hit
-      // signal. Note: chrome.downloads doesn't surface Retry-After for
-      // network interrupts; meta.retry_after_sec is null.
-      emitTelemetry('rate_limit_hit', {
-        export_id: state.runId,
-        item_id: item.source_item_id,
-        source: item.source,
-        phase: 'download',
-        t: Date.now(),
-        http_status: null,
-        retry_count: item.retries || 0,
-        meta: { retry_after_sec: null, reason: reason },
-      })
-      item.retries++
-      chrome.downloads.resume(item.download_id).catch(async err => {
-        await failItem(item, `network_resume_failed:${err?.message}`)
-        item.__settle?.()
-      })
+  const verdict = classifyDownloadInterrupt(reason, item)
+
+  // Special: url-expired maybe-refetch path. The classifier returned
+  // skip with maybe_refetch; the queue decides whether to promote to
+  // a refetch-retry based on source + refetch count.
+  if (verdict.skip?.maybe_refetch && item.source === 'freepik') {
+    if ((item.url_refetch_count || 0) < FREEPIK_URL_REFETCH_CAP) {
+      item.url_refetch_count = (item.url_refetch_count || 0) + 1
+      item.signed_url = null
+      item.download_id = null
+      item.bytes_received = 0
+      item.phase = 'downloading'
+      item.claimed = false
       await persistAndBroadcast()
+      schedule()
       return
     }
-    await failItem(item, 'network_failed')
+    // Refetch cap hit — final verdict.
+    await failItem(item, 'url_expired_refetch_failed')
     item.__settle?.()
-  } else if (reason.startsWith('FILE_')) {
-    // Disk is broken — hard stop the whole queue.
-    await failItem(item, `disk_failed:${reason}`)
-    item.__settle?.()
-    await hardStopQueue('disk_failed')
-  } else if (reason === 'USER_CANCELED') {
-    await failItem(item, 'cancelled')
-    item.__settle?.()
-  } else {
-    await failItem(item, `download_interrupt:${reason}`)
-    item.__settle?.()
+    return
   }
+
+  // Ext.6 telemetry: NETWORK_* retries emit rate_limit_hit (preserved
+  // from the Ext.6 wiring). applyVerdict emits rate_limit_hit for
+  // 429-status errors only, so do the chrome.downloads-specific
+  // NETWORK_* case here before dispatching.
+  if (verdict.retry?.use_chrome_resume) {
+    emitTelemetry('rate_limit_hit', {
+      export_id: state.runId,
+      item_id: item.source_item_id,
+      source: item.source,
+      phase: 'download',
+      t: Date.now(),
+      http_status: null,
+      retry_count: item.retries || 0,
+      meta: { retry_after_sec: null, reason: reason },
+    })
+  }
+
+  await applyVerdict(item, verdict, { phase: 'download', err: { reason } })
 }
 
 function maybePushProgress(item) {
@@ -457,6 +625,22 @@ function buildInitialRunState({ runId, manifest, targetFolder, options, userId }
       resolve_started_at: null,
       license_started_at: null,
       download_started_at: null,
+      // Ext.7: retry counters (per-phase + per-error). Persisted so a
+      // SW restart remembers the retry state.
+      resolve_attempts: 0,
+      license_attempts: 0,
+      rate_limit_429_count: 0,
+      freepik_429_count: 0,
+      mint_attempts: 0,
+      url_refetch_count: 0,
+      integrity_retries: 0,
+      signed_url_expires_at: null,
+      expected_size_bytes: null,
+      // Ext.7 (Task 10): set on item_finalized from chrome.downloads.search.
+      // null until the download completes; web app reads from the
+      // persisted state.items[].final_path once State F / WebApp.3 wire
+      // the consumer (deferred — see note above at the emit site).
+      final_path: null,
     })),
     stats: { ok_count: 0, fail_count: 0, total_bytes_downloaded: 0 },
     run_state: 'running',
@@ -764,4 +948,167 @@ function spawnReattachedDownloader(item) {
       schedule()
     }
   })()
+}
+
+// ------------------- Ext.7 verdict dispatcher + helpers -------------------
+
+// Central dispatcher for classifier verdicts. Called from runResolver,
+// runLicenser, runDownloader, and handleDownloadInterrupt. Every
+// verdict terminates by calling EXACTLY ONE of failItem /
+// hardStopQueue (for skip/hardStop verdicts) OR schedules a retry
+// (for retry/cooldownThenRetry verdicts). Never both — see invariant
+// #1 in the plan.
+async function applyVerdict(item, verdict, context) {
+  if (verdict.skip) {
+    // Special: freepik_unconfigured sets skip_whole_source so all
+    // remaining freepik items bail out at once.
+    if (verdict.skip.skip_whole_source) {
+      const source = verdict.skip.skip_whole_source
+      for (const it of state.items) {
+        if (it === item) continue
+        if (it.source === source && (it.phase === 'queued' || it.phase === 'licensing' || it.phase === 'downloading')) {
+          it.phase = 'failed'
+          it.error_code = verdict.skip.error_code
+          state.stats.fail_count++
+        }
+      }
+      await persistAndBroadcast()
+    }
+    await failItem(item, verdict.skip.error_code)
+    // Signal settle so the worker's Promise doesn't dangle.
+    item.__settle?.()
+    return
+  }
+  if (verdict.hardStop) {
+    await failItem(item, verdict.hardStop.error_code)
+    item.__settle?.()
+    await hardStopQueue(verdict.hardStop.error_code)
+    return
+  }
+  if (verdict.retry) {
+    // Emit a rate_limit_hit telemetry for 429 retries (so State F has
+    // visibility into retry chains).
+    if (context.err?.httpStatus === 429) {
+      item.rate_limit_429_count = (item.rate_limit_429_count || 0) + 1
+      const retryAfterSec = parseRetryAfter(context.err?.retryAfter)
+      emitTelemetry('rate_limit_hit', {
+        export_id: state.runId,
+        item_id: item.source_item_id,
+        source: item.source,
+        phase: context.phase,
+        t: Date.now(),
+        http_status: 429,
+        retry_count: item.rate_limit_429_count,
+        meta: { retry_after_sec: retryAfterSec },
+      })
+    }
+    if (verdict.retry.use_chrome_resume) {
+      // Download-phase NETWORK_* retry. The existing
+      // chrome.downloads.resume path handles it; caller should have
+      // routed here via handleDownloadInterrupt.
+      item.retries = (item.retries || 0) + 1
+      chrome.downloads.resume(item.download_id).catch(async err => {
+        await failItem(item, `network_resume_failed:${err?.message}`)
+        item.__settle?.()
+      })
+      await persistAndBroadcast()
+      return
+    }
+    // Normal retry: sleep, reset the relevant phase, let the scheduler
+    // re-pick it on the next pass.
+    if (verdict.retry.delay_ms > 0) {
+      await sleep(verdict.retry.delay_ms)
+    }
+    // Reset phase so the worker re-picks.
+    if (context.phase === 'resolve') {
+      item.phase = 'queued'
+    } else if (context.phase === 'license') {
+      item.phase = 'licensing'
+    } else {
+      item.phase = 'downloading'
+    }
+    item.claimed = false
+    item.signed_url = null // force JIT refetch on retry
+    await persistAndBroadcast()
+    schedule()
+    return
+  }
+  if (verdict.cooldownThenRetry) {
+    // Pause the queue for the cooldown, then resume with a final-retry
+    // flag on the item. If the final retry fails, the classifier's
+    // next verdict will be hardStop.
+    item.rate_limit_429_count = (item.rate_limit_429_count || 0) + 1
+    emitTelemetry('queue_paused', {
+      export_id: state.runId,
+      t: Date.now(),
+      meta: { reason: `${verdict.cooldownThenRetry.error_code}_cooldown` },
+    })
+    state.run_state = 'paused'
+    await persistAndBroadcast()
+    setTimeout(async () => {
+      if (!state || state.run_state !== 'paused') return
+      // Resume only if we're still the same run.
+      state.run_state = 'running'
+      item.phase = context.phase === 'resolve' ? 'queued'
+                  : context.phase === 'license' ? 'licensing'
+                  : 'downloading'
+      item.claimed = false
+      item.signed_url = null
+      await persistAndBroadcast()
+      emitTelemetry('queue_resumed', { export_id: state.runId, t: Date.now() })
+      schedule()
+    }, verdict.cooldownThenRetry.cooldown_ms)
+    return
+  }
+  // Unknown verdict — defensive skip.
+  await failItem(item, 'unknown_verdict')
+  item.__settle?.()
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms))
+}
+
+// Ext.7: 24h-deduped Slack-alert emitter for deny-list hits.
+// Persists markAlertEmitted BEFORE the emit so a SW death between the
+// two doesn't double-alert on next wake.
+async function maybeEmitDenyAlert(item, errorCode, detail) {
+  try {
+    const should = await shouldAlertForDeny(item.source, item.source_item_id, errorCode)
+    if (!should) return
+    await markAlertEmitted(item.source, item.source_item_id, errorCode)
+    emitTelemetry('item_failed', {
+      export_id: state.runId,
+      item_id: item.source_item_id,
+      source: item.source,
+      phase: 'license',
+      t: Date.now(),
+      error_code: errorCode,
+      retry_count: 0,
+      meta: { alert: true, detail, filename: detail },
+    })
+  } catch (err) {
+    console.warn('[queue] maybeEmitDenyAlert failed', err)
+  }
+}
+
+// Ext.7: Parse the CDN filename out of an AWS-flavored signed URL.
+// Mirrors the private copy in envato.js so the pool-path license
+// worker can run the same ZIP/AEP/PRPROJ safety net without a
+// cross-module import. Future refactor: hoist to a shared util.
+const QUEUE_CONTENT_DISPOSITION_RE = /response-content-disposition=([^&]+)/
+const QUEUE_FILENAME_FROM_DISPOSITION_RE = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i
+
+function extractFilenameFromSignedUrl(url) {
+  if (typeof url !== 'string' || !url.length) return null
+  const dispMatch = QUEUE_CONTENT_DISPOSITION_RE.exec(url)
+  if (!dispMatch) return null
+  let disposition
+  try {
+    disposition = decodeURIComponent(dispMatch[1])
+  } catch {
+    return null
+  }
+  const nameMatch = QUEUE_FILENAME_FROM_DISPOSITION_RE.exec(disposition)
+  return nameMatch ? nameMatch[1] : null
 }

@@ -95,12 +95,62 @@ async function renderBanner() {
   else banner.textContent = 'Sign in to Envato to continue.'
 }
 
+// Ext.7: Check if the most-recent run ended with disk_failed (a
+// chrome.downloads FILE_* interrupt → hardStopQueue). If so, render a
+// recovery hint pointing the user at Chrome's download settings so
+// they can change the folder without a DevTools spelunk.
+async function renderDiskErrorIfAny() {
+  const container = document.getElementById('disk-error')
+  if (!container) return false
+  container.innerHTML = ''
+  container.style.display = 'none'
+  try {
+    const { active_run_id } = await chrome.storage.local.get('active_run_id')
+    // Read any run:* key — the most-recent run is either the active
+    // one OR the last one (whichever the user most likely cares about).
+    const candidates = new Set()
+    if (active_run_id) candidates.add('run:' + active_run_id)
+    // Additionally scan all keys for run: prefix so a post-complete run
+    // (lock cleared) still surfaces.
+    const all = await chrome.storage.local.get(null)
+    for (const k of Object.keys(all)) if (k.startsWith('run:')) candidates.add(k)
+    let hit = null
+    for (const k of candidates) {
+      const run = all[k] || (await chrome.storage.local.get(k))[k]
+      if (!run) continue
+      const runDiskFailed = run.error_code === 'disk_failed'
+      const itemDiskFailed = Array.isArray(run.items) && run.items.some(i => i && i.error_code === 'disk_failed')
+      if (runDiskFailed || itemDiskFailed) {
+        hit = run
+        break
+      }
+    }
+    if (!hit) return false
+    container.innerHTML = `
+      <div class="disk-error-title">Disk error</div>
+      <div class="disk-error-body">
+        The last download was interrupted by a disk error
+        (out of space, permission denied, or the path is gone).
+        Change your download folder in
+        <a href="chrome://settings/downloads" target="_blank" rel="noopener">Chrome settings</a>
+        and try the export again.
+      </div>
+    `
+    container.style.display = 'block'
+    return true
+  } catch (err) {
+    console.warn('[popup] renderDiskErrorIfAny failed', err)
+    return false
+  }
+}
+
 async function render() {
   document.getElementById('version').textContent = `v${EXT_VERSION}`
   const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
   await renderTeRow()
   await renderEnvatoRow(envato_session_status)
   await renderBanner()
+  await renderDiskErrorIfAny()
 }
 
 // Live updates: if a new JWT arrives OR the cookie watcher updates

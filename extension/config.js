@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.6.0'
+export const EXT_VERSION = '0.7.0'
 export const ENV = 'dev'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
@@ -96,3 +96,49 @@ export const TELEMETRY_EVENT_ENUM = Object.freeze([
   'queue_resumed',
   'export_completed',
 ])
+
+// -------- Ext.7 failure-mode polish --------
+//
+// Source of truth for retry timings, backoff caps, and daily-cap
+// thresholds. Ext.9 will serve these from /api/ext-config; for now
+// they are compile-time baked in.
+
+// Resolver tab retry: one retry at +30s on timeout, then give up.
+export const RESOLVER_RETRY_DELAY_MS = 30000
+export const RESOLVER_MAX_ATTEMPTS   = 2  // initial + 1 retry
+
+// Envato download.data 5xx / network exponential backoff: 1s, 5s, 15s, 60s,
+// then license_failed. Four total attempts.
+export const ENVATO_LICENSE_BACKOFF_MS = [1000, 5000, 15000, 60000]
+
+// Retry-After clamp (in seconds). Envato may return absurd values
+// or a misbehaving CDN may return garbage; clamp to a sane window so
+// we never sleep for days.
+export const RETRY_AFTER_MIN_SEC = 1
+export const RETRY_AFTER_MAX_SEC = 600
+
+// Jitter applied to Retry-After values. Spec says ±20%.
+export const RETRY_AFTER_JITTER = 0.20
+
+// 429 escalation: after second 429, pause the queue this long, then
+// one final retry before hard-stop.
+export const ENVATO_429_COOLDOWN_MS = 5 * 60 * 1000  // 5 minutes
+
+// Daily cap per source per user. Warn at warn_at; hard-stop (that
+// source) at hard_stop_at.
+export const DAILY_CAP_WARN_AT      = 400
+export const DAILY_CAP_HARD_STOP_AT = 500
+
+// Deny-list alert dedupe window. One Slack alert per
+// (source_item_id, error_code) per this many ms.
+export const DENY_LIST_ALERT_DEDUPE_MS = 24 * 60 * 60 * 1000  // 24h
+
+// Freepik URL-refetch-on-expiry cap. After this many refetches that
+// still yield an expired URL, mark url_expired_refetch_failed.
+export const FREEPIK_URL_REFETCH_CAP = 2
+
+// Integrity check: size-mismatch tolerance. If the downloaded size
+// is within ±N% of est_size_bytes, accept (some CDNs return slightly
+// different sizes than the catalogue claimed). Below / above → retry
+// once, then integrity_failed.
+export const INTEGRITY_TOLERANCE = 0.05  // ±5%

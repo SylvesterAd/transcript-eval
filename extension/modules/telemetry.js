@@ -211,12 +211,30 @@ export function normalizeErrorCode(raw) {
   // "download_interrupt:SERVER_UNAUTHORIZED", "network_resume_failed:<msg>").
   const beforeColon = s.split(':', 1)[0]
   if (ERROR_CODE_SET.has(beforeColon)) return beforeColon
-  // Known Ext.5 raw strings that don't match the enum yet. Map
-  // conservatively; Ext.7 will tighten.
+
+  // Ext.5's legacy raw-string mappings (pre-Ext.7 classifier).
   if (beforeColon === 'download_interrupt') return 'network_failed'
   if (beforeColon === 'network_resume_failed') return 'network_failed'
   if (beforeColon === 'license_failed') return 'envato_unavailable'
   if (beforeColon === 'download_failed') return null
+
+  // Ext.7 additions — classifier may still pass through some raw codes
+  // via failItem (e.g. envato_http_500, envato_session_missing,
+  // pexels_daily_cap_exceeded).
+  if (s === 'envato_session_missing') return 'envato_session_401'
+  if (s === 'envato_session_missing_preflight') return 'envato_session_401'
+  if (s === 'envato_preflight_error') return 'envato_unavailable'
+  if (s === 'envato_402') return 'envato_402_tier'
+  if (s.startsWith('envato_http_5')) return 'envato_unavailable'
+  if (s.startsWith('envato_http_4')) return 'envato_unavailable'  // 4xx that aren't 401/402/403/429
+  if (s === 'freepik_url_expired') return 'url_expired_refetch_failed'
+  if (s.endsWith('_daily_cap_exceeded')) return null  // no matching enum entry; raw in meta.raw_error
+  if (s === 'unknown_verdict') return null
+  if (s === 'cancelled') return null  // user-cancelled isn't in the enum; null + raw
+  if (s === 'resolve_timeout') return 'resolve_failed'
+  if (s === 'resolve_error') return 'resolve_failed'
+  if (s === 'bad_input') return null
+
   // Unknown — return null so the event still posts; the raw string
   // lives in meta.raw_error for admin triage.
   return null
