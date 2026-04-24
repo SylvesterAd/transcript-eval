@@ -19,6 +19,7 @@ import GpuPipelineView from './components/views/GpuPipelineView.jsx'
 import ProjectsView from './components/views/ProjectsView.jsx'
 import ExportsList from './pages/admin/ExportsList.jsx'
 import ExportDetail from './pages/admin/ExportDetail.jsx'
+import SupportBundle from './pages/admin/SupportBundle.jsx'
 import EditorView from './components/editor/EditorView.jsx'
 import ExportPage from './pages/ExportPage.jsx'
 
@@ -200,6 +201,7 @@ export default function App() {
         <Route path="experiments/:experimentId/stability" element={<StabilityView />} />
         <Route path="exports" element={<ExportsList />} />
         <Route path="exports/:id" element={<ExportDetail />} />
+        <Route path="support" element={<SupportBundle />} />
       </Route>
 
       {/* User panel routes */}
