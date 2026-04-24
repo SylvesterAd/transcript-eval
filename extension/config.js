@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.2.0'
+export const EXT_VERSION = '0.3.0'
 export const ENV = 'dev'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
@@ -24,3 +24,10 @@ export const RESOLVER_TIMEOUT_MS = 15000
 // user click so the cap is 1; Ext.5 raises this to 5 with a real pool.
 // Keep the constant here so the bump point is a single-line edit.
 export const MAX_RESOLVER_CONCURRENCY = 1
+
+// Freepik signed URLs are short-lived (Phase 1 backend mints with
+// ~15 min TTL; Freepik's own TTL is 15-60 min). Ext.3 aborts the
+// download if the URL is within 60s of expiry rather than starting
+// a transfer that may 403 mid-stream. Full refetch-on-expiry lands
+// in Ext.5/Ext.7; this constant is the grace window.
+export const FREEPIK_URL_GRACE_MS = 60000
