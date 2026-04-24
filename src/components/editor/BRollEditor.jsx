@@ -302,7 +302,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
           {/* Horizontal splitter */}
           <div
-            className="h-4 w-full flex items-center justify-center group relative z-40 shrink-0 cursor-ns-resize"
+            className="h-2 w-full flex items-center justify-center group relative z-40 shrink-0 cursor-ns-resize"
             onMouseDown={onMouseDown}
           >
             <div className="w-full h-px bg-white/5 group-hover:bg-primary-fixed/30 transition-colors" />
@@ -310,7 +310,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
           </div>
 
           {/* Bottom: playback controls + timeline */}
-          <div className="flex flex-col gap-2 pb-4 shrink-0" style={{ height: `${bottomH}px` }}>
+          <div className="flex flex-col gap-1 shrink-0" style={{ height: `${bottomH}px` }}>
             <PlaybackControls />
             <div className="flex-1 min-h-0">
               <Timeline
