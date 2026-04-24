@@ -22,7 +22,7 @@
 // directly, so .crx is only needed for side-loading.
 
 import { fileURLToPath } from 'node:url'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { readFile, readdir, mkdir, rm, copyFile, stat, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { zipSync } from 'fflate'
@@ -251,7 +251,10 @@ async function main() {
 
   const scriptDir = dirname(fileURLToPath(import.meta.url))
   const extRoot = join(scriptDir, '..')
-  const outDir = opts.out ? join(process.cwd(), opts.out) : join(extRoot, 'dist')
+  // `resolve` honors absolute paths passed via --out while still
+  // anchoring relative paths to cwd. Plain `join(cwd, opts.out)` would
+  // double-prepend cwd when opts.out is already absolute.
+  const outDir = opts.out ? resolve(process.cwd(), opts.out) : join(extRoot, 'dist')
 
   const manifestPath = join(extRoot, 'manifest.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
