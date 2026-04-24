@@ -9,7 +9,7 @@ import StateB_Session from '../components/export/StateB_Session.jsx'
 import StateC_Summary from '../components/export/StateC_Summary.jsx'
 import StateD_InProgress from '../components/export/StateD_InProgress.jsx'
 import StateE_Complete from '../components/export/StateE_Complete.jsx'
-import StateF_Partial_Placeholder from '../components/export/StateF_Partial_Placeholder.jsx'
+import StateF_Partial from '../components/export/StateF_Partial.jsx'
 import { useExportPort } from '../hooks/useExportPort.js'
 
 // FSM:
@@ -204,6 +204,40 @@ export default function ExportPage() {
     })
   }, [pipelineId, variant, ext])
 
+  // Retry failed items — State F button callback. Rebuilds a filtered
+  // unified manifest containing only items whose source_item_id is in
+  // the failedIds set, then hands off to the existing onStart ceremony
+  // (createExport → sendSession → sendExport). onStart's dispatch on
+  // success naturally transitions the FSM to state_d.
+  //
+  // Invariant #5: the filtered manifest is built from
+  // state.unified_manifest.items (the authoritative copy from State C),
+  // NOT from the Port snapshot (which loses envato_item_url, placements,
+  // etc.).
+  const onRetryFailed = useCallback(async ({ failedIds }) => {
+    if (!state.unified_manifest || !(failedIds instanceof Set) || failedIds.size === 0) return
+    const filteredItems = state.unified_manifest.items.filter(
+      it => failedIds.has(it.source_item_id)
+    )
+    if (filteredItems.length === 0) return
+    const filteredManifest = {
+      ...state.unified_manifest,
+      items: filteredItems,
+      totals: {
+        ...(state.unified_manifest.totals || {}),
+        count: filteredItems.length,
+      },
+    }
+    // target_folder and options: reuse the original request's defaults.
+    // (State C's onStart passed targetFolder as a display string; we
+    // re-send the same string. options.variants stays the same.)
+    await onStart({
+      unifiedManifest: filteredManifest,
+      options: { force_redownload: false, variants: state.variant_labels },
+      targetFolder: '~/Downloads/transcript-eval/',  // same default as State C
+    })
+  }, [state.unified_manifest, state.variant_labels, onStart])
+
   // Fail-fast on missing pipelineId.
   if (!pipelineId) {
     return <ErrorBox>Missing pipeline id in URL — expected /editor/:id/export</ErrorBox>
@@ -258,7 +292,7 @@ export default function ExportPage() {
     )
   }
 
-  // States D / E / F — live-progress + State E XMEML + State F stub.
+  // States D / E / F — live-progress + State E XMEML + State F partial UI.
   if (state.phase === 'state_d' || state.phase === 'state_e' || state.phase === 'state_f') {
     return (
       <ActiveRun
@@ -269,6 +303,7 @@ export default function ExportPage() {
         completePayload={state.complete_payload}
         unifiedManifest={state.unified_manifest}
         variantLabels={state.variant_labels}
+        onRetryFailed={onRetryFailed}
         onComplete={(payload) => dispatch({ type: 'export_completed', payload })}
       />
     )
@@ -283,7 +318,7 @@ export default function ExportPage() {
 // lifecycle lives only for the duration of the active run.
 function ActiveRun({
   variant, exportId, expectedRunId, phase, completePayload,
-  unifiedManifest, variantLabels, onComplete,
+  unifiedManifest, variantLabels, onRetryFailed, onComplete,
 }) {
   const port = useExportPort({ exportId, expectedRunId })
 
@@ -305,7 +340,16 @@ function ActiveRun({
     )
   }
   if (phase === 'state_f') {
-    return <StateF_Partial_Placeholder complete={completePayload} snapshot={port.snapshot} />
+    return (
+      <StateF_Partial
+        complete={completePayload}
+        snapshot={port.snapshot}
+        exportId={exportId}
+        variantLabels={variantLabels}
+        unifiedManifest={unifiedManifest}
+        onRetryFailed={onRetryFailed}
+      />
+    )
   }
   // state_d
   return (
