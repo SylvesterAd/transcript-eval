@@ -99,6 +99,14 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       return row ? { vi, rect: row.getBoundingClientRect(), variant: v } : null
     }).filter(Boolean)
 
+    // Capture where within the placement the user grabbed, so cross-variant drop
+    // can place the clip such that the grabbed point lands under the cursor.
+    const labelW = 144
+    const srcRow = variantRows.find(r => r.vi === (activeVariantIdx ?? 0))
+    const srcTrackLeft = srcRow ? srcRow.rect.left + labelW : 0
+    const placementLeftPx = srcTrackLeft + placement.timelineStart * zoom - (scrollX || 0)
+    const grabOffsetSec = (startX - placementLeftPx) / zoom
+
     // Ghost element that follows the cursor
     const ghost = document.createElement('div')
     ghost.style.position = 'fixed'
@@ -139,10 +147,9 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       }
 
       if (overRow && overRow.vi !== (activeVariantIdx ?? 0)) {
-        const labelW = 144
         const trackLeft = overRow.rect.left + labelW
         const timeAtPointer = (ev.clientX - trackLeft) / zoom
-        const dropStart = Math.max(0, timeAtPointer - duration / 2)
+        const dropStart = Math.max(0, timeAtPointer - grabOffsetSec)
         crossMode = { variantIdx: overRow.vi, dropStart, variant: overRow.variant }
         marker.style.display = 'block'
         marker.style.left = (trackLeft + dropStart * zoom) + 'px'
