@@ -16,6 +16,10 @@ import {
 import { downloadEnvato } from './modules/envato.js'
 import { downloadSourceItem } from './modules/sources.js'
 import { registerPortHandler, broadcastToPort } from './modules/port.js'
+import {
+  startRun, pauseRun, resumeRun, cancelRun, getRunState,
+  autoResumeIfActiveRun,
+} from './modules/queue.js'
 
 async function handlePing() {
   const jwt = await getJwt()
@@ -43,6 +47,11 @@ async function handleSession(msg) {
   }
 }
 
+// DEPRECATED Ext.5+ — kept for isolated debugging of the 3-phase
+// envato flow without spinning up the queue. The queue in
+// modules/queue.js is the production path. Removing this case would
+// be strictly a cleanup, not a correctness fix.
+//
 // Ext.2 debug handler — fires the full 3-phase Envato flow for ONE
 // item. NOT user-facing; only triggered from the dev test page.
 // The message does not require a valid JWT — the debug path doesn't
@@ -71,6 +80,10 @@ async function handleDebugEnvatoOneShot(msg) {
   }
 }
 
+// DEPRECATED Ext.5+ — kept for isolated debugging of a single Pexels
+// or Freepik item without spinning up the queue. The queue in
+// modules/queue.js is the production path.
+//
 // Ext.3 debug handler — fires the full Pexels OR Freepik flow for
 // ONE item via the server-proxied /api/<source>-url endpoints.
 // NOT user-facing; only triggered from the dev test page.
@@ -167,6 +180,40 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
       case 'session':
         sendResponse(await handleSession(msg))
         return
+      // Ext.5 queue handlers — the production path. Routing is a thin
+      // dispatcher to modules/queue.js.
+      case 'export': {
+        const { manifest, target_folder, options, export_id } = msg
+        // user_id comes from the stored JWT — queue uses it for
+        // completed_items keying.
+        const jwt = await getJwt()
+        const userId = jwt?.user_id || null
+        const result = await startRun({
+          runId: export_id,
+          manifest,
+          targetFolder: target_folder,
+          options,
+          userId,
+        })
+        sendResponse(result)
+        return
+      }
+      case 'pause': {
+        sendResponse(await pauseRun())
+        return
+      }
+      case 'resume': {
+        sendResponse(await resumeRun())
+        return
+      }
+      case 'cancel': {
+        sendResponse(await cancelRun())
+        return
+      }
+      case 'status': {
+        sendResponse({ ok: true, state: getRunState() })
+        return
+      }
       case 'debug_envato_one_shot':
         sendResponse(await handleDebugEnvatoOneShot(msg))
         return
@@ -182,4 +229,26 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
     }
   })()
   return true  // keep sendResponse alive for the async handler above
+})
+
+// --- Ext.5: auto-resume hooks ---
+//
+// On SW wake (Chrome reopen, extension reload, or first install),
+// check if there's an active run to resume. Task 9 fills in
+// autoResumeIfActiveRun.
+chrome.runtime.onStartup.addListener(() => {
+  autoResumeIfActiveRun().catch(err => {
+    console.error('[sw] autoResumeIfActiveRun on startup failed', err)
+  })
+})
+chrome.runtime.onInstalled.addListener(() => {
+  autoResumeIfActiveRun().catch(err => {
+    console.error('[sw] autoResumeIfActiveRun on install failed', err)
+  })
+})
+// Also try at module top level — onStartup doesn't always fire on
+// SW wake from idle (it fires on Chrome startup). The top-level call
+// covers wake-from-idle.
+autoResumeIfActiveRun().catch(err => {
+  console.error('[sw] autoResumeIfActiveRun at module-init failed', err)
 })
