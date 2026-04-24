@@ -120,5 +120,88 @@ export function useExtension() {
       if (r?.error) throw new Error(r.error)
       return r ?? { ok: true }
     },
+
+    // Open a long-lived Port to the extension. Unlike sendMessage (one-
+    // shot request/response), a Port stays open until one side calls
+    // disconnect(). Used by State D's useExportPort hook to subscribe
+    // to the extension's queue broadcasts: {type:"state"},
+    // {type:"progress"}, {type:"item_done"}, {type:"complete"}.
+    //
+    // Returns a handle the caller owns: { port, disconnect }. The
+    // caller is responsible for calling disconnect() on unmount.
+    //
+    // Auto-retries once on IMMEDIATE disconnect: if Chrome fires
+    // onDisconnect synchronously (typical when EXT_ID is invalid or
+    // the extension was just reloaded), we try one more connect with
+    // a small delay before surfacing the error to the caller. This
+    // handles the common "extension was reloaded during dev" race
+    // without a user-visible blip.
+    openPort: (name = 'export-tap') => {
+      if (typeof chrome === 'undefined' || !chrome?.runtime?.connect) {
+        throw new Error('chrome.runtime.connect is not available — non-Chrome browser?')
+      }
+      if (!EXT_ID) {
+        throw new Error('EXT_ID is empty (see src/lib/extension-id.js)')
+      }
+      let port = null
+      let retried = false
+      const listeners = { message: [], disconnect: [] }
+
+      function attach(p) {
+        p.onMessage.addListener((msg) => {
+          listeners.message.forEach(fn => { try { fn(msg) } catch (e) { console.error('[useExtension.openPort onMessage listener error]', e) } })
+        })
+        p.onDisconnect.addListener(() => {
+          const lastErr = chrome.runtime.lastError
+          const reason = lastErr?.message || 'disconnected'
+          // Retry ONCE on immediate disconnect (extension reloaded,
+          // transient), then surface to caller.
+          if (!retried) {
+            retried = true
+            setTimeout(() => {
+              try {
+                const p2 = chrome.runtime.connect(EXT_ID, { name })
+                port = p2
+                attach(p2)
+              } catch (e) {
+                listeners.disconnect.forEach(fn => { try { fn(e.message || reason) } catch {} })
+              }
+            }, 200)
+            return
+          }
+          listeners.disconnect.forEach(fn => { try { fn(reason) } catch {} })
+        })
+      }
+
+      try {
+        port = chrome.runtime.connect(EXT_ID, { name })
+        attach(port)
+      } catch (e) {
+        throw new Error(`failed to open port to ${EXT_ID}: ${e.message}`)
+      }
+
+      return {
+        // Consumers use these to subscribe; plain add/remove pattern
+        // so the hook consumer doesn't have to think about Chrome's
+        // API quirks.
+        onMessage: (fn) => {
+          listeners.message.push(fn)
+          return () => { listeners.message = listeners.message.filter(f => f !== fn) }
+        },
+        onDisconnect: (fn) => {
+          listeners.disconnect.push(fn)
+          return () => { listeners.disconnect = listeners.disconnect.filter(f => f !== fn) }
+        },
+        postMessage: (msg) => {
+          try { port?.postMessage(msg) } catch (e) { console.error('[openPort.postMessage]', e) }
+        },
+        disconnect: () => {
+          try { port?.disconnect() } catch {}
+          port = null
+          listeners.message = []
+          listeners.disconnect = []
+        },
+      }
+    },
   }), [])
 }
