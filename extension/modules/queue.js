@@ -421,6 +421,46 @@ async function handleDownloadEvent(item, delta) {
   if (delta.state) {
     const next = delta.state.current
     if (next === 'complete') {
+      // Ext.7 integrity check. chrome.downloads reports bytes_received;
+      // the manifest carries est_size_bytes (stored as
+      // item.expected_size_bytes or item.total_bytes). If
+      // |actual - expected| > INTEGRITY_TOLERANCE AND > 1024 bytes
+      // absolute, retry once (delete + re-mint + re-download); second
+      // mismatch → integrity_failed. Placed BEFORE stats/daily-cap
+      // so a failed-integrity item never counts toward either.
+      const expected = item.expected_size_bytes || item.total_bytes
+      const actual = item.bytes_received || 0
+      if (expected && actual > 0) {
+        const tol = expected * INTEGRITY_TOLERANCE
+        if (Math.abs(actual - expected) > tol && Math.abs(actual - expected) > 1024) {
+          const verdict = classifyIntegrityError(item)
+          if (verdict.retry) {
+            item.integrity_retries = (item.integrity_retries || 0) + 1
+            // Delete the file so the redownload writes a fresh copy
+            // (instead of chrome uniquifying the filename).
+            try {
+              await chrome.downloads.removeFile(item.download_id)
+            } catch {}
+            // Drop the download_id mapping so future onChanged events
+            // for the old id don't re-enter this branch.
+            if (item.download_id != null) {
+              delete state.download_id_to_seq[item.download_id]
+            }
+            item.download_id = null
+            item.signed_url = null
+            item.bytes_received = 0
+            item.phase = 'downloading'
+            item.claimed = false
+            await persistAndBroadcast()
+            schedule()
+            return
+          }
+          // verdict.skip path — already retried.
+          await failItem(item, verdict.skip.error_code)
+          item.__settle?.()
+          return
+        }
+      }
       item.phase = 'done'
       state.stats.ok_count++
       state.stats.total_bytes_downloaded += item.bytes_received || 0
