@@ -13,6 +13,7 @@ import pexelsRouter from './routes/pexels.js'
 import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
 import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter, freepikUrlRouter } from './routes/exports.js'
+import exportXmlRouter from './routes/export-xml.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 import { startGpuFailurePoller } from './services/gpu-failure-poller.js'
@@ -55,6 +56,7 @@ app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/gpu', gpuRouter)
 app.use('/api/exports', exportsRouter)
+app.use('/api/exports', exportXmlRouter)
 app.use('/api/session-token', sessionTokenRouter)
 app.use('/api/export-events', exportEventsRouter)
 app.use('/api/pexels-url', pexelsUrlRouter)

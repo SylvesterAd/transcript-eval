@@ -43,6 +43,45 @@ export async function getExport(id, { userId } = {}) {
   return row
 }
 
+// Read the post-run per-item result payload. Populated by
+// recordExportEvent when an `export_completed` event arrives with
+// `meta` containing the per-item resolved filenames + placement data.
+// Returns null if the export doesn't exist, doesn't belong to
+// `userId`, or hasn't completed yet.
+//
+// Shape of returned object (when non-null):
+//   {
+//     export_id, status, folder_path,
+//     variants: [{
+//       label, sequenceName,
+//       placements: [{ seq, source, sourceItemId, filename,
+//         timelineStart, timelineDuration,
+//         width?, height?, sourceFrameRate? }, ...]
+//     }, ...]
+//   }
+//
+// The placements array is exactly the input shape generateXmeml()
+// expects. Upstream Phase 1 is responsible for writing this shape
+// into exports.result_json; see docs/specs/2026-04-23-envato-export-design.md
+// § "Partial-run XML".
+export async function getExportResult(id, { userId } = {}) {
+  const row = await db.prepare(
+    'SELECT id, user_id, status, folder_path, result_json FROM exports WHERE id = ?'
+  ).get(id)
+  if (!row) return null
+  if (userId && row.user_id && row.user_id !== userId) return null
+  if (!row.result_json) return null
+  let parsed
+  try { parsed = JSON.parse(row.result_json) } catch { return null }
+  if (!parsed || !Array.isArray(parsed.variants)) return null
+  return {
+    export_id: row.id,
+    status: row.status,
+    folder_path: row.folder_path || null,
+    variants: parsed.variants,
+  }
+}
+
 const ALLOWED_EVENTS = new Set([
   'export_started', 'item_resolved', 'item_licensed', 'item_downloaded',
   'item_failed', 'rate_limit_hit', 'session_expired',
