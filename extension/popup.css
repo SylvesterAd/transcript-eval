@@ -117,3 +117,28 @@ footer {
 .banner a:hover {
   text-decoration: underline;
 }
+
+/* Ext.7 disk-error state */
+.disk-error {
+  margin: 0 14px 10px;
+  padding: 10px 12px;
+  border: 1px solid #fca5a5;
+  background: #fef2f2;
+  border-radius: 6px;
+  color: #991b1b;
+}
+
+.disk-error-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.disk-error-body {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.disk-error-body a {
+  color: #991b1b;
+  text-decoration: underline;
+}
