@@ -107,6 +107,14 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     const placementLeftPx = srcTrackLeft + placement.timelineStart * zoom - (scrollX || 0)
     const grabOffsetSec = (startX - placementLeftPx) / zoom
 
+    console.log('[broll-drag] start', {
+      placementIndex: placement.index,
+      activeVariantIdx,
+      duration,
+      grabOffsetSec: grabOffsetSec.toFixed(2),
+      variantRows: variantRows.map(r => ({ vi: r.vi, top: r.rect.top, bottom: r.rect.bottom, variantId: r.variant.id })),
+    })
+
     // Ghost element that follows the cursor
     const ghost = document.createElement('div')
     ghost.style.position = 'fixed'
@@ -146,6 +154,16 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         if (ev.clientY >= row.rect.top && ev.clientY <= row.rect.bottom) { overRow = row; break }
       }
 
+      if (!onMove._lastLog || Date.now() - onMove._lastLog > 200) {
+        onMove._lastLog = Date.now()
+        console.log('[broll-drag] move', {
+          clientY: ev.clientY,
+          overRowVi: overRow?.vi ?? null,
+          activeVariantIdx,
+          isCross: !!(overRow && overRow.vi !== (activeVariantIdx ?? 0)),
+        })
+      }
+
       if (overRow && overRow.vi !== (activeVariantIdx ?? 0)) {
         const trackLeft = overRow.rect.left + labelW
         const timeAtPointer = (ev.clientX - trackLeft) / zoom
@@ -168,6 +186,13 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       window.removeEventListener('mouseup', onUp)
       if (ghost.parentNode) ghost.parentNode.removeChild(ghost)
       if (marker.parentNode) marker.parentNode.removeChild(marker)
+
+      console.log('[broll-drag] drop', {
+        moved,
+        crossMode,
+        altKey: ev.altKey,
+        finalMode: crossMode ? (ev.altKey ? 'copy' : 'move') : 'in-variant',
+      })
 
       if (!moved) { selectPlacement(placement.index); return }
 

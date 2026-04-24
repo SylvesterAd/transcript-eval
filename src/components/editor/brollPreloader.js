@@ -22,6 +22,7 @@ function addPreload(url) {
   link.setAttribute('fetchpriority', 'low')
   document.head.appendChild(link)
   links.set(url, link)
+  console.log('[broll-preload] added', url.slice(0, 80))
   while (links.size > MAX_ENTRIES) {
     const oldestUrl = links.keys().next().value
     const oldestEl = links.get(oldestUrl)
@@ -49,6 +50,12 @@ function removeUnused(keepSet) {
  * @param {Record<string|number, number>} selectedResultsByIndex
  */
 export function scheduleBrollPreload({ activePlacements = [], inactivePlacementsByPid = {}, currentTime = 0, selectedResultsByIndex = {} }) {
+  console.log('[broll-preload] schedule', {
+    currentTime: currentTime.toFixed(2),
+    activeCount: activePlacements.length,
+    inactiveVariants: Object.keys(inactivePlacementsByPid).length,
+    cacheSize: links.size,
+  })
   if (scheduleTimer) clearTimeout(scheduleTimer)
   scheduleTimer = setTimeout(() => {
     const keep = new Set()
@@ -77,6 +84,12 @@ export function scheduleBrollPreload({ activePlacements = [], inactivePlacements
 
     for (const url of keep) addPreload(url)
     removeUnused(keep)
+    console.log('[broll-preload] applied', {
+      keepUrls: [...keep].slice(0, 3),
+      keepCount: keep.size,
+      cacheSize: links.size,
+      activeNext: active.map(p => ({ start: p.timelineStart.toFixed(2), idx: p.index })).slice(0, 3),
+    })
   }, 250)
 }
 
