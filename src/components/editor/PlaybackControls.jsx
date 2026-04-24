@@ -197,14 +197,16 @@ export default function PlaybackControls() {
           <button onClick={cycleSpeed} className="text-xs font-medium text-on-surface hover:text-primary-fixed transition-colors">
             {state.playbackRate}x
           </button>
-          <button
-            onClick={handleSplit}
-            disabled={state.activeTab !== 'roughcut' && state.selectedTrackIds.size !== 1}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed group"
-          >
-            <span className="material-symbols-outlined text-sm">content_cut</span>
-            <span className="text-[10px] font-bold uppercase tracking-wider">{state.activeTab === 'roughcut' ? 'Cut' : 'Split'}</span>
-          </button>
+          {state.activeTab !== 'brolls' && (
+            <button
+              onClick={handleSplit}
+              disabled={state.activeTab !== 'roughcut' && state.selectedTrackIds.size !== 1}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed group"
+            >
+              <span className="material-symbols-outlined text-sm">content_cut</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider">{state.activeTab === 'roughcut' ? 'Cut' : 'Split'}</span>
+            </button>
+          )}
         </div>
       </div>
 
