@@ -436,3 +436,76 @@ file's Task 9.
   to `BACKEND_URL`, which is already reachable for `/api/pexels-url` +
   `/api/freepik-url` from Ext.3.
 - `version`: 0.5.0 → 0.6.0.
+
+## Ext.8 — Diagnostics + privacy
+
+### Diagnostic bundle
+
+The popup's **Export diagnostic bundle** button produces a
+timestamped ZIP (`transcript-eval-diagnostics-<UTC>.zip`) for
+attaching to a support ticket. The ZIP contains:
+
+- `meta.json` — schema version (currently 1), extension version,
+  generation timestamp, browser family.
+- `queue.json` — all `run:*` records from the last 24h, with
+  absolute file paths redacted to
+  `~/Downloads/transcript-eval/export-<redacted>/<basename>`.
+- `events.json` — the last 200 telemetry events (in-memory ring +
+  persisted queue, deduped + sorted).
+- `environment.json` — browser UA + platform, cookie-presence
+  booleans (NEVER values), JWT-presence booleans (NEVER the token),
+  deny-list, daily-cap counts, telemetry overflow count, current
+  opt-out state.
+
+Every byte in the ZIP passes through `scrubSensitive()`:
+
+- JWT-shaped strings (`eyJ....`) → `<redacted-jwt>` (or `<redacted>`
+  when under a sensitive-named key like `token`/`secret`/`password`/
+  `auth_key`/`api_key`).
+- Absolute OS paths → collapsed to the redacted export-prefix
+  (`~/Downloads/transcript-eval/export-<redacted>/<basename>`) if
+  recognizable, else `<redacted-path>`.
+- `email`-keyed values and email-shaped strings → `<redacted-email>`.
+- Cookie values are never read; we record booleans via
+  `chrome.cookies.get(...).then(c => !!c)`.
+
+The bundle format is the contract WebApp.4 will parse — schema_version
+1 is the current spec. Future changes require a bump + migration.
+
+### Privacy opt-out
+
+The popup's **Send diagnostic events** toggle flips
+`chrome.storage.local.telemetry_opt_out`:
+
+- **On (default):** `emit()` queues + posts to `/api/export-events`.
+- **Off:** the first line of `emit()` returns early; nothing is
+  queued, nothing is posted. The persisted `telemetry_queue` is
+  cleared on flip-to-off so a flip-back doesn't retroactively
+  send buffered events.
+
+Export runs work identically in either state. Opt-out is a
+client-side circuit breaker; the backend continues to accept any
+events that arrive.
+
+### Debug handlers
+
+For the `extension-test.html` harness:
+
+- `debug_build_bundle` — trigger `buildBundle()` from outside the popup.
+- `debug_set_telemetry_opt_out { value: boolean }` — flip the flag.
+- `debug_get_telemetry_opt_out` — read the current value.
+
+These are never called from production code.
+
+### Manifest changes (0.7.0 → 0.8.0)
+
+- `permissions`: unchanged — `downloads` + `storage` are already
+  present from Ext.1 / Ext.5.
+- `host_permissions`: unchanged.
+- `version`: 0.7.0 → 0.8.0.
+
+### New runtime dep
+
+- `fflate@^0.8` — 16KB, zero-dep, MIT, synchronous ZIP writer. Used
+  by `diagnostics.buildBundle()` to assemble the multi-file ZIP
+  without blocking on async I/O inside the MV3 SW.

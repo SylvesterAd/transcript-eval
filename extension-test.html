@@ -231,6 +231,21 @@
     <pre id="t-log">(no events yet)</pre>
   </fieldset>
 
+  <fieldset>
+    <legend>12. Diagnostics + privacy (Ext.8)</legend>
+    <p class="muted">
+      Build the diagnostic bundle, toggle the telemetry opt-out flag,
+      or read the current opt-out state. The bundle download uses
+      <code>saveAs: true</code> so you'll see the OS picker.
+    </p>
+    <div class="row">
+      <button id="btn-ext8-build-bundle">Build diagnostic bundle</button>
+      <button id="btn-ext8-toggle-optout">Toggle telemetry opt-out</button>
+      <button id="btn-ext8-show-optout">Show opt-out state</button>
+    </div>
+    <pre id="out-ext8">(not run)</pre>
+  </fieldset>
+
   <script type="module">
     const idInput = document.getElementById('ext-id')
     idInput.value = localStorage.getItem('ext_test_id') || ''
@@ -640,6 +655,38 @@
     document.getElementById('t-flush').onclick = async () => {
       const r = await send({ type: 'debug_telemetry_flush', version: 1 })
       tAppend('flush result: ' + JSON.stringify(r))
+    }
+
+    // Ext.8 — diagnostics + privacy
+    document.getElementById('btn-ext8-build-bundle').onclick = async () => {
+      const out = document.getElementById('out-ext8')
+      out.textContent = 'Building…'
+      try {
+        const res = await send({ type: 'debug_build_bundle', version: 1 })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+    document.getElementById('btn-ext8-toggle-optout').onclick = async () => {
+      const out = document.getElementById('out-ext8')
+      try {
+        const cur = await send({ type: 'debug_get_telemetry_opt_out', version: 1 })
+        const next = !(cur?.telemetry_opt_out === true)
+        const res = await send({ type: 'debug_set_telemetry_opt_out', version: 1, value: next })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+    document.getElementById('btn-ext8-show-optout').onclick = async () => {
+      const out = document.getElementById('out-ext8')
+      try {
+        const res = await send({ type: 'debug_get_telemetry_opt_out', version: 1 })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
     }
   </script>
 </body>

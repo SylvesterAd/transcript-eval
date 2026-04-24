@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.7.0'
+export const EXT_VERSION = '0.8.0'
 export const ENV = 'dev'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
@@ -142,3 +142,24 @@ export const FREEPIK_URL_REFETCH_CAP = 2
 // different sizes than the catalogue claimed). Below / above → retry
 // once, then integrity_failed.
 export const INTEGRITY_TOLERANCE = 0.05  // ±5%
+
+// -------- Ext.8 diagnostics + privacy --------
+//
+// Source of truth for the diagnostic bundle's time-window + event
+// cap. WebApp.4's bundle parser reads these indirectly via the
+// bundle's meta.json (bundle_window_ms + bundle_max_events mirror
+// these at generation time — a schema_version bump is required if
+// we ever change the semantics).
+
+// Queue-state inclusion window for buildBundle(). Runs older than
+// this are skipped entirely. 24h is the spec-stated value.
+export const DIAGNOSTICS_BUNDLE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+// Hard cap on event count in the bundle. If more events exist,
+// the oldest are dropped (events.json.truncated_from records the
+// original size). 200 is the spec-stated value.
+export const DIAGNOSTICS_MAX_EVENTS = 200
+
+// Bundle schema version. Bump when changing the on-disk JSON
+// shape; WebApp.4's parser must support each prior version.
+export const DIAGNOSTICS_SCHEMA_VERSION = 1

@@ -4,6 +4,7 @@
 
 import { EXT_VERSION, BACKEND_URL } from './config.js'
 import { getJwt, hasEnvatoSession } from './modules/auth.js'
+import { buildBundle } from './modules/diagnostics.js'
 
 function setRow(rowEl, statusEl, detailEl, state) {
   statusEl.textContent = state.text
@@ -144,6 +145,54 @@ async function renderDiskErrorIfAny() {
   }
 }
 
+// Ext.8 — "Export diagnostic bundle" button. Kicks off
+// diagnostics.buildBundle() (which invokes chrome.downloads.download
+// with saveAs: true) and surfaces the result in the row-detail text.
+async function renderDiagRow() {
+  const btn = document.getElementById('btn-build-bundle')
+  const detail = document.getElementById('detail-diag')
+  if (!btn || btn._wired) return
+  btn._wired = true
+  btn.addEventListener('click', async () => {
+    btn.disabled = true
+    detail.textContent = 'Building bundle…'
+    try {
+      const res = await buildBundle()
+      detail.textContent = res?.ok
+        ? `Saved ${res.filename} (${Math.round((res.bytes || 0) / 1024)} KB)`
+        : 'Bundle failed'
+    } catch (err) {
+      detail.textContent = `Error: ${String(err?.message || err)}`
+    } finally {
+      btn.disabled = false
+    }
+  })
+}
+
+// Ext.8 — "Send diagnostic events" toggle. The persisted flag is
+// `telemetry_opt_out`; the checkbox represents "send" (checked = ON
+// = NOT opted-out) — we invert when reading/writing. Flipping to
+// off clears the persisted queue (Q3 recommendation).
+async function renderOptOutRow() {
+  const chk = document.getElementById('chk-optout-send')
+  const detail = document.getElementById('detail-optout')
+  if (!chk) return
+  const { telemetry_opt_out } = await chrome.storage.local.get('telemetry_opt_out')
+  chk.checked = telemetry_opt_out !== true   // "Send" = ON when not opted-out
+  if (chk._wired) return
+  chk._wired = true
+  chk.addEventListener('change', async () => {
+    const newOptOut = !chk.checked  // unchecked → opted-out
+    await chrome.storage.local.set({ telemetry_opt_out: newOptOut })
+    if (newOptOut) {
+      await chrome.storage.local.remove('telemetry_queue')
+      detail.textContent = 'Opt-out on — events will not be sent. Queue cleared.'
+    } else {
+      detail.textContent = 'Opt-out off — events will be sent.'
+    }
+  })
+}
+
 async function render() {
   document.getElementById('version').textContent = `v${EXT_VERSION}`
   const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
@@ -151,6 +200,8 @@ async function render() {
   await renderEnvatoRow(envato_session_status)
   await renderBanner()
   await renderDiskErrorIfAny()
+  await renderDiagRow()
+  await renderOptOutRow()
 }
 
 // Live updates: if a new JWT arrives OR the cookie watcher updates

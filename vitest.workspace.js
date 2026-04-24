@@ -1,8 +1,11 @@
-// Vitest workspace — dual-environment fan-out.
-//   - server: Node 20 env, server/**/__tests__/**/*.test.js (XMEML
-//             generator tests + new exports service tests).
-//   - web:    happy-dom env, src/**/__tests__/**/*.test.{js,jsx}
-//             (State E XMEML hook tests).
+// Vitest workspace — triple-environment fan-out.
+//   - server:    Node 20 env, server/**/__tests__/**/*.test.js (XMEML
+//                generator tests + exports service tests).
+//   - web:       happy-dom env, src/**/__tests__/**/*.test.{js,jsx}
+//                (State E XMEML hook tests + WebApp.3/State F).
+//   - extension: Node 20 env, extension/**/__tests__/**/*.test.js
+//                (Ext.8 diagnostics — mocks chrome.* globals so node
+//                env is sufficient).
 //
 // Vitest 1.6.x uses this file (a workspace file) instead of an
 // inline `projects:` key on defineConfig (which is 2.x syntax).
@@ -19,6 +22,14 @@ export default defineWorkspace([
       name: 'server',
       environment: 'node',
       include: ['server/**/__tests__/**/*.test.js'],
+      globals: false,
+    },
+  },
+  {
+    test: {
+      name: 'extension',
+      environment: 'node',
+      include: ['extension/**/__tests__/**/*.test.js'],
       globals: false,
     },
   },
