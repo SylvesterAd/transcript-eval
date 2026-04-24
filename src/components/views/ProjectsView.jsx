@@ -5,7 +5,6 @@ import { Home, LayoutGrid, List, Film, Loader2, CheckCircle2, AlertCircle, Trash
 import UploadModal from './UploadModal.jsx'
 import UploadConfigFlow from '../upload-config/UploadConfigFlow.jsx'
 import ProcessingModal from './ProcessingModal.jsx'
-import BRollExamplesModal from './BRollExamplesModal.jsx'
 
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
 const CONFIG_STEPS = new Set(['libraries', 'audience', 'references', 'path'])
@@ -316,14 +315,6 @@ export default function ProjectsView() {
           initialState={initialConfig}
           onBack={() => setStep('upload', groupId)}
           onComplete={(gid) => setStep('processing', gid)}
-        />
-      )}
-
-      {step === 'broll-examples' && (
-        <BRollExamplesModal
-          groupId={groupId}
-          onBack={() => setStep('libraries', groupId)}
-          onComplete={(gid) => setStep('path', gid)}
         />
       )}
 
