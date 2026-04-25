@@ -553,13 +553,15 @@ export function useBRollEditorState(planPipelineId) {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
     const resultIdx = state.selectedResults[index] ?? placement.persistedSelectedResult ?? 0
+    const allResults = placement.results || []
+    const slim = allResults[resultIdx] ? [allResults[resultIdx]] : []
     const entry = {
       sourcePipelineId: placement.isUserPlacement ? placement.sourcePipelineId : planPipelineId,
       sourceChapterIndex: placement.chapterIndex ?? null,
       sourcePlacementIndex: placement.placementIndex ?? null,
       sourceUserPlacementId: placement.userPlacementId ?? null,
-      selectedResult: resultIdx,
-      results: JSON.parse(JSON.stringify(placement.results || [])),
+      selectedResult: 0,
+      results: slim,
       snapshot: {
         description: placement.description,
         audio_anchor: placement.audio_anchor,
@@ -651,6 +653,8 @@ export function useBRollEditorState(planPipelineId) {
       throw new Error('source placement not found')
     }
     const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
+    const allResults = placement.results || []
+    const slim = allResults[resultIdx] ? [allResults[resultIdx]] : []
     // Caller may supply a uuid so an optimistic insert into the target's track shares the same
     // id with the eventually-saved server entry — that lets React reconcile by key without remount.
     const uuid = externalUuid || ('u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12))
@@ -663,8 +667,8 @@ export function useBRollEditorState(planPipelineId) {
       sourcePlacementIndex: placement.placementIndex ?? null,
       timelineStart: targetStartSec,
       timelineEnd: targetStartSec + dur,
-      selectedResult: resultIdx,
-      results: JSON.parse(JSON.stringify(placement.results || [])),
+      selectedResult: 0,
+      results: slim,
       snapshot: {
         description: placement.description,
         audio_anchor: placement.audio_anchor,

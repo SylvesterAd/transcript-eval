@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { reducer, initialState } from '../brollReducer.js'
+import { reducer, initialState, userPlacementToRawEntry } from '../brollReducer.js'
 
 describe('reducer SET_DATA_RESOLVED', () => {
   it('clears selectedIndex when payload.pipelineChanged is true', () => {
@@ -68,5 +68,22 @@ describe('reducer CONDITIONAL_UNDO', () => {
     const next = reducer(base, { type: 'CONDITIONAL_UNDO', payload: { entryId: 'e1' } })
     expect(next.undoStack.map(e => e.id)).toEqual(['e1', 'e2'])
     expect(next.edits['0:0']?.hidden).toBe(true)
+  })
+})
+
+describe('userPlacementToRawEntry', () => {
+  it('preserves provided results array as-is', () => {
+    const out = userPlacementToRawEntry({
+      id: 'u_x', timelineStart: 0, timelineEnd: 1, selectedResult: 0,
+      results: [{ id: 'r1' }, { id: 'r2' }],
+    })
+    expect(out.results.length).toBe(2)
+    expect(out.searchStatus).toBe('complete')
+  })
+  it('marks status pending when results empty', () => {
+    const out = userPlacementToRawEntry({
+      id: 'u_x', timelineStart: 0, timelineEnd: 1, selectedResult: 0, results: [],
+    })
+    expect(out.searchStatus).toBe('pending')
   })
 })
