@@ -1442,6 +1442,42 @@ async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
   return { status: 'timeout' }
 }
 
+// Resolve which stock libraries to send to the broll proxy for a given plan pipeline.
+// Reads `libraries_json` + `freepik_opt_in` from the parent video group, filters
+// `artlist` (no proxy provider yet), and always appends `pexels` (free, always on).
+// `overrides.sources` (if non-empty) wins, with the same artlist filter applied.
+async function resolveBrollSources(planPipelineId, overrides = {}) {
+  if (overrides.sources?.length) {
+    return overrides.sources.filter(s => s !== 'artlist')
+  }
+
+  let libraries = []
+  let freepikOptIn = true
+
+  try {
+    const planRuns = await db.prepare(
+      `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id LIMIT 1`
+    ).all(`%"pipelineId":"${planPipelineId}"%`)
+    const groupId = planRuns[0] ? JSON.parse(planRuns[0].metadata_json || '{}').groupId : null
+
+    if (groupId) {
+      const group = await db.prepare(
+        `SELECT libraries_json, freepik_opt_in FROM video_groups WHERE id = ?`
+      ).get(groupId)
+      if (group?.libraries_json) {
+        try { libraries = JSON.parse(group.libraries_json) || [] } catch {}
+      }
+      if (group?.freepik_opt_in === false) freepikOptIn = false
+    }
+  } catch (e) {
+    console.error('[broll] resolveBrollSources failed, falling back to pexels only:', e)
+  }
+
+  const sources = [...libraries.filter(l => l !== 'artlist'), 'pexels']
+  if (freepikOptIn) sources.push('freepik')
+  return Array.from(new Set(sources))
+}
+
 // Search stock footage for each B-Roll placement using keywords + GPU-powered API
 export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
@@ -1575,6 +1611,8 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   brollPipelineProgress.set(searchPipelineId, { strategyId: searchStrategy.id, videoId, groupId, strategyName: 'B-Roll Search', videoTitle: '', startedAt: pipelineStart, stageIndex: 0, totalStages: 1, status: 'running', stageName: 'Searching stock footage', phase: 'broll_search', videoLabel: '', subDone: 0, subTotal: itemsToProcess.length, subLabel: '' })
 
   let completedItems = 0
+  const resolvedSources = await resolveBrollSources(planPipelineId)
+  console.log(`[broll-pipeline] Sources for ${searchPipelineId}: ${resolvedSources.join(', ')}`)
 
   try {
     // Process ONE element at a time (sequential — API takes ~90s each)
@@ -1607,7 +1645,7 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
       const requestBody = {
         keywords: searchKeywords,
         brief,
-        sources: ['pexels', 'storyblocks'],
+        sources: resolvedSources,
         max_results: 10,
       }
 
@@ -5384,7 +5422,7 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
   ].filter(Boolean).join('\n')
 
   const searchKeywords = keywords.length ? keywords : (p.search_keywords || [])
-  const sources = overrides.sources?.length ? overrides.sources : ['pexels', 'storyblocks']
+  const sources = await resolveBrollSources(planPipelineId, overrides)
 
   const requestBody = {
     keywords: searchKeywords,
@@ -5548,7 +5586,7 @@ export async function searchUserPlacement(planPipelineId, userPlacementId, overr
     styleStr ? `## Style: ${styleStr}` : '',
   ].filter(Boolean).join('\n')
 
-  const sources = overrides.sources?.length ? overrides.sources : ['pexels', 'storyblocks']
+  const sources = await resolveBrollSources(planPipelineId, overrides)
   const requestBody = { keywords: [], brief, sources, max_results: 10 }
 
   const res = await fetch(GPU_URL, {
