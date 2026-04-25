@@ -121,6 +121,9 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       pendingArgs = null
     }
 
+    let lastWasCross = false
+    let inVariantStartX = startX  // re-anchored when re-entering in-variant
+
     // Variant row lookup for hit-testing. Query once per drag start.
     const variantRows = (variants || []).map((v, vi) => {
       const row = document.querySelector(`[data-broll-variant="${vi}"]`)
@@ -175,6 +178,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       }
 
       if (overRow && overRow.vi !== (activeVariantIdx ?? 0)) {
+        lastWasCross = true
         // Cross-mode active. If we previously moved the placement in-variant, revert
         // to its drag-start position so the source doesn't end up at a weird spot
         // (and so undo of the cross-drop returns the placement to where it started).
@@ -195,11 +199,18 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         ghost.style.left = dropLeftPx + 'px'
         ghost.style.top = overRow.rect.top + 'px'
       } else {
+        // Re-anchor on transition from cross-mode → in-variant.
+        if (lastWasCross) {
+          inVariantStartX = ev.clientX
+          lastWasCross = false
+        }
         crossMode = null
         marker.style.display = 'none'
         // In-variant drag: recompute neighbors against the cursor position so the dragged
         // clip can tunnel past intermediate placements into a wider gap further along.
         // Static drag-start neighbors clamp the cursor inside the original gap forever.
+        // Use inVariantStartX as the anchor (re-anchored after cross-bounce).
+        const dx = ev.clientX - inVariantStartX
         const dt = dx / zoom
         const cursorTime = origStart + dt
         const livePlacements = placementsRef.current
