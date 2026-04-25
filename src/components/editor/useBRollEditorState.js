@@ -88,10 +88,64 @@ function applyMutation(state, entry, side /* 'before' | 'after' */) {
   return { ...state, edits: nextEdits, userPlacements: nextUserPlacements, dirty: true }
 }
 
+// Build a placement entry matching the server's merged userPlacement shape (broll.js:5181),
+// adapted for client-side resolution. chapterIndex/placementIndex are set to null (not the
+// source indices) so the entry doesn't pick up the source placement's edits[key] overrides
+// — userPlacements have their own timeline/result fields and are not edit-key keyed.
+export function userPlacementToRawEntry(up) {
+  return {
+    ...(up.snapshot || {}),
+    index: `user:${up.id}`,
+    userPlacementId: up.id,
+    isUserPlacement: true,
+    sourcePipelineId: up.sourcePipelineId,
+    chapterIndex: null,
+    placementIndex: null,
+    userTimelineStart: up.timelineStart,
+    userTimelineEnd: up.timelineEnd,
+    persistedSelectedResult: up.selectedResult,
+    results: up.results || [],
+    searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+  }
+}
+
+// Resolve placements, choosing between server-authoritative (no local editor-state yet)
+// and local-authoritative (after LOAD_EDITOR_STATE has populated state.userPlacements/edits).
+// Both modes filter hidden placements; local mode strips server's userPlacements and re-adds
+// from local state so unsaved local edits to userPlacements are reflected.
+function resolvePlacements({ rawPlacements, userPlacements, edits, transcriptWords, editorStateLoaded }) {
+  if (!editorStateLoaded) {
+    const visible = rawPlacements.filter(p => !p.hidden)
+    return matchPlacementsToTranscript(visible, transcriptWords)
+  }
+  const visible = rawPlacements.filter(p => !p.hidden && !p.isUserPlacement)
+  return matchPlacementsToTranscript(
+    [...visible, ...userPlacements.map(userPlacementToRawEntry)],
+    transcriptWords,
+    edits,
+  )
+}
+
 function reducer(state, action) {
   switch (action.type) {
     case 'SET_LOADING':
       return { ...state, rawPlacements: [], placements: [], selectedIndex: null, selectedResults: {}, loading: true, error: null }
+    case 'RESET_PIPELINE_STATE':
+      // Clear all per-pipeline state. Used when switching to a different planPipelineId so
+      // the outgoing pipeline's userPlacements/edits/undoStack don't leak into the new view
+      // before LOAD_EDITOR_STATE arrives.
+      return {
+        ...state,
+        edits: {},
+        userPlacements: [],
+        undoStack: [],
+        redoStack: [],
+        editorStateVersion: 0,
+        dirty: false,
+        editorStateLoaded: false,
+        selectedIndex: null,
+        selectedResults: {},
+      }
     case 'SET_DATA_RESOLVED':
       // Clearing selectedIndex is required on variant switches: the old variant's
       // index would otherwise resolve against the new variant's placements and open
@@ -160,6 +214,7 @@ function reducer(state, action) {
         redoStack: Array.isArray(loaded.redoStack) ? loaded.redoStack : [],
         editorStateVersion: version || 0,
         dirty: false,
+        editorStateLoaded: true,
       }
     }
     case 'APPLY_ACTION': {
@@ -201,10 +256,39 @@ function reducer(state, action) {
         redoStack: [...state.redoStack, entry],
       }
     }
+    case 'CONDITIONAL_UNDO': {
+      // Roll back only if the head of undoStack matches the action we expect.
+      // Used by async cross-pipeline redo when the server PUT fails: we need to
+      // un-redo the local change, but only if no unrelated action has been pushed
+      // on top in the meantime (otherwise we'd corrupt that entry instead).
+      const stack = state.undoStack
+      if (!stack.length) return state
+      const entry = stack[stack.length - 1]
+      if (entry.id !== action.payload?.entryId) return state
+      const applied = applyMutation(state, entry, 'before')
+      return {
+        ...applied,
+        undoStack: stack.slice(0, -1),
+        redoStack: [...state.redoStack, entry],
+      }
+    }
     case 'REDO': {
       const stack = state.redoStack
       if (!stack.length) return state
       const entry = stack[stack.length - 1]
+      const applied = applyMutation(state, entry, 'after')
+      return {
+        ...applied,
+        redoStack: stack.slice(0, -1),
+        undoStack: [...state.undoStack, entry].slice(-MAX_UNDO),
+      }
+    }
+    case 'CONDITIONAL_REDO': {
+      // Mirror of CONDITIONAL_UNDO — used by async cross-pipeline undo on failure.
+      const stack = state.redoStack
+      if (!stack.length) return state
+      const entry = stack[stack.length - 1]
+      if (entry.id !== action.payload?.entryId) return state
       const applied = applyMutation(state, entry, 'after')
       return {
         ...applied,
@@ -244,6 +328,7 @@ function reducer(state, action) {
         redoStack: Array.isArray(remoteState.redoStack) ? remoteState.redoStack : [],
         editorStateVersion: version,
         dirty: pending.length > 0,
+        editorStateLoaded: true,
       }
       for (const entry of pending) {
         next = applyMutation(next, entry, 'after')
@@ -274,6 +359,7 @@ const initialState = {
   redoStack: [],               // array of action objects
   editorStateVersion: 0,       // for optimistic concurrency
   dirty: false,                // true while a debounced save is pending
+  editorStateLoaded: false,    // true once LOAD_EDITOR_STATE has populated for the current pipeline
 }
 
 export function useBRollEditorState(planPipelineId) {
@@ -283,6 +369,10 @@ export function useBRollEditorState(planPipelineId) {
   // Tracks which pipelineId the current reducer state was seeded for — so the load effect
   // can skip SET_LOADING + fetch when a cached seed already populated placements.
   const seededPipelineIdRef = useRef(null)
+  // Tracks the last pipeline that was loaded/seeded; lets seedFromCache and the load effect
+  // detect a pipeline switch and dispatch RESET_PIPELINE_STATE so the outgoing pipeline's
+  // userPlacements/edits don't bleed into the new view.
+  const lastLoadedPipelineIdRef = useRef(null)
 
   // Fetch editor data on mount or when pipeline changes (variant switch)
   const refetchEditorData = useCallback(() => {
@@ -314,27 +404,31 @@ export function useBRollEditorState(planPipelineId) {
   const userPlacementsRef = useRef(state.userPlacements)
   userPlacementsRef.current = state.userPlacements
 
+  const editorStateLoadedRef = useRef(state.editorStateLoaded)
+  editorStateLoadedRef.current = state.editorStateLoaded
+
   // Seed cached placements synchronously. Called by BRollEditor BEFORE setActiveVariantIdx,
   // so the pipelineId passed here is the INCOMING one.
   const seedFromCache = useCallback((pipelineId, rawPlacements, searchProgress) => {
-    const visible = rawPlacements.filter(p => !p.hidden && !p.isUserPlacement)
-    const resolved = matchPlacementsToTranscript(
-      [...visible, ...userPlacementsRef.current.map(up => ({
-        ...(up.snapshot || {}),
-        index: `user:${up.id}`,
-        userPlacementId: up.id,
-        isUserPlacement: true,
-        userTimelineStart: up.timelineStart,
-        userTimelineEnd: up.timelineEnd,
-        results: up.results,
-        searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
-        chapterIndex: null,
-        placementIndex: null,
-      }))],
-      transcriptWordsRef.current,
-      editsRef.current,
-    )
+    const isPipelineSwitch = lastLoadedPipelineIdRef.current !== null && lastLoadedPipelineIdRef.current !== pipelineId
+    if (isPipelineSwitch) {
+      // Drop outgoing pipeline's userPlacements/edits/undoStack before resolving, so the
+      // server-baked rawPlacements (which already include the new pipeline's userPlacements)
+      // are treated as authoritative until LOAD_EDITOR_STATE arrives for the new pipeline.
+      dispatch({ type: 'RESET_PIPELINE_STATE' })
+    }
+    lastLoadedPipelineIdRef.current = pipelineId
     seededPipelineIdRef.current = pipelineId
+    // After RESET, editorStateLoaded is false so resolvePlacements uses server-as-is mode.
+    // For same-pipeline reseeds (no RESET), we use the existing local-authoritative mode.
+    const useServerMode = isPipelineSwitch
+    const resolved = resolvePlacements({
+      rawPlacements,
+      userPlacements: useServerMode ? [] : userPlacementsRef.current,
+      edits: useServerMode ? {} : editsRef.current,
+      transcriptWords: transcriptWordsRef.current,
+      editorStateLoaded: !useServerMode && editorStateLoadedRef.current,
+    })
     dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
   }, [])
 
@@ -356,26 +450,28 @@ export function useBRollEditorState(planPipelineId) {
       // timelineStart and BRollTrack filters them all out (producing an empty-looking track).
       return
     }
+
+    const isPipelineSwitch = lastLoadedPipelineIdRef.current !== null && lastLoadedPipelineIdRef.current !== planPipelineId
+    if (isPipelineSwitch) {
+      // Drop outgoing pipeline's local state before fetching new data; LOAD_EDITOR_STATE
+      // for the new pipeline will repopulate userPlacements/edits/undoStack.
+      dispatch({ type: 'RESET_PIPELINE_STATE' })
+    }
+    lastLoadedPipelineIdRef.current = planPipelineId
+
     dispatch({ type: 'SET_LOADING' })
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
       .then(data => {
-        const visible = (data.placements || []).filter(p => !p.hidden && !p.isUserPlacement)
-        const resolved = matchPlacementsToTranscript(
-          [...visible, ...userPlacementsRef.current.map(up => ({
-            ...(up.snapshot || {}),
-            index: `user:${up.id}`,
-            userPlacementId: up.id,
-            isUserPlacement: true,
-            userTimelineStart: up.timelineStart,
-            userTimelineEnd: up.timelineEnd,
-            results: up.results,
-            searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
-            chapterIndex: null,
-            placementIndex: null,
-          }))],
-          transcriptWordsRef.current,
-          editsRef.current,
-        )
+        // Resolve using server-as-is mode if editor-state hasn't loaded yet for this pipeline.
+        // The resolve useEffect will re-render with local-authoritative mode once
+        // LOAD_EDITOR_STATE dispatches (the parallel effect below).
+        const resolved = resolvePlacements({
+          rawPlacements: data.placements || [],
+          userPlacements: userPlacementsRef.current,
+          edits: editsRef.current,
+          transcriptWords: transcriptWordsRef.current,
+          editorStateLoaded: editorStateLoadedRef.current,
+        })
         dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
@@ -395,29 +491,22 @@ export function useBRollEditorState(planPipelineId) {
     return () => { cancelled = true }
   }, [planPipelineId])
 
-  // Re-resolve when transcript words, edits, or userPlacements change
+  // Re-resolve when transcript words, edits, userPlacements, or editor-state-loaded flag change.
+  // The editorStateLoaded dep is critical: when it flips true (LOAD_EDITOR_STATE arrives),
+  // resolution switches from server-as-is to local-authoritative — without this dep, a brief
+  // flash where unsaved local edits aren't reflected can occur.
   useEffect(() => {
     if (!state.rawPlacements.length) return
     if (!transcriptWords.length) return
-    const visible = state.rawPlacements.filter(p => !p.hidden && !p.isUserPlacement)
-    const resolved = matchPlacementsToTranscript(
-      [...visible, ...state.userPlacements.map(up => ({
-        ...(up.snapshot || {}),
-        index: `user:${up.id}`,
-        userPlacementId: up.id,
-        isUserPlacement: true,
-        userTimelineStart: up.timelineStart,
-        userTimelineEnd: up.timelineEnd,
-        results: up.results,
-        searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
-        chapterIndex: null,
-        placementIndex: null,
-      }))],
+    const resolved = resolvePlacements({
+      rawPlacements: state.rawPlacements,
+      userPlacements: state.userPlacements,
+      edits: state.edits,
       transcriptWords,
-      state.edits,
-    )
+      editorStateLoaded: state.editorStateLoaded,
+    })
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
-  }, [transcriptWords, state.edits, state.userPlacements, state.rawPlacements])
+  }, [transcriptWords, state.edits, state.userPlacements, state.rawPlacements, state.editorStateLoaded])
 
   // Poll for progressive search updates
   useEffect(() => {
@@ -511,8 +600,57 @@ export function useBRollEditorState(planPipelineId) {
   }, [])
 
   const selectResult = useCallback((placementIndex, resultIndex) => {
+    // Update transient session state for immediate UI feedback.
     dispatch({ type: 'SELECT_RESULT', payload: { placementIndex, resultIndex } })
-  }, [])
+
+    // Persist via APPLY_ACTION so the choice survives reloads / variant switches.
+    // Without this, RESET_PIPELINE_STATE clears selectedResults and the renderer falls
+    // back to persistedSelectedResult — which was never saved, so it defaults to 0.
+    const placement = state.placements.find(p => p.index === placementIndex)
+    if (!placement) return
+
+    if (placement.userPlacementId) {
+      const up = state.userPlacements.find(u => u.id === placement.userPlacementId)
+      if (!up || up.selectedResult === resultIndex) return
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: 'select-result',
+        userPlacementId: placement.userPlacementId,
+        before: { userPlacementPatch: { selectedResult: up.selectedResult } },
+        after:  { userPlacementPatch: { selectedResult: resultIndex } },
+      }
+      // Coalesce rapid back-and-forth picks within 800ms (same window as move/resize)
+      // so clicking through options doesn't spam the undo stack.
+      const last = state.undoStack[state.undoStack.length - 1]
+      const sameTarget = last
+        && last.kind === 'select-result'
+        && last.userPlacementId === placement.userPlacementId
+        && (Date.now() - (last.ts || 0) < 800)
+      dispatch({ type: sameTarget ? 'APPLY_ACTION_COALESCE' : 'APPLY_ACTION', payload: entry })
+      return
+    }
+
+    if (placement.chapterIndex != null && placement.placementIndex != null) {
+      const placementKey = `${placement.chapterIndex}:${placement.placementIndex}`
+      const prev = state.edits[placementKey] || {}
+      if (prev.selectedResult === resultIndex) return
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: 'select-result',
+        placementKey,
+        before: { editsSlot: { selectedResult: prev.selectedResult } },
+        after:  { editsSlot: { selectedResult: resultIndex } },
+      }
+      const last = state.undoStack[state.undoStack.length - 1]
+      const sameTarget = last
+        && last.kind === 'select-result'
+        && last.placementKey === placementKey
+        && (Date.now() - (last.ts || 0) < 800)
+      dispatch({ type: sameTarget ? 'APPLY_ACTION_COALESCE' : 'APPLY_ACTION', payload: entry })
+    }
+  }, [state.placements, state.userPlacements, state.edits, state.undoStack])
 
   const selectedPlacement = useMemo(() => {
     if (state.selectedIndex == null) return null
@@ -624,8 +762,81 @@ export function useBRollEditorState(planPipelineId) {
     }
   }, [state.placements, state.edits, state.userPlacements])
 
-  const undo = useCallback(() => dispatch({ type: 'UNDO' }), [])
-  const redo = useCallback(() => dispatch({ type: 'REDO' }), [])
+  // Async undo/redo: cross-pipeline drag actions carry targetPipelineId +
+  // targetUserPlacementSnapshot. Undoing them must also remove the userPlacement
+  // from the target pipeline's editor-state on the server (and redo must add it back).
+  // If the server PUT fails, we roll back the local UNDO/REDO so source and target stay
+  // in sync. Non-cross actions stay synchronous via the bare dispatch.
+  //
+  // Concurrency: a per-target mutex guards against overlapping cross-pipeline ops, so two
+  // rapid undos against the same target don't both fetch the same `version` and lose one
+  // to a 409. Rollback also verifies the stack head still matches the action we popped —
+  // if the user has dispatched another action since, we don't blindly REDO/UNDO and corrupt
+  // the wrong entry.
+  const crossPipelineLockRef = useRef(new Map()) // pid -> Promise
+
+  const runWithTargetLock = useCallback(async (pid, fn) => {
+    const prev = crossPipelineLockRef.current.get(pid) || Promise.resolve()
+    const next = prev.catch(() => {}).then(fn)
+    crossPipelineLockRef.current.set(pid, next)
+    try { return await next } finally {
+      if (crossPipelineLockRef.current.get(pid) === next) {
+        crossPipelineLockRef.current.delete(pid)
+      }
+    }
+  }, [])
+
+  const undo = useCallback(async () => {
+    const top = state.undoStack[state.undoStack.length - 1]
+    if (!top) return
+    dispatch({ type: 'UNDO' })
+    if (top.kind !== 'drag-cross' || !top.targetPipelineId || !top.targetUserPlacementId) return
+    await runWithTargetLock(top.targetPipelineId, async () => {
+      try {
+        const remote = await authFetch(`/broll/pipeline/${top.targetPipelineId}/editor-state`)
+        const next = {
+          edits: remote.state?.edits || {},
+          userPlacements: (remote.state?.userPlacements || []).filter(u => u.id !== top.targetUserPlacementId),
+          undoStack: Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [],
+          redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
+        }
+        await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
+      } catch (err) {
+        console.error('[broll-undo] cross-pipeline cleanup failed:', err.message)
+        // Only roll back if this entry is still at the top of redoStack — otherwise the
+        // user has done other things since and a blind REDO would corrupt unrelated state.
+        dispatch({ type: 'CONDITIONAL_REDO', payload: { entryId: top.id } })
+        window.alert('Undo failed — could not contact target pipeline. Try again.')
+      }
+    })
+  }, [state.undoStack, runWithTargetLock])
+
+  const redo = useCallback(async () => {
+    const top = state.redoStack[state.redoStack.length - 1]
+    if (!top) return
+    dispatch({ type: 'REDO' })
+    if (top.kind !== 'drag-cross' || !top.targetPipelineId || !top.targetUserPlacementSnapshot) return
+    await runWithTargetLock(top.targetPipelineId, async () => {
+      try {
+        const remote = await authFetch(`/broll/pipeline/${top.targetPipelineId}/editor-state`)
+        // Guard: don't double-create if the snapshot is already present (e.g. if the user
+        // independently redid on the target side first).
+        const ups = remote.state?.userPlacements || []
+        const alreadyPresent = ups.some(u => u.id === top.targetUserPlacementId)
+        const next = {
+          edits: remote.state?.edits || {},
+          userPlacements: alreadyPresent ? ups : [...ups, top.targetUserPlacementSnapshot],
+          undoStack: Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [],
+          redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
+        }
+        await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
+      } catch (err) {
+        console.error('[broll-redo] cross-pipeline cleanup failed:', err.message)
+        dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: top.id } })
+        window.alert('Redo failed — could not contact target pipeline. Try again.')
+      }
+    })
+  }, [state.redoStack, runWithTargetLock])
 
   const copyPlacement = useCallback((index, { cut = false } = {}) => {
     const placement = state.placements.find(p => p.index === index)
@@ -723,11 +934,15 @@ export function useBRollEditorState(planPipelineId) {
     }})
   }, [state.placements, state.edits])
 
-  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, targetDurationSec, mode }) => {
+  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, targetDurationSec, mode, uuid: externalUuid }) => {
     const placement = state.placements.find(p => p.index === sourceIndex)
-    if (!placement) return
+    if (!placement) {
+      throw new Error('source placement not found')
+    }
     const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
-    const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+    // Caller may supply a uuid so an optimistic insert into the target's track shares the same
+    // id with the eventually-saved server entry — that lets React reconcile by key without remount.
+    const uuid = externalUuid || ('u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12))
     const actionId = generateActionId()
     const dur = Math.max(0.5, targetDurationSec ?? placement.timelineDuration ?? 1)
     const up = {
@@ -750,9 +965,16 @@ export function useBRollEditorState(planPipelineId) {
     }
 
     // Source-side: dispatch hide IMMEDIATELY for instant visual feedback.
-    // We'll revert this if the remote write fails.
+    // We'll revert this if the remote write fails. We tag the action with
+    // targetPipelineId + targetUserPlacementSnapshot so undo can asynchronously
+    // delete the userPlacement on the target pipeline, and redo can re-create it.
     let sourceAction = null
     if (mode === 'move') {
+      const crossMeta = {
+        targetPipelineId,
+        targetUserPlacementId: uuid,
+        targetUserPlacementSnapshot: up,
+      }
       const placementKey = placement.chapterIndex != null && placement.placementIndex != null
         ? `${placement.chapterIndex}:${placement.placementIndex}`
         : null
@@ -760,12 +982,14 @@ export function useBRollEditorState(planPipelineId) {
         const prev = state.edits[placementKey] || {}
         sourceAction = {
           id: actionId, ts: Date.now(), kind: 'drag-cross', placementKey,
+          ...crossMeta,
           before: { editsSlot: { hidden: !!prev.hidden } },
           after:  { editsSlot: { hidden: true } },
         }
       } else if (placement.userPlacementId) {
         sourceAction = {
           id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: placement.userPlacementId,
+          ...crossMeta,
           before: { userPlacementCreate: state.userPlacements.find(u => u.id === placement.userPlacementId) },
           after:  { userPlacementDelete: true },
         }
@@ -794,7 +1018,8 @@ export function useBRollEditorState(planPipelineId) {
       if (sourceAction) {
         dispatch({ type: 'UNDO' })
       }
-      return
+      // Propagate so the caller can revert any optimistic target-side insert.
+      throw err
     }
   }, [state.placements, state.selectedResults, state.edits, state.userPlacements, planPipelineId])
 

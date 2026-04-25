@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo, useContext } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { BRollContext, useBRollEditorState, authFetchBRollData } from './useBRollEditorState.js'
+import { BRollContext, useBRollEditorState, authFetchBRollData, userPlacementToRawEntry } from './useBRollEditorState.js'
 import { EditorContext } from './EditorView.jsx'
 import { matchPlacementsToTranscript } from './brollUtils.js'
 import BRollPreview from './BRollPreview.jsx'
@@ -88,15 +88,19 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   // Cache active variant's placements into inactive cache before switching
   const pendingSelectionRef = useRef(null)
-  const handleVariantActivate = useCallback((newIdx, selectIndex) => {
+  const handleVariantActivate = useCallback((newIdx, selectIdentity) => {
     const currentPid = variants[activeVariantIdx]?.id
     // Cache outgoing variant — apply local edits and hide flags so the inactive display
     // matches what the user just saw (avoids a visual jump from old → new position when
-    // the parallel fetchInactive refetches editor-data).
+    // the parallel fetchInactive refetches editor-data). Strip out the server's merged
+    // userPlacements (isUserPlacement: true) and re-inject from local state.userPlacements
+    // so unsaved local pastes/drag-cross results are reflected on the now-inactive track.
     if (currentPid && brollState.rawPlacements?.length) {
       const edits = brollState.edits || {}
-      const snapshot = brollState.rawPlacements
+      const localUps = brollState.userPlacements || []
+      const originals = brollState.rawPlacements
         .filter(p => {
+          if (p.isUserPlacement) return false
           if (p.chapterIndex == null || p.placementIndex == null) return true
           return !edits[`${p.chapterIndex}:${p.placementIndex}`]?.hidden
         })
@@ -113,6 +117,10 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
           }
           return next
         })
+      const snapshot = [
+        ...originals,
+        ...localUps.map(userPlacementToRawEntry),
+      ]
       setRawInactivePlacements(prev => ({ ...prev, [currentPid]: snapshot }))
     }
     // If we have cached data for the incoming variant, seed it immediately to avoid blank frames
@@ -123,9 +131,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
       // and skip the SET_LOADING clear, avoiding a blank frame.
       brollState.seedFromCache(newPid, cached)
     }
-    if (selectIndex != null) pendingSelectionRef.current = selectIndex
+    // selectIdentity may be: { chapterIndex, placementIndex, userPlacementId } object,
+    // or a bare numeric index (legacy). Stash for the pending-selection effect to resolve
+    // once the new variant's placements are loaded.
+    if (selectIdentity != null) pendingSelectionRef.current = selectIdentity
     setActiveVariantIdx(newIdx)
-  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
+  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.userPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
 
   // Resolve inactive placements using same transcript matching as active variant.
   // Per-pid cache keeps individual array references stable when only one variant's
@@ -155,15 +166,35 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     return out
   }, [rawInactivePlacements, transcriptWords])
 
-  // Apply pending selection after variant switch data loads.
-  // activeVariantIdx is a dep because loading/length alone can be unchanged across
-  // switches between variants with identical placement counts (common for alt plans).
+  // Apply pending selection after variant switch data loads. The pending value can be:
+  //   - { chapterIndex, placementIndex, userPlacementId } — stable cross-variant identity (preferred)
+  //   - bare number — legacy / direct-index path
+  // Re-runs as placements/userPlacements change so userPlacement matches arrive after
+  // LOAD_EDITOR_STATE populates state.userPlacements (which lands AFTER editor-data).
   useEffect(() => {
-    if (pendingSelectionRef.current != null && !brollState.loading && brollState.placements?.length) {
-      brollState.selectPlacement(pendingSelectionRef.current)
-      pendingSelectionRef.current = null
+    const pending = pendingSelectionRef.current
+    if (pending == null || brollState.loading || !brollState.placements?.length) return
+
+    if (typeof pending === 'object') {
+      let match = null
+      if (pending.userPlacementId) {
+        match = brollState.placements.find(p => p.userPlacementId === pending.userPlacementId)
+      } else if (pending.chapterIndex != null && pending.placementIndex != null) {
+        match = brollState.placements.find(p =>
+          p.chapterIndex === pending.chapterIndex && p.placementIndex === pending.placementIndex
+        )
+      }
+      if (match) {
+        brollState.selectPlacement(match.index)
+        pendingSelectionRef.current = null
+      }
+      // No match yet — wait for next placements update (e.g. LOAD_EDITOR_STATE landing).
+      return
     }
-  }, [activeVariantIdx, brollState.loading, brollState.placements?.length])
+
+    brollState.selectPlacement(pending)
+    pendingSelectionRef.current = null
+  }, [activeVariantIdx, brollState.loading, brollState.placements])
 
   // Sync URL detail (placementId) → selection on mount / URL change
   useEffect(() => {
@@ -334,9 +365,35 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                   const sourcePlacement = brollState.placements.find(p => p.index === args.sourceIndex)
                   const sourceDur = Math.max(0.5, sourcePlacement?.timelineDuration || 1)
                   const targetIsActive = args.targetPipelineId === variants[activeVariantIdx]?.id
-                  const targetPlacements = targetIsActive
-                    ? brollState.placements
-                    : (inactiveVariantPlacements?.[args.targetPipelineId] || [])
+
+                  // For inactive targets, refresh from server right before the fit-check so the
+                  // gap math is current. The 5s fetchInactive interval only runs while a search
+                  // is active, so cached data can be stale (or missing entirely if the initial
+                  // fetch silently failed). Without this refresh, computeFitDropPosition runs
+                  // against `[]` → infinite gap → drops succeed in occupied space.
+                  //
+                  // We also merge any locally-cached optimistic synthetics (from prior drops in
+                  // this session whose PUT may not have committed yet on the server) so two
+                  // rapid drops into the same gap don't both pass fit-check and overlap.
+                  let targetPlacements
+                  if (targetIsActive) {
+                    targetPlacements = brollState.placements
+                  } else {
+                    try {
+                      const data = await authFetchBRollData(args.targetPipelineId)
+                      const serverPlacements = data.placements || []
+                      const serverIds = new Set(serverPlacements.filter(p => p.userPlacementId).map(p => p.userPlacementId))
+                      const localOptimistic = (rawInactivePlacements[args.targetPipelineId] || [])
+                        .filter(p => p.isUserPlacement && p.userPlacementId && !serverIds.has(p.userPlacementId))
+                      const merged = [...serverPlacements, ...localOptimistic]
+                      targetPlacements = matchPlacementsToTranscript(merged, transcriptWords)
+                      setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: merged }))
+                    } catch (err) {
+                      console.error('[broll-cross-drop] fit-check refresh failed:', err.message)
+                      window.alert('Could not load target variant. Try again in a moment.')
+                      return
+                    }
+                  }
 
                   const adjusted = computeFitDropPosition(targetPlacements, args.targetStartSec, sourceDur)
                   if (!adjusted) {
@@ -344,16 +401,63 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                     return
                   }
 
-                  await brollState.dragCrossPlacement({
-                    ...args,
-                    targetStartSec: adjusted.start,
-                    targetDurationSec: adjusted.duration,
+                  // Generate the userPlacement uuid up-front so the optimistic insert and
+                  // the server-saved entry share one id — React reconciles by key, no remount
+                  // when the eventual refetch replaces the synthetic with the server version.
+                  const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+
+                  // Optimistic insert: target is always inactive (handleBoxMove only triggers
+                  // cross-mode when the dragged-over row differs from active). Insert a synthetic
+                  // entry matching the server's merged shape so the b-roll is visible immediately
+                  // and the gap-fit logic for subsequent drops sees it.
+                  const resultIdx = brollState.selectedResults?.[args.sourceIndex] ?? sourcePlacement.persistedSelectedResult ?? 0
+                  const synthetic = userPlacementToRawEntry({
+                    id: uuid,
+                    sourcePipelineId: variants[activeVariantIdx]?.id,
+                    sourceChapterIndex: sourcePlacement.chapterIndex ?? null,
+                    sourcePlacementIndex: sourcePlacement.placementIndex ?? null,
+                    timelineStart: adjusted.start,
+                    timelineEnd: adjusted.start + adjusted.duration,
+                    selectedResult: resultIdx,
+                    results: sourcePlacement.results || [],
+                    snapshot: {
+                      description: sourcePlacement.description,
+                      audio_anchor: sourcePlacement.audio_anchor,
+                      function: sourcePlacement.function,
+                      type_group: sourcePlacement.type_group,
+                      source_feel: sourcePlacement.source_feel,
+                      style: sourcePlacement.style,
+                    },
                   })
+                  let optimisticInserted = false
                   if (!targetIsActive) {
-                    try {
-                      const data = await authFetchBRollData(args.targetPipelineId)
-                      setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: data.placements || [] }))
-                    } catch {}
+                    setRawInactivePlacements(prev => ({
+                      ...prev,
+                      [args.targetPipelineId]: [...(prev[args.targetPipelineId] || []), synthetic],
+                    }))
+                    optimisticInserted = true
+                  }
+
+                  try {
+                    await brollState.dragCrossPlacement({
+                      ...args,
+                      targetStartSec: adjusted.start,
+                      targetDurationSec: adjusted.duration,
+                      uuid,
+                    })
+                    // Skip the success-path refetch: the synthetic shares the server uuid and
+                    // matches the server's merged shape, so the inactive view is already correct.
+                    // A natural fetchInactive (variant switch or 5s search interval) will reconcile
+                    // any later changes.
+                  } catch (err) {
+                    // Server write failed — revert the optimistic insert. dragCrossPlacement
+                    // already reverted its source-side hide.
+                    if (optimisticInserted) {
+                      setRawInactivePlacements(prev => ({
+                        ...prev,
+                        [args.targetPipelineId]: (prev[args.targetPipelineId] || []).filter(p => p.userPlacementId !== uuid),
+                      }))
+                    }
                   }
                 }}
               />

@@ -486,7 +486,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   const variantActivators = useMemo(() => {
     const out = []
     for (let vi = 0; vi < brollVariantCount; vi++) {
-      out.push((selectIndex) => onVariantActivate?.(vi, selectIndex))
+      out.push((selectIdentity) => onVariantActivate?.(vi, selectIdentity))
     }
     return out
   }, [brollVariantCount, onVariantActivate])

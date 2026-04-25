@@ -80,7 +80,15 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     e.stopPropagation()
 
     if (!isActive) {
-      onActivate?.(placement.index)
+      // Pass stable identity so the new variant can resolve THIS placement post-switch.
+      // Bare numeric `index` is per-variant — the same number means a different placement
+      // (or no placement) in the activated variant. chapterIndex+placementIndex identify
+      // chapter-derived placements; userPlacementId identifies pastes/cross-drag results.
+      onActivate?.({
+        chapterIndex: placement.chapterIndex ?? null,
+        placementIndex: placement.placementIndex ?? null,
+        userPlacementId: placement.userPlacementId ?? null,
+      })
       return
     }
 
@@ -187,9 +195,36 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       } else {
         crossMode = null
         marker.style.display = 'none'
-        // In-variant drag (original behavior)
+        // In-variant drag: recompute neighbors against the cursor position so the dragged
+        // clip can tunnel past intermediate placements into a wider gap further along.
+        // Static drag-start neighbors clamp the cursor inside the original gap forever.
         const dt = dx / zoom
-        const newStart = Math.max(prevEnd, Math.min(origStart + dt, nextStart - duration))
+        const cursorTime = origStart + dt
+        const others = placements
+          .filter(p => p.index !== placement.index)
+          .filter(p => Number.isFinite(p.timelineStart) && Number.isFinite(p.timelineEnd))
+          .sort((a, b) => a.timelineStart - b.timelineStart)
+        let target = Math.max(0, cursorTime)
+        const inside = others.find(o => target >= o.timelineStart && target < o.timelineEnd)
+        if (inside) {
+          // Pick whichever side of the placement is nearer so the user can pull either way.
+          const distToStart = target - inside.timelineStart
+          const distToEnd = inside.timelineEnd - target
+          target = distToStart < distToEnd
+            ? Math.max(0, inside.timelineStart - duration - 0.05)
+            : inside.timelineEnd + 0.05
+        }
+        const next = others.find(o => o.timelineStart >= target)
+        const prev = [...others].reverse().find(o => o.timelineEnd <= target)
+        const dynPrevEnd = prev ? prev.timelineEnd : 0
+        const dynNextStart = next ? next.timelineStart : Infinity
+        const minStart = dynPrevEnd
+        const maxStart = Number.isFinite(dynNextStart) ? dynNextStart - duration : Infinity
+        if (maxStart - minStart < 0) {
+          // No gap big enough at this cursor location; skip dispatch this frame.
+          return
+        }
+        const newStart = Math.max(minStart, Math.min(target, maxStart))
         updatePlacementPosition(placement.index, newStart, newStart + duration)
         inVariantDispatched = true
       }
