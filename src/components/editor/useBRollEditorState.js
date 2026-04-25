@@ -462,6 +462,11 @@ export function useBRollEditorState(planPipelineId) {
   // the wrong entry.
   const crossPipelineLockRef = useRef(new Map()) // pid -> Promise
 
+  const inactiveCacheSetterRef = useRef(null)
+  const registerInactiveCacheSetter = useCallback((fn) => {
+    inactiveCacheSetterRef.current = fn
+  }, [])
+
   const runWithTargetLock = useCallback(async (pid, fn) => {
     const prev = crossPipelineLockRef.current.get(pid) || Promise.resolve()
     const next = prev.catch(() => {}).then(fn)
@@ -490,6 +495,10 @@ export function useBRollEditorState(planPipelineId) {
             .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
         }
         await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
+        // Inform the editor to drop the optimistic synthetic from its inactive cache.
+        inactiveCacheSetterRef.current?.(top.targetPipelineId, (prev) =>
+          (prev || []).filter(p => p.userPlacementId !== top.targetUserPlacementId)
+        )
       } catch (err) {
         console.error('[broll-undo] cross-pipeline cleanup failed:', err.message)
         // Only roll back if this entry is still at the top of redoStack — otherwise the
@@ -526,6 +535,12 @@ export function useBRollEditorState(planPipelineId) {
           redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
         }
         await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
+        // Re-add the userPlacement to the local cache (using the rebuilt entry shape).
+        const reAdded = userPlacementToRawEntry(top.targetUserPlacementSnapshot)
+        inactiveCacheSetterRef.current?.(top.targetPipelineId, (prev) => {
+          const without = (prev || []).filter(p => p.userPlacementId !== top.targetUserPlacementId)
+          return [...without, reAdded]
+        })
       } catch (err) {
         console.error('[broll-redo] cross-pipeline cleanup failed:', err.message)
         dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: top.id } })
@@ -823,6 +838,7 @@ export function useBRollEditorState(planPipelineId) {
     editorStateVersion: state.editorStateVersion,
     dirty: state.dirty,
     flushSave,
+    registerInactiveCacheSetter,
   }), [
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
@@ -832,7 +848,7 @@ export function useBRollEditorState(planPipelineId) {
     updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
-    flushSave,
+    flushSave, registerInactiveCacheSetter,
   ])
 }
 

@@ -52,6 +52,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
   const brollState = useBRollEditorState(activePipelineId)
+  useEffect(() => {
+    brollState.registerInactiveCacheSetter?.((pid, updater) => {
+      setRawInactivePlacements(prev => ({ ...prev, [pid]: updater(prev[pid]) }))
+    })
+    return () => brollState.registerInactiveCacheSetter?.(null)
+  }, [brollState.registerInactiveCacheSetter])
   const hasEverLoaded = useRef(false)
   if (brollState.placements?.length) hasEverLoaded.current = true
 
