@@ -46,6 +46,10 @@ try {
     await pool.query(`ALTER TABLE transcripts DROP CONSTRAINT IF EXISTS transcripts_type_check`)
     await pool.query(`ALTER TABLE transcripts ADD CONSTRAINT transcripts_type_check CHECK (type IN ('raw', 'human_edited', 'rough_cut_adjusted'))`)
     await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE`)
+    await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS libraries_json TEXT`)
+    await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS freepik_opt_in BOOLEAN DEFAULT TRUE`)
+    await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS audience_json TEXT`)
+    await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS path_id TEXT`)
     await pool.query(`CREATE TABLE IF NOT EXISTS user_tokens (
       id SERIAL PRIMARY KEY,
       user_id TEXT NOT NULL UNIQUE,

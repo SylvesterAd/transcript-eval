@@ -15,21 +15,33 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   const { id, detail } = useParams()
   const navigate = useNavigate()
   const [activeVariantIdx, setActiveVariantIdx] = useState(0)
+  const editorCtx = useContext(EditorContext)
 
-  // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs
+  // Auto-hide the variant picker on the hands-off path. path_id already lives in
+  // EditorContext's groupDetail (loaded by EditorView) — read it from there
+  // instead of refetching.
+  const pathId = editorCtx?.state?.groupDetail?.path_id || null
+
+  // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs.
+  // For the hands-off path we hide the picker by collapsing to the first variant — the
+  // user opted out of manual variant selection, so we just auto-use variant 0.
   const variants = useMemo(() => {
+    let all
     if (planVariantsProp?.length) {
-      return planVariantsProp.map(v => ({
+      all = planVariantsProp.map(v => ({
         id: v.pipelineId,
         label: v.label || `Variant ${String.fromCharCode(65 + planVariantsProp.indexOf(v))}`,
       }))
+    } else if (!allPlanPipelineIds?.length) {
+      all = [{ id: planPipelineId, label: 'B-Roll' }]
+    } else {
+      all = allPlanPipelineIds.map((pid, i) => ({
+        id: pid,
+        label: `Variant ${String.fromCharCode(65 + i)}`,
+      }))
     }
-    if (!allPlanPipelineIds?.length) return [{ id: planPipelineId, label: 'B-Roll' }]
-    return allPlanPipelineIds.map((pid, i) => ({
-      id: pid,
-      label: `Variant ${String.fromCharCode(65 + i)}`,
-    }))
-  }, [allPlanPipelineIds, planPipelineId, planVariantsProp])
+    return pathId === 'hands-off' ? all.slice(0, 1) : all
+  }, [allPlanPipelineIds, planPipelineId, planVariantsProp, pathId])
 
   const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
   const brollState = useBRollEditorState(activePipelineId)
@@ -37,7 +49,6 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   if (brollState.placements?.length) hasEverLoaded.current = true
 
   // Load placement data for inactive variants, resolved against transcript words
-  const editorCtx = useContext(EditorContext)
   const transcriptWords = useMemo(() => {
     if (!editorCtx?.state?.tracks) return []
     const audioTrack = editorCtx.state.tracks

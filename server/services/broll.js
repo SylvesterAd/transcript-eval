@@ -3477,7 +3477,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   }
 }
 
-export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
+export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
   const strategy = await getStrategy(strategyId)
   if (!strategy) throw new Error('Strategy not found')
 
@@ -3866,6 +3866,15 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           }
           console.log(`[broll-pipeline] Analysis for "${ap.videoTitle}" complete (${(analysisOutputs[ap.videoId] || '').length} chars)`)
         }
+      }
+
+      // Stop-after-strategy checkpoint (mirror of stopAfterPlan below):
+      // strategy-only / guided paths pause the pipeline at the boundary
+      // between the analysis phase and the plan phase so the user can
+      // review the creative strategy before plan generation continues.
+      if (stopAfterStrategy && analysisStageCount && i === planPhaseStartIdx) {
+        console.log(`[broll-pipeline] stopAfterStrategy: stopping before plan phase (analysis complete for ${analysisPhases.length} videos)`)
+        break
       }
 
       // When plan phase starts: set referenceAnalysis from favorite video

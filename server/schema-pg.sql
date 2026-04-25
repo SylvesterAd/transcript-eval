@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS video_groups (
   parent_group_id INTEGER REFERENCES video_groups(id),
   annotations_json TEXT,
   user_id TEXT,
+  libraries_json TEXT,
+  freepik_opt_in BOOLEAN DEFAULT TRUE,
+  audience_json TEXT,
+  path_id TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
