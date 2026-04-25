@@ -369,9 +369,24 @@ async function runDownloader(item) {
       }
     }
     item.download_started_at = Date.now()
+    // chrome.downloads.download requires a path RELATIVE to the user's
+    // Downloads folder. The web app passes target_folder_path as a
+    // display-friendly absolute string like "~/Downloads/transcript-eval/
+    // export-<run>-a/" — strip the leading "~/Downloads/" (or any leading
+    // "~/" / "/") and any redundant slashes before handing to Chrome,
+    // otherwise downloads fail with "Invalid filename" before any byte
+    // is written.
+    const relFolder = String(state.target_folder_path || '')
+      .replace(/^~\/Downloads\//, '')
+      .replace(/^~\//, '')
+      .replace(/^\/+/, '')
+      .replace(/\/+$/, '')
+    const filename = relFolder
+      ? `${relFolder}/${item.target_filename}`
+      : item.target_filename
     const downloadId = await chrome.downloads.download({
       url: item.signed_url,
-      filename: `${state.target_folder_path}/${item.target_filename}`,
+      filename,
       saveAs: false,
       conflictAction: 'uniquify',
     })
