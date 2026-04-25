@@ -11,6 +11,13 @@ import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
 import { scheduleBrollPreload, clearBrollPreload } from './brollPreloader.js'
 
+export function resolveDetailToIndex(detail) {
+  if (detail == null || detail === '') return null
+  if (typeof detail === 'string' && detail.startsWith('user:')) return detail
+  const n = parseInt(detail, 10)
+  return Number.isFinite(n) ? n : null
+}
+
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
   const navigate = useNavigate()
@@ -198,11 +205,10 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   // Sync URL detail (placementId) → selection on mount / URL change
   useEffect(() => {
-    if (detail != null && brollState.placements?.length) {
-      const idx = parseInt(detail)
-      if (!isNaN(idx) && idx !== brollState.selectedIndex) {
-        brollState.selectPlacement(idx)
-      }
+    if (!brollState.placements?.length) return
+    const idx = resolveDetailToIndex(detail)
+    if (idx != null && idx !== brollState.selectedIndex) {
+      brollState.selectPlacement(idx)
     }
   }, [detail, brollState.placements?.length])
 
