@@ -5238,15 +5238,29 @@ export function buildManifestFromPlacements(placements, { variant } = {}) {
       if (label !== variantNorm) continue
     }
 
-    // Selection rule: user pick > top-ranked.
-    const pick = (p.persistedSelectedResult && typeof p.persistedSelectedResult === 'object')
-      ? p.persistedSelectedResult
-      : p.results[0]
+    // Selection rule: user pick > top-ranked-non-storyblocks.
+    // If the user explicitly picked a result, honor it (even if storyblocks —
+    // we only filter storyblocks from auto-selection, not from explicit picks
+    // because the editor wouldn't let them pick a non-existent source).
+    // Otherwise scan results[] in rank order for the first non-storyblocks
+    // result. Storyblocks is an export-pipeline non-goal per master spec, so
+    // dropping it ENTIRELY (i.e. skipping the placement when storyblocks is
+    // results[0]) means losing placements that have a perfectly good Pexels/
+    // Envato/Freepik clip at index 1+. Fall through instead.
+    let pick
+    if (p.persistedSelectedResult && typeof p.persistedSelectedResult === 'object') {
+      pick = p.persistedSelectedResult
+    } else {
+      pick = p.results.find(r => {
+        const s = String(r?.source || '').toLowerCase()
+        return s && s !== 'storyblocks'
+      })
+    }
     if (!pick) continue
 
     const source = String(pick.source || '').toLowerCase()
     if (!source) continue
-    if (source === 'storyblocks') continue   // Export-pipeline non-goal.
+    if (source === 'storyblocks') continue   // Defensive: if user picked storyblocks explicitly, still drop.
 
     const sourceItemId = pick.source_item_id || pick.id || pick.uid || null
     if (!sourceItemId) continue

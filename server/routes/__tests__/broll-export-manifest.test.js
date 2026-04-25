@@ -78,9 +78,12 @@ describe('buildManifestFromPlacements', () => {
     expect(out.items[0].source_item_id).toBe('12345')
   })
 
-  it('filters out storyblocks results entirely', () => {
+  it('skips placement when ALL results are storyblocks', () => {
     const placements = [
-      makePlacement({ results: [makeResult({ source: 'storyblocks', source_item_id: 'sb_1' })] }),
+      makePlacement({ results: [
+        makeResult({ source: 'storyblocks', source_item_id: 'sb_1' }),
+        makeResult({ source: 'storyblocks', source_item_id: 'sb_2' }),
+      ] }),
       makePlacement({ results: [makeResult({ source: 'pexels', source_item_id: 'px_1' })] }),
     ]
     const out = buildManifestFromPlacements(placements, { variant: null })
@@ -89,15 +92,49 @@ describe('buildManifestFromPlacements', () => {
     expect(out.totals.by_source).toEqual({ pexels: 1 })
   })
 
-  it('filters storyblocks case-insensitively (StoryBlocks, STORYBLOCKS)', () => {
+  it('falls through to next non-storyblocks result when results[0] is storyblocks', () => {
+    // Real-world data: many placements have storyblocks ranked first but
+    // pexels/envato available at index 1+. The export should use the first
+    // non-storyblocks result rather than dropping the placement entirely.
+    const placements = [makePlacement({ results: [
+      makeResult({ source: 'storyblocks', source_item_id: 'sb_top' }),
+      makeResult({ source: 'storyblocks', source_item_id: 'sb_2' }),
+      makeResult({ source: 'pexels', source_item_id: 'px_fallback' }),
+      makeResult({ source: 'envato', source_item_id: 'env_4' }),
+    ] })]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].source).toBe('pexels')
+    expect(out.items[0].source_item_id).toBe('px_fallback')
+  })
+
+  it('filters storyblocks case-insensitively when scanning fallback', () => {
     const placements = [
-      makePlacement({ results: [makeResult({ source: 'StoryBlocks' })] }),
-      makePlacement({ results: [makeResult({ source: 'STORYBLOCKS' })] }),
-      makePlacement({ results: [makeResult({ source: 'pexels', source_item_id: 'p1' })] }),
+      makePlacement({ results: [
+        makeResult({ source: 'StoryBlocks', source_item_id: 'sb1' }),
+        makeResult({ source: 'STORYBLOCKS', source_item_id: 'sb2' }),
+        makeResult({ source: 'pexels', source_item_id: 'p1' }),
+      ] }),
     ]
     const out = buildManifestFromPlacements(placements, { variant: null })
     expect(out.items).toHaveLength(1)
     expect(out.items[0].source).toBe('pexels')
+    expect(out.items[0].source_item_id).toBe('p1')
+  })
+
+  it('persistedSelectedResult takes precedence even over storyblocks-fallback logic', () => {
+    // If user explicitly picked something via the editor, honor it. The
+    // editor wouldn't let them pick a storyblocks clip in practice.
+    const placements = [makePlacement({
+      persistedSelectedResult: makeResult({ source: 'envato', source_item_id: 'user_pick' }),
+      results: [
+        makeResult({ source: 'storyblocks', source_item_id: 'sb_top' }),
+        makeResult({ source: 'pexels', source_item_id: 'p_other' }),
+      ],
+    })]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items[0].source).toBe('envato')
+    expect(out.items[0].source_item_id).toBe('user_pick')
   })
 
   it('emits target_filename with seq prefix + source + safe id', () => {
