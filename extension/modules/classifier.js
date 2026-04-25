@@ -180,7 +180,12 @@ export function classifySourceMintError(err, item) {
     return { skip: { error_code: 'freepik_404', detail: 'mint network exhausted' } }
   }
 
-  return { skip: { error_code: msg.startsWith('pexels') ? 'pexels_404' : 'freepik_404', detail: msg } }
+  // Source-aware default: keep error_code attached to the actual source
+  // so the State F UI doesn't blame Freepik for an A-roll/Envato failure.
+  const itemSource = String(item?.source || '').toLowerCase()
+  if (msg.startsWith('pexels')) return { skip: { error_code: 'pexels_404', detail: msg } }
+  if (msg.startsWith('aroll') || itemSource === 'aroll') return { skip: { error_code: 'aroll_unavailable', detail: msg } }
+  return { skip: { error_code: 'freepik_404', detail: msg } }
 }
 
 // Classify a download-phase error (chrome.downloads interrupt).

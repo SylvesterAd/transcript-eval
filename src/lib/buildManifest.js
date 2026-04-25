@@ -99,6 +99,12 @@ export function buildManifest({ manifests, options = {} }) {
         resolution: raw.resolution || { width: 1920, height: 1080 },
         frame_rate: raw.frame_rate || 30,
         est_size_bytes: typeof raw.est_size_bytes === 'number' ? raw.est_size_bytes : 0,
+        // Preserve signed_url when the manifest endpoint pre-populated
+        // it (today: A-roll items carry the Cloudflare Stream URL so
+        // the extension queue skips the mint phase). Without this the
+        // extension treats source='aroll' as an unknown mint target
+        // and the classifier defaults the failure to 'freepik_404'.
+        signed_url: raw.signed_url || null,
         variants: m.variant ? [m.variant] : [],
         placements: [{
           variant: m.variant,
