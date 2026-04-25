@@ -14,3 +14,11 @@ server/eval.db
 .secrets/
 extension/dist/
 extension/scripts/*.log
+
+# Local sqlite scratch DBs
+server/db.sqlite
+
+# Local investigation scripts (kept on disk, never committed)
+/query_*.js
+/final_*.js
+/check_*.js
