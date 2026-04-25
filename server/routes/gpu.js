@@ -6,7 +6,7 @@ import { brollPipelineProgress } from '../services/broll.js'
 const router = Router()
 
 // Supabase client for reading GPU proxy logs
-const supabaseUrl = process.env.SUPABASE_URL
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
 const supabaseKey = process.env.SUPABASE_SECRET_KEY
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null
 

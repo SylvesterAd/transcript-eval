@@ -11,7 +11,7 @@ const seenJobIds = new Set()
 let lastPollTs = null
 
 export function startGpuFailurePoller() {
-  const url = process.env.SUPABASE_URL
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
   const key = process.env.SUPABASE_SECRET_KEY
   if (!url || !key) {
     console.warn('[gpu-failure-poller] SUPABASE_URL/SUPABASE_SECRET_KEY missing, poller disabled')
