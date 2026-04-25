@@ -6,6 +6,14 @@ import { getClipboard } from './brollClipboard.js'
 
 const TRACK_H = 60
 
+export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
+  if (isActive) {
+    const transient = selectedResults?.[placement.index]
+    if (transient != null) return transient
+  }
+  return placement.persistedSelectedResult ?? 0
+}
+
 function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, onCrossDrop }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
@@ -302,7 +310,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         const left = p.timelineStart * zoom
         const width = Math.max(p.timelineDuration * zoom, 4)
         const isSelected = isActive && p.index === selectedIndex
-        const resultIdx = (isActive ? selectedResults?.[p.index] : null) ?? 0
+        const resultIdx = resolveDisplayResultIdx(p, isActive, selectedResults)
         const result = p.results?.[resultIdx]
         const hasResult = p.searchStatus === 'complete' && result
         const isSearching = p.searchStatus === 'searching'
