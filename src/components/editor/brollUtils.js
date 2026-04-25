@@ -29,7 +29,13 @@ function normalize(text) {
  * @returns {Array} placements with timelineStart, timelineEnd, timelineDuration added
  */
 export function matchPlacementsToTranscript(placements, words, editsByKey = null) {
-  if (!placements?.length || !words?.length) return placements || []
+  if (!placements?.length) return placements || []
+  // Even when transcript words aren't available yet (race during initial mount or
+  // a track-list reload), each placement still resolves via its plan timecodes
+  // fallback at the bottom of the per-placement loop. Returning the unresolved
+  // input here causes downstream gap-find logic to filter chapter-derived
+  // placements out (they lack timelineStart) and silently allow overlapping drops.
+  const wordsList = words || []
 
   // Step 0: Filter out placements hidden via local user-edits
   const filtered = editsByKey
@@ -76,14 +82,14 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
     let bestScore = 0
     let bestWordIdx = -1
 
-    for (let i = 0; i < words.length; i++) {
-      const w = words[i]
+    for (let i = 0; i < wordsList.length; i++) {
+      const w = wordsList[i]
       if (w.start < windowStart || w.start > windowEnd) continue
 
       // Build a phrase from this word onward (same length as anchor)
       const phraseWords = []
-      for (let j = i; j < Math.min(i + anchorWords.length + 2, words.length); j++) {
-        phraseWords.push(normalize(words[j].word))
+      for (let j = i; j < Math.min(i + anchorWords.length + 2, wordsList.length); j++) {
+        phraseWords.push(normalize(wordsList[j].word))
       }
       const phrase = phraseWords.join(' ')
 
@@ -105,7 +111,7 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
     }
 
     if (bestWordIdx >= 0) {
-      const matchedWord = words[bestWordIdx]
+      const matchedWord = wordsList[bestWordIdx]
       return {
         ...p,
         timelineStart: matchedWord.start,

@@ -658,26 +658,37 @@ function computeFitDropPosition(placements, requestedStart, sourceDur) {
   const prevEnd = prevs.length ? prevs[prevs.length - 1].timelineEnd : 0
   const rightBoundary = next ? next.timelineStart : Infinity
 
+  let candidate = null
   const gapRight = rightBoundary - start
   if (gapRight >= MIN_DUR) {
-    return { start, duration: Math.min(sourceDur, gapRight - 0.05) }
-  }
-
-  // Gap to right is too small — try shifting LEFT so the clip ends just before `next`
-  // and has at least MIN_DUR.
-  if (next) {
+    candidate = { start, duration: Math.min(sourceDur, gapRight - 0.05) }
+  } else if (next) {
+    // Gap to right is too small — try shifting LEFT so the clip ends just before `next`
+    // and has at least MIN_DUR.
     const desiredEnd = next.timelineStart - 0.05
     const desiredDur = Math.min(sourceDur, MIN_DUR)
     const desiredStart = desiredEnd - desiredDur
     if (desiredStart >= prevEnd + 0.05) {
-      // Try to grow the duration toward sourceDur if there's more room
       const maxDur = desiredEnd - (prevEnd + 0.05)
       const dur = Math.min(sourceDur, Math.max(MIN_DUR, maxDur))
-      return { start: desiredEnd - dur, duration: dur }
+      candidate = { start: desiredEnd - dur, duration: dur }
     }
   }
 
-  // No fit possible — caller will show "no space" toast.
-  return null
+  if (!candidate) return null
+
+  // Defensive: guarantee zero overlap with ANY placement that has a finite range,
+  // even ones the gap-find logic might have skipped (e.g., a placement positioned
+  // BEFORE `start` whose end extends past `start`). The math above should prevent
+  // overlap, but a stale or partially-resolved targetPlacements list (transient
+  // race during variant switch / refetch) has historically allowed it through.
+  // Caller turns null into a "no space" alert, which is the correct user signal.
+  const candEnd = candidate.start + candidate.duration
+  const overlap = sorted.find(p =>
+    p.timelineStart < candEnd && p.timelineEnd > candidate.start
+  )
+  if (overlap) return null
+
+  return candidate
 }
 

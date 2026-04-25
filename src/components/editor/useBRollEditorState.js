@@ -628,6 +628,17 @@ export function useBRollEditorState(planPipelineId) {
     const timelineStart = effectiveStart
     const timelineEnd = effectiveStart + duration
 
+    // Defensive overlap check: if any existing placement intersects [timelineStart,
+    // timelineEnd], reject. The math above should prevent this, but a partially-
+    // resolved placements list (e.g., chapter-derived clips with no timelineStart
+    // because transcript words weren't loaded yet) silently allowed overlap before.
+    const overlap = all.find(r => r.start < timelineEnd && r.end > timelineStart)
+    if (overlap) {
+      console.warn('[broll-paste] Computed range overlaps existing placement', { timelineStart, timelineEnd, overlap })
+      window.alert('Not enough space to paste here.')
+      return
+    }
+
     const up = {
       id: uuid,
       sourcePipelineId: entry.sourcePipelineId,
