@@ -116,7 +116,7 @@ export function useBRollEditorState(planPipelineId) {
       transcriptWords: transcriptWordsRef.current,
       editorStateLoaded: !useServerMode && editorStateLoadedRef.current,
     })
-    dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
+    dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null, pipelineChanged: isPipelineSwitch } })
   }, [])
 
   useEffect(() => {
@@ -159,7 +159,7 @@ export function useBRollEditorState(planPipelineId) {
           transcriptWords: transcriptWordsRef.current,
           editorStateLoaded: editorStateLoadedRef.current,
         })
-        dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
+        dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress, pipelineChanged: isPipelineSwitch } })
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
   }, [planPipelineId, transcriptWords])

@@ -1,6 +1,26 @@
 import { describe, it, expect } from 'vitest'
 import { reducer, initialState } from '../brollReducer.js'
 
+describe('reducer SET_DATA_RESOLVED', () => {
+  it('clears selectedIndex when payload.pipelineChanged is true', () => {
+    const base = { ...initialState, selectedIndex: 5, selectedResults: { 5: 2 } }
+    const next = reducer(base, { type: 'SET_DATA_RESOLVED', payload: {
+      rawPlacements: [], placements: [], searchProgress: null, pipelineChanged: true,
+    }})
+    expect(next.selectedIndex).toBe(null)
+    expect(next.selectedResults).toEqual({})
+  })
+
+  it('preserves selectedIndex when payload.pipelineChanged is false', () => {
+    const base = { ...initialState, selectedIndex: 5, selectedResults: { 5: 2 } }
+    const next = reducer(base, { type: 'SET_DATA_RESOLVED', payload: {
+      rawPlacements: [], placements: [], searchProgress: null, pipelineChanged: false,
+    }})
+    expect(next.selectedIndex).toBe(5)
+    expect(next.selectedResults).toEqual({ 5: 2 })
+  })
+})
+
 describe('reducer APPLY_ACTION_COALESCE', () => {
   it('coalesces consecutive resize actions on same placementKey', () => {
     const base = {
