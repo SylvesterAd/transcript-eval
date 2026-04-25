@@ -84,7 +84,17 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     function fetchInactive() {
       for (const pid of inactiveIds) {
         authFetchBRollData(pid, controller.signal)
-          .then(data => setRawInactivePlacements(prev => ({ ...prev, [pid]: data.placements || [] })))
+          .then(data => {
+            const serverPlacements = data.placements || []
+            setRawInactivePlacements(prev => {
+              const local = prev[pid] || []
+              const serverIds = new Set(serverPlacements.filter(p => p.userPlacementId).map(p => p.userPlacementId))
+              // Keep local optimistic userPlacements whose uuids are NOT yet on server
+              // (they're in flight; replacing would make them vanish from view).
+              const optimistic = local.filter(p => p.isUserPlacement && p.userPlacementId && !serverIds.has(p.userPlacementId))
+              return { ...prev, [pid]: [...serverPlacements, ...optimistic] }
+            })
+          })
           .catch(err => { if (err.name !== 'AbortError') {/* swallow */} })
       }
     }
