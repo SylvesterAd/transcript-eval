@@ -5,7 +5,7 @@
 // build-step substitution yet (added in Ext.10).
 
 export const EXT_VERSION = '0.9.0'
-export const ENV = 'dev'  // "dev" | "prod"
+export const ENV = 'prod'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
   ? 'https://backend-production-4b19.up.railway.app'
