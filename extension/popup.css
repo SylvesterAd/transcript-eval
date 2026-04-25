@@ -117,3 +117,65 @@ footer {
 .banner a:hover {
   text-decoration: underline;
 }
+
+/* Ext.7 disk-error state */
+.disk-error {
+  margin: 0 14px 10px;
+  padding: 10px 12px;
+  border: 1px solid #fca5a5;
+  background: #fef2f2;
+  border-radius: 6px;
+  color: #991b1b;
+}
+
+.disk-error-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.disk-error-body {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.disk-error-body a {
+  color: #991b1b;
+  text-decoration: underline;
+}
+
+/* Ext.8 diagnostics + opt-out rows */
+.btn-action {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  cursor: pointer;
+}
+.btn-action:disabled { opacity: 0.5; cursor: not-allowed; }
+.optout-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.optout-toggle input[type="checkbox"] { cursor: pointer; }
+.diag-row, .optout-row { margin-top: 4px; }
+
+/* Ext.9 — config state banner. Three severity variants. */
+.config-banner {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin: 8px 0;
+  border: 1px solid #e5e7eb;
+  background: #fef3c7;  /* default: warn */
+}
+.config-banner[data-severity="error"] { background: #fee2e2; border-color: #fecaca; }
+.config-banner[data-severity="warn"]  { background: #fef3c7; border-color: #fde68a; }
+.config-banner[data-severity="info"]  { background: #e0f2fe; border-color: #bae6fd; }
+.config-banner-icon { flex: 0 0 auto; font-weight: 700; width: 20px; height: 20px; border-radius: 50%; background: #000; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+.config-banner-body { flex: 1 1 auto; min-width: 0; }
+.config-banner-title  { font-weight: 600; color: #111827; }
+.config-banner-detail { color: #374151; font-size: 13px; margin-top: 2px; }
+.config-banner-action { display: inline-block; margin-top: 6px; color: #1d4ed8; font-size: 13px; }
+
+/* Ext.9 — Envato auth row "paused" state (distinct from "signed-out"). */
+[data-state="paused"] .row-status { color: #6b7280; font-style: italic; }
+[data-state="paused"] .row-status::before { content: "\23f8  "; font-style: normal; }

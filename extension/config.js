@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.6.0'
+export const EXT_VERSION = '0.9.0'
 export const ENV = 'dev'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
@@ -96,3 +96,117 @@ export const TELEMETRY_EVENT_ENUM = Object.freeze([
   'queue_resumed',
   'export_completed',
 ])
+
+// -------- Ext.7 failure-mode polish --------
+//
+// Source of truth for retry timings, backoff caps, and daily-cap
+// thresholds. Ext.9 will serve these from /api/ext-config; for now
+// they are compile-time baked in.
+
+// Resolver tab retry: one retry at +30s on timeout, then give up.
+export const RESOLVER_RETRY_DELAY_MS = 30000
+export const RESOLVER_MAX_ATTEMPTS   = 2  // initial + 1 retry
+
+// Envato download.data 5xx / network exponential backoff: 1s, 5s, 15s, 60s,
+// then license_failed. Four total attempts.
+export const ENVATO_LICENSE_BACKOFF_MS = [1000, 5000, 15000, 60000]
+
+// Retry-After clamp (in seconds). Envato may return absurd values
+// or a misbehaving CDN may return garbage; clamp to a sane window so
+// we never sleep for days.
+export const RETRY_AFTER_MIN_SEC = 1
+export const RETRY_AFTER_MAX_SEC = 600
+
+// Jitter applied to Retry-After values. Spec says ±20%.
+export const RETRY_AFTER_JITTER = 0.20
+
+// 429 escalation: after second 429, pause the queue this long, then
+// one final retry before hard-stop.
+export const ENVATO_429_COOLDOWN_MS = 5 * 60 * 1000  // 5 minutes
+
+// Daily cap per source per user. Warn at warn_at; hard-stop (that
+// source) at hard_stop_at.
+export const DAILY_CAP_WARN_AT      = 400
+export const DAILY_CAP_HARD_STOP_AT = 500
+
+// Deny-list alert dedupe window. One Slack alert per
+// (source_item_id, error_code) per this many ms.
+export const DENY_LIST_ALERT_DEDUPE_MS = 24 * 60 * 60 * 1000  // 24h
+
+// Freepik URL-refetch-on-expiry cap. After this many refetches that
+// still yield an expired URL, mark url_expired_refetch_failed.
+export const FREEPIK_URL_REFETCH_CAP = 2
+
+// Integrity check: size-mismatch tolerance. If the downloaded size
+// is within ±N% of est_size_bytes, accept (some CDNs return slightly
+// different sizes than the catalogue claimed). Below / above → retry
+// once, then integrity_failed.
+export const INTEGRITY_TOLERANCE = 0.05  // ±5%
+
+// -------- Ext.8 diagnostics + privacy --------
+//
+// Source of truth for the diagnostic bundle's time-window + event
+// cap. WebApp.4's bundle parser reads these indirectly via the
+// bundle's meta.json (bundle_window_ms + bundle_max_events mirror
+// these at generation time — a schema_version bump is required if
+// we ever change the semantics).
+
+// Queue-state inclusion window for buildBundle(). Runs older than
+// this are skipped entirely. 24h is the spec-stated value.
+export const DIAGNOSTICS_BUNDLE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+// Hard cap on event count in the bundle. If more events exist,
+// the oldest are dropped (events.json.truncated_from records the
+// original size). 200 is the spec-stated value.
+export const DIAGNOSTICS_MAX_EVENTS = 200
+
+// Bundle schema version. Bump when changing the on-disk JSON
+// shape; WebApp.4's parser must support each prior version.
+export const DIAGNOSTICS_SCHEMA_VERSION = 1
+
+// -------- Ext.9 feature flag fetch --------
+//
+// Source of truth for /api/ext-config consumption. Keep this block
+// in sync with server/routes/ext-config.js — both share the 60s
+// TTL contract (server sets Cache-Control: public, max-age=60).
+
+// Endpoint path appended to BACKEND_URL. PUBLIC (no auth) — must stay
+// public so newly-installed extensions can gate BEFORE JWT mint.
+export const EXT_CONFIG_ENDPOINT = '/api/ext-config'
+
+// Cache TTL in ms. Fresh (<60s) → trust. Stale (>60s) + fetch failure
+// → trust stale with a warning log. No cache at all + fetch failure
+// → fall open (see CONFIG_FALL_OPEN_DEFAULTS).
+export const EXT_CONFIG_CACHE_TTL_MS = 60 * 1000
+
+// Max wait for an in-flight startup refresh when the first
+// {type:"export"} races with SW boot. Past this, fall back to
+// cached / fall-open.
+export const CONFIG_CHECK_AWAIT_TIMEOUT_MS = 5000
+
+// Fall-open defaults — what enforceConfigBeforeExport uses when no
+// cache exists AND fetch failed. Match Backend 1.5 DEFAULTS where
+// they are "on"; freepik_enabled is true here (vs false in server
+// DEFAULTS) because fall-open means "backend unreachable" — a remote
+// safety flag cannot be honored when we cannot reach the remote.
+// The user gets Freepik; if Freepik is broken upstream, the download
+// itself will fail with a clear per-item error.
+export const CONFIG_FALL_OPEN_DEFAULTS = Object.freeze({
+  min_ext_version:      '0.0.0',
+  export_enabled:       true,
+  envato_enabled:       true,
+  pexels_enabled:       true,
+  freepik_enabled:      true,
+  daily_cap_override:   null,
+  slack_alerts_enabled: false,  // client doesn't care — pass-through field
+})
+
+// Canonical error codes emitted by enforceConfigBeforeExport on reject.
+// WebApp.4 / popup key UI off these exact strings — do NOT rename.
+export const CONFIG_ERROR_CODES = Object.freeze({
+  EXPORT_DISABLED:    'export_disabled_by_config',
+  VERSION_BELOW_MIN:  'ext_version_below_min',
+  ENVATO_DISABLED:    'envato_disabled_by_config',
+  PEXELS_DISABLED:    'pexels_disabled_by_config',
+  FREEPIK_DISABLED:   'freepik_disabled_by_config',
+})

@@ -231,6 +231,37 @@
     <pre id="t-log">(no events yet)</pre>
   </fieldset>
 
+  <fieldset>
+    <legend>12. Diagnostics + privacy (Ext.8)</legend>
+    <p class="muted">
+      Build the diagnostic bundle, toggle the telemetry opt-out flag,
+      or read the current opt-out state. The bundle download uses
+      <code>saveAs: true</code> so you'll see the OS picker.
+    </p>
+    <div class="row">
+      <button id="btn-ext8-build-bundle">Build diagnostic bundle</button>
+      <button id="btn-ext8-toggle-optout">Toggle telemetry opt-out</button>
+      <button id="btn-ext8-show-optout">Show opt-out state</button>
+    </div>
+    <pre id="out-ext8">(not run)</pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>13. Config (feature flags) (Ext.9)</legend>
+    <p class="muted">
+      Fetch <code>/api/ext-config</code> directly, read the current
+      cached config, or simulate <code>export_enabled=false</code> to
+      verify the popup banner + export gate without flipping a
+      backend env var.
+    </p>
+    <div class="row">
+      <button id="btn-ext9-fetch-config">Fetch config now</button>
+      <button id="btn-ext9-show-cached">Show cached config</button>
+      <button id="btn-ext9-simulate-disabled">Simulate export_enabled=false</button>
+    </div>
+    <pre id="out-ext9">(not run)</pre>
+  </fieldset>
+
   <script type="module">
     const idInput = document.getElementById('ext-id')
     idInput.value = localStorage.getItem('ext_test_id') || ''
@@ -640,6 +671,81 @@
     document.getElementById('t-flush').onclick = async () => {
       const r = await send({ type: 'debug_telemetry_flush', version: 1 })
       tAppend('flush result: ' + JSON.stringify(r))
+    }
+
+    // Ext.8 — diagnostics + privacy
+    document.getElementById('btn-ext8-build-bundle').onclick = async () => {
+      const out = document.getElementById('out-ext8')
+      out.textContent = 'Building…'
+      try {
+        const res = await send({ type: 'debug_build_bundle', version: 1 })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+    document.getElementById('btn-ext8-toggle-optout').onclick = async () => {
+      const out = document.getElementById('out-ext8')
+      try {
+        const cur = await send({ type: 'debug_get_telemetry_opt_out', version: 1 })
+        const next = !(cur?.telemetry_opt_out === true)
+        const res = await send({ type: 'debug_set_telemetry_opt_out', version: 1, value: next })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+    document.getElementById('btn-ext8-show-optout').onclick = async () => {
+      const out = document.getElementById('out-ext8')
+      try {
+        const res = await send({ type: 'debug_get_telemetry_opt_out', version: 1 })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+
+    // Ext.9 — feature flag fetch
+    document.getElementById('btn-ext9-fetch-config').onclick = async () => {
+      const out = document.getElementById('out-ext9')
+      out.textContent = 'Fetching…'
+      try {
+        const res = await send({ type: 'debug_fetch_config', version: 1 })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+    document.getElementById('btn-ext9-show-cached').onclick = async () => {
+      const out = document.getElementById('out-ext9')
+      try {
+        const res = await send({ type: 'debug_get_cached_config', version: 1 })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
+    }
+    document.getElementById('btn-ext9-simulate-disabled').onclick = async () => {
+      const out = document.getElementById('out-ext9')
+      try {
+        const res = await send({
+          type: 'debug_set_cached_config',
+          version: 1,
+          config: {
+            min_ext_version: '0.1.0',
+            export_enabled: false,
+            envato_enabled: true,
+            pexels_enabled: true,
+            freepik_enabled: true,
+            daily_cap_override: null,
+            slack_alerts_enabled: true,
+          },
+          fetched_at: Date.now(),
+        })
+        out.textContent = pretty(res)
+      } catch (err) {
+        out.textContent = 'Error: ' + String(err?.message || err)
+      }
     }
   </script>
 </body>

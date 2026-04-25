@@ -35,6 +35,12 @@
 //     Ext.7 increments + enforces; Ext.5 only reads (and may soft-warn
 //     but not hard-stop; hard-stop is Ext.7's feature).
 //
+//   deny_list_alerted
+//     { "<source>|<source_item_id>|<error_code>": <last_emitted_at_epoch_ms> }
+//     Dedupe map for 24h-rate-limited telemetry alerts. Ext.7 reads
+//     before emitting an alert-flagged event; writes on emit. MV3 SW
+//     termination would otherwise lose this — persistence is mandatory.
+//
 // MV3 single-SW-instance note: Chrome runs exactly one service worker
 // per extension at a time. `active_run_id` CAS via a read-then-write
 // is therefore safe against extension-side races. Races against the
@@ -42,12 +48,15 @@
 // ordering — whichever tab's message lands at onMessageExternal first
 // wins the CAS.
 
+import { DENY_LIST_ALERT_DEDUPE_MS, DAILY_CAP_WARN_AT, DAILY_CAP_HARD_STOP_AT } from '../config.js'
+
 const K = {
   runPrefix: 'run:',
   activeRunId: 'active_run_id',
   completedItems: 'completed_items',
   denyList: 'deny_list',
   dailyCounts: 'daily_counts',
+  denyListAlerted: 'deny_list_alerted',
 }
 
 function runKey(runId) {
@@ -179,4 +188,43 @@ export async function incrementDailyCount(source) {
   map[d] = map[d] || { envato: 0, pexels: 0, freepik: 0 }
   map[d][source] = (map[d][source] || 0) + 1
   await chrome.storage.local.set({ [K.dailyCounts]: map })
+}
+
+// -------------------- deny_list_alerted (Ext.7) --------------------
+
+function denyAlertKey(source, itemId, errorCode) {
+  return `${source}|${itemId}|${errorCode}`
+}
+
+// Ext.7. Returns true if we should emit a Slack-alert-flagged telemetry
+// event for this (source, item, error_code) tuple now — i.e. the 24h
+// dedupe window has elapsed. Returns false if we alerted recently.
+export async function shouldAlertForDeny(source, itemId, errorCode) {
+  const { [K.denyListAlerted]: map } = await chrome.storage.local.get(K.denyListAlerted)
+  const last = map && map[denyAlertKey(source, itemId, errorCode)]
+  if (!last) return true
+  return Date.now() - last >= DENY_LIST_ALERT_DEDUPE_MS
+}
+
+// Ext.7. Stamps the dedupe map with `now` for this (source, item,
+// error_code). Call BEFORE emitting the alert (so a SW death between
+// the persist and emit doesn't duplicate-alert on next SW wake).
+export async function markAlertEmitted(source, itemId, errorCode) {
+  const { [K.denyListAlerted]: existing } = await chrome.storage.local.get(K.denyListAlerted)
+  const map = existing || {}
+  map[denyAlertKey(source, itemId, errorCode)] = Date.now()
+  await chrome.storage.local.set({ [K.denyListAlerted]: map })
+}
+
+// Ext.7. Returns 'ok' / 'warn' / 'hard_stop' based on the current
+// day's count for `source`. Called by the queue before every download
+// start AND after every download complete (the cap is on completed
+// downloads; `warn` fires on the download that would cross the warn
+// threshold, `hard_stop` fires when we try to start a download at or
+// above the hard-stop threshold).
+export async function checkDailyCapThreshold(source) {
+  const count = await getDailyCount(source)
+  if (count >= DAILY_CAP_HARD_STOP_AT) return 'hard_stop'
+  if (count >= DAILY_CAP_WARN_AT) return 'warn'
+  return 'ok'
 }

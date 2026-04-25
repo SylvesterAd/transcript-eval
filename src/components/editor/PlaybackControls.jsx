@@ -1,5 +1,6 @@
 import { useContext, useState, useCallback } from 'react'
 import { EditorContext } from './EditorView.jsx'
+import { BRollContext } from './useBRollEditorState.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
 
@@ -30,6 +31,7 @@ const speeds = [0.5, 1, 1.5, 2]
 
 export default function PlaybackControls() {
   const { state, dispatch, playbackEngine, refetchDetail, refetchTimestamps } = useContext(EditorContext)
+  const broll = useContext(BRollContext) // available only inside b-roll editor
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState(null)
 
@@ -98,6 +100,26 @@ export default function PlaybackControls() {
             <span className="material-symbols-outlined text-lg">keyboard_double_arrow_right</span>
           </button>
         </div>
+        {state.activeTab === 'brolls' && broll && (
+          <div className="flex items-center gap-2 border-l border-white/10 pl-3 ml-1">
+            <button
+              onClick={() => broll.undo?.()}
+              disabled={!broll.undoStack?.length}
+              title={broll.undoStack?.length ? `Undo (${broll.undoStack.length})` : 'Nothing to undo'}
+              className="flex items-center justify-center text-on-surface/60 hover:text-primary-fixed transition-colors disabled:opacity-30 disabled:hover:text-on-surface/60"
+            >
+              <span className="material-symbols-outlined text-lg">undo</span>
+            </button>
+            <button
+              onClick={() => broll.redo?.()}
+              disabled={!broll.redoStack?.length}
+              title={broll.redoStack?.length ? `Redo (${broll.redoStack.length})` : 'Nothing to redo'}
+              className="flex items-center justify-center text-on-surface/60 hover:text-primary-fixed transition-colors disabled:opacity-30 disabled:hover:text-on-surface/60"
+            >
+              <span className="material-symbols-outlined text-lg">redo</span>
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-3 ml-4 border-l border-white/10 pl-4">
           {state.activeTab === 'roughcut' ? (
             <button
@@ -175,14 +197,16 @@ export default function PlaybackControls() {
           <button onClick={cycleSpeed} className="text-xs font-medium text-on-surface hover:text-primary-fixed transition-colors">
             {state.playbackRate}x
           </button>
-          <button
-            onClick={handleSplit}
-            disabled={state.activeTab !== 'roughcut' && state.selectedTrackIds.size !== 1}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed group"
-          >
-            <span className="material-symbols-outlined text-sm">content_cut</span>
-            <span className="text-[10px] font-bold uppercase tracking-wider">{state.activeTab === 'roughcut' ? 'Cut' : 'Split'}</span>
-          </button>
+          {state.activeTab !== 'brolls' && (
+            <button
+              onClick={handleSplit}
+              disabled={state.activeTab !== 'roughcut' && state.selectedTrackIds.size !== 1}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed group"
+            >
+              <span className="material-symbols-outlined text-sm">content_cut</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider">{state.activeTab === 'roughcut' ? 'Cut' : 'Split'}</span>
+            </button>
+          )}
         </div>
       </div>
 

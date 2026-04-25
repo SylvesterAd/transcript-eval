@@ -122,12 +122,39 @@ export async function getSignedDownloadUrl(newUuid) {
 
   if (resp.status === 401) {
     await handle401Envato()
-    throw new Error('envato_session_missing')
+    const err = new Error('envato_session_missing')
+    err.httpStatus = 401
+    throw err
   }
-  if (resp.status === 402) throw new Error('envato_402')
-  if (resp.status === 403) throw new Error('envato_403')
-  if (resp.status === 429) throw new Error('envato_429')
-  if (!resp.ok) throw new Error('envato_http_' + resp.status)
+  if (resp.status === 402) {
+    const err = new Error('envato_402')
+    err.httpStatus = 402
+    // Read body so classifier can check for the "upgrade" hint.
+    try { err.body = await resp.text() } catch {}
+    throw err
+  }
+  if (resp.status === 403) {
+    const err = new Error('envato_403')
+    err.httpStatus = 403
+    try { err.body = await resp.text() } catch {}
+    throw err
+  }
+  if (resp.status === 429) {
+    const err = new Error('envato_429')
+    err.httpStatus = 429
+    err.retryAfter = resp.headers.get('Retry-After') || null
+    throw err
+  }
+  if (resp.status >= 500) {
+    const err = new Error('envato_http_' + resp.status)
+    err.httpStatus = resp.status
+    throw err
+  }
+  if (!resp.ok) {
+    const err = new Error('envato_http_' + resp.status)
+    err.httpStatus = resp.status
+    throw err
+  }
 
   const text = await resp.text()
   const signedUrl = extractDownloadUrlFromRemixStream(text)

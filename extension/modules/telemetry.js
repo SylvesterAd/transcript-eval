@@ -45,9 +45,38 @@ const ring = []
 // Drift-check allowed-event set, derived once.
 const ALLOWED = new Set(TELEMETRY_EVENT_ENUM)
 
+// Ext.8 opt-out short-circuit — cached to keep emit() O(1). A
+// chrome.storage.onChanged listener keeps this in sync with the
+// persisted flag. emit() consults this FIRST (invariant #7 of the
+// Ext.8 plan) before any other work, including the ALLOWED drift
+// assert. Default is false — telemetry is opt-in-by-default per
+// extension spec § "Privacy + data rights".
+let optedOut = false
+;(async () => {
+  try {
+    const { telemetry_opt_out } = await chrome.storage.local.get('telemetry_opt_out')
+    optedOut = telemetry_opt_out === true
+  } catch (err) {
+    console.warn('[telemetry] initial opt-out read failed', err)
+  }
+})()
+try {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return
+    if ('telemetry_opt_out' in changes) {
+      optedOut = changes.telemetry_opt_out.newValue === true
+    }
+  })
+} catch (err) {
+  // Test harness without chrome.storage.onChanged — ignore.
+}
+
 // ------------------- Public API -------------------
 
 export function emit(event, payload) {
+  // Ext.8 opt-out: first line, before any other work. Drops silently,
+  // does NOT queue, does NOT persist, does NOT drift-assert.
+  if (optedOut) return
   // Invariant #4: drift assert. Unknown events are dropped with a
   // warn, not thrown — a typo here must not crash the queue worker.
   if (!ALLOWED.has(event)) {
@@ -84,6 +113,13 @@ export async function getBufferStats() {
     paused_for_auth: pausedForAuth,
     overflow_total: overflow || 0,
   }
+}
+
+// Ext.8 — diagnostics.buildBundle() reads the ring to combine with
+// the persisted telemetry_queue. Returns a shallow clone so callers
+// cannot mutate the live ring. See ext8 plan § "Bundle format (v1)".
+export function getRingSnapshot() {
+  return ring.slice()
 }
 
 // ------------------- Internals -------------------
@@ -211,12 +247,30 @@ export function normalizeErrorCode(raw) {
   // "download_interrupt:SERVER_UNAUTHORIZED", "network_resume_failed:<msg>").
   const beforeColon = s.split(':', 1)[0]
   if (ERROR_CODE_SET.has(beforeColon)) return beforeColon
-  // Known Ext.5 raw strings that don't match the enum yet. Map
-  // conservatively; Ext.7 will tighten.
+
+  // Ext.5's legacy raw-string mappings (pre-Ext.7 classifier).
   if (beforeColon === 'download_interrupt') return 'network_failed'
   if (beforeColon === 'network_resume_failed') return 'network_failed'
   if (beforeColon === 'license_failed') return 'envato_unavailable'
   if (beforeColon === 'download_failed') return null
+
+  // Ext.7 additions — classifier may still pass through some raw codes
+  // via failItem (e.g. envato_http_500, envato_session_missing,
+  // pexels_daily_cap_exceeded).
+  if (s === 'envato_session_missing') return 'envato_session_401'
+  if (s === 'envato_session_missing_preflight') return 'envato_session_401'
+  if (s === 'envato_preflight_error') return 'envato_unavailable'
+  if (s === 'envato_402') return 'envato_402_tier'
+  if (s.startsWith('envato_http_5')) return 'envato_unavailable'
+  if (s.startsWith('envato_http_4')) return 'envato_unavailable'  // 4xx that aren't 401/402/403/429
+  if (s === 'freepik_url_expired') return 'url_expired_refetch_failed'
+  if (s.endsWith('_daily_cap_exceeded')) return null  // no matching enum entry; raw in meta.raw_error
+  if (s === 'unknown_verdict') return null
+  if (s === 'cancelled') return null  // user-cancelled isn't in the enum; null + raw
+  if (s === 'resolve_timeout') return 'resolve_failed'
+  if (s === 'resolve_error') return 'resolve_failed'
+  if (s === 'bad_input') return null
+
   // Unknown — return null so the event still posts; the raw string
   // lives in meta.raw_error for admin triage.
   return null

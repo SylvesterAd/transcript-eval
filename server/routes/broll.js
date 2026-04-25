@@ -42,6 +42,7 @@ import {
   executeKeywordsBatch,
   getBRollEditorData,
   searchSinglePlacement,
+  searchUserPlacement,
   executePlanPrep,
   executeCreateStrategy,
   executeCreatePlan,
@@ -50,6 +51,8 @@ import {
   loadExampleVideos,
   previewBrollReset,
   resetBrollSearches,
+  loadBrollEditorState,
+  saveBrollEditorState,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -864,6 +867,36 @@ router.get('/pipeline/:pipelineId/editor-data', requireAuth, async (req, res) =>
   }
 })
 
+router.get('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) => {
+  try {
+    const data = await loadBrollEditorState(req.params.pipelineId)
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.put('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) => {
+  try {
+    let body = req.body || {}
+    // sendBeacon may deliver as text/plain; fall back to JSON-parse if we got a string
+    if (req.query.beacon && typeof body === 'string') {
+      try { body = JSON.parse(body) } catch {}
+    }
+    const { state, version } = body
+    if (state == null || typeof version !== 'number') {
+      return res.status(400).json({ error: 'state and numeric version required' })
+    }
+    const result = await saveBrollEditorState(req.params.pipelineId, state, version)
+    if (result.status === 'conflict') {
+      return res.status(409).json({ state: result.state, version: result.version })
+    }
+    res.json({ version: result.version })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
@@ -876,6 +909,21 @@ router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, r
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
     const result = await searchSinglePlacement(pipelineId, chapterIndex, placementIndex, overrides)
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/pipeline/:pipelineId/search-user-placement', requireAuth, async (req, res) => {
+  try {
+    const { userPlacementId, description, style, sources } = req.body || {}
+    if (!userPlacementId) return res.status(400).json({ error: 'userPlacementId required' })
+    const overrides = {}
+    if (description) overrides.description = description
+    if (style) overrides.style = style
+    if (sources) overrides.sources = sources
+    const result = await searchUserPlacement(req.params.pipelineId, userPlacementId, overrides)
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })

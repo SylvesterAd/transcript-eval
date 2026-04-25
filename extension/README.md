@@ -436,3 +436,237 @@ file's Task 9.
   to `BACKEND_URL`, which is already reachable for `/api/pexels-url` +
   `/api/freepik-url` from Ext.3.
 - `version`: 0.5.0 → 0.6.0.
+
+## Ext.8 — Diagnostics + privacy
+
+### Diagnostic bundle
+
+The popup's **Export diagnostic bundle** button produces a
+timestamped ZIP (`transcript-eval-diagnostics-<UTC>.zip`) for
+attaching to a support ticket. The ZIP contains:
+
+- `meta.json` — schema version (currently 1), extension version,
+  generation timestamp, browser family.
+- `queue.json` — all `run:*` records from the last 24h, with
+  absolute file paths redacted to
+  `~/Downloads/transcript-eval/export-<redacted>/<basename>`.
+- `events.json` — the last 200 telemetry events (in-memory ring +
+  persisted queue, deduped + sorted).
+- `environment.json` — browser UA + platform, cookie-presence
+  booleans (NEVER values), JWT-presence booleans (NEVER the token),
+  deny-list, daily-cap counts, telemetry overflow count, current
+  opt-out state.
+
+Every byte in the ZIP passes through `scrubSensitive()`:
+
+- JWT-shaped strings (`eyJ....`) → `<redacted-jwt>` (or `<redacted>`
+  when under a sensitive-named key like `token`/`secret`/`password`/
+  `auth_key`/`api_key`).
+- Absolute OS paths → collapsed to the redacted export-prefix
+  (`~/Downloads/transcript-eval/export-<redacted>/<basename>`) if
+  recognizable, else `<redacted-path>`.
+- `email`-keyed values and email-shaped strings → `<redacted-email>`.
+- Cookie values are never read; we record booleans via
+  `chrome.cookies.get(...).then(c => !!c)`.
+
+The bundle format is the contract WebApp.4 will parse — schema_version
+1 is the current spec. Future changes require a bump + migration.
+
+### Privacy opt-out
+
+The popup's **Send diagnostic events** toggle flips
+`chrome.storage.local.telemetry_opt_out`:
+
+- **On (default):** `emit()` queues + posts to `/api/export-events`.
+- **Off:** the first line of `emit()` returns early; nothing is
+  queued, nothing is posted. The persisted `telemetry_queue` is
+  cleared on flip-to-off so a flip-back doesn't retroactively
+  send buffered events.
+
+Export runs work identically in either state. Opt-out is a
+client-side circuit breaker; the backend continues to accept any
+events that arrive.
+
+### Debug handlers
+
+For the `extension-test.html` harness:
+
+- `debug_build_bundle` — trigger `buildBundle()` from outside the popup.
+- `debug_set_telemetry_opt_out { value: boolean }` — flip the flag.
+- `debug_get_telemetry_opt_out` — read the current value.
+
+These are never called from production code.
+
+### Manifest changes (0.7.0 → 0.8.0)
+
+- `permissions`: unchanged — `downloads` + `storage` are already
+  present from Ext.1 / Ext.5.
+- `host_permissions`: unchanged.
+- `version`: 0.7.0 → 0.8.0.
+
+### New runtime dep
+
+- `fflate@^0.8` — 16KB, zero-dep, MIT, synchronous ZIP writer. Used
+  by `diagnostics.buildBundle()` to assemble the multi-file ZIP
+  without blocking on async I/O inside the MV3 SW.
+
+## Ext.9 — Feature flag fetch
+
+The extension consumes `GET /api/ext-config` (Backend 1.5, public
+endpoint) on service-worker boot and before every `{type:"export"}`
+message. Response shape:
+
+```jsonc
+{
+  "min_ext_version":       "0.1.0",
+  "export_enabled":        true,
+  "envato_enabled":        true,
+  "pexels_enabled":        true,
+  "freepik_enabled":       false,
+  "daily_cap_override":    null,
+  "slack_alerts_enabled":  true
+}
+```
+
+### Cache TTL
+
+Successful fetches are persisted to
+`chrome.storage.local.cached_ext_config` with a `fetched_at`
+timestamp. The 60-second TTL mirrors the server's
+`Cache-Control: public, max-age=60` header — within 60s, reads
+trust the cache; past 60s, reads try a refresh and fall back to
+the stale value if the refresh fails.
+
+### Semver gate
+
+`EXT_VERSION` (from `config.js`) is compared against
+`min_ext_version` (from the server) using a hand-rolled `x.y.z`
+comparator. If `EXT_VERSION < min_ext_version`, the export is
+rejected with `ext_version_below_min`, and the popup surfaces an
+"Update required" banner.
+
+### Per-source kill switches
+
+`envato_enabled` / `pexels_enabled` / `freepik_enabled` gate
+NEW exports only. A running queue is immune — kill-switch flips
+do NOT retroactively pause in-flight runs. Rejections name the
+source: `envato_disabled_by_config`, `pexels_disabled_by_config`,
+`freepik_disabled_by_config`.
+
+### Fall-open behavior
+
+- **Cache fresh (<60s)** → trust cache.
+- **Cache stale + fetch succeeds** → trust fresh response.
+- **Cache stale + fetch fails** → trust stale (warning logged).
+- **No cache + fetch succeeds** → trust fresh response.
+- **No cache + fetch fails** → FALL OPEN (all flags default true).
+  A down backend must never strand users whose download paths
+  are otherwise healthy.
+
+### Error codes
+
+The five canonical codes returned by `enforceConfigBeforeExport`:
+
+| Code                             | Meaning |
+|----------------------------------|---------|
+| `export_disabled_by_config`      | Global `export_enabled=false`. |
+| `ext_version_below_min`          | `EXT_VERSION` < `min_ext_version`. Payload includes `current` + `min`. |
+| `envato_disabled_by_config`      | Envato kill, and envato is in the manifest. |
+| `pexels_disabled_by_config`      | Pexels kill, and pexels is in the manifest. |
+| `freepik_disabled_by_config`     | Freepik kill, and freepik is in the manifest. |
+
+WebApp.4 keys its "Export disabled" UI off these exact strings —
+do not rename without a coordinated change there.
+
+### Debug handlers
+
+For the `extension-test.html` harness:
+
+- `debug_fetch_config` — trigger `fetchConfig()` manually.
+- `debug_get_cached_config` — read the current cache record.
+- `debug_set_cached_config` — inject a cache record (for simulating
+  `export_enabled=false` without touching the backend env var).
+
+These are never called from production code.
+
+---
+
+## Ext.10 — Build + CI
+
+### Package the extension locally
+
+```bash
+npm run ext:package
+# → extension/dist/extension-0.9.0.zip
+```
+
+The script (`extension/scripts/package.mjs`) is deterministic — two runs
+on the same inputs produce a byte-identical zip. It uses an include-list,
+not an exclude-list: adding a new runtime file to `extension/` requires
+updating `ROOT_INCLUDES` or `DIR_INCLUDES` in `package.mjs` or the file
+will NOT ship. Developer-only files (`scripts/`, `README.md`,
+`.extension-id`, `modules/__tests__/`, `.private-key.pem`) are excluded
+unconditionally by `DIR_EXCLUDES` regexes.
+
+Flags:
+- `--out <dir>` — output directory (default `extension/dist`)
+- `--no-zip` — stage the dist tree but skip the zip step (test harness)
+- `--verbose` — log each staged file
+
+Determinism is enforced by a stable ZIP-epoch mtime (1980-01-01 UTC,
+the ZIP format's own epoch — fflate rejects dates outside 1980-2099 so
+plain Unix epoch 0 does not work) and alphabetically-sorted file input.
+
+### GitHub Actions workflow
+
+`.github/workflows/extension-build.yml` runs on:
+
+| Trigger | Behavior |
+|---------|----------|
+| Push to `main` touching `extension/**` | Build + upload workflow-run artifact (90-day retention) |
+| Tag `ext-v*` (e.g. `ext-v0.9.0`) | Build + publish GitHub Release with `.zip` attached |
+| `workflow_dispatch` (manual) | Build + upload workflow-run artifact |
+
+The `validate-dist` step in CI unzips the built archive and asserts the
+manifest parses, runtime files are present, and excluded paths are
+absent. Failure at this step means the include-list drifted — fix
+`package.mjs`, not the workflow.
+
+**Post-merge TODO:** the workflow is NOT yet a required status check.
+Flip `Extension Build` to required in GitHub repo settings once it has
+been green for a week.
+
+### Cut a tagged release
+
+```bash
+# From main, with the desired commit checked out:
+git tag ext-v0.9.0
+git push origin ext-v0.9.0
+# Workflow fires, builds, publishes GitHub Release with the zip.
+```
+
+Tag format is `ext-v<semver>` (NOT `v<semver>`) so extension releases
+don't collide with future app-wide version tags.
+
+### Cross-browser compatibility
+
+| Browser | Status | Notes |
+|---------|--------|-------|
+| Chrome 120+ | Primary | Manifest `minimum_chrome_version: "120"` enforces. |
+| Microsoft Edge | Supported | Chromium-based; same extension package works. |
+| Arc | Best-effort | Chromium-based; untested in CI. |
+| Brave | Best-effort | Strict tracker-blocking may block `/api/export-events` beacons on Envato pages. Non-fatal. |
+| Vivaldi | Best-effort | Chromium-based; untested in CI. |
+| Opera | Best-effort | Chromium-based; untested in CI. |
+| Firefox | Out of scope | Manifest V3 incompatibilities + different WebExtensions API quirks. |
+| Safari | Out of scope | Separate Safari Web Extensions pipeline required. |
+| Chrome Enterprise / managed policies | May block install | Corporate users need IT approval. Documented, not engineered around. |
+| Chromebook | Untested | Disk layout differs; treat as unsupported until tested. |
+
+### Deferred
+
+- **`.crx` signing + self-hosted distribution** — future Ext.10.5 mini-PR.
+- **Chrome Web Store auto-submission on tag** — Ext.11 (submission phase).
+- **Puppeteer-driven headless browser smoke** — future phase if beta
+  surfaces undetected MV3 loading bugs.
+- **Canary channel / second Web Store listing** — Ext.12.

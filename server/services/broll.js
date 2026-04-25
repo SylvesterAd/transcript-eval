@@ -4852,6 +4852,64 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 // ── B-Roll Editor Data ────────────────────────────────────────────────
 
 /**
+ * Load the editor state blob for a plan pipeline.
+ * Returns { state, version } — empty object and version 0 if no row yet.
+ */
+export async function loadBrollEditorState(planPipelineId) {
+  const row = await db.prepare(
+    `SELECT state_json, version FROM broll_editor_state WHERE plan_pipeline_id = ?`
+  ).get(planPipelineId)
+  if (!row) return { state: {}, version: 0 }
+  let state = {}
+  try { state = JSON.parse(row.state_json || '{}') } catch {}
+  return { state, version: row.version }
+}
+
+/**
+ * Save the editor state blob with optimistic concurrency.
+ * If expectedVersion does not match the current row's version, returns
+ * { status: 'conflict', state, version } without writing.
+ * On success returns { status: 'ok', version: newVersion }.
+ */
+export async function saveBrollEditorState(planPipelineId, state, expectedVersion) {
+  const client = await db.pool.connect()
+  try {
+    await client.query('BEGIN')
+    const cur = await client.query(
+      `SELECT state_json, version FROM broll_editor_state WHERE plan_pipeline_id = $1 FOR UPDATE`,
+      [planPipelineId],
+    )
+    const currentVersion = cur.rows[0]?.version || 0
+    if (currentVersion !== expectedVersion) {
+      await client.query('ROLLBACK')
+      let currentState = {}
+      try { currentState = JSON.parse(cur.rows[0]?.state_json || '{}') } catch {}
+      return { status: 'conflict', state: currentState, version: currentVersion }
+    }
+    const nextVersion = currentVersion + 1
+    const stateJson = JSON.stringify(state || {})
+    if (cur.rows.length === 0) {
+      await client.query(
+        `INSERT INTO broll_editor_state (plan_pipeline_id, state_json, version, updated_at) VALUES ($1, $2, $3, NOW())`,
+        [planPipelineId, stateJson, nextVersion],
+      )
+    } else {
+      await client.query(
+        `UPDATE broll_editor_state SET state_json = $1, version = $2, updated_at = NOW() WHERE plan_pipeline_id = $3`,
+        [stateJson, nextVersion, planPipelineId],
+      )
+    }
+    await client.query('COMMIT')
+    return { status: 'ok', version: nextVersion }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/**
  * Assemble all data needed for the B-Roll editor UI.
  * Loads plan placements and search results for a given plan pipeline.
  */
@@ -5092,7 +5150,52 @@ export async function getBRollEditorData(planPipelineId) {
     // Don't report 'running' — let the UI show "Search next 10" button to resume.
   }
 
-  return { placements, searchProgress, totalPlacements: placements.length }
+  // 4. Merge user edits from broll_editor_state (hidden, manual positions, selected result, userPlacements)
+  let editorState = {}, editorVersion = 0
+  try {
+    const loaded = await loadBrollEditorState(planPipelineId)
+    editorState = loaded.state || {}
+    editorVersion = loaded.version
+  } catch (err) {
+    console.error('[getBRollEditorData] Failed to load editor-state:', err.message)
+  }
+
+  const edits = editorState.edits || {}
+  const userPlacements = Array.isArray(editorState.userPlacements) ? editorState.userPlacements : []
+
+  const editedPlacements = []
+  for (const p of placements) {
+    const key = `${p.chapterIndex}:${p.placementIndex}`
+    const e = edits[key]
+    if (e?.hidden) continue
+    if (e?.timelineStart != null && e?.timelineEnd != null) {
+      p.userTimelineStart = e.timelineStart
+      p.userTimelineEnd = e.timelineEnd
+    }
+    if (e?.selectedResult != null) {
+      p.persistedSelectedResult = e.selectedResult
+    }
+    editedPlacements.push(p)
+  }
+
+  for (const up of userPlacements) {
+    editedPlacements.push({
+      index: `user:${up.id}`,
+      userPlacementId: up.id,
+      isUserPlacement: true,
+      sourcePipelineId: up.sourcePipelineId,
+      chapterIndex: up.sourceChapterIndex ?? null,
+      placementIndex: up.sourcePlacementIndex ?? null,
+      userTimelineStart: up.timelineStart,
+      userTimelineEnd: up.timelineEnd,
+      persistedSelectedResult: up.selectedResult,
+      results: up.results || [],
+      searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+      ...(up.snapshot || {}),
+    })
+  }
+
+  return { placements: editedPlacements, searchProgress, totalPlacements: editedPlacements.length, editorStateVersion: editorVersion }
 }
 
 /**
@@ -5311,6 +5414,66 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
   // No need to duplicate in broll_runs
 
   return { results, ...searchMeta, duration: searchDuration, apiLogId, gpuJobStatus, jobId: gpuJobId }
+}
+
+export async function searchUserPlacement(planPipelineId, userPlacementId, overrides = {}) {
+  const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
+  const GPU_KEY = process.env.GPU_INTERNAL_KEY
+  if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')
+
+  const loaded = await loadBrollEditorState(planPipelineId)
+  const up = (loaded.state.userPlacements || []).find(u => u.id === userPlacementId)
+  if (!up) throw new Error(`userPlacement ${userPlacementId} not found on pipeline ${planPipelineId}`)
+
+  const desc = overrides.description || up.snapshot?.description
+  let styleStr
+  if (overrides.style) {
+    styleStr = overrides.style
+  } else {
+    const s = up.snapshot?.style || {}
+    const parts = []
+    if (s.colors) parts.push(`colors: ${s.colors}`)
+    if (s.temperature) parts.push(`temperature: ${s.temperature}`)
+    if (s.motion) parts.push(`motion: ${s.motion}`)
+    if (s.framing) parts.push(`framing: ${s.framing}`)
+    if (s.lighting) parts.push(`lighting: ${s.lighting}`)
+    styleStr = parts.join('; ')
+  }
+
+  const brief = [
+    desc ? `# ${desc}` : '',
+    styleStr ? `## Style: ${styleStr}` : '',
+  ].filter(Boolean).join('\n')
+
+  const sources = overrides.sources?.length ? overrides.sources : ['pexels', 'storyblocks']
+  const requestBody = { keywords: [], brief, sources, max_results: 10 }
+
+  const res = await fetch(GPU_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
+    body: JSON.stringify(requestBody),
+  })
+  if (!res.ok) throw new Error(`GPU search failed: ${res.status}`)
+  const data = await res.json()
+  const results = (data.results || []).map(r => r.preview_url_hq ? r : { ...r, preview_url_hq: upgradePreviewUrl(r.preview_url) })
+
+  // Persist back: replace the userPlacement's results, reset selectedResult to 0.
+  // Retry up to 3x on 409 conflict.
+  let saved = false
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const latest = await loadBrollEditorState(planPipelineId)
+    const updatedUps = (latest.state.userPlacements || []).map(u =>
+      u.id === userPlacementId ? { ...u, results, selectedResult: 0 } : u
+    )
+    const nextState = { ...latest.state, userPlacements: updatedUps }
+    const save = await saveBrollEditorState(planPipelineId, nextState, latest.version)
+    if (save.status === 'ok') { saved = true; break }
+  }
+  if (!saved) {
+    throw new Error('Failed to persist search results after conflicts; please retry')
+  }
+
+  return { results, searchStatus: results.length ? 'complete' : 'no_results' }
 }
 
 // ── Reset B-Roll Searches ──────────────────────────────────────────────

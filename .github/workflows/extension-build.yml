@@ -1,0 +1,100 @@
+name: Extension Build
+
+# Ext.10 — reproducible packaging pipeline.
+#
+# - Push to main touching extension/** → build + upload workflow-run
+#   artifact (90-day retention).
+# - Tag ext-v* → build + publish GitHub Release with .zip attached.
+# - workflow_dispatch → on-demand build.
+#
+# .crx signing is deferred (future Ext.10.5 mini-PR). Chrome Web Store
+# auto-submission is Ext.11. Puppeteer headless smoke is deferred.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extension/**'
+      - '.github/workflows/extension-build.yml'
+      - 'package.json'
+      - 'package-lock.json'
+    tags:
+      - 'ext-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required by softprops/action-gh-release on tag
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Package extension
+        run: npm run ext:package
+
+      - name: Validate dist
+        # Unzip the built archive and assert manifest keys + runtime file
+        # presence + excluded-path absence. Failure here means the
+        # include-list in package.mjs drifted — fix the script, not this
+        # workflow.
+        run: |
+          set -euo pipefail
+          cd extension/dist
+          VERSION=$(node -p "require('../manifest.json').version")
+          echo "Expected zip: extension-${VERSION}.zip"
+          [ -f "extension-${VERSION}.zip" ] || { echo "::error::Zip not found"; exit 1; }
+          rm -rf verify && mkdir verify && unzip -q "extension-${VERSION}.zip" -d verify
+          node -e "
+            const m = require('./verify/manifest.json');
+            if (m.manifest_version !== 3) { console.error('manifest_version !== 3'); process.exit(1); }
+            if (m.version !== '${VERSION}') { console.error('version mismatch'); process.exit(1); }
+            if (!m.background || !m.background.service_worker) { console.error('missing service_worker'); process.exit(1); }
+            if (!m.key) { console.error('missing manifest key (Ext.1 pin)'); process.exit(1); }
+            if (!Array.isArray(m.permissions) || m.permissions.length < 4) { console.error('permissions shrunk unexpectedly'); process.exit(1); }
+            console.log('[validate-dist] manifest OK, version=' + m.version);
+          "
+          for f in service_worker.js popup.html popup.js popup.css config.js modules/auth.js modules/config-fetch.js modules/diagnostics.js modules/queue.js modules/telemetry.js; do
+            [ -f "verify/$f" ] || { echo "::error::Missing $f in dist zip"; exit 1; }
+          done
+          for bad in .extension-id README.md modules/__tests__ scripts generate-key.mjs; do
+            [ ! -e "verify/$bad" ] || { echo "::error::Excluded path $bad leaked into dist"; exit 1; }
+          done
+          echo "[validate-dist] include + exclude checks passed"
+          rm -rf verify
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-zip
+          path: extension/dist/extension-*.zip
+          retention-days: 90
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/ext-v')
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: extension-zip
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/extension-*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
