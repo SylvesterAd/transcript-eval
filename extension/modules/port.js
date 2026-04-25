@@ -22,6 +22,9 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
   'https://transcript-eval.com',
+  'https://transcript-eval.vercel.app',
+  'https://transcript-eval-sylvesterads-projects.vercel.app',
+  'https://transcript-eval-git-main-sylvesterads-projects.vercel.app',
 ]
 
 // Module-scoped singletons — the Port lives here.
