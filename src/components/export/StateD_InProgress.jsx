@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from 'react'
-import styled, { keyframes } from 'styled-components'
+import styled, { keyframes, css } from 'styled-components'
 import { Pause, Play, Square, AlertCircle, RefreshCw, CheckCircle2, XCircle, Clock } from 'lucide-react'
 import { selectTotals, selectCurrentItem, selectSpeedAndEta } from './progressState.js'
 import { formatBytes } from '../../lib/buildManifest.js'
@@ -65,7 +65,7 @@ const BarFill = styled.div`
   background: linear-gradient(90deg, #2563eb, #3b82f6);
   border-radius: 6px 0 0 6px;
   transition: width 300ms ease-out;
-  ${p => p.$running && `animation: ${pulse} 1.8s infinite;`}
+  ${p => p.$running && css`animation: ${pulse} 1.8s infinite;`}
 `
 const BarLabel = styled.div`
   display: flex;
