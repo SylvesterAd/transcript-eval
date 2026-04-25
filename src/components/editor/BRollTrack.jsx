@@ -14,7 +14,7 @@ export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
   return placement.persistedSelectedResult ?? 0
 }
 
-function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, onCrossDrop }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -280,7 +280,13 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       label: 'Paste', shortcut: '⌘V', disabled: !hasClipboard,
       onClick: () => {
         const targetStart = p ? p.timelineEnd + 0.05 : menu.emptyAreaTime
-        broll.pastePlacement(targetStart)
+        // On an inactive row, route through onCrossPaste so the parent switches
+        // variants first, then pastes once the new variant's placements load.
+        if (!isActive && onCrossPaste && localVariantIdx != null) {
+          onCrossPaste(localVariantIdx, targetStart)
+        } else {
+          broll.pastePlacement(targetStart)
+        }
       },
     })
     if (p) {
@@ -301,9 +307,11 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       onContextMenu={(e) => {
         if (e.defaultPrevented) return
         e.preventDefault()
+        // BRollTrack lives inside the .flex-1 sibling of the sticky label, so its
+        // bounding rect already starts AT time=0 (the label's right edge). No need to
+        // subtract labelW or add scrollX — getBoundingClientRect handles the scroll.
         const rect = e.currentTarget.getBoundingClientRect()
-        const labelW = 144
-        const timeAtClick = ((e.clientX - rect.left) + (scrollX || 0) - labelW) / zoom
+        const timeAtClick = (e.clientX - rect.left) / zoom
         setMenuState({ x: e.clientX, y: e.clientY, emptyAreaTime: Math.max(0, timeAtClick) })
       }}
     >

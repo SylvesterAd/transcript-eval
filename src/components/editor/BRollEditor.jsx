@@ -165,6 +165,31 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     setActiveVariantIdx(newIdx)
   }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.userPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
 
+  // Cross-variant paste: right-click → Paste on an inactive row should land the clipboard
+  // on THAT variant, not the currently-active one. Switch first, then paste once the new
+  // variant's placements have loaded (so gap-find sees the correct neighbors).
+  const pendingPasteRef = useRef(null)
+  const handleCrossPaste = useCallback((targetVariantIdx, targetStartSec) => {
+    if (targetVariantIdx === activeVariantIdx) {
+      brollState.pastePlacement(targetStartSec)
+      return
+    }
+    pendingPasteRef.current = { time: targetStartSec, ts: Date.now() }
+    handleVariantActivate(targetVariantIdx, null)
+  }, [activeVariantIdx, brollState.pastePlacement, handleVariantActivate])
+
+  // Apply pending paste once the new variant's placements load. 5s TTL same as pending selection.
+  useEffect(() => {
+    const pending = pendingPasteRef.current
+    if (!pending || brollState.loading || !brollState.placements) return
+    if (Date.now() - pending.ts > 5000) {
+      pendingPasteRef.current = null
+      return
+    }
+    brollState.pastePlacement(pending.time)
+    pendingPasteRef.current = null
+  }, [activeVariantIdx, brollState.loading, brollState.placements])
+
   // Resolve inactive placements using same transcript matching as active variant.
   // Per-pid cache keeps individual array references stable when only one variant's
   // raw data changed, allowing React.memo in BRollTrack to skip unchanged tracks.
@@ -228,12 +253,14 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     pendingSelectionRef.current = null
   }, [activeVariantIdx, brollState.loading, brollState.placements])
 
-  // Sync URL detail (placementId) → selection on mount / URL change
+  // Sync URL detail (placementId) → selection on mount / URL change.
+  // Defers to pendingSelectionRef when a fresh inactive-variant click is in flight —
+  // the click is fresher intent than a stale URL detail from the previous variant.
   useEffect(() => {
     if (!brollState.placements?.length) return
+    if (pendingSelectionRef.current != null) return
     const idx = resolveDetailToIndex(detail)
     if (idx != null && idx !== brollState.selectedIndex) {
-      pendingSelectionRef.current = null  // user navigated, drop pending
       brollState.selectPlacement(idx)
     }
   }, [detail, brollState.placements?.length])
@@ -391,6 +418,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 variants={variants}
                 activeVariantIdx={activeVariantIdx}
                 onVariantActivate={handleVariantActivate}
+                onCrossPaste={handleCrossPaste}
                 inactiveVariantPlacements={inactiveVariantPlacements}
                 onCrossDrop={async (args) => {
                   // Determine source duration and target's existing placements (for gap-fit).

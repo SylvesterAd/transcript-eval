@@ -9,7 +9,7 @@ import { BRollContext } from './useBRollEditorState.js'
 const COMPOSITE_H = 80
 const COMPOSITE_AUDIO_H = 56
 
-export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop }) {
+export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop, onCrossPaste }) {
   const { state, dispatch, totalDuration, playbackEngine, playheadRef } = useContext(EditorContext)
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
@@ -671,7 +671,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                         overridePlacements={!isActiveVariant ? inactiveVariantPlacements?.[variants?.[vi]?.id] : undefined}
                         variants={variants}
                         activeVariantIdx={activeVariantIdx}
+                        localVariantIdx={vi}
                         onCrossDrop={onCrossDrop}
+                        onCrossPaste={onCrossPaste}
                       />
                     </div>
                   </div>
