@@ -484,8 +484,10 @@ export function useBRollEditorState(planPipelineId) {
         const next = {
           edits: remote.state?.edits || {},
           userPlacements: (remote.state?.userPlacements || []).filter(u => u.id !== top.targetUserPlacementId),
-          undoStack: Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [],
-          redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
+          undoStack: (Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [])
+            .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
+          redoStack: (Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [])
+            .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
         }
         await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
       } catch (err) {
@@ -510,10 +512,17 @@ export function useBRollEditorState(planPipelineId) {
         // independently redid on the target side first).
         const ups = remote.state?.userPlacements || []
         const alreadyPresent = ups.some(u => u.id === top.targetUserPlacementId)
+        const remoteUndo = Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : []
+        const hasCreateEntry = remoteUndo.some(e => e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)
         const next = {
           edits: remote.state?.edits || {},
           userPlacements: alreadyPresent ? ups : [...ups, top.targetUserPlacementSnapshot],
-          undoStack: Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [],
+          undoStack: hasCreateEntry
+            ? remoteUndo
+            : [...remoteUndo, {
+                id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: top.targetUserPlacementId,
+                before: { userPlacementDelete: true }, after: { userPlacementCreate: top.targetUserPlacementSnapshot },
+              }].slice(-MAX_UNDO),
           redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
         }
         await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
