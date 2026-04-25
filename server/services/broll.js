@@ -5198,6 +5198,95 @@ export async function getBRollEditorData(planPipelineId) {
   return { placements: editedPlacements, searchProgress, totalPlacements: editedPlacements.length, editorStateVersion: editorVersion }
 }
 
+// Pure transform: getBRollEditorData() placements → export manifest items.
+// Filters Storyblocks (export pipeline non-goal). Picks the user-selected
+// result if present, else the top-ranked candidate. Variant filter is
+// applied case-insensitively against `variant_label` and is forgiving of
+// the "Variant X" vs "X" mismatch. When NO placement has variant_label
+// (legacy data), the filter is a no-op pass-through (legacy data is
+// per-pipelineId, not per-variant — there's no label to filter on).
+//
+// This function is exported separately from getBRollEditorData so the
+// route handler can stay thin and the transform is unit-testable
+// without a DB.
+export function buildManifestFromPlacements(placements, { variant } = {}) {
+  // Variant normalization: accept "A" or "Variant A".
+  const variantNorm = variant
+    ? variant.trim().replace(/^Variant\s+/i, '').toLowerCase()
+    : null
+
+  // Pre-pass: detect whether ANY placement carries a variant_label.
+  // If none do, the variant filter is a no-op (legacy data path).
+  const anyHasLabel = placements.some(p => p.variant_label != null && p.variant_label !== '')
+  const applyVariantFilter = !!(variantNorm && anyHasLabel)
+
+  let seq = 0
+  const items = []
+  let estTotal = 0
+  const bySource = {}
+
+  for (const p of placements) {
+    if (p.hidden) continue
+    if (!Array.isArray(p.results) || p.results.length === 0) continue
+
+    // Variant filter (queue data path).
+    if (applyVariantFilter) {
+      const label = String(p.variant_label || '')
+        .trim()
+        .replace(/^Variant\s+/i, '')
+        .toLowerCase()
+      if (label !== variantNorm) continue
+    }
+
+    // Selection rule: user pick > top-ranked.
+    const pick = (p.persistedSelectedResult && typeof p.persistedSelectedResult === 'object')
+      ? p.persistedSelectedResult
+      : p.results[0]
+    if (!pick) continue
+
+    const source = String(pick.source || '').toLowerCase()
+    if (!source) continue
+    if (source === 'storyblocks') continue   // Export-pipeline non-goal.
+
+    const sourceItemId = pick.source_item_id || pick.id || pick.uid || null
+    if (!sourceItemId) continue
+
+    seq += 1
+    const ext = source === 'envato' ? 'mov' : 'mp4'
+    const safeId = String(sourceItemId).replace(/[^A-Za-z0-9_-]/g, '_')
+    const targetFilename = `${String(seq).padStart(3, '0')}_${source}_${safeId}.${ext}`
+
+    // Timeline: prefer user-edited positions over plan defaults.
+    const startS = (p.userTimelineStart != null) ? p.userTimelineStart : (p.start ?? null)
+    const endS   = (p.userTimelineEnd   != null) ? p.userTimelineEnd   : (p.end   ?? null)
+    const durS   = (startS != null && endS != null) ? Math.max(0, endS - startS) : null
+
+    const item = {
+      seq,
+      timeline_start_s: startS,
+      timeline_duration_s: durS,
+      source,
+      source_item_id: String(sourceItemId),
+      envato_item_url: source === 'envato' ? (pick.envato_item_url || null) : null,
+      target_filename: targetFilename,
+      resolution: pick.resolution || { width: pick.width || 1920, height: pick.height || 1080 },
+      frame_rate: pick.frame_rate || 30,
+      est_size_bytes: typeof pick.est_size_bytes === 'number'
+        ? pick.est_size_bytes
+        : (pick.duration_seconds ? Math.round(pick.duration_seconds * 25 * 1024 * 1024) : 100 * 1024 * 1024),
+      variant_label: p.variant_label || null,
+    }
+    items.push(item)
+    estTotal += item.est_size_bytes
+    bySource[source] = (bySource[source] || 0) + 1
+  }
+
+  return {
+    items,
+    totals: { count: items.length, est_size_bytes: estTotal, by_source: bySource },
+  }
+}
+
 /**
  * Search a single B-Roll placement by its chapterIndex + placementIndex.
  * Reuses the same brief/keyword building as executeBrollSearch but for one item.
