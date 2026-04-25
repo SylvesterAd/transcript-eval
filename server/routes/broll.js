@@ -41,6 +41,7 @@ import {
   executeBrollSearch,
   executeKeywordsBatch,
   getBRollEditorData,
+  buildManifestFromPlacements,
   searchSinglePlacement,
   searchUserPlacement,
   executePlanPrep,
@@ -114,95 +115,18 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
     if (!pipelineId) return res.status(400).json({ error: 'pipelineId required' })
     const variant = req.query.variant ? String(req.query.variant) : null
 
-    // variant_label in broll_searches may be stored as "Variant C" or
-    // just "C"; callers often pass the short letter. Accept either by
-    // matching both forms when a variant filter is provided.
-    const variantAlt = variant
-      ? (variant.toLowerCase().startsWith('variant ')
-          ? variant.replace(/^Variant\s+/i, '').trim()
-          : `Variant ${variant}`)
-      : null
+    // Use the same data path as the b-roll editor — 3-tier fallback
+    // (broll_searches → broll_runs → broll_search_logs) plus user
+    // edits from broll_editor_state. Without this, projects whose
+    // searches landed in legacy storage show 0 items in the export
+    // pre-flight even though the editor displays them correctly.
+    const editorData = await getBRollEditorData(pipelineId)
+    const placements = Array.isArray(editorData?.placements) ? editorData.placements : []
 
-    // Pull all completed search rows for this pipeline (optionally
-    // filtered to a single variant_label). 'complete' is the only
-    // status with usable results_json.
-    const rows = variant
-      ? await db.prepare(
-          `SELECT id, chapter_index, placement_index, variant_label, results_json
-           FROM broll_searches
-           WHERE plan_pipeline_id = ? AND status = 'complete' AND (variant_label = ? OR variant_label = ?)
-           ORDER BY id`
-        ).all(pipelineId, variant, variantAlt)
-      : await db.prepare(
-          `SELECT id, chapter_index, placement_index, variant_label, results_json
-           FROM broll_searches
-           WHERE plan_pipeline_id = ? AND status = 'complete'
-           ORDER BY id`
-        ).all(pipelineId)
+    // Pure transform: pick → filter → manifest item shape.
+    const { items, totals } = buildManifestFromPlacements(placements, { variant })
 
-    if (!rows.length) {
-      return res.json({
-        pipeline_id: pipelineId,
-        variant,
-        items: [],
-        totals: { count: 0, est_size_bytes: 0, by_source: {} },
-      })
-    }
-
-    // Each broll_searches row's results_json is the full ranked
-    // candidate list. The "picked" item for export is the user's
-    // selection from the editor — for Phase A we take the FIRST
-    // result per placement (the highest-ranked candidate). Once the
-    // editor exposes per-placement user picks, swap this for the
-    // user's choice (one-line change in the map below).
-    let seq = 0
-    const items = []
-    let estTotal = 0
-    const bySource = {}
-
-    for (const row of rows) {
-      let results = []
-      try { results = JSON.parse(row.results_json || '[]') } catch { results = [] }
-      if (!Array.isArray(results) || results.length === 0) continue
-      // TODO: swap to results.find(r => r.picked) ?? results[0] once
-      //       editor exposes user picks. Phase A uses top-ranked.
-      const pick = results[0]
-
-      const source = String(pick.source || '').toLowerCase()
-      const sourceItemId = pick.source_item_id || pick.id || pick.uid || null
-      if (!source || !sourceItemId) continue
-
-      seq += 1
-      const ext = source === 'pexels' ? 'mp4' : source === 'freepik' ? 'mp4' : 'mov'
-      const safeId = String(sourceItemId).replace(/[^A-Za-z0-9_-]/g, '_')
-      const targetFilename = `${String(seq).padStart(3, '0')}_${source}_${safeId}.${ext}`
-
-      const item = {
-        seq,
-        timeline_start_s: pick.timeline_start_s ?? pick.start ?? null,
-        timeline_duration_s: pick.timeline_duration_s ?? pick.duration ?? null,
-        source,
-        source_item_id: String(sourceItemId),
-        envato_item_url: source === 'envato' ? (pick.envato_item_url || null) : null,
-        target_filename: targetFilename,
-        resolution: pick.resolution || { width: pick.width || 1920, height: pick.height || 1080 },
-        frame_rate: pick.frame_rate || 30,
-        est_size_bytes: typeof pick.est_size_bytes === 'number'
-          ? pick.est_size_bytes
-          : (pick.duration_seconds ? Math.round(pick.duration_seconds * 25 * 1024 * 1024) : 100 * 1024 * 1024),
-        variant_label: row.variant_label || null,
-      }
-      items.push(item)
-      estTotal += item.est_size_bytes
-      bySource[source] = (bySource[source] || 0) + 1
-    }
-
-    res.json({
-      pipeline_id: pipelineId,
-      variant,
-      items,
-      totals: { count: items.length, est_size_bytes: estTotal, by_source: bySource },
-    })
+    res.json({ pipeline_id: pipelineId, variant, items, totals })
   } catch (err) {
     console.error('[broll-export-manifest] error:', err.message)
     res.status(500).json({ error: err.message })
