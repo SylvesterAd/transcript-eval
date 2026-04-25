@@ -11,6 +11,13 @@ import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
 import { scheduleBrollPreload, clearBrollPreload } from './brollPreloader.js'
 
+export function resolveDetailToIndex(detail) {
+  if (detail == null || detail === '') return null
+  if (typeof detail === 'string' && detail.startsWith('user:')) return detail
+  const n = parseInt(detail, 10)
+  return Number.isFinite(n) ? n : null
+}
+
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
   const navigate = useNavigate()
@@ -45,6 +52,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
   const brollState = useBRollEditorState(activePipelineId)
+  useEffect(() => {
+    brollState.registerInactiveCacheSetter?.((pid, updater) => {
+      setRawInactivePlacements(prev => ({ ...prev, [pid]: updater(prev[pid]) }))
+    })
+    return () => brollState.registerInactiveCacheSetter?.(null)
+  }, [brollState.registerInactiveCacheSetter])
   const hasEverLoaded = useRef(false)
   if (brollState.placements?.length) hasEverLoaded.current = true
 
@@ -71,7 +84,17 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     function fetchInactive() {
       for (const pid of inactiveIds) {
         authFetchBRollData(pid, controller.signal)
-          .then(data => setRawInactivePlacements(prev => ({ ...prev, [pid]: data.placements || [] })))
+          .then(data => {
+            const serverPlacements = data.placements || []
+            setRawInactivePlacements(prev => {
+              const local = prev[pid] || []
+              const serverIds = new Set(serverPlacements.filter(p => p.userPlacementId).map(p => p.userPlacementId))
+              // Keep local optimistic userPlacements whose uuids are NOT yet on server
+              // (they're in flight; replacing would make them vanish from view).
+              const optimistic = local.filter(p => p.isUserPlacement && p.userPlacementId && !serverIds.has(p.userPlacementId))
+              return { ...prev, [pid]: [...serverPlacements, ...optimistic] }
+            })
+          })
           .catch(err => { if (err.name !== 'AbortError') {/* swallow */} })
       }
     }
@@ -88,6 +111,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   // Cache active variant's placements into inactive cache before switching
   const pendingSelectionRef = useRef(null)
+  const pendingSelectionTsRef = useRef(0)
   const handleVariantActivate = useCallback((newIdx, selectIdentity) => {
     const currentPid = variants[activeVariantIdx]?.id
     // Cache outgoing variant — apply local edits and hide flags so the inactive display
@@ -134,7 +158,10 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     // selectIdentity may be: { chapterIndex, placementIndex, userPlacementId } object,
     // or a bare numeric index (legacy). Stash for the pending-selection effect to resolve
     // once the new variant's placements are loaded.
-    if (selectIdentity != null) pendingSelectionRef.current = selectIdentity
+    if (selectIdentity != null) {
+      pendingSelectionRef.current = selectIdentity
+      pendingSelectionTsRef.current = Date.now()
+    }
     setActiveVariantIdx(newIdx)
   }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.userPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
 
@@ -175,6 +202,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     const pending = pendingSelectionRef.current
     if (pending == null || brollState.loading || !brollState.placements?.length) return
 
+    // TTL: if older than 5s, drop it — the data we expected never arrived.
+    if (Date.now() - pendingSelectionTsRef.current > 5000) {
+      pendingSelectionRef.current = null
+      return
+    }
+
     if (typeof pending === 'object') {
       let match = null
       if (pending.userPlacementId) {
@@ -188,7 +221,6 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         brollState.selectPlacement(match.index)
         pendingSelectionRef.current = null
       }
-      // No match yet — wait for next placements update (e.g. LOAD_EDITOR_STATE landing).
       return
     }
 
@@ -198,11 +230,11 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   // Sync URL detail (placementId) → selection on mount / URL change
   useEffect(() => {
-    if (detail != null && brollState.placements?.length) {
-      const idx = parseInt(detail)
-      if (!isNaN(idx) && idx !== brollState.selectedIndex) {
-        brollState.selectPlacement(idx)
-      }
+    if (!brollState.placements?.length) return
+    const idx = resolveDetailToIndex(detail)
+    if (idx != null && idx !== brollState.selectedIndex) {
+      pendingSelectionRef.current = null  // user navigated, drop pending
+      brollState.selectPlacement(idx)
     }
   }, [detail, brollState.placements?.length])
 

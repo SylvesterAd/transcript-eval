@@ -1,4 +1,4 @@
-import { useMemo, useContext, useCallback, useState, memo } from 'react'
+import { useMemo, useContext, useCallback, useState, memo, useRef } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2, Copy } from 'lucide-react'
 import BRollContextMenu from './BRollContextMenu.jsx'
@@ -6,11 +6,21 @@ import { getClipboard } from './brollClipboard.js'
 
 const TRACK_H = 60
 
+export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
+  if (isActive) {
+    const transient = selectedResults?.[placement.index]
+    if (transient != null) return transient
+  }
+  return placement.persistedSelectedResult ?? 0
+}
+
 function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, onCrossDrop }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
   const placements = overridePlacements || broll?.placements || []
+  const placementsRef = useRef(placements)
+  placementsRef.current = placements
   const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
 
   const [menuState, setMenuState] = useState(null)
@@ -60,10 +70,10 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       const dt = (ev.clientX - startX) / zoom
       if (edge === 'left') {
         const newStart = Math.max(prevEnd, Math.min(origStart + dt, origEnd - 0.5))
-        updatePlacementPosition(placement.index, newStart, origEnd)
+        updatePlacementPosition(placement.index, newStart, origEnd, { kind: 'resize' })
       } else {
         const newEnd = Math.min(nextStart, Math.max(origStart + 0.5, origEnd + dt))
-        updatePlacementPosition(placement.index, origStart, newEnd)
+        updatePlacementPosition(placement.index, origStart, newEnd, { kind: 'resize' })
       }
     }
     const onUp = () => {
@@ -102,6 +112,18 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     let crossMode = null
     let inVariantDispatched = false  // tracks whether we've moved the source placement in-variant during this drag
 
+    let pendingFrame = 0
+    let pendingArgs = null
+    const flushPosition = () => {
+      pendingFrame = 0
+      if (!pendingArgs) return
+      updatePlacementPosition(placement.index, pendingArgs[0], pendingArgs[1])
+      pendingArgs = null
+    }
+
+    let lastWasCross = false
+    let inVariantStartX = startX  // re-anchored when re-entering in-variant
+
     // Variant row lookup for hit-testing. Query once per drag start.
     const variantRows = (variants || []).map((v, vi) => {
       const row = document.querySelector(`[data-broll-variant="${vi}"]`)
@@ -115,14 +137,6 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     const srcTrackLeft = srcRow ? srcRow.rect.left + labelW : 0
     const placementLeftPx = srcTrackLeft + placement.timelineStart * zoom
     const grabOffsetSec = (startX - placementLeftPx) / zoom
-
-    console.log('[broll-drag] start', {
-      placementIndex: placement.index,
-      activeVariantIdx,
-      duration,
-      grabOffsetSec: grabOffsetSec.toFixed(2),
-      variantRows: variantRows.map(r => ({ vi: r.vi, top: r.rect.top, bottom: r.rect.bottom, variantId: r.variant.id })),
-    })
 
     // Ghost element that follows the cursor
     const ghost = document.createElement('div')
@@ -163,20 +177,12 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         if (ev.clientY >= row.rect.top && ev.clientY <= row.rect.bottom) { overRow = row; break }
       }
 
-      if (!onMove._lastLog || Date.now() - onMove._lastLog > 200) {
-        onMove._lastLog = Date.now()
-        console.log('[broll-drag] move', {
-          clientY: ev.clientY,
-          overRowVi: overRow?.vi ?? null,
-          activeVariantIdx,
-          isCross: !!(overRow && overRow.vi !== (activeVariantIdx ?? 0)),
-        })
-      }
-
       if (overRow && overRow.vi !== (activeVariantIdx ?? 0)) {
+        lastWasCross = true
         // Cross-mode active. If we previously moved the placement in-variant, revert
         // to its drag-start position so the source doesn't end up at a weird spot
         // (and so undo of the cross-drop returns the placement to where it started).
+        if (pendingFrame) { cancelAnimationFrame(pendingFrame); pendingFrame = 0; pendingArgs = null }
         if (inVariantDispatched) {
           updatePlacementPosition(placement.index, origStart, origEnd)
           inVariantDispatched = false
@@ -193,14 +199,22 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         ghost.style.left = dropLeftPx + 'px'
         ghost.style.top = overRow.rect.top + 'px'
       } else {
+        // Re-anchor on transition from cross-mode → in-variant.
+        if (lastWasCross) {
+          inVariantStartX = ev.clientX
+          lastWasCross = false
+        }
         crossMode = null
         marker.style.display = 'none'
         // In-variant drag: recompute neighbors against the cursor position so the dragged
         // clip can tunnel past intermediate placements into a wider gap further along.
         // Static drag-start neighbors clamp the cursor inside the original gap forever.
+        // Use inVariantStartX as the anchor (re-anchored after cross-bounce).
+        const dx = ev.clientX - inVariantStartX
         const dt = dx / zoom
         const cursorTime = origStart + dt
-        const others = placements
+        const livePlacements = placementsRef.current
+        const others = livePlacements
           .filter(p => p.index !== placement.index)
           .filter(p => Number.isFinite(p.timelineStart) && Number.isFinite(p.timelineEnd))
           .sort((a, b) => a.timelineStart - b.timelineStart)
@@ -225,22 +239,17 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
           return
         }
         const newStart = Math.max(minStart, Math.min(target, maxStart))
-        updatePlacementPosition(placement.index, newStart, newStart + duration)
+        pendingArgs = [newStart, newStart + duration]
+        if (!pendingFrame) pendingFrame = requestAnimationFrame(flushPosition)
         inVariantDispatched = true
       }
     }
     const onUp = (ev) => {
+      if (pendingFrame) { cancelAnimationFrame(pendingFrame); flushPosition() }
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       if (ghost.parentNode) ghost.parentNode.removeChild(ghost)
       if (marker.parentNode) marker.parentNode.removeChild(marker)
-
-      console.log('[broll-drag] drop', {
-        moved,
-        crossMode,
-        altKey: ev.altKey,
-        finalMode: crossMode ? (ev.altKey ? 'copy' : 'move') : 'in-variant',
-      })
 
       if (!moved) { selectPlacement(placement.index); return }
 
@@ -302,7 +311,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         const left = p.timelineStart * zoom
         const width = Math.max(p.timelineDuration * zoom, 4)
         const isSelected = isActive && p.index === selectedIndex
-        const resultIdx = (isActive ? selectedResults?.[p.index] : null) ?? 0
+        const resultIdx = resolveDisplayResultIdx(p, isActive, selectedResults)
         const result = p.results?.[resultIdx]
         const hasResult = p.searchStatus === 'complete' && result
         const isSearching = p.searchStatus === 'searching'
