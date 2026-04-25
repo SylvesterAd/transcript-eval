@@ -5184,8 +5184,13 @@ export async function getBRollEditorData(planPipelineId) {
       userPlacementId: up.id,
       isUserPlacement: true,
       sourcePipelineId: up.sourcePipelineId,
-      chapterIndex: up.sourceChapterIndex ?? null,
-      placementIndex: up.sourcePlacementIndex ?? null,
+      sourceChapterIndex: up.sourceChapterIndex ?? null,
+      sourcePlacementIndex: up.sourcePlacementIndex ?? null,
+      // chapterIndex/placementIndex left null so the same-key edit lookup
+      // in matchPlacementsToTranscript treats userPlacements distinctly from
+      // chapter-derived placements (matches client-side userPlacementToRawEntry).
+      chapterIndex: null,
+      placementIndex: null,
       userTimelineStart: up.timelineStart,
       userTimelineEnd: up.timelineEnd,
       persistedSelectedResult: up.selectedResult,
