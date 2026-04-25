@@ -122,14 +122,32 @@ export function useBRollEditorState(planPipelineId) {
   useEffect(() => {
     if (!planPipelineId) return
 
-    // If seedFromCache just populated the reducer for this exact pipelineId, skip the
-    // LOADING→fetch→RESOLVED round-trip. If the seeded searchProgress.status is 'running',
-    // the active-pipeline poll below will live-refresh results. If the search finished
-    // between the last inactive-poll and the seed, results may be transiently stale
-    // until the user takes another action — acceptable trade-off to avoid the blank frame.
-    if (seededPipelineIdRef.current === planPipelineId) {
+    const wasSeeded = seededPipelineIdRef.current === planPipelineId
+    if (wasSeeded) {
       seededPipelineIdRef.current = null
-      return
+      // Background revalidate: fetch fresh data without flashing the loading state.
+      // Cached seed data may be 30s+ old; this silently refreshes rawPlacements.
+      // lastLoadedPipelineIdRef is NOT updated here — seedFromCache already set it.
+      let cancelled = false
+      authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
+        .then(data => {
+          if (cancelled) return
+          const resolved = resolvePlacements({
+            rawPlacements: data.placements || [],
+            userPlacements: userPlacementsRef.current,
+            edits: editsRef.current,
+            transcriptWords: transcriptWordsRef.current,
+            editorStateLoaded: editorStateLoadedRef.current,
+          })
+          dispatch({ type: 'SET_DATA_RESOLVED', payload: {
+            rawPlacements: data.placements,
+            placements: resolved,
+            searchProgress: data.searchProgress,
+            pipelineChanged: false,  // same pipeline — preserve selection (T5)
+          }})
+        })
+        .catch(() => {})
+      return () => { cancelled = true }
     }
 
     if (!transcriptWords.length) {
