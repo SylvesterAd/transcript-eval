@@ -13,7 +13,7 @@
 // passed through scrubSensitive at least once. See invariant #1
 // in the plan's § "Why read this before touching code".
 
-import { zipSync, strToU8 } from 'fflate'
+import { zipSync, strToU8 } from './vendor/fflate.js'
 import {
   EXT_VERSION,
   DIAGNOSTICS_BUNDLE_WINDOW_MS,
