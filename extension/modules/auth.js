@@ -29,7 +29,7 @@ const ENVATO_STATUS_KEY = 'envato_session_status'
 // As of 2026-04: this UUID is a well-known long-lived Envato item.
 // If pre-flight starts failing with non-401 status on a healthy
 // account, rotate.
-export const ENVATO_REFERENCE_UUID = '00000000-0000-0000-0000-000000000000'
+export const ENVATO_REFERENCE_UUID = 'c7b99c11-828b-4791-932a-37345c1740a2'
 
 // Shape returned by POST /api/session-token and by the web app's
 // {type:"session"} message:
