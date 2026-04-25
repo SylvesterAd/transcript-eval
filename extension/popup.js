@@ -70,7 +70,7 @@ async function renderEnvatoRow(statusFromStorage) {
       text: 'sign in required',
       className: 'warn',
       detail: 'Click to open Envato sign-in',
-      onClick: () => chrome.tabs.create({ url: 'https://app.envato.com/sign-in' }),
+      onClick: () => chrome.tabs.create({ url: 'https://account.envato.com/sign_in?to=envatoapp' }),
     })
   }
   return status

@@ -79,19 +79,27 @@ export async function hasValidJwt() {
 // Reads .envato.com cookies. Returns true ONLY if both
 // envato_client_id and elements.session.5 are present (name-match
 // only; we don't validate cookie value — Envato's server does that).
+//
+// chrome.cookies.get matches cookies whose Domain attribute is
+// compatible with the given URL. A cookie scoped to "elements.envato.com"
+// will NOT match a query for "https://www.envato.com/", so we have
+// to probe multiple URLs to cover where Envato actually scopes the
+// session cookie post-sign-in. Order is most-likely first.
+const ENVATO_COOKIE_PROBE_URLS = [
+  'https://elements.envato.com/',
+  'https://www.envato.com/',
+  'https://account.envato.com/',
+]
 export async function hasEnvatoSession() {
-  const results = await Promise.all(ENVATO_COOKIE_NAMES.map(name =>
-    new Promise(resolve => {
-      chrome.cookies.get({ url: 'https://www.envato.com/', name }, cookie => {
-        // If the cookie is set on a subdomain (e.g. app.envato.com)
-        // instead of root, chrome.cookies.get still finds it via URL
-        // match. Fall back to explicit app.envato.com URL if root
-        // returns null.
-        if (cookie) return resolve(cookie)
-        chrome.cookies.get({ url: 'https://app.envato.com/', name }, c2 => resolve(c2))
-      })
-    })
-  ))
+  const results = await Promise.all(ENVATO_COOKIE_NAMES.map(name => (async () => {
+    for (const url of ENVATO_COOKIE_PROBE_URLS) {
+      const cookie = await new Promise(resolve =>
+        chrome.cookies.get({ url, name }, resolve)
+      )
+      if (cookie) return cookie
+    }
+    return null
+  })()))
   return results.every(c => !!c)
 }
 
