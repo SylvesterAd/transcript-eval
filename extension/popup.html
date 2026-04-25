@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>transcript-eval Export Helper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>transcript-eval Export Helper</h1>
+    <span class="version" id="version"></span>
+  </header>
+
+  <main>
+    <!-- Ext.9 — global config state banner. Hidden by default; popup.js
+         toggles the .show class based on cached config. -->
+    <div id="config-banner" class="config-banner" hidden>
+      <div class="config-banner-icon" aria-hidden="true">!</div>
+      <div class="config-banner-body">
+        <div id="config-banner-title" class="config-banner-title"></div>
+        <div id="config-banner-detail" class="config-banner-detail"></div>
+        <a id="config-banner-action" class="config-banner-action" href="#" hidden>Open Chrome Web Store</a>
+      </div>
+    </div>
+
+    <div class="row" id="row-te">
+      <div class="row-label">transcript-eval</div>
+      <div class="row-status" id="status-te">—</div>
+      <div class="row-detail" id="detail-te"></div>
+    </div>
+
+    <div class="row" id="row-envato">
+      <div class="row-label">Envato</div>
+      <div class="row-status" id="status-envato">—</div>
+      <div class="row-detail" id="detail-envato"></div>
+    </div>
+
+    <div class="row diag-row" id="row-diag">
+      <div class="row-label">Diagnostics</div>
+      <div class="row-status">
+        <button type="button" id="btn-build-bundle" class="btn-action">Export diagnostic bundle</button>
+      </div>
+      <div class="row-detail" id="detail-diag">Zip with queue + events + environment for support tickets.</div>
+    </div>
+
+    <div class="row optout-row" id="row-optout">
+      <div class="row-label">Send diagnostic events</div>
+      <div class="row-status">
+        <label class="optout-toggle">
+          <input type="checkbox" id="chk-optout-send" />
+          <span>On</span>
+        </label>
+      </div>
+      <div class="row-detail" id="detail-optout">Off disables all /api/export-events POSTs. Export still works.</div>
+    </div>
+  </main>
+
+  <div id="disk-error" class="disk-error" style="display:none"></div>
+
+  <footer>
+    <div class="banner" id="banner"></div>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

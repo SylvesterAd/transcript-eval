@@ -323,3 +323,40 @@ CREATE TABLE IF NOT EXISTS broll_editor_state (
   version          INTEGER NOT NULL DEFAULT 1,
   updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- B-Roll Export Runs (one row per user-triggered export)
+CREATE TABLE IF NOT EXISTS exports (
+  id               TEXT PRIMARY KEY,              -- ULID with exp_ prefix
+  user_id          TEXT,
+  plan_pipeline_id TEXT NOT NULL,                 -- matches broll_searches.plan_pipeline_id
+  variant_labels   TEXT NOT NULL,                 -- JSON array, e.g. ["C"] or ["A","B","C"]
+  status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','in_progress','complete','failed','partial')),
+  manifest_json    TEXT NOT NULL,                 -- full per-item manifest sent to extension
+  result_json      TEXT,                          -- per-item status after run
+  xml_paths        TEXT,                          -- JSON map: {"C":"variant-c.xml",...}
+  folder_path      TEXT,                          -- redacted absolute path
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_exports_user_created ON exports(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_exports_pipeline     ON exports(plan_pipeline_id);
+
+-- B-Roll Export Event Stream (telemetry from extension)
+CREATE TABLE IF NOT EXISTS export_events (
+  id           BIGSERIAL PRIMARY KEY,
+  export_id    TEXT NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
+  user_id      TEXT,
+  event        TEXT NOT NULL,
+  item_id      TEXT,
+  source       TEXT,
+  phase        TEXT,
+  error_code   TEXT,
+  http_status  INTEGER,
+  retry_count  INTEGER,
+  meta_json    TEXT,
+  t            BIGINT NOT NULL,                    -- client-stamped epoch_ms
+  received_at  BIGINT NOT NULL                     -- server-stamped epoch_ms
+);
+CREATE INDEX IF NOT EXISTS idx_export_events_export   ON export_events(export_id, t);
+CREATE INDEX IF NOT EXISTS idx_export_events_failures ON export_events(event, received_at)
+  WHERE event IN ('item_failed','rate_limit_hit','session_expired');

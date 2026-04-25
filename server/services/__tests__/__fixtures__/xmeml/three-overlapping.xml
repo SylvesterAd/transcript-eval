@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <sequence id="seq-variant-c">
+    <name>Variant C</name>
+    <duration>180</duration>
+    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+    <media>
+      <video>
+        <format>
+          <samplecharacteristics>
+            <width>1920</width><height>1080</height>
+            <rate><timebase>30</timebase></rate>
+          </samplecharacteristics>
+        </format>
+        <track>
+          <clipitem id="clip-variant-c-001">
+            <name>001_envato_A.mov</name>
+            <start>0</start>
+            <end>120</end>
+            <in>0</in>
+            <out>120</out>
+            <file id="file-envato-A">
+              <name>001_envato_A.mov</name>
+              <pathurl>file://./media/001_envato_A.mov</pathurl>
+              <duration>120</duration>
+              <rate><timebase>30</timebase></rate>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
+            </file>
+          </clipitem>
+        </track>
+        <track>
+          <clipitem id="clip-variant-c-002">
+            <name>002_envato_B.mov</name>
+            <start>30</start>
+            <end>150</end>
+            <in>0</in>
+            <out>120</out>
+            <file id="file-envato-B">
+              <name>002_envato_B.mov</name>
+              <pathurl>file://./media/002_envato_B.mov</pathurl>
+              <duration>120</duration>
+              <rate><timebase>30</timebase></rate>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
+            </file>
+          </clipitem>
+        </track>
+        <track>
+          <clipitem id="clip-variant-c-003">
+            <name>003_envato_C.mov</name>
+            <start>60</start>
+            <end>180</end>
+            <in>0</in>
+            <out>120</out>
+            <file id="file-envato-C">
+              <name>003_envato_C.mov</name>
+              <pathurl>file://./media/003_envato_C.mov</pathurl>
+              <duration>120</duration>
+              <rate><timebase>30</timebase></rate>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
+            </file>
+          </clipitem>
+        </track>
+      </video>
+    </media>
+  </sequence>
+</xmeml>

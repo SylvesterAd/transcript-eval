@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <sequence id="seq-variant-b">
+    <name>Variant B</name>
+    <duration>90</duration>
+    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+    <media>
+      <video>
+        <format>
+          <samplecharacteristics>
+            <width>1920</width><height>1080</height>
+            <rate><timebase>30</timebase></rate>
+          </samplecharacteristics>
+        </format>
+        <track>
+          <clipitem id="clip-variant-b-001">
+            <name>001_freepik_xyz.mp4</name>
+            <start>0</start>
+            <end>90</end>
+            <in>0</in>
+            <out>90</out>
+            <file id="file-freepik-xyz">
+              <name>001_freepik_xyz.mp4</name>
+              <pathurl>file://./media/001_freepik_xyz.mp4</pathurl>
+              <duration>90</duration>
+              <rate><timebase>30</timebase></rate>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
+            </file>
+          </clipitem>
+        </track>
+      </video>
+    </media>
+  </sequence>
+</xmeml>

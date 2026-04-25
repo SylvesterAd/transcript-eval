@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <sequence id="seq-variant-c">
+    <name>Variant C</name>
+    <duration>882</duration>
+    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+    <media>
+      <video>
+        <format>
+          <samplecharacteristics>
+            <width>1920</width><height>1080</height>
+            <rate><timebase>30</timebase></rate>
+          </samplecharacteristics>
+        </format>
+        <track>
+          <clipitem id="clip-variant-c-001">
+            <name>001_envato_NX9WYGQ.mov</name>
+            <start>762</start>
+            <end>882</end>
+            <in>0</in>
+            <out>120</out>
+            <file id="file-envato-NX9WYGQ">
+              <name>001_envato_NX9WYGQ.mov</name>
+              <pathurl>file://./media/001_envato_NX9WYGQ.mov</pathurl>
+              <duration>120</duration>
+              <rate><timebase>30</timebase></rate>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
+            </file>
+          </clipitem>
+        </track>
+      </video>
+    </media>
+  </sequence>
+</xmeml>
