@@ -1,5 +1,5 @@
 // src/components/upload-config/UploadConfigFlow.jsx
-import { useReducer } from 'react'
+import { useReducer, useState } from 'react'
 import { apiPut } from '../../hooks/useApi.js'
 import Stepper from './Stepper.jsx'
 import StepLibraries from './steps/StepLibraries.jsx'
@@ -54,6 +54,10 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   // hydrate effect that would re-fire on every parent re-render and
   // overwrite in-progress edits.
   const [state, dispatch] = useReducer(reducer, { ...DEFAULT_STATE, ...(initialState || {}) })
+  // Tracks whether StepReferences has ≥2 refs AND a favorite. Defaults to
+  // the value derivable from the (uninitialized) list — false — so the
+  // gate is closed until StepReferences signals otherwise.
+  const [referencesValid, setReferencesValid] = useState(false)
 
   // Persist on step-forward
   async function persistCurrent() {
@@ -78,13 +82,16 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
     if (current < CONFIG_STEPS.length - 1) setCurrent(current + 1)
     else setSubmitted(true)
   }
-  const back = () => {
-    if (submitted) setSubmitted(false)
-    else if (current > 0) setCurrent(current - 1)
+  const back = async () => {
+    if (submitted) { setSubmitted(false); return }
+    await persistCurrent()
+    if (current > 0) setCurrent(current - 1)
     else onBack?.()
   }
 
   const isLast = current === CONFIG_STEPS.length - 1
+  const currentStepId = CONFIG_STEPS[current].id
+  const continueDisabled = currentStepId === 'references' && !referencesValid
 
   const setState = {
     libraries: v => dispatch({ type: 'setLibraries', payload: v }),
@@ -97,7 +104,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   if (submitted) body = <StepDone state={state} onEdit={() => setSubmitted(false)} onComplete={onComplete} />
   else if (current === 0) body = <StepLibraries state={state} setState={setState} />
   else if (current === 1) body = <StepAudience state={state} setState={setState} />
-  else if (current === 2) body = <StepReferences groupId={groupId} />
+  else if (current === 2) body = <StepReferences groupId={groupId} onValidityChange={setReferencesValid} />
   else if (current === 3) body = <StepPath state={state} setState={setState} />
 
   return (
@@ -108,9 +115,10 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
           <Stepper
             steps={UNIFIED_STEPS}
             current={submitted ? UNIFIED_OFFSET + CONFIG_STEPS.length : UNIFIED_OFFSET + current}
-            onJump={i => {
+            onJump={async i => {
               if (i === 0) { onBack?.(); return }
               if (i >= UNIFIED_OFFSET && i < UNIFIED_OFFSET + CONFIG_STEPS.length) {
+                await persistCurrent()
                 setSubmitted(false)
                 setCurrent(i - UNIFIED_OFFSET)
               }
@@ -143,7 +151,9 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
               </div>
               <button
                 onClick={next}
-                className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-8 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all"
+                disabled={continueDisabled}
+                title={continueDisabled ? 'Add at least 2 reference videos and pick a favorite' : undefined}
+                className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-8 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100"
               >
                 {isLast ? 'Review & Continue' : 'Continue'}
               </button>

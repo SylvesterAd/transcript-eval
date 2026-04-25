@@ -299,13 +299,18 @@ export default function ProjectsView() {
         </div>
       )}
 
-      {step === 'upload' && (
-        <UploadModal
-          onClose={() => setStep(null)}
-          onComplete={(gid, files) => setStep('libraries', gid, files)}
-          initialGroupId={groupId}
-          onFilesChange={(f) => { filesRef.current = f; setLiveFiles(f) }}
-        />
+      {/* UploadModal stays mounted across upload → config → processing so
+          in-flight TUS uploads keep streaming progress to filesRef/liveFiles.
+          Hidden via display:none on every step except 'upload'. */}
+      {(step === 'upload' || CONFIG_STEPS.has(step) || step === 'processing') && (
+        <div style={{ display: step === 'upload' ? undefined : 'none' }}>
+          <UploadModal
+            onClose={() => setStep(null)}
+            onComplete={(gid, files) => setStep('libraries', gid, files)}
+            initialGroupId={groupId}
+            onFilesChange={(f) => { filesRef.current = f; setLiveFiles(f) }}
+          />
+        </div>
       )}
 
       {CONFIG_STEPS.has(step) && (

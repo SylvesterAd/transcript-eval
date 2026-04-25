@@ -108,7 +108,7 @@ function EmptySlot() {
   )
 }
 
-export default function StepReferences({ groupId }) {
+export default function StepReferences({ groupId, onValidityChange }) {
   const { data: items, refetch, mutate } = useApi(`/broll/groups/${groupId}/examples`)
   const [videoUrls, setVideoUrls] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -126,6 +126,10 @@ export default function StepReferences({ groupId }) {
     const interval = setInterval(refetch, 3000)
     return () => clearInterval(interval)
   }, [hasProcessing, refetch])
+
+  useEffect(() => {
+    onValidityChange?.(!needsMore && hasFavorite)
+  }, [needsMore, hasFavorite, onValidityChange])
 
   async function handleAddVideos(e) {
     e?.preventDefault()
