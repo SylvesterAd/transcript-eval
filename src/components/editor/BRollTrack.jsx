@@ -1,4 +1,4 @@
-import { useMemo, useContext, useCallback, useState, memo } from 'react'
+import { useMemo, useContext, useCallback, useState, memo, useRef } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2, Copy } from 'lucide-react'
 import BRollContextMenu from './BRollContextMenu.jsx'
@@ -19,6 +19,8 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
   if (!broll && !overridePlacements) return null
 
   const placements = overridePlacements || broll?.placements || []
+  const placementsRef = useRef(placements)
+  placementsRef.current = placements
   const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
 
   const [menuState, setMenuState] = useState(null)
@@ -190,7 +192,8 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         // Static drag-start neighbors clamp the cursor inside the original gap forever.
         const dt = dx / zoom
         const cursorTime = origStart + dt
-        const others = placements
+        const livePlacements = placementsRef.current
+        const others = livePlacements
           .filter(p => p.index !== placement.index)
           .filter(p => Number.isFinite(p.timelineStart) && Number.isFinite(p.timelineEnd))
           .sort((a, b) => a.timelineStart - b.timelineStart)
