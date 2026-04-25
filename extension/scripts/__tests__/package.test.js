@@ -120,4 +120,25 @@ describe('package.mjs', () => {
     expect(res.status).toBe(2)
     expect(res.stderr).toContain('Unknown flag')
   })
+
+  it("strips the 'key' field from the dist manifest (Web Store rejects it)", () => {
+    // Source manifest carries a `key` from Ext.1's RSA pinning. The Web Store
+    // generates its own key, so the shipped manifest must not contain one.
+    const srcRaw = readFileSync(join(EXT_ROOT, 'manifest.json'), 'utf8')
+    const srcParsed = JSON.parse(srcRaw)
+    expect(typeof srcParsed.key).toBe('string') // sanity: source still has it
+    expect(srcParsed.key.length).toBeGreaterThan(100)
+
+    const res = runPackager(['--no-zip', '--out', tmpOut])
+    expect(res.status, `stderr: ${res.stderr}`).toBe(0)
+
+    const distRaw = readFileSync(join(tmpOut, 'manifest.json'), 'utf8')
+    const distParsed = JSON.parse(distRaw)
+    expect('key' in distParsed).toBe(false)
+    // Other fields preserved.
+    expect(distParsed.manifest_version).toBe(srcParsed.manifest_version)
+    expect(distParsed.name).toBe(srcParsed.name)
+    expect(distParsed.version).toBe(srcParsed.version)
+    expect(distParsed.permissions).toEqual(srcParsed.permissions)
+  })
 })

@@ -151,7 +151,23 @@ async function stageDist({ extRoot, outDir, verbose }) {
       throw err
     }
     await mkdir(dirname(dest), { recursive: true })
-    await copyFile(src, dest)
+    if (name === 'manifest.json') {
+      // Chrome Web Store rejects manifests carrying a `key` field. The key
+      // is a developer-only artifact (Ext.1's RSA pinning so the unpacked
+      // extension always loads with the same chrome-extension://<id> in
+      // dev). The Web Store generates its own key from the upload + the
+      // dev account, so the source-side key MUST be stripped from the
+      // shipped manifest. Determinism is preserved — V8 retains insertion
+      // order, and JSON.stringify with a fixed indent + trailing newline
+      // gives the same bytes for the same parsed object.
+      const raw = await readFile(src, 'utf8')
+      const parsed = JSON.parse(raw)
+      delete parsed.key
+      const serialized = JSON.stringify(parsed, null, 2) + '\n'
+      await writeFile(dest, serialized, 'utf8')
+    } else {
+      await copyFile(src, dest)
+    }
     const size = (await stat(dest)).size
     stagedCount++
     bytesTotal += size
