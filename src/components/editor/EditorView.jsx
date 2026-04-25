@@ -845,7 +845,10 @@ export default function EditorView() {
                 <span className="text-xs font-bold text-on-surface-variant">{tokenBalance.toLocaleString()}</span>
               </div>
             )}
-            <button className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all">
+            <button
+              onClick={() => window.open(`/editor/${id}/export`, '_blank')}
+              className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
+            >
               Export
             </button>
             <div className="w-8 h-8 rounded-full bg-surface-variant flex items-center justify-center border border-outline-variant/30">
