@@ -112,6 +112,15 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     let crossMode = null
     let inVariantDispatched = false  // tracks whether we've moved the source placement in-variant during this drag
 
+    let pendingFrame = 0
+    let pendingArgs = null
+    const flushPosition = () => {
+      pendingFrame = 0
+      if (!pendingArgs) return
+      updatePlacementPosition(placement.index, pendingArgs[0], pendingArgs[1])
+      pendingArgs = null
+    }
+
     // Variant row lookup for hit-testing. Query once per drag start.
     const variantRows = (variants || []).map((v, vi) => {
       const row = document.querySelector(`[data-broll-variant="${vi}"]`)
@@ -169,6 +178,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
         // Cross-mode active. If we previously moved the placement in-variant, revert
         // to its drag-start position so the source doesn't end up at a weird spot
         // (and so undo of the cross-drop returns the placement to where it started).
+        if (pendingFrame) { cancelAnimationFrame(pendingFrame); pendingFrame = 0; pendingArgs = null }
         if (inVariantDispatched) {
           updatePlacementPosition(placement.index, origStart, origEnd)
           inVariantDispatched = false
@@ -218,11 +228,13 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
           return
         }
         const newStart = Math.max(minStart, Math.min(target, maxStart))
-        updatePlacementPosition(placement.index, newStart, newStart + duration)
+        pendingArgs = [newStart, newStart + duration]
+        if (!pendingFrame) pendingFrame = requestAnimationFrame(flushPosition)
         inVariantDispatched = true
       }
     }
     const onUp = (ev) => {
+      if (pendingFrame) { cancelAnimationFrame(pendingFrame); flushPosition() }
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       if (ghost.parentNode) ghost.parentNode.removeChild(ghost)
