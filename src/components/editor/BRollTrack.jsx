@@ -68,10 +68,10 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       const dt = (ev.clientX - startX) / zoom
       if (edge === 'left') {
         const newStart = Math.max(prevEnd, Math.min(origStart + dt, origEnd - 0.5))
-        updatePlacementPosition(placement.index, newStart, origEnd)
+        updatePlacementPosition(placement.index, newStart, origEnd, { kind: 'resize' })
       } else {
         const newEnd = Math.min(nextStart, Math.max(origStart + 0.5, origEnd + dt))
-        updatePlacementPosition(placement.index, origStart, newEnd)
+        updatePlacementPosition(placement.index, origStart, newEnd, { kind: 'resize' })
       }
     }
     const onUp = () => {
