@@ -95,6 +95,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   // Cache active variant's placements into inactive cache before switching
   const pendingSelectionRef = useRef(null)
+  const pendingSelectionTsRef = useRef(0)
   const handleVariantActivate = useCallback((newIdx, selectIdentity) => {
     const currentPid = variants[activeVariantIdx]?.id
     // Cache outgoing variant — apply local edits and hide flags so the inactive display
@@ -141,7 +142,10 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     // selectIdentity may be: { chapterIndex, placementIndex, userPlacementId } object,
     // or a bare numeric index (legacy). Stash for the pending-selection effect to resolve
     // once the new variant's placements are loaded.
-    if (selectIdentity != null) pendingSelectionRef.current = selectIdentity
+    if (selectIdentity != null) {
+      pendingSelectionRef.current = selectIdentity
+      pendingSelectionTsRef.current = Date.now()
+    }
     setActiveVariantIdx(newIdx)
   }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.userPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
 
@@ -182,6 +186,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     const pending = pendingSelectionRef.current
     if (pending == null || brollState.loading || !brollState.placements?.length) return
 
+    // TTL: if older than 5s, drop it — the data we expected never arrived.
+    if (Date.now() - pendingSelectionTsRef.current > 5000) {
+      pendingSelectionRef.current = null
+      return
+    }
+
     if (typeof pending === 'object') {
       let match = null
       if (pending.userPlacementId) {
@@ -195,7 +205,6 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         brollState.selectPlacement(match.index)
         pendingSelectionRef.current = null
       }
-      // No match yet — wait for next placements update (e.g. LOAD_EDITOR_STATE landing).
       return
     }
 
@@ -208,6 +217,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     if (!brollState.placements?.length) return
     const idx = resolveDetailToIndex(detail)
     if (idx != null && idx !== brollState.selectedIndex) {
+      pendingSelectionRef.current = null  // user navigated, drop pending
       brollState.selectPlacement(idx)
     }
   }, [detail, brollState.placements?.length])
