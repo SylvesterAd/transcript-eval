@@ -3,8 +3,18 @@ import { supabase } from '../../lib/supabaseClient.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { EditorContext } from './EditorView.jsx'
 import { matchPlacementsToTranscript } from './brollUtils.js'
+import { getClipboard, setClipboard } from './brollClipboard.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+
+// Editor-state action kinds. Each APPLY_ACTION payload is of this shape:
+//   { id: string, ts: number, kind: string, ...action-specific fields }
+// `before` and `after` capture just the mutated slots so the action can be reversed.
+const MAX_UNDO = 50
+
+function generateActionId() {
+  return 'act_' + (crypto.randomUUID?.() || (Math.random().toString(36).slice(2) + Date.now().toString(36))).slice(0, 12)
+}
 
 export const BRollContext = createContext(null)
 
@@ -21,6 +31,61 @@ async function authFetch(path, signal) {
   const res = await fetch(`${API_BASE}${path}`, { headers, signal })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
+}
+
+async function authPut(path, body, signal) {
+  const headers = { 'Content-Type': 'application/json' }
+  if (supabase) {
+    const { data } = await supabase.auth.getSession()
+    if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
+  }
+  const res = await fetch(`${API_BASE}${path}`, { method: 'PUT', headers, body: JSON.stringify(body), signal })
+  if (res.status === 409) {
+    const parsed = await res.json().catch(() => ({}))
+    const err = new Error('conflict')
+    err.conflict = parsed
+    throw err
+  }
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+// Applies just the mutation side of an action to the reducer's editor-state slots.
+// Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
+function applyMutation(state, entry, side /* 'before' | 'after' */) {
+  const patch = entry[side] || {}
+  let nextEdits = state.edits
+  let nextUserPlacements = state.userPlacements
+
+  if (entry.placementKey != null) {
+    // Mutation targets an original placement's `edits[key]` slot.
+    const key = entry.placementKey
+    if (patch.editsSlot === null) {
+      // Delete the edits slot entirely (e.g. "reset to original")
+      nextEdits = { ...nextEdits }
+      delete nextEdits[key]
+    } else if (patch.editsSlot) {
+      nextEdits = { ...nextEdits, [key]: { ...(nextEdits[key] || {}), ...patch.editsSlot } }
+    }
+  }
+
+  if (entry.userPlacementId != null) {
+    // Mutation targets a userPlacement.
+    if (patch.userPlacementDelete) {
+      nextUserPlacements = nextUserPlacements.filter(up => up.id !== entry.userPlacementId)
+    } else if (patch.userPlacementCreate) {
+      // Only create if not already present (avoid dup on repeated redo)
+      if (!nextUserPlacements.some(up => up.id === entry.userPlacementId)) {
+        nextUserPlacements = [...nextUserPlacements, patch.userPlacementCreate]
+      }
+    } else if (patch.userPlacementPatch) {
+      nextUserPlacements = nextUserPlacements.map(up =>
+        up.id === entry.userPlacementId ? { ...up, ...patch.userPlacementPatch } : up
+      )
+    }
+  }
+
+  return { ...state, edits: nextEdits, userPlacements: nextUserPlacements, dirty: true }
 }
 
 function reducer(state, action) {
@@ -85,23 +150,109 @@ function reducer(state, action) {
       }))
       return { ...state, rawPlacements: reset, selectedResults: {}, searchProgress: null }
     }
-    case 'UPDATE_PLACEMENT_POSITION': {
-      const { index, timelineStart, timelineEnd } = action.payload
-      const updatedRaw = state.rawPlacements.map((p, i) =>
-        i === index ? { ...p, userTimelineStart: timelineStart, userTimelineEnd: timelineEnd } : p
-      )
-      const updatedPlacements = state.placements.map(p =>
-        p.index === index
-          ? { ...p, timelineStart, timelineEnd, timelineDuration: timelineEnd - timelineStart }
-          : p
-      )
-      return { ...state, rawPlacements: updatedRaw, placements: updatedPlacements }
+    case 'LOAD_EDITOR_STATE': {
+      const { state: loaded, version } = action.payload
+      return {
+        ...state,
+        edits: loaded.edits || {},
+        userPlacements: Array.isArray(loaded.userPlacements) ? loaded.userPlacements : [],
+        undoStack: Array.isArray(loaded.undoStack) ? loaded.undoStack : [],
+        redoStack: Array.isArray(loaded.redoStack) ? loaded.redoStack : [],
+        editorStateVersion: version || 0,
+        dirty: false,
+      }
     }
-    case 'HIDE_PLACEMENT': {
-      const updated = state.rawPlacements.map((p, i) =>
-        i === action.payload ? { ...p, hidden: true } : p
-      )
-      return { ...state, rawPlacements: updated }
+    case 'APPLY_ACTION': {
+      const entry = action.payload
+      const applied = applyMutation(state, entry, 'after')
+      const newUndoStack = [...state.undoStack, entry].slice(-MAX_UNDO)
+      return { ...applied, undoStack: newUndoStack, redoStack: [] }
+    }
+    case 'APPLY_ACTION_COALESCE': {
+      const entry = action.payload
+      if (!state.undoStack.length) {
+        // No previous action to coalesce with — behave like APPLY_ACTION
+        const applied = applyMutation(state, entry, 'after')
+        const newUndoStack = [...state.undoStack, entry].slice(-MAX_UNDO)
+        return { ...applied, undoStack: newUndoStack, redoStack: [] }
+      }
+      const last = state.undoStack[state.undoStack.length - 1]
+      // Build merged entry: keep last's before, take current's after, bump ts
+      const merged = {
+        ...last,
+        ts: entry.ts,
+        after: entry.after,
+      }
+      const applied = applyMutation(state, merged, 'after')
+      return {
+        ...applied,
+        undoStack: [...state.undoStack.slice(0, -1), merged],
+        redoStack: [],
+      }
+    }
+    case 'UNDO': {
+      const stack = state.undoStack
+      if (!stack.length) return state
+      const entry = stack[stack.length - 1]
+      const applied = applyMutation(state, entry, 'before')
+      return {
+        ...applied,
+        undoStack: stack.slice(0, -1),
+        redoStack: [...state.redoStack, entry],
+      }
+    }
+    case 'REDO': {
+      const stack = state.redoStack
+      if (!stack.length) return state
+      const entry = stack[stack.length - 1]
+      const applied = applyMutation(state, entry, 'after')
+      return {
+        ...applied,
+        redoStack: stack.slice(0, -1),
+        undoStack: [...state.undoStack, entry].slice(-MAX_UNDO),
+      }
+    }
+    case 'MERGE_REMOTE_STATE': {
+      // Used after a 409: replace base with remote state, then replay any pending
+      // local actions (undoStack entries whose ids are NOT in the remote stack).
+      const { state: remoteState, version } = action.payload
+      const remoteUndo = Array.isArray(remoteState.undoStack) ? remoteState.undoStack : []
+      const remoteIds = new Set(remoteUndo.map(e => e.id))
+      // Collect targets the remote has also mutated — we'll skip any local pending
+      // entry that targets the same key/userPlacement to avoid corrupting shared state
+      // via mis-captured `before` snapshots.
+      const remoteTargets = new Set()
+      for (const e of remoteUndo) {
+        if (e.placementKey) remoteTargets.add('pk:' + e.placementKey)
+        if (e.userPlacementId) remoteTargets.add('up:' + e.userPlacementId)
+      }
+      const pending = state.undoStack.filter(e => {
+        if (remoteIds.has(e.id)) return false
+        const keyTag = e.placementKey ? 'pk:' + e.placementKey : null
+        const upTag  = e.userPlacementId ? 'up:' + e.userPlacementId : null
+        if ((keyTag && remoteTargets.has(keyTag)) || (upTag && remoteTargets.has(upTag))) {
+          console.warn('[broll-merge] dropping pending action — remote also mutated', e.kind, e.placementKey || e.userPlacementId)
+          return false
+        }
+        return true
+      })
+      let next = {
+        ...state,
+        edits: remoteState.edits || {},
+        userPlacements: Array.isArray(remoteState.userPlacements) ? remoteState.userPlacements : [],
+        undoStack: remoteUndo,
+        redoStack: Array.isArray(remoteState.redoStack) ? remoteState.redoStack : [],
+        editorStateVersion: version,
+        dirty: pending.length > 0,
+      }
+      for (const entry of pending) {
+        next = applyMutation(next, entry, 'after')
+        next = { ...next, undoStack: [...next.undoStack, entry].slice(-MAX_UNDO) }
+      }
+      return next
+    }
+    case 'SAVE_SUCCESS': {
+      return { ...state, editorStateVersion: action.payload.version, dirty: false }
     }
     default:
       return state
@@ -116,6 +267,13 @@ const initialState = {
   searchProgress: null,
   loading: true,
   error: null,
+  // Editor state — persisted per pipeline
+  edits: {},                  // { "chapterIdx:placementIdx": { hidden?, timelineStart?, timelineEnd?, selectedResult? } }
+  userPlacements: [],          // array of user-created placements (pastes, cross-variant copies)
+  undoStack: [],               // array of action objects
+  redoStack: [],               // array of action objects
+  editorStateVersion: 0,       // for optimistic concurrency
+  dirty: false,                // true while a debounced save is pending
 }
 
 export function useBRollEditorState(planPipelineId) {
@@ -150,11 +308,32 @@ export function useBRollEditorState(planPipelineId) {
   const transcriptWordsRef = useRef(transcriptWords)
   transcriptWordsRef.current = transcriptWords
 
+  const editsRef = useRef(state.edits)
+  editsRef.current = state.edits
+
+  const userPlacementsRef = useRef(state.userPlacements)
+  userPlacementsRef.current = state.userPlacements
+
   // Seed cached placements synchronously. Called by BRollEditor BEFORE setActiveVariantIdx,
   // so the pipelineId passed here is the INCOMING one.
   const seedFromCache = useCallback((pipelineId, rawPlacements, searchProgress) => {
-    const visible = rawPlacements.filter(p => !p.hidden)
-    const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+    const visible = rawPlacements.filter(p => !p.hidden && !p.isUserPlacement)
+    const resolved = matchPlacementsToTranscript(
+      [...visible, ...userPlacementsRef.current.map(up => ({
+        ...(up.snapshot || {}),
+        index: `user:${up.id}`,
+        userPlacementId: up.id,
+        isUserPlacement: true,
+        userTimelineStart: up.timelineStart,
+        userTimelineEnd: up.timelineEnd,
+        results: up.results,
+        searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+        chapterIndex: null,
+        placementIndex: null,
+      }))],
+      transcriptWordsRef.current,
+      editsRef.current,
+    )
     seededPipelineIdRef.current = pipelineId
     dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null } })
   }, [])
@@ -180,21 +359,65 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'SET_LOADING' })
     authFetch(`/broll/pipeline/${planPipelineId}/editor-data`)
       .then(data => {
-        const visible = (data.placements || []).filter(p => !p.hidden)
-        const resolved = matchPlacementsToTranscript(visible, transcriptWordsRef.current)
+        const visible = (data.placements || []).filter(p => !p.hidden && !p.isUserPlacement)
+        const resolved = matchPlacementsToTranscript(
+          [...visible, ...userPlacementsRef.current.map(up => ({
+            ...(up.snapshot || {}),
+            index: `user:${up.id}`,
+            userPlacementId: up.id,
+            isUserPlacement: true,
+            userTimelineStart: up.timelineStart,
+            userTimelineEnd: up.timelineEnd,
+            results: up.results,
+            searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+            chapterIndex: null,
+            placementIndex: null,
+          }))],
+          transcriptWordsRef.current,
+          editsRef.current,
+        )
         dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress } })
       })
       .catch(err => dispatch({ type: 'SET_ERROR', payload: err.message }))
   }, [planPipelineId, transcriptWords])
 
-  // Re-resolve when transcript words change (rare — only on initial track load)
+  // Load editor-state in parallel with editor-data. We do a dedicated fetch to get the
+  // full state (edits/userPlacements/undo/redo) — editor-data only merges it into placements.
+  useEffect(() => {
+    if (!planPipelineId) return
+    let cancelled = false
+    authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
+      .then(data => {
+        if (cancelled) return
+        dispatch({ type: 'LOAD_EDITOR_STATE', payload: data })
+      })
+      .catch(() => { /* non-fatal; empty state stays */ })
+    return () => { cancelled = true }
+  }, [planPipelineId])
+
+  // Re-resolve when transcript words, edits, or userPlacements change
   useEffect(() => {
     if (!state.rawPlacements.length) return
     if (!transcriptWords.length) return
-    const visible = state.rawPlacements.filter(p => !p.hidden)
-    const resolved = matchPlacementsToTranscript(visible, transcriptWords)
+    const visible = state.rawPlacements.filter(p => !p.hidden && !p.isUserPlacement)
+    const resolved = matchPlacementsToTranscript(
+      [...visible, ...state.userPlacements.map(up => ({
+        ...(up.snapshot || {}),
+        index: `user:${up.id}`,
+        userPlacementId: up.id,
+        isUserPlacement: true,
+        userTimelineStart: up.timelineStart,
+        userTimelineEnd: up.timelineEnd,
+        results: up.results,
+        searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
+        chapterIndex: null,
+        placementIndex: null,
+      }))],
+      transcriptWords,
+      state.edits,
+    )
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
-  }, [transcriptWords])
+  }, [transcriptWords, state.edits, state.userPlacements, state.rawPlacements])
 
   // Poll for progressive search updates
   useEffect(() => {
@@ -209,6 +432,79 @@ export function useBRollEditorState(planPipelineId) {
     }, 5000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [planPipelineId, state.searchProgress?.status])
+
+  // Refs for debounced save
+  const saveTimerRef = useRef(null)
+  const savingRef = useRef(false)
+  const pendingSaveRef = useRef(false)
+  const savePayloadRef = useRef(null)
+
+  const flushSave = useCallback(async () => {
+    if (!planPipelineId) return
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null }
+    if (savingRef.current) {
+      // A save is already in flight — flag a follow-up
+      pendingSaveRef.current = true
+      return
+    }
+    const payload = savePayloadRef.current
+    if (!payload) return
+    savingRef.current = true
+    try {
+      const res = await authPut(`/broll/pipeline/${planPipelineId}/editor-state`, payload)
+      dispatch({ type: 'SAVE_SUCCESS', payload: { version: res.version } })
+    } catch (err) {
+      if (err.conflict) {
+        dispatch({ type: 'MERGE_REMOTE_STATE', payload: err.conflict })
+        pendingSaveRef.current = true
+      } else {
+        console.error('[broll-editor-state] save failed:', err.message)
+      }
+    } finally {
+      savingRef.current = false
+      if (pendingSaveRef.current) {
+        pendingSaveRef.current = false
+        setTimeout(() => flushSave(), 100)
+      }
+    }
+  }, [planPipelineId])
+
+  // Keep savePayloadRef fresh
+  useEffect(() => {
+    savePayloadRef.current = {
+      state: {
+        edits: state.edits,
+        userPlacements: state.userPlacements,
+        undoStack: state.undoStack,
+        redoStack: state.redoStack,
+      },
+      version: state.editorStateVersion,
+    }
+  }, [state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion])
+
+  // Debounced save on dirty
+  useEffect(() => {
+    if (!state.dirty || !planPipelineId) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => flushSave(), 500)
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
+  }, [state.dirty, planPipelineId, flushSave])
+
+  // beforeunload — sendBeacon the pending save so edits aren't lost on tab close
+  useEffect(() => {
+    const handler = (e) => {
+      if (!state.dirty) return
+      const payload = savePayloadRef.current
+      if (payload && navigator.sendBeacon) {
+        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+        navigator.sendBeacon(`${API_BASE}/broll/pipeline/${planPipelineId}/editor-state?beacon=1`, blob)
+      }
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [state.dirty, planPipelineId])
 
   const selectPlacement = useCallback((index) => {
     dispatch({ type: 'SELECT_PLACEMENT', payload: index })
@@ -280,13 +576,277 @@ export function useBRollEditorState(planPipelineId) {
     }
   }, [state.rawPlacements, planPipelineId])
 
-  const hidePlacement = useCallback((index) => {
-    dispatch({ type: 'HIDE_PLACEMENT', payload: index })
-  }, [])
+  const searchUserPlacement = useCallback(async (userPlacementId, overrides = {}) => {
+    if (!planPipelineId) return
+    try {
+      await apiPost(`/broll/pipeline/${planPipelineId}/search-user-placement`, {
+        userPlacementId, ...overrides,
+      })
+      // Reload editor-state to pick up new results on the userPlacement
+      const data = await authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
+      dispatch({ type: 'LOAD_EDITOR_STATE', payload: data })
+    } catch (err) {
+      console.error('[broll] user placement search failed:', err.message)
+    }
+  }, [planPipelineId])
 
-  const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd) => {
-    dispatch({ type: 'UPDATE_PLACEMENT_POSITION', payload: { index, timelineStart, timelineEnd } })
-  }, [])
+  const hidePlacement = useCallback((index) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    const userPlacementId = placement.userPlacementId || null
+
+    if (placementKey) {
+      const prev = state.edits[placementKey] || {}
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: 'delete',
+        placementKey,
+        before: { editsSlot: { hidden: !!prev.hidden } },
+        after:  { editsSlot: { hidden: true } },
+      }
+      dispatch({ type: 'APPLY_ACTION', payload: entry })
+    } else if (userPlacementId) {
+      const up = state.userPlacements.find(u => u.id === userPlacementId)
+      if (!up) return
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: 'delete',
+        userPlacementId,
+        before: { userPlacementCreate: up },
+        after:  { userPlacementDelete: true },
+      }
+      dispatch({ type: 'APPLY_ACTION', payload: entry })
+    }
+  }, [state.placements, state.edits, state.userPlacements])
+
+  const undo = useCallback(() => dispatch({ type: 'UNDO' }), [])
+  const redo = useCallback(() => dispatch({ type: 'REDO' }), [])
+
+  const copyPlacement = useCallback((index, { cut = false } = {}) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const resultIdx = state.selectedResults[index] ?? placement.persistedSelectedResult ?? 0
+    const entry = {
+      sourcePipelineId: placement.isUserPlacement ? placement.sourcePipelineId : planPipelineId,
+      sourceChapterIndex: placement.chapterIndex ?? null,
+      sourcePlacementIndex: placement.placementIndex ?? null,
+      sourceUserPlacementId: placement.userPlacementId ?? null,
+      selectedResult: resultIdx,
+      results: JSON.parse(JSON.stringify(placement.results || [])),
+      snapshot: {
+        description: placement.description,
+        audio_anchor: placement.audio_anchor,
+        function: placement.function,
+        type_group: placement.type_group,
+        source_feel: placement.source_feel,
+        style: placement.style,
+      },
+      durationSec: placement.timelineDuration,
+      copiedAt: Date.now(),
+    }
+    setClipboard(entry)
+    if (cut) hidePlacement(index)
+  }, [state.placements, state.selectedResults, planPipelineId, hidePlacement])
+
+  const pastePlacement = useCallback((targetStartSec) => {
+    const entry = getClipboard()
+    if (!entry) return
+
+    // Compute available gap at targetStartSec.
+    // Combine all current placements (originals + userPlacements) sorted by timelineStart.
+    const all = state.placements
+      .map(p => ({ start: p.timelineStart, end: p.timelineEnd }))
+      .filter(r => Number.isFinite(r.start) && Number.isFinite(r.end))
+      .sort((a, b) => a.start - b.start)
+
+    // If targetStartSec falls inside an existing placement, snap to that placement's end.
+    let effectiveStart = Math.max(0, targetStartSec)
+    const inside = all.find(r => effectiveStart >= r.start && effectiveStart < r.end)
+    if (inside) effectiveStart = inside.end + 0.05
+
+    // Find next placement starting after effectiveStart — that bounds the gap.
+    const next = all.find(r => r.start >= effectiveStart)
+    const rightBoundary = next ? next.start : Infinity
+    const gap = rightBoundary - effectiveStart
+    if (gap < 0.5) {
+      console.warn('[broll-paste] Not enough space at', targetStartSec.toFixed(2), '- gap is', gap.toFixed(2))
+      window.alert('Not enough space to paste here.')
+      return
+    }
+
+    const sourceDur = Math.max(0.5, entry.durationSec || 1)
+    const duration = Math.min(sourceDur, gap - 0.05)
+
+    const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+    const timelineStart = effectiveStart
+    const timelineEnd = effectiveStart + duration
+
+    const up = {
+      id: uuid,
+      sourcePipelineId: entry.sourcePipelineId,
+      sourceChapterIndex: entry.sourceChapterIndex,
+      sourcePlacementIndex: entry.sourcePlacementIndex,
+      timelineStart, timelineEnd,
+      selectedResult: entry.selectedResult,
+      results: entry.results,
+      snapshot: entry.snapshot,
+    }
+    const action = {
+      id: generateActionId(),
+      ts: Date.now(),
+      kind: 'paste',
+      userPlacementId: uuid,
+      before: { userPlacementDelete: true },
+      after:  { userPlacementCreate: up },
+    }
+    dispatch({ type: 'APPLY_ACTION', payload: action })
+  }, [state.placements])
+
+  const resetPlacement = useCallback((index) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    if (!placementKey) return
+    const prev = state.edits[placementKey]
+    if (!prev) return
+    dispatch({ type: 'APPLY_ACTION', payload: {
+      id: generateActionId(), ts: Date.now(), kind: 'reset', placementKey,
+      before: { editsSlot: prev },
+      after:  { editsSlot: null },
+    }})
+  }, [state.placements, state.edits])
+
+  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, targetDurationSec, mode }) => {
+    const placement = state.placements.find(p => p.index === sourceIndex)
+    if (!placement) return
+    const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
+    const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+    const actionId = generateActionId()
+    const dur = Math.max(0.5, targetDurationSec ?? placement.timelineDuration ?? 1)
+    const up = {
+      id: uuid,
+      sourcePipelineId: planPipelineId,
+      sourceChapterIndex: placement.chapterIndex ?? null,
+      sourcePlacementIndex: placement.placementIndex ?? null,
+      timelineStart: targetStartSec,
+      timelineEnd: targetStartSec + dur,
+      selectedResult: resultIdx,
+      results: JSON.parse(JSON.stringify(placement.results || [])),
+      snapshot: {
+        description: placement.description,
+        audio_anchor: placement.audio_anchor,
+        function: placement.function,
+        type_group: placement.type_group,
+        source_feel: placement.source_feel,
+        style: placement.style,
+      },
+    }
+
+    // Source-side: dispatch hide IMMEDIATELY for instant visual feedback.
+    // We'll revert this if the remote write fails.
+    let sourceAction = null
+    if (mode === 'move') {
+      const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+        ? `${placement.chapterIndex}:${placement.placementIndex}`
+        : null
+      if (placementKey) {
+        const prev = state.edits[placementKey] || {}
+        sourceAction = {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', placementKey,
+          before: { editsSlot: { hidden: !!prev.hidden } },
+          after:  { editsSlot: { hidden: true } },
+        }
+      } else if (placement.userPlacementId) {
+        sourceAction = {
+          id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: placement.userPlacementId,
+          before: { userPlacementCreate: state.userPlacements.find(u => u.id === placement.userPlacementId) },
+          after:  { userPlacementDelete: true },
+        }
+      }
+      if (sourceAction) {
+        dispatch({ type: 'APPLY_ACTION', payload: sourceAction })
+      }
+    }
+
+    // Write to target pipeline's editor-state with optimistic concurrency.
+    try {
+      const remote = await authFetch(`/broll/pipeline/${targetPipelineId}/editor-state`)
+      const next = {
+        edits: remote.state?.edits || {},
+        userPlacements: [...(remote.state?.userPlacements || []), up],
+        undoStack: [...(remote.state?.undoStack || []), {
+          id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
+          before: { userPlacementDelete: true }, after: { userPlacementCreate: up },
+        }].slice(-MAX_UNDO),
+        redoStack: [],
+      }
+      await authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
+    } catch (err) {
+      console.error('[broll-drag-cross] Failed to write target:', err.message)
+      // Revert the source-side action if we dispatched one
+      if (sourceAction) {
+        dispatch({ type: 'UNDO' })
+      }
+      return
+    }
+  }, [state.placements, state.selectedResults, state.edits, state.userPlacements, planPipelineId])
+
+  const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd, opts = {}) => {
+    const placement = state.placements.find(p => p.index === index)
+    if (!placement) return
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    const userPlacementId = placement.userPlacementId || null
+
+    const COALESCE_KINDS = new Set(['move', 'resize'])
+
+    if (placementKey) {
+      const prev = state.edits[placementKey] || {}
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: opts.kind || 'move',
+        placementKey,
+        before: { editsSlot: { timelineStart: prev.timelineStart, timelineEnd: prev.timelineEnd } },
+        after:  { editsSlot: { timelineStart, timelineEnd } },
+      }
+      const last = state.undoStack[state.undoStack.length - 1]
+      const sameTarget = last
+        && COALESCE_KINDS.has(entry.kind)
+        && (last.kind === entry.kind)
+        && (last.placementKey === entry.placementKey)
+        && (last.userPlacementId === entry.userPlacementId)
+        && (Date.now() - (last.ts || 0) < 800)
+      dispatch({ type: sameTarget ? 'APPLY_ACTION_COALESCE' : 'APPLY_ACTION', payload: entry })
+    } else if (userPlacementId) {
+      const up = state.userPlacements.find(u => u.id === userPlacementId)
+      if (!up) return
+      const entry = {
+        id: generateActionId(),
+        ts: Date.now(),
+        kind: opts.kind || 'move',
+        userPlacementId,
+        before: { userPlacementPatch: { timelineStart: up.timelineStart, timelineEnd: up.timelineEnd } },
+        after:  { userPlacementPatch: { timelineStart, timelineEnd } },
+      }
+      const last = state.undoStack[state.undoStack.length - 1]
+      const sameTarget = last
+        && COALESCE_KINDS.has(entry.kind)
+        && (last.kind === entry.kind)
+        && (last.placementKey === entry.placementKey)
+        && (last.userPlacementId === entry.userPlacementId)
+        && (Date.now() - (last.ts || 0) < 800)
+      dispatch({ type: sameTarget ? 'APPLY_ACTION_COALESCE' : 'APPLY_ACTION', payload: entry })
+    }
+  }, [state.placements, state.edits, state.userPlacements, state.undoStack])
 
   const resetAllPlacements = useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), [])
 
@@ -305,16 +865,34 @@ export function useBRollEditorState(planPipelineId) {
     activePlacementAtTime,
     searchPlacement,
     searchPlacementCustom,
+    searchUserPlacement,
     hidePlacement,
+    undo,
+    redo,
+    copyPlacement,
+    pastePlacement,
+    resetPlacement,
+    dragCrossPlacement,
     updatePlacementPosition,
     resetAllPlacements,
     refetchEditorData,
     planPipelineId,
+    edits: state.edits,
+    userPlacements: state.userPlacements,
+    undoStack: state.undoStack,
+    redoStack: state.redoStack,
+    editorStateVersion: state.editorStateVersion,
+    dirty: state.dirty,
+    flushSave,
   }), [
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
     state.selectedResults, state.searchProgress, state.loading, state.error,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
-    searchPlacement, searchPlacementCustom, hidePlacement, updatePlacementPosition,
+    searchPlacement, searchPlacementCustom, searchUserPlacement, hidePlacement, undo, redo,
+    copyPlacement, pastePlacement, resetPlacement, dragCrossPlacement,
+    updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
+    state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
+    flushSave,
   ])
 }

@@ -316,6 +316,14 @@ CREATE TABLE IF NOT EXISTS broll_example_sources (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- B-Roll editor state: persisted per-pipeline user edits, user placements, undo/redo
+CREATE TABLE IF NOT EXISTS broll_editor_state (
+  plan_pipeline_id TEXT PRIMARY KEY,
+  state_json       TEXT    NOT NULL DEFAULT '{}',
+  version          INTEGER NOT NULL DEFAULT 1,
+  updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- B-Roll Export Runs (one row per user-triggered export)
 CREATE TABLE IF NOT EXISTS exports (
   id               TEXT PRIMARY KEY,              -- ULID with exp_ prefix

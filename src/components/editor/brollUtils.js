@@ -28,18 +28,33 @@ function normalize(text) {
  * @param {Array} words - transcript words [{word, start, end}, ...]
  * @returns {Array} placements with timelineStart, timelineEnd, timelineDuration added
  */
-export function matchPlacementsToTranscript(placements, words) {
+export function matchPlacementsToTranscript(placements, words, editsByKey = null) {
   if (!placements?.length || !words?.length) return placements || []
 
+  // Step 0: Filter out placements hidden via local user-edits
+  const filtered = editsByKey
+    ? placements.filter(p => {
+        if (p.chapterIndex == null || p.placementIndex == null) return true // userPlacements are deleted by removal from state.userPlacements, not via edits[key].hidden
+        const e = editsByKey[`${p.chapterIndex}:${p.placementIndex}`]
+        return !e?.hidden
+      })
+    : placements
+
   // Step 1: Position each placement independently based on audio_anchor
-  const resolved = placements.map(p => {
-    // User has manually positioned this placement — their position wins
-    if (p.userTimelineStart != null && p.userTimelineEnd != null) {
+  const resolved = filtered.map(p => {
+    // Prefer editsByKey lookup if provided; fall back to inline userTimelineStart/End
+    const editKey = p.chapterIndex != null && p.placementIndex != null
+      ? `${p.chapterIndex}:${p.placementIndex}`
+      : null
+    const edit = editKey && editsByKey ? editsByKey[editKey] : null
+    const uStart = edit?.timelineStart ?? p.userTimelineStart
+    const uEnd   = edit?.timelineEnd   ?? p.userTimelineEnd
+    if (uStart != null && uEnd != null) {
       return {
         ...p,
-        timelineStart: p.userTimelineStart,
-        timelineEnd: p.userTimelineEnd,
-        timelineDuration: p.userTimelineEnd - p.userTimelineStart,
+        timelineStart: uStart,
+        timelineEnd: uEnd,
+        timelineDuration: uEnd - uStart,
       }
     }
 
@@ -103,15 +118,15 @@ export function matchPlacementsToTranscript(placements, words) {
     return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration }
   })
 
-  // Step 2: Fix overlaps — audio_anchor position has priority.
-  // Sort by timelineStart, then trim earlier placement's end if it overlaps
-  // the next placement's anchor-based start.
+  // Step 2: Sort by timelineStart, trim earlier placement's end if it overlaps the next.
+  // (Pastes auto-fit via gap-find at insertion time; manual drags are bounded by neighbors;
+  // so the only source of overlap here is when the LLM plan generated overlapping placements
+  // OR when an edit override accidentally collides.)
   const sorted = [...resolved].sort((a, b) => a.timelineStart - b.timelineStart)
   for (let i = 0; i < sorted.length - 1; i++) {
     const curr = sorted[i]
     const next = sorted[i + 1]
     if (curr.timelineEnd > next.timelineStart) {
-      // Trim current placement's end to where the next one starts
       curr.timelineEnd = next.timelineStart
       curr.timelineDuration = Math.max(0, curr.timelineEnd - curr.timelineStart)
     }

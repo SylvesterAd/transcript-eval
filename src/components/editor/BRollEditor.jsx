@@ -9,6 +9,7 @@ import Timeline from './Timeline.jsx'
 import PlaybackControls from './PlaybackControls.jsx'
 import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
+import { scheduleBrollPreload, clearBrollPreload } from './brollPreloader.js'
 
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
@@ -78,9 +79,30 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   const pendingSelectionRef = useRef(null)
   const handleVariantActivate = useCallback((newIdx, selectIndex) => {
     const currentPid = variants[activeVariantIdx]?.id
-    // Cache outgoing variant
+    // Cache outgoing variant — apply local edits and hide flags so the inactive display
+    // matches what the user just saw (avoids a visual jump from old → new position when
+    // the parallel fetchInactive refetches editor-data).
     if (currentPid && brollState.rawPlacements?.length) {
-      setRawInactivePlacements(prev => ({ ...prev, [currentPid]: brollState.rawPlacements }))
+      const edits = brollState.edits || {}
+      const snapshot = brollState.rawPlacements
+        .filter(p => {
+          if (p.chapterIndex == null || p.placementIndex == null) return true
+          return !edits[`${p.chapterIndex}:${p.placementIndex}`]?.hidden
+        })
+        .map(p => {
+          if (p.chapterIndex == null || p.placementIndex == null) return p
+          const e = edits[`${p.chapterIndex}:${p.placementIndex}`]
+          if (!e) return p
+          let next = p
+          if (e.timelineStart != null && e.timelineEnd != null) {
+            next = { ...next, userTimelineStart: e.timelineStart, userTimelineEnd: e.timelineEnd }
+          }
+          if (e.selectedResult != null) {
+            next = { ...next, persistedSelectedResult: e.selectedResult }
+          }
+          return next
+        })
+      setRawInactivePlacements(prev => ({ ...prev, [currentPid]: snapshot }))
     }
     // If we have cached data for the incoming variant, seed it immediately to avoid blank frames
     const newPid = variants[newIdx]?.id
@@ -92,7 +114,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     }
     if (selectIndex != null) pendingSelectionRef.current = selectIndex
     setActiveVariantIdx(newIdx)
-  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements])
+  }, [activeVariantIdx, variants, brollState.rawPlacements, brollState.seedFromCache, rawInactivePlacements, brollState.edits])
 
   // Resolve inactive placements using same transcript matching as active variant.
   // Per-pid cache keeps individual array references stable when only one variant's
@@ -109,6 +131,8 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         out[pid] = cached.resolved
         continue
       }
+      // TODO: inactive variant edits — currently inactive variants don't have their edits applied
+      //       because fetching per-pipeline editor-state for all variants is not yet wired up.
       const resolved = matchPlacementsToTranscript(placements, transcriptWords)
       cache.set(pid, { raw: placements, words: transcriptWords, resolved })
       out[pid] = resolved
@@ -149,6 +173,87 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
       navigate(currentUrl, { replace: true })
     }
   }, [brollState.selectedIndex])
+
+  // Keyboard shortcuts — delete/backspace, undo/redo
+  useEffect(() => {
+    const handler = (e) => {
+      // Ignore when user is typing in inputs
+      const tag = (e.target?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return
+
+      const isMac = navigator.platform.toLowerCase().includes('mac')
+      const mod = isMac ? e.metaKey : e.ctrlKey
+
+      // Delete / Backspace → delete selected placement
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && brollState.selectedIndex != null) {
+        e.preventDefault()
+        const placement = brollState.selectedPlacement
+        brollState.hidePlacement(brollState.selectedIndex)
+        brollState.selectPlacement(null)
+        if (placement && placement.timelineStart != null) {
+          editorCtx?.dispatch?.({ type: 'SET_CURRENT_TIME', payload: placement.timelineStart })
+        }
+        return
+      }
+
+      // CMD/Ctrl + C → copy selected
+      if (mod && e.code === 'KeyC' && brollState.selectedIndex != null) {
+        e.preventDefault()
+        brollState.copyPlacement(brollState.selectedIndex)
+        return
+      }
+      // CMD/Ctrl + X → cut selected
+      if (mod && e.code === 'KeyX' && brollState.selectedIndex != null) {
+        e.preventDefault()
+        brollState.copyPlacement(brollState.selectedIndex, { cut: true })
+        return
+      }
+      // CMD/Ctrl + V → paste after selected OR at playhead
+      if (mod && e.code === 'KeyV') {
+        e.preventDefault()
+        let targetStart
+        if (brollState.selectedPlacement) {
+          targetStart = brollState.selectedPlacement.timelineEnd + 0.05
+        } else if (editorCtx?.state?.currentTime != null) {
+          targetStart = editorCtx.state.currentTime
+        } else {
+          targetStart = 0
+        }
+        brollState.pastePlacement(targetStart)
+        return
+      }
+
+      // CMD/Ctrl + Z (without Shift) → undo
+      if (mod && !e.shiftKey && e.code === 'KeyZ') {
+        e.preventDefault()
+        brollState.undo()
+        return
+      }
+
+      // CMD/Ctrl + Shift + Z (or CMD/Ctrl + Y on Windows) → redo
+      if ((mod && e.shiftKey && e.code === 'KeyZ') || (mod && e.code === 'KeyY')) {
+        e.preventDefault()
+        brollState.redo()
+        return
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [brollState.selectedIndex, brollState.hidePlacement, brollState.selectPlacement, brollState.undo, brollState.redo, brollState.copyPlacement, brollState.pastePlacement, brollState.selectedPlacement, editorCtx])
+
+  // Preload next few b-roll clips on the active variant and inactive variants.
+  useEffect(() => {
+    scheduleBrollPreload({
+      activePlacements: brollState.placements || [],
+      inactivePlacementsByPid: inactiveVariantPlacements || {},
+      currentTime: editorCtx?.state?.currentTime || 0,
+      selectedResultsByIndex: brollState.selectedResults || {},
+    })
+  }, [brollState.placements, inactiveVariantPlacements, editorCtx?.state?.currentTime, brollState.selectedResults])
+
+  // Clean up preload tags on unmount
+  useEffect(() => () => clearBrollPreload(), [])
+
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
 
@@ -197,7 +302,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
           {/* Horizontal splitter */}
           <div
-            className="h-4 w-full flex items-center justify-center group relative z-40 shrink-0 cursor-ns-resize"
+            className="h-2 w-full flex items-center justify-center group relative z-40 shrink-0 cursor-ns-resize"
             onMouseDown={onMouseDown}
           >
             <div className="w-full h-px bg-white/5 group-hover:bg-primary-fixed/30 transition-colors" />
@@ -205,7 +310,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
           </div>
 
           {/* Bottom: playback controls + timeline */}
-          <div className="flex flex-col gap-2 pb-4 shrink-0" style={{ height: `${bottomH}px` }}>
+          <div className="flex flex-col gap-1 shrink-0" style={{ height: `${bottomH}px` }}>
             <PlaybackControls />
             <div className="flex-1 min-h-0">
               <Timeline
@@ -213,6 +318,33 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 activeVariantIdx={activeVariantIdx}
                 onVariantActivate={handleVariantActivate}
                 inactiveVariantPlacements={inactiveVariantPlacements}
+                onCrossDrop={async (args) => {
+                  // Determine source duration and target's existing placements (for gap-fit).
+                  const sourcePlacement = brollState.placements.find(p => p.index === args.sourceIndex)
+                  const sourceDur = Math.max(0.5, sourcePlacement?.timelineDuration || 1)
+                  const targetIsActive = args.targetPipelineId === variants[activeVariantIdx]?.id
+                  const targetPlacements = targetIsActive
+                    ? brollState.placements
+                    : (inactiveVariantPlacements?.[args.targetPipelineId] || [])
+
+                  const adjusted = computeFitDropPosition(targetPlacements, args.targetStartSec, sourceDur)
+                  if (!adjusted) {
+                    window.alert('Not enough space at this drop position.')
+                    return
+                  }
+
+                  await brollState.dragCrossPlacement({
+                    ...args,
+                    targetStartSec: adjusted.start,
+                    targetDurationSec: adjusted.duration,
+                  })
+                  if (!targetIsActive) {
+                    try {
+                      const data = await authFetchBRollData(args.targetPipelineId)
+                      setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: data.placements || [] }))
+                    } catch {}
+                  }
+                }}
               />
             </div>
           </div>
@@ -330,3 +462,47 @@ function SearchStatusBar({ placements, searchProgress, allPlanPipelineIds, onRef
 
   return null
 }
+
+// Find a drop position that fits the source clip without becoming too tiny to grab.
+// If the gap to the right is < 0.5s, try shifting LEFT so the clip ends just before
+// the next clip AND is at least 0.5s wide. Returns null if no fit is possible.
+function computeFitDropPosition(placements, requestedStart, sourceDur) {
+  const MIN_DUR = 0.5
+  const sorted = [...placements]
+    .filter(p => Number.isFinite(p.timelineStart) && Number.isFinite(p.timelineEnd))
+    .sort((a, b) => a.timelineStart - b.timelineStart)
+
+  // If requestedStart falls INSIDE an existing placement, snap to its end + 0.05.
+  let start = Math.max(0, requestedStart)
+  const inside = sorted.find(r => start >= r.timelineStart && start < r.timelineEnd)
+  if (inside) start = inside.timelineEnd + 0.05
+
+  // Find left and right neighbors relative to `start`.
+  const next = sorted.find(r => r.timelineStart >= start)
+  const prevs = sorted.filter(r => r.timelineEnd <= start)
+  const prevEnd = prevs.length ? prevs[prevs.length - 1].timelineEnd : 0
+  const rightBoundary = next ? next.timelineStart : Infinity
+
+  const gapRight = rightBoundary - start
+  if (gapRight >= MIN_DUR) {
+    return { start, duration: Math.min(sourceDur, gapRight - 0.05) }
+  }
+
+  // Gap to right is too small — try shifting LEFT so the clip ends just before `next`
+  // and has at least MIN_DUR.
+  if (next) {
+    const desiredEnd = next.timelineStart - 0.05
+    const desiredDur = Math.min(sourceDur, MIN_DUR)
+    const desiredStart = desiredEnd - desiredDur
+    if (desiredStart >= prevEnd + 0.05) {
+      // Try to grow the duration toward sourceDur if there's more room
+      const maxDur = desiredEnd - (prevEnd + 0.05)
+      const dur = Math.min(sourceDur, Math.max(MIN_DUR, maxDur))
+      return { start: desiredEnd - dur, duration: dur }
+    }
+  }
+
+  // No fit possible — caller will show "no space" toast.
+  return null
+}
+

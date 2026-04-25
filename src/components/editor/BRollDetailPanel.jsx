@@ -1,5 +1,6 @@
 import { useRef, useState, useContext } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
+import { EditorContext } from './EditorView.jsx'
 import { Play, Pause, X, Search, Loader2, RotateCw, Pencil, Trash2 } from 'lucide-react'
 import { parseTimecode } from './brollUtils.js'
 
@@ -11,6 +12,7 @@ function formatTime(s) {
 
 export default function BRollDetailPanel() {
   const broll = useContext(BRollContext)
+  const editorCtx = useContext(EditorContext)
   const [showEditModal, setShowEditModal] = useState(false)
   const [retrying, setRetrying] = useState(false)
   if (!broll) return null
@@ -25,13 +27,23 @@ export default function BRollDetailPanel() {
 
   async function handleRetry() {
     setRetrying(true)
-    try { await broll.searchPlacement(selectedIndex) } catch {}
+    try {
+      if (placement.isUserPlacement) {
+        await broll.searchUserPlacement(placement.userPlacementId)
+      } else {
+        await broll.searchPlacement(selectedIndex)
+      }
+    } catch {}
     setRetrying(false)
   }
 
   function handleDelete() {
+    const targetTime = placement?.timelineStart
     broll.hidePlacement(selectedIndex)
     broll.selectPlacement(null)
+    if (targetTime != null) {
+      editorCtx?.dispatch?.({ type: 'SET_CURRENT_TIME', payload: targetTime })
+    }
   }
 
   return (
@@ -139,6 +151,7 @@ export default function BRollDetailPanel() {
                   result={r}
                   isSelected={i === resultIdx}
                   onSelect={() => selectResult(selectedIndex, i)}
+                  eager={i < 4}
                 />
               ))}
             </div>
@@ -269,7 +282,7 @@ function EditModal({ placement, index, onSearch, onClose }) {
   )
 }
 
-function BRollOptionThumbnail({ result, isSelected, onSelect }) {
+function BRollOptionThumbnail({ result, isSelected, onSelect, eager = false }) {
   const videoRef = useRef(null)
   const [playing, setPlaying] = useState(false)
   const thumb = result.thumbnail_url || result.preview_url || result.url
@@ -320,7 +333,7 @@ function BRollOptionThumbnail({ result, isSelected, onSelect }) {
           src={videoUrl}
           poster={thumb}
           className="w-full h-full object-cover bg-black pointer-events-none"
-          preload="metadata"
+          preload={eager ? 'auto' : 'metadata'}
           playsInline
           muted
           onEnded={() => setPlaying(false)}

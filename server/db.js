@@ -85,6 +85,12 @@ try {
     )`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id)`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id)`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS broll_editor_state (
+      plan_pipeline_id TEXT PRIMARY KEY,
+      state_json       TEXT    NOT NULL DEFAULT '{}',
+      version          INTEGER NOT NULL DEFAULT 1,
+      updated_at       TIMESTAMPTZ DEFAULT NOW()
+    )`)
     await pool.query(`CREATE TABLE IF NOT EXISTS exports (
       id               TEXT PRIMARY KEY,
       user_id          TEXT,
