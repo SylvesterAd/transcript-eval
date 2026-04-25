@@ -690,7 +690,7 @@ export function useBRollEditorState(planPipelineId) {
     // runWithTargetLock serialises concurrent cross-drags to the same target
     // pipeline, preventing 409 version conflicts (Bug #11).
     await runWithTargetLock(targetPipelineId, async () => {
-      try {
+      const writeOnce = async () => {
         const remote = await authFetch(`/broll/pipeline/${targetPipelineId}/editor-state`)
         const next = {
           edits: remote.state?.edits || {},
@@ -701,9 +701,21 @@ export function useBRollEditorState(planPipelineId) {
           }].slice(-MAX_UNDO),
           redoStack: [],
         }
-        await authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
+        return authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
+      }
+      try {
+        try {
+          await writeOnce()
+        } catch (err) {
+          if (err.message === 'conflict') {
+            // Conflict: another writer bumped the target. Retry once with fresh version.
+            await writeOnce()
+          } else {
+            throw err
+          }
+        }
       } catch (err) {
-        console.error('[broll-drag-cross] Failed to write target:', err.message)
+        console.error('[broll-drag-cross] Failed to write target after retry:', err.message)
         // Revert the source-side action only if it is still at the top of the
         // undo stack — CONDITIONAL_UNDO is a no-op when the user has dispatched
         // another action in the meantime (Bug #1).
