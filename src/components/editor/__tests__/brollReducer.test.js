@@ -42,3 +42,31 @@ describe('reducer APPLY_ACTION_COALESCE', () => {
     expect(next.edits['0:0'].timelineEnd).toBe(2.0)
   })
 })
+
+describe('reducer CONDITIONAL_UNDO', () => {
+  it('rolls back when entry.id matches stack head', () => {
+    const entry = {
+      id: 'e1', ts: 0, kind: 'drag-cross', placementKey: '0:0',
+      before: { editsSlot: { hidden: false } },
+      after:  { editsSlot: { hidden: true } },
+    }
+    const base = { ...initialState, undoStack: [entry], edits: { '0:0': { hidden: true } } }
+    const next = reducer(base, { type: 'CONDITIONAL_UNDO', payload: { entryId: 'e1' } })
+    expect(next.undoStack).toEqual([])
+    expect(next.edits['0:0']?.hidden).toBe(false)
+  })
+  it('does NOT roll back when entry.id is no longer at stack head', () => {
+    const entry1 = {
+      id: 'e1', ts: 0, kind: 'drag-cross', placementKey: '0:0',
+      before: { editsSlot: { hidden: false } }, after: { editsSlot: { hidden: true } },
+    }
+    const entry2 = {
+      id: 'e2', ts: 0, kind: 'select-result', placementKey: '0:1',
+      before: { editsSlot: { selectedResult: 0 } }, after: { editsSlot: { selectedResult: 3 } },
+    }
+    const base = { ...initialState, undoStack: [entry1, entry2], edits: { '0:0': { hidden: true }, '0:1': { selectedResult: 3 } } }
+    const next = reducer(base, { type: 'CONDITIONAL_UNDO', payload: { entryId: 'e1' } })
+    expect(next.undoStack.map(e => e.id)).toEqual(['e1', 'e2'])
+    expect(next.edits['0:0']?.hidden).toBe(true)
+  })
+})

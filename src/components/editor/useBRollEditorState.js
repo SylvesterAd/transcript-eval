@@ -687,28 +687,34 @@ export function useBRollEditorState(planPipelineId) {
     }
 
     // Write to target pipeline's editor-state with optimistic concurrency.
-    try {
-      const remote = await authFetch(`/broll/pipeline/${targetPipelineId}/editor-state`)
-      const next = {
-        edits: remote.state?.edits || {},
-        userPlacements: [...(remote.state?.userPlacements || []), up],
-        undoStack: [...(remote.state?.undoStack || []), {
-          id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
-          before: { userPlacementDelete: true }, after: { userPlacementCreate: up },
-        }].slice(-MAX_UNDO),
-        redoStack: [],
+    // runWithTargetLock serialises concurrent cross-drags to the same target
+    // pipeline, preventing 409 version conflicts (Bug #11).
+    await runWithTargetLock(targetPipelineId, async () => {
+      try {
+        const remote = await authFetch(`/broll/pipeline/${targetPipelineId}/editor-state`)
+        const next = {
+          edits: remote.state?.edits || {},
+          userPlacements: [...(remote.state?.userPlacements || []), up],
+          undoStack: [...(remote.state?.undoStack || []), {
+            id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
+            before: { userPlacementDelete: true }, after: { userPlacementCreate: up },
+          }].slice(-MAX_UNDO),
+          redoStack: [],
+        }
+        await authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
+      } catch (err) {
+        console.error('[broll-drag-cross] Failed to write target:', err.message)
+        // Revert the source-side action only if it is still at the top of the
+        // undo stack — CONDITIONAL_UNDO is a no-op when the user has dispatched
+        // another action in the meantime (Bug #1).
+        if (sourceAction) {
+          dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: sourceAction.id } })
+        }
+        // Propagate so the caller can revert any optimistic target-side insert.
+        throw err
       }
-      await authPut(`/broll/pipeline/${targetPipelineId}/editor-state`, { state: next, version: remote.version })
-    } catch (err) {
-      console.error('[broll-drag-cross] Failed to write target:', err.message)
-      // Revert the source-side action if we dispatched one
-      if (sourceAction) {
-        dispatch({ type: 'UNDO' })
-      }
-      // Propagate so the caller can revert any optimistic target-side insert.
-      throw err
-    }
-  }, [state.placements, state.selectedResults, state.edits, state.userPlacements, planPipelineId])
+    })
+  }, [state.placements, state.selectedResults, state.edits, state.userPlacements, planPipelineId, runWithTargetLock])
 
   const updatePlacementPosition = useCallback((index, timelineStart, timelineEnd, opts = {}) => {
     const placement = state.placements.find(p => p.index === index)
