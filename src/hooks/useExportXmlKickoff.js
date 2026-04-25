@@ -24,6 +24,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiPost } from './useApi.js'
+import { EXT_ID } from '../lib/extension-id.js'
 
 // ----------------------------------------------------------------------
 // Pure transform: unified manifest → endpoint-ready variants shape.
@@ -87,24 +88,67 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
 // after 10 seconds (long enough for any browser to pick up the blob;
 // short enough not to leak if the user closes the tab).
 
-export function triggerXmlDownload(filename, xmlString) {
-  const blob = new Blob([xmlString], { type: 'application/xml' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.rel = 'noopener'
-  a.style.display = 'none'
-  document.body.appendChild(a)
-  a.click()
-  // Next tick, remove the element. Schedule URL revocation later.
-  setTimeout(() => {
-    try { document.body.removeChild(a) } catch {}
-  }, 0)
-  setTimeout(() => {
-    try { URL.revokeObjectURL(url) } catch {}
-  }, 10_000)
-  return url  // returned for test assertions; callers can ignore
+export function triggerXmlDownload(filename, xmlString, folderPath) {
+  // Preferred path: hand the XML to the extension so it lands in the
+  // same folder as the b-roll mp4s. If the extension is unreachable
+  // (no EXT_ID, non-Chrome browser, popup blocker, etc.), fall back
+  // to the classic Blob + <a download> which lands in the user's
+  // default Downloads folder — they'll have to move the file by hand
+  // but at least it isn't lost.
+  const tryExtension = () => new Promise((resolve, reject) => {
+    if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage || !EXT_ID) {
+      reject(new Error('extension unavailable'))
+      return
+    }
+    if (!folderPath) {
+      reject(new Error('folderPath required for extension save'))
+      return
+    }
+    let settled = false
+    const t = setTimeout(() => {
+      if (!settled) { settled = true; reject(new Error('extension save timed out')) }
+    }, 5000)
+    try {
+      chrome.runtime.sendMessage(
+        EXT_ID,
+        { type: 'save_xml', version: 1, folder: folderPath, filename, content: xmlString },
+        (response) => {
+          if (settled) return
+          settled = true
+          clearTimeout(t)
+          const lastErr = chrome.runtime.lastError
+          if (lastErr) return reject(new Error(lastErr.message || 'sendMessage error'))
+          if (!response?.ok) return reject(new Error(response?.error || 'extension declined save'))
+          resolve(response)
+        },
+      )
+    } catch (e) {
+      if (!settled) { settled = true; clearTimeout(t); reject(e) }
+    }
+  })
+
+  const fallbackBrowserDownload = () => {
+    const blob = new Blob([xmlString], { type: 'application/xml' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.rel = 'noopener'
+    a.style.display = 'none'
+    document.body.appendChild(a)
+    a.click()
+    setTimeout(() => { try { document.body.removeChild(a) } catch {} }, 0)
+    setTimeout(() => { try { URL.revokeObjectURL(url) } catch {} }, 10_000)
+    return url
+  }
+
+  // Fire the extension save; if it rejects, fall back. Return the
+  // resulting promise for tests / callers that want to await.
+  return tryExtension().catch((err) => {
+    console.warn('[xml-download] extension save failed, using browser fallback:', err?.message || err)
+    fallbackBrowserDownload()
+    return { ok: true, fallback: true, error: String(err?.message || err) }
+  })
 }
 
 // ----------------------------------------------------------------------
@@ -157,11 +201,15 @@ export function useExportXmlKickoff({
       if (reqId !== activeRequestRef.current) return
       const xmls = resp?.xml_by_variant || {}
       setXmlByVariant(xmls)
+      const folderPath = complete?.folder_path || null
       for (const label of variantLabels) {
         const xml = xmls[label]
         if (typeof xml !== 'string' || !xml) continue
         const filename = `variant-${String(label).toLowerCase()}.xml`
-        _triggerDownload(filename, xml)
+        // Don't await — fire-and-forget per variant. Each call resolves
+        // either through the extension or falls back to a browser
+        // download; we don't block the State E transition on either.
+        try { _triggerDownload(filename, xml, folderPath) } catch {}
       }
       setStatus(STATUS_READY)
     } catch (err) {

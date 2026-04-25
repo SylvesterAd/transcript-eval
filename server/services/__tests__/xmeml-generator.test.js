@@ -255,7 +255,7 @@ describe('generateXmeml — sanitization + edge cases', () => {
     expect(xml).toContain('bad_name_')
     // <name> and <pathurl> both use the sanitized form
     expect(xml).toMatch(/<name>bad_name_[^<]*<\/name>/)
-    expect(xml).toContain('file://./media/bad_name_')
+    expect(xml).toContain('file://./bad_name_')
   })
 
   it('Case 5b: XML reserved chars in sequenceName are escaped', () => {

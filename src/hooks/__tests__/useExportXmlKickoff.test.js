@@ -215,9 +215,11 @@ describe('triggerXmlDownload', () => {
     })
   })
 
-  it('creates a blob URL and clicks an anchor with the right filename', () => {
-    const url = triggerXmlDownload('variant-a.xml', '<?xml version="1.0"?><xmeml/>')
-    expect(typeof url).toBe('string')
+  it('falls back to blob+<a download> when the extension is unavailable', async () => {
+    // No `chrome.runtime.sendMessage` defined in happy-dom → tryExtension()
+    // rejects synchronously, the catch branch runs the blob fallback.
+    const result = await triggerXmlDownload('variant-a.xml', '<?xml version="1.0"?><xmeml/>')
+    expect(result).toMatchObject({ ok: true, fallback: true })
     expect(clickSpy).toHaveBeenCalledTimes(1)
   })
 })

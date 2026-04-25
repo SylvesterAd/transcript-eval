@@ -22,7 +22,7 @@
             <out>120</out>
             <file id="file-envato-A">
               <name>001_envato_A.mov</name>
-              <pathurl>file://./media/001_envato_A.mov</pathurl>
+              <pathurl>file://./001_envato_A.mov</pathurl>
               <duration>120</duration>
               <rate><timebase>30</timebase></rate>
               <media>
@@ -42,7 +42,7 @@
             <out>120</out>
             <file id="file-envato-B">
               <name>002_envato_B.mov</name>
-              <pathurl>file://./media/002_envato_B.mov</pathurl>
+              <pathurl>file://./002_envato_B.mov</pathurl>
               <duration>120</duration>
               <rate><timebase>30</timebase></rate>
               <media>
@@ -62,7 +62,7 @@
             <out>120</out>
             <file id="file-envato-C">
               <name>003_envato_C.mov</name>
-              <pathurl>file://./media/003_envato_C.mov</pathurl>
+              <pathurl>file://./003_envato_C.mov</pathurl>
               <duration>120</duration>
               <rate><timebase>30</timebase></rate>
               <media>

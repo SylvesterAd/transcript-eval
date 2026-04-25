@@ -65,14 +65,38 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       })
     }
 
+    // A-roll lookup: result_json for the export carries each placement's
+    // source/sourceItemId/filename. The A-roll, when present, was
+    // injected into the manifest with seq=0 + source='aroll' by the
+    // manifest endpoint at /api/broll-searches/:pipelineId/manifest.
+    // Pull it out here so we can hand the V1 track to generateXmeml.
+    function pickAroll(placements) {
+      if (!Array.isArray(placements)) return null
+      const a = placements.find((p) => p && (p.source === 'aroll' || p.seq === 0))
+      if (!a) return null
+      return {
+        filename: a.filename || `aroll.mp4`,
+        frameRate: Number.isFinite(a.sourceFrameRate) ? a.sourceFrameRate : null,
+        width: Number.isFinite(a.width) ? a.width : null,
+        height: Number.isFinite(a.height) ? a.height : null,
+      }
+    }
+
     // Generate per variant. Loop is sequential since each call is
     // CPU-bound microseconds of string concat — no benefit to Promise.all.
     const xml_by_variant = {}
     for (const label of variants) {
       const v = byLabel.get(label)
+      const allPlacements = v.placements || []
+      const aroll = pickAroll(allPlacements)
+      // Strip the A-roll out of the b-roll placements list — it's emitted
+      // separately on V1 by generateXmeml's `aroll` arg, not as a regular
+      // b-roll clipitem.
+      const brollPlacements = allPlacements.filter((p) => !p || (p.source !== 'aroll' && p.seq !== 0))
       xml_by_variant[label] = generateXmeml({
         sequenceName: v.sequenceName || `Variant ${label}`,
-        placements: v.placements || [],
+        placements: brollPlacements,
+        aroll,
         // frameRate + sequenceSize fall through to generator defaults;
         // future manifest fields could override here.
       })

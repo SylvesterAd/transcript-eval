@@ -325,6 +325,48 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         }
         return
       }
+      case 'save_xml': {
+        // Web app calls this after server returns the per-variant XMEML
+        // string. Web pages can't put downloads into a subfolder
+        // (chrome.downloads is extension-only), so the web hands the
+        // content + folder + filename to us and we drop it next to the
+        // b-roll mp4s. folder may be the display-string the user saw
+        // in State C ("~/Downloads/transcript-eval/export-<run>-a/")
+        // — strip the leading prefix so chrome.downloads accepts it as
+        // a relative path, same shape queue.js writes b-rolls into.
+        try {
+          const { folder, filename, content } = msg
+          if (typeof content !== 'string' || !content) {
+            sendResponse({ ok: false, error: 'content (string) required' })
+            return
+          }
+          if (typeof filename !== 'string' || !filename) {
+            sendResponse({ ok: false, error: 'filename (string) required' })
+            return
+          }
+          const relFolder = String(folder || '')
+            .replace(/^~\/Downloads\//, '')
+            .replace(/^~\//, '')
+            .replace(/^\/+/, '')
+            .replace(/\/+$/, '')
+          const fullName = relFolder ? `${relFolder}/${filename}` : filename
+          // Encode as a UTF-8 base64 data URL — handles non-ASCII safely.
+          const utf8 = new TextEncoder().encode(content)
+          let bin = ''
+          for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i])
+          const dataUrl = 'data:application/xml;base64,' + btoa(bin)
+          const downloadId = await chrome.downloads.download({
+            url: dataUrl,
+            filename: fullName,
+            saveAs: false,
+            conflictAction: 'uniquify',
+          })
+          sendResponse({ ok: true, download_id: downloadId, filename: fullName })
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
       default:
         sendResponse({ error: 'unknown_type', type: msg.type })
         return

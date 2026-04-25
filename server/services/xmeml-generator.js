@@ -194,6 +194,7 @@ export function generateXmeml({
   placements,
   frameRate = 30,
   sequenceSize = { w: 1920, h: 1080 },
+  aroll = null,  // optional: { filename, frameRate, width, height } — emits a V1 track spanning the entire timeline
 }) {
   if (typeof sequenceName !== 'string' || !sequenceName) {
     throw new Error('generateXmeml: sequenceName must be a non-empty string')
@@ -283,6 +284,39 @@ export function generateXmeml({
   lines.push(`          </samplecharacteristics>`)
   lines.push(`        </format>`)
 
+  // Emit A-roll track first (V1) so b-rolls land on V2/V3 above it.
+  // A-roll spans the entire sequence: source IN=0, OUT=sequenceDuration,
+  // timeline start=0, end=sequenceDuration. Only emitted when caller
+  // passed the optional `aroll` arg with a non-empty filename.
+  if (aroll && typeof aroll === 'object' && aroll.filename) {
+    const arollFilename = sanitizeFilename(String(aroll.filename))
+    const arollFrameRate = Number.isFinite(aroll.frameRate) && aroll.frameRate > 0 ? aroll.frameRate : frameRate
+    const arollWidth = Number.isFinite(aroll.width) && aroll.width > 0 ? aroll.width : seqW
+    const arollHeight = Number.isFinite(aroll.height) && aroll.height > 0 ? aroll.height : seqH
+    const arollClipId = `clip-${seqSlug}-aroll`
+    const arollFileId = `file-aroll`
+    lines.push(`        <track>`)
+    lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
+    lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
+    lines.push(`            <start>0</start>`)
+    lines.push(`            <end>${sequenceDuration}</end>`)
+    lines.push(`            <in>0</in>`)
+    lines.push(`            <out>${sequenceDuration}</out>`)
+    lines.push(`            <file id="${escapeXml(arollFileId)}">`)
+    lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
+    lines.push(`              <pathurl>file://./${escapeXml(arollFilename)}</pathurl>`)
+    lines.push(`              <duration>${sequenceDuration}</duration>`)
+    lines.push(`              <rate><timebase>${arollFrameRate}</timebase></rate>`)
+    lines.push(`              <media>`)
+    lines.push(`                <video><samplecharacteristics>`)
+    lines.push(`                  <width>${arollWidth}</width><height>${arollHeight}</height>`)
+    lines.push(`                </samplecharacteristics></video>`)
+    lines.push(`              </media>`)
+    lines.push(`            </file>`)
+    lines.push(`          </clipitem>`)
+    lines.push(`        </track>`)
+  }
+
   // Emit tracks in V1, V2, V3 order. If placements is empty, emit zero
   // tracks inside <video> — valid xmeml, opens in Premiere as an empty
   // video layer.
@@ -300,7 +334,7 @@ export function generateXmeml({
       lines.push(`            <out>${p._duration}</out>`)
       lines.push(`            <file id="${escapeXml(fileId)}">`)
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
-      lines.push(`              <pathurl>file://./media/${escapeXml(p.filename)}</pathurl>`)
+      lines.push(`              <pathurl>file://./${escapeXml(p.filename)}</pathurl>`)
       lines.push(`              <duration>${p._duration}</duration>`)
       lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
       lines.push(`              <media>`)

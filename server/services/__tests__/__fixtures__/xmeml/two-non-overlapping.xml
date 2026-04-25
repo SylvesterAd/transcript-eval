@@ -22,7 +22,7 @@
             <out>60</out>
             <file id="file-pexels-123">
               <name>001_pexels_123.mp4</name>
-              <pathurl>file://./media/001_pexels_123.mp4</pathurl>
+              <pathurl>file://./001_pexels_123.mp4</pathurl>
               <duration>60</duration>
               <rate><timebase>30</timebase></rate>
               <media>
@@ -40,7 +40,7 @@
             <out>60</out>
             <file id="file-pexels-456">
               <name>002_pexels_456.mp4</name>
-              <pathurl>file://./media/002_pexels_456.mp4</pathurl>
+              <pathurl>file://./002_pexels_456.mp4</pathurl>
               <duration>60</duration>
               <rate><timebase>30</timebase></rate>
               <media>

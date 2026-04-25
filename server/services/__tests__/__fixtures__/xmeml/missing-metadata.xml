@@ -22,7 +22,7 @@
             <out>90</out>
             <file id="file-freepik-xyz">
               <name>001_freepik_xyz.mp4</name>
-              <pathurl>file://./media/001_freepik_xyz.mp4</pathurl>
+              <pathurl>file://./001_freepik_xyz.mp4</pathurl>
               <duration>90</duration>
               <rate><timebase>30</timebase></rate>
               <media>

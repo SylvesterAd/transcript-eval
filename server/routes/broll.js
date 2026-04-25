@@ -126,7 +126,61 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
     // Pure transform: pick → filter → manifest item shape.
     const { items, totals } = buildManifestFromPlacements(placements, { variant })
 
-    res.json({ pipeline_id: pipelineId, variant, items, totals })
+    // A-roll injection: parse pipelineId for the videoId (pattern is
+    // 'plan-<videoId>-<timestamp>'); look up the user's source video;
+    // if it has a downloadable file_path, prepend an A-roll item with
+    // a pre-populated signed_url so the extension queue downloads it
+    // alongside the b-rolls without going through a mint API call.
+    // The A-roll downloaded copy lets the XMEML generator emit a V1
+    // track that Premiere can resolve locally instead of leaving the
+    // user to re-link the main video by hand.
+    let aroll = null
+    const planMatch = pipelineId.match(/^plan-(\d+)-/)
+    if (planMatch) {
+      const videoId = parseInt(planMatch[1], 10)
+      try {
+        const vRow = await db.prepare(
+          'SELECT id, title, file_path, duration_seconds, media_info_json FROM videos WHERE id = ?'
+        ).get(videoId)
+        if (vRow && vRow.file_path && /^https?:\/\//.test(vRow.file_path)) {
+          // Parse media_info_json for resolution / framerate hints if present.
+          let mediaInfo = {}
+          try { mediaInfo = JSON.parse(vRow.media_info_json || '{}') } catch {}
+          aroll = {
+            video_id: vRow.id,
+            title: vRow.title || `aroll_${videoId}.mp4`,
+            target_filename: `aroll_${videoId}.mp4`,
+            signed_url: vRow.file_path,
+            duration_seconds: vRow.duration_seconds || null,
+            width: mediaInfo.width || null,
+            height: mediaInfo.height || null,
+            frame_rate: mediaInfo.frame_rate || null,
+          }
+          // Prepend an item entry the extension queue understands. seq
+          // is 0 to mark it as the A-roll; b-rolls remain seq 1..N.
+          items.unshift({
+            seq: 0,
+            timeline_start_s: 0,
+            timeline_duration_s: aroll.duration_seconds,
+            source: 'aroll',
+            source_item_id: String(videoId),
+            envato_item_url: null,
+            target_filename: aroll.target_filename,
+            resolution: { width: aroll.width || 1920, height: aroll.height || 1080 },
+            frame_rate: aroll.frame_rate || 30,
+            est_size_bytes: null,
+            variant_label: null,
+            signed_url: aroll.signed_url,  // pre-populated → extension skips the mint phase
+          })
+          totals.count = items.length
+          totals.by_source = { ...totals.by_source, aroll: 1 }
+        }
+      } catch (e) {
+        console.warn('[broll-export-manifest] aroll lookup failed:', e.message)
+      }
+    }
+
+    res.json({ pipeline_id: pipelineId, variant, items, totals, aroll })
   } catch (err) {
     console.error('[broll-export-manifest] error:', err.message)
     res.status(500).json({ error: err.message })
