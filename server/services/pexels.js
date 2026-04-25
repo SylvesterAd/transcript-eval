@@ -25,7 +25,7 @@ export async function searchVideos({ query, page = 1, perPage = 15, orientation,
   if (orientation) params.set('orientation', orientation)
   if (size) params.set('size', size)
   if (locale) params.set('locale', locale)
-  return apiGet(`${BASE}/v1/videos/search?${params}`)
+  return apiGet(`${BASE}/videos/search?${params}`)
 }
 
 export async function searchPhotos({ query, page = 1, perPage = 15, orientation, size, color, locale }) {
@@ -38,7 +38,7 @@ export async function searchPhotos({ query, page = 1, perPage = 15, orientation,
 }
 
 export async function getVideo(id) {
-  return apiGet(`${BASE}/v1/videos/videos/${id}`)
+  return apiGet(`${BASE}/videos/videos/${id}`)
 }
 
 export async function getPhoto(id) {
@@ -49,7 +49,7 @@ export async function popularVideos({ page = 1, perPage = 15, minDuration, maxDu
   const params = new URLSearchParams({ page: String(page), per_page: String(Math.min(perPage, 80)) })
   if (minDuration) params.set('min_duration', String(minDuration))
   if (maxDuration) params.set('max_duration', String(maxDuration))
-  return apiGet(`${BASE}/v1/videos/popular?${params}`)
+  return apiGet(`${BASE}/videos/popular?${params}`)
 }
 
 export async function curatedPhotos({ page = 1, perPage = 15 } = {}) {
