@@ -17,7 +17,8 @@
     "matches": [
       "http://localhost:5173/*",
       "http://localhost:5174/*",
-      "https://transcript-eval.com/*"
+      "https://transcript-eval.com/*",
+      "https://*.vercel.app/*"
     ]
   },
   "background": {
