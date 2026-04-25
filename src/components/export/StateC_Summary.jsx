@@ -138,6 +138,7 @@ const StartButton = styled.button`
 export default function StateC_Summary({
   variant, manifestResp, additionalManifests, ping, diskValue,
   onStart, onChangeFolder, onToggleVariant, availableExtraVariants,
+  targetFolderOverride,
 }) {
   const [forceRedownload, setForceRedownload] = useState(false)
   const [includeExtras, setIncludeExtras] = useState({})  // {variantLabel: true}
@@ -157,9 +158,11 @@ export default function StateC_Summary({
   const variantLabels = unified.variants.length ? unified.variants.join(', ') : variant
 
   // Default folder per spec § "Multi-variant exports" (multi: -all suffix).
-  const folderName = unified.variants.length > 1
+  // User-edited override (via "Change folder") wins when present.
+  const defaultFolder = unified.variants.length > 1
     ? `~/Downloads/transcript-eval/export-${manifestResp?.pipeline_id || ''}-all/`
     : `~/Downloads/transcript-eval/export-${manifestResp?.pipeline_id || ''}-${variant.toLowerCase()}/`
+  const folderName = targetFolderOverride || defaultFolder
 
   const diskAvailable = diskValue?.available ?? null
   const diskOk = diskAvailable == null ? 'unknown' : (diskAvailable > totalBytes * 1.1 ? 'ok' : 'warn')

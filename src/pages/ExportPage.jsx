@@ -28,6 +28,7 @@ function reducer(state, action) {
     case 'goto':                  return { ...state, phase: action.phase }
     case 'set_extra_variants':    return { ...state, additionalVariants: action.variants }
     case 'override_session':      return { ...state, sessionOverridden: true }
+    case 'set_target_folder':     return { ...state, targetFolder: action.targetFolder }
     case 'export_started':        return {
       ...state,
       phase: 'state_d',
@@ -54,6 +55,7 @@ const initialState = {
   complete_payload: null,
   unified_manifest: null,   // captured in onStart; needed by State E
   variant_labels: [],       // captured in onStart; passed to State E
+  targetFolder: null,       // user-chosen folder override (StateC "Change folder")
   error: null,
 }
 
@@ -78,10 +80,27 @@ const ErrorBox = styled.div`
 `
 export default function ExportPage() {
   const { id: pipelineId } = useParams()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const variant = searchParams.get('variant') || 'A'
   const ext = useExtension()
   const [state, dispatch] = useReducer(reducer, initialState)
+
+  // Push the current export phase into the URL as `?step=<phase>` so
+  // each step is bookmarkable / shareable. State A→F + the complete /
+  // partial endings get distinct URLs without changing the route shape
+  // in App.jsx (which would force every existing /editor/:id/export
+  // bookmark to break). One-way sync only — opening a deep link goes
+  // through pre-flight first and then transitions normally; we don't
+  // attempt to short-circuit into State C when someone visits
+  // ?step=state_c without a fresh ping/manifest, because the underlying
+  // state is meaningless without those checks.
+  useEffect(() => {
+    if (!state.phase) return
+    if (searchParams.get('step') === state.phase) return
+    const next = new URLSearchParams(searchParams)
+    next.set('step', state.phase)
+    setSearchParams(next, { replace: true })
+  }, [state.phase, searchParams, setSearchParams])
 
   const preflight = useExportPreflight({
     pipelineId,
@@ -147,9 +166,28 @@ export default function ExportPage() {
   }, [])
 
   const onChangeFolder = useCallback(() => {
-    // Phase A defers File System Access API — see plan § Scope.
-    window.alert('Folder picker coming in a later release. For now exports save to ~/Downloads/transcript-eval/')
-  }, [])
+    // Chrome's chrome.downloads.download requires paths relative to
+    // the user's OS Downloads folder. We can't escape that sandbox
+    // from a web page (and even from the extension, true arbitrary
+    // folders need the File System Access API + per-file streaming —
+    // out of scope). What we CAN do is let the user pick the SUBFOLDER
+    // name under Downloads. Default looks like
+    // "~/Downloads/transcript-eval/export-<runId>-a/"; user can rename
+    // the subfolder portion. Result is dispatched onto state.targetFolder
+    // and threaded through to onStart's targetFolder arg.
+    const current = state.targetFolder || ''
+    const proposed = window.prompt(
+      'Save to (path under your Downloads folder):\n\nThe extension can only write inside the OS Downloads folder. Edit the subfolder portion below — leading "~/Downloads/" is for display only.',
+      current,
+    )
+    if (proposed == null) return  // user cancelled
+    const trimmed = String(proposed).trim()
+    if (!trimmed) {
+      window.alert('Folder cannot be empty.')
+      return
+    }
+    dispatch({ type: 'set_target_folder', targetFolder: trimmed })
+  }, [state.targetFolder])
 
   const onToggleVariant = useCallback((v, on) => {
     dispatch({
@@ -286,6 +324,7 @@ export default function ExportPage() {
         diskValue={preflight.disk.status === 'ok' ? preflight.disk.value : { available: null }}
         onStart={onStart}
         onChangeFolder={onChangeFolder}
+        targetFolderOverride={state.targetFolder}
         onToggleVariant={onToggleVariant}
         availableExtraVariants={knownVariants || []}
       />
