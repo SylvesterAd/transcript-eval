@@ -15,6 +15,16 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
+// Tab-session boundary: undo entries with ts < PAGE_LOAD_TS belong to a previous
+// session and are filtered out on LOAD_EDITOR_STATE. Prevents accidentally
+// undoing actions from a previous tab session.
+const PAGE_LOAD_TS = Date.now()
+
+function filterToSession(entries) {
+  if (!Array.isArray(entries)) return []
+  return entries.filter(e => (e?.ts || 0) >= PAGE_LOAD_TS)
+}
+
 export const BRollContext = createContext(null)
 
 export async function authFetchBRollData(planPipelineId, signal) {
@@ -190,7 +200,15 @@ export function useBRollEditorState(planPipelineId) {
     authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
       .then(data => {
         if (cancelled) return
-        dispatch({ type: 'LOAD_EDITOR_STATE', payload: data })
+        const sessionScoped = {
+          ...data,
+          state: data?.state ? {
+            ...data.state,
+            undoStack: filterToSession(data.state.undoStack),
+            redoStack: filterToSession(data.state.redoStack),
+          } : data?.state,
+        }
+        dispatch({ type: 'LOAD_EDITOR_STATE', payload: sessionScoped })
       })
       .catch(() => { /* non-fatal; empty state stays */ })
     return () => { cancelled = true }
@@ -427,7 +445,15 @@ export function useBRollEditorState(planPipelineId) {
       })
       // Reload editor-state to pick up new results on the userPlacement
       const data = await authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
-      dispatch({ type: 'LOAD_EDITOR_STATE', payload: data })
+      const sessionScoped = {
+        ...data,
+        state: data?.state ? {
+          ...data.state,
+          undoStack: filterToSession(data.state.undoStack),
+          redoStack: filterToSession(data.state.redoStack),
+        } : data?.state,
+      }
+      dispatch({ type: 'LOAD_EDITOR_STATE', payload: sessionScoped })
     } catch (err) {
       console.error('[broll] user placement search failed:', err.message)
     }
@@ -500,71 +526,147 @@ export function useBRollEditorState(planPipelineId) {
     const top = state.undoStack[state.undoStack.length - 1]
     if (!top) return
     dispatch({ type: 'UNDO' })
-    if (top.kind !== 'drag-cross' || !top.targetPipelineId || !top.targetUserPlacementId) return
-    await runWithTargetLock(top.targetPipelineId, async () => {
-      try {
-        const remote = await authFetch(`/broll/pipeline/${top.targetPipelineId}/editor-state`)
-        const next = {
-          edits: remote.state?.edits || {},
-          userPlacements: (remote.state?.userPlacements || []).filter(u => u.id !== top.targetUserPlacementId),
-          undoStack: (Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [])
-            .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
-          redoStack: (Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [])
-            .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
+    if (top.kind !== 'drag-cross') return
+    // Source-side perspective: entry has target refs → cleanup target pipeline
+    // (delete userPlacement on target).
+    if (top.targetPipelineId && top.targetUserPlacementId) {
+      await runWithTargetLock(top.targetPipelineId, async () => {
+        try {
+          const remote = await authFetch(`/broll/pipeline/${top.targetPipelineId}/editor-state`)
+          const next = {
+            edits: remote.state?.edits || {},
+            userPlacements: (remote.state?.userPlacements || []).filter(u => u.id !== top.targetUserPlacementId),
+            undoStack: (Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [])
+              .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
+            redoStack: (Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [])
+              .filter(e => !(e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)),
+          }
+          await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
+          // Inform the editor to drop the optimistic synthetic from its inactive cache.
+          inactiveCacheSetterRef.current?.(top.targetPipelineId, (prev) =>
+            (prev || []).filter(p => p.userPlacementId !== top.targetUserPlacementId)
+          )
+        } catch (err) {
+          console.error('[broll-undo] cross-pipeline cleanup failed:', err.message)
+          // Only roll back if this entry is still at the top of redoStack — otherwise the
+          // user has done other things since and a blind REDO would corrupt unrelated state.
+          dispatch({ type: 'CONDITIONAL_REDO', payload: { entryId: top.id } })
+          window.alert('Undo failed — could not contact target pipeline. Try again.')
         }
-        await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
-        // Inform the editor to drop the optimistic synthetic from its inactive cache.
-        inactiveCacheSetterRef.current?.(top.targetPipelineId, (prev) =>
-          (prev || []).filter(p => p.userPlacementId !== top.targetUserPlacementId)
-        )
-      } catch (err) {
-        console.error('[broll-undo] cross-pipeline cleanup failed:', err.message)
-        // Only roll back if this entry is still at the top of redoStack — otherwise the
-        // user has done other things since and a blind REDO would corrupt unrelated state.
-        dispatch({ type: 'CONDITIONAL_REDO', payload: { entryId: top.id } })
-        window.alert('Undo failed — could not contact target pipeline. Try again.')
-      }
-    })
+      })
+    }
+    // Target-side perspective: entry has source refs → restore source on the
+    // source pipeline (un-hide chapter-derived placement OR re-add userPlacement).
+    if (top.sourcePipelineId && (top.sourcePlacementKey || top.sourceUserPlacementId)) {
+      await runWithTargetLock(top.sourcePipelineId, async () => {
+        try {
+          const remote = await authFetch(`/broll/pipeline/${top.sourcePipelineId}/editor-state`)
+          let nextEdits = { ...(remote.state?.edits || {}) }
+          let nextUserPlacements = [...(remote.state?.userPlacements || [])]
+          if (top.sourcePlacementKey) {
+            const e = nextEdits[top.sourcePlacementKey]
+            if (e?.hidden) {
+              nextEdits[top.sourcePlacementKey] = { ...e, hidden: false }
+            }
+          }
+          if (top.sourceUserPlacementId && top.sourceUserPlacementSnapshot) {
+            if (!nextUserPlacements.some(u => u.id === top.sourceUserPlacementId)) {
+              nextUserPlacements.push(top.sourceUserPlacementSnapshot)
+            }
+          }
+          // Drop the matching source-hide entry from source's undo/redo stacks.
+          const cleanedUndo = (Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [])
+            .filter(e => !(e.kind === 'drag-cross' && e.targetUserPlacementId === top.userPlacementId))
+          const cleanedRedo = (Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [])
+            .filter(e => !(e.kind === 'drag-cross' && e.targetUserPlacementId === top.userPlacementId))
+          const next = {
+            edits: nextEdits,
+            userPlacements: nextUserPlacements,
+            undoStack: cleanedUndo,
+            redoStack: cleanedRedo,
+          }
+          await authPut(`/broll/pipeline/${top.sourcePipelineId}/editor-state`, { state: next, version: remote.version })
+          // Invalidate source pipeline's inactive cache so the next refetch shows the un-hidden source.
+          inactiveCacheSetterRef.current?.(top.sourcePipelineId, () => null)
+        } catch (err) {
+          console.error('[broll-undo] target-side source cleanup failed:', err.message)
+          dispatch({ type: 'CONDITIONAL_REDO', payload: { entryId: top.id } })
+          window.alert('Undo failed — could not contact source pipeline. Try again.')
+        }
+      })
+    }
   }, [state.undoStack, runWithTargetLock])
 
   const redo = useCallback(async () => {
     const top = state.redoStack[state.redoStack.length - 1]
     if (!top) return
     dispatch({ type: 'REDO' })
-    if (top.kind !== 'drag-cross' || !top.targetPipelineId || !top.targetUserPlacementSnapshot) return
-    await runWithTargetLock(top.targetPipelineId, async () => {
-      try {
-        const remote = await authFetch(`/broll/pipeline/${top.targetPipelineId}/editor-state`)
-        // Guard: don't double-create if the snapshot is already present (e.g. if the user
-        // independently redid on the target side first).
-        const ups = remote.state?.userPlacements || []
-        const alreadyPresent = ups.some(u => u.id === top.targetUserPlacementId)
-        const remoteUndo = Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : []
-        const hasCreateEntry = remoteUndo.some(e => e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)
-        const next = {
-          edits: remote.state?.edits || {},
-          userPlacements: alreadyPresent ? ups : [...ups, top.targetUserPlacementSnapshot],
-          undoStack: hasCreateEntry
-            ? remoteUndo
-            : [...remoteUndo, {
-                id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: top.targetUserPlacementId,
-                before: { userPlacementDelete: true }, after: { userPlacementCreate: top.targetUserPlacementSnapshot },
-              }].slice(-MAX_UNDO),
-          redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
+    if (top.kind !== 'drag-cross') return
+    // Source-side perspective: entry has target snapshot → re-create userPlacement on target.
+    if (top.targetPipelineId && top.targetUserPlacementSnapshot) {
+      await runWithTargetLock(top.targetPipelineId, async () => {
+        try {
+          const remote = await authFetch(`/broll/pipeline/${top.targetPipelineId}/editor-state`)
+          // Guard: don't double-create if the snapshot is already present (e.g. if the user
+          // independently redid on the target side first).
+          const ups = remote.state?.userPlacements || []
+          const alreadyPresent = ups.some(u => u.id === top.targetUserPlacementId)
+          const remoteUndo = Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : []
+          const hasCreateEntry = remoteUndo.some(e => e.kind === 'drag-cross' && e.userPlacementId === top.targetUserPlacementId)
+          const next = {
+            edits: remote.state?.edits || {},
+            userPlacements: alreadyPresent ? ups : [...ups, top.targetUserPlacementSnapshot],
+            undoStack: hasCreateEntry
+              ? remoteUndo
+              : [...remoteUndo, {
+                  id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: top.targetUserPlacementId,
+                  before: { userPlacementDelete: true }, after: { userPlacementCreate: top.targetUserPlacementSnapshot },
+                }].slice(-MAX_UNDO),
+            redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
+          }
+          await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
+          // Re-add the userPlacement to the local cache (using the rebuilt entry shape).
+          const reAdded = userPlacementToRawEntry(top.targetUserPlacementSnapshot)
+          inactiveCacheSetterRef.current?.(top.targetPipelineId, (prev) => {
+            const without = (prev || []).filter(p => p.userPlacementId !== top.targetUserPlacementId)
+            return [...without, reAdded]
+          })
+        } catch (err) {
+          console.error('[broll-redo] cross-pipeline cleanup failed:', err.message)
+          dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: top.id } })
+          window.alert('Redo failed — could not contact target pipeline. Try again.')
         }
-        await authPut(`/broll/pipeline/${top.targetPipelineId}/editor-state`, { state: next, version: remote.version })
-        // Re-add the userPlacement to the local cache (using the rebuilt entry shape).
-        const reAdded = userPlacementToRawEntry(top.targetUserPlacementSnapshot)
-        inactiveCacheSetterRef.current?.(top.targetPipelineId, (prev) => {
-          const without = (prev || []).filter(p => p.userPlacementId !== top.targetUserPlacementId)
-          return [...without, reAdded]
-        })
-      } catch (err) {
-        console.error('[broll-redo] cross-pipeline cleanup failed:', err.message)
-        dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: top.id } })
-        window.alert('Redo failed — could not contact target pipeline. Try again.')
-      }
-    })
+      })
+    }
+    // Target-side perspective: entry has source refs → re-hide source / re-delete source userPlacement.
+    if (top.sourcePipelineId && (top.sourcePlacementKey || top.sourceUserPlacementId)) {
+      await runWithTargetLock(top.sourcePipelineId, async () => {
+        try {
+          const remote = await authFetch(`/broll/pipeline/${top.sourcePipelineId}/editor-state`)
+          let nextEdits = { ...(remote.state?.edits || {}) }
+          let nextUserPlacements = [...(remote.state?.userPlacements || [])]
+          if (top.sourcePlacementKey) {
+            const e = nextEdits[top.sourcePlacementKey] || {}
+            nextEdits[top.sourcePlacementKey] = { ...e, hidden: true }
+          }
+          if (top.sourceUserPlacementId) {
+            nextUserPlacements = nextUserPlacements.filter(u => u.id !== top.sourceUserPlacementId)
+          }
+          const next = {
+            edits: nextEdits,
+            userPlacements: nextUserPlacements,
+            undoStack: Array.isArray(remote.state?.undoStack) ? remote.state.undoStack : [],
+            redoStack: Array.isArray(remote.state?.redoStack) ? remote.state.redoStack : [],
+          }
+          await authPut(`/broll/pipeline/${top.sourcePipelineId}/editor-state`, { state: next, version: remote.version })
+          inactiveCacheSetterRef.current?.(top.sourcePipelineId, () => null)
+        } catch (err) {
+          console.error('[broll-redo] target-side source replay failed:', err.message)
+          dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: top.id } })
+          window.alert('Redo failed — could not contact source pipeline. Try again.')
+        }
+      })
+    }
   }, [state.redoStack, runWithTargetLock])
 
   const copyPlacement = useCallback((index, { cut = false } = {}) => {
@@ -792,6 +894,16 @@ export function useBRollEditorState(planPipelineId) {
       }
     }
 
+    // Source refs embedded in the TARGET's undo entry so undo-on-target can also
+    // un-hide / restore the source on this pipeline (otherwise undoing from B
+    // only deletes the userPlacement on B, leaving source hidden on A).
+    const sourcePlacementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    const sourceUserPlacementSnapshot = placement.userPlacementId
+      ? state.userPlacements.find(u => u.id === placement.userPlacementId) || null
+      : null
+
     // Write to target pipeline's editor-state with optimistic concurrency.
     // runWithTargetLock serialises concurrent cross-drags to the same target
     // pipeline, preventing 409 version conflicts (Bug #11).
@@ -803,6 +915,10 @@ export function useBRollEditorState(planPipelineId) {
           userPlacements: [...(remote.state?.userPlacements || []), up],
           undoStack: [...(remote.state?.undoStack || []), {
             id: generateActionId(), ts: Date.now(), kind: 'drag-cross', userPlacementId: uuid,
+            sourcePipelineId: planPipelineId,
+            sourcePlacementKey,
+            sourceUserPlacementId: placement.userPlacementId || null,
+            sourceUserPlacementSnapshot,
             before: { userPlacementDelete: true }, after: { userPlacementCreate: up },
           }].slice(-MAX_UNDO),
           redoStack: [],
