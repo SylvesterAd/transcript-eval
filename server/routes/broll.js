@@ -979,101 +979,9 @@ router.post('/pipeline/run-all', requireAuth, async (req, res) => {
   try {
     const { video_id, group_id } = req.body || {}
     if (!video_id || !group_id) return res.status(400).json({ error: 'video_id and group_id required' })
-
-    // Load editor cuts
-    let editorCuts = null
-    const group = await (await import('../db.js')).default
-      .prepare('SELECT editor_state_json FROM video_groups WHERE id = ?')
-      .get(group_id)
-    if (group?.editor_state_json) {
-      try {
-        const state = JSON.parse(group.editor_state_json)
-        if (state.cuts?.length) editorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
-      } catch {}
-    }
-
-    // Load example videos
-    const examples = await loadExampleVideos(group_id)
-    const readyVideos = examples.filter(v => v.id) // filter to ready videos with IDs
-
-    const db = (await import('../db.js')).default
-
-    // Check for existing completed prep pipeline (skip if already done)
-    const existingPrep = await db.prepare(
-      `SELECT metadata_json FROM broll_runs WHERE video_id = ? AND status = 'complete' AND metadata_json LIKE '%"phase":"plan_prep"%' AND metadata_json NOT LIKE '%"isSubRun":true%' LIMIT 1`
-    ).get(video_id)
-    const existingPrepId = existingPrep ? JSON.parse(existingPrep.metadata_json || '{}').pipelineId : null
-
-    // Generate pipeline IDs upfront and pre-register in progress map
-    let prepPipelineId = existingPrepId || null
-    if (!existingPrepId) {
-      prepPipelineId = `7-${video_id}-${Date.now()}`
-      brollPipelineProgress.set(prepPipelineId, { strategyId: 7, videoId: video_id, groupId: group_id, status: 'running', stageName: 'Loading data...', stageIndex: 0, totalStages: 5, phase: 'plan_prep', strategyName: 'Plan Prep' })
-      executePlanPrep(video_id, group_id, editorCuts, prepPipelineId)
-        .catch(err => console.error(`[broll-pipeline] Plan prep failed: ${err.message}`))
-    } else {
-      console.log(`[broll-pipeline] Skipping prep — already complete (${existingPrepId})`)
-    }
-
-    // Check which example videos already have completed analysis
-    const analysisStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'main_analysis' ORDER BY id LIMIT 1").get()
-
-    const allAnalysisIds = [] // all pipeline IDs (existing + new)
-    if (analysisStrategy) {
-      // Find completed analysis runs per example video
-      const completedAnalysisRuns = await db.prepare(
-        `SELECT metadata_json FROM broll_runs WHERE strategy_id = ? AND video_id = ? AND status = 'complete' AND metadata_json NOT LIKE '%"isSubRun":true%' ORDER BY id DESC`
-      ).all(analysisStrategy.id, video_id)
-
-      const alreadyAnalyzedVideoIds = new Set()
-      for (const r of completedAnalysisRuns) {
-        try {
-          const m = JSON.parse(r.metadata_json || '{}')
-          const exMatch = m.pipelineId?.match(/-ex(\d+)/)
-          if (exMatch) {
-            alreadyAnalyzedVideoIds.add(Number(exMatch[1]))
-            if (!allAnalysisIds.includes(m.pipelineId)) allAnalysisIds.push(m.pipelineId)
-          }
-        } catch {}
-      }
-
-      const analysisVersion = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(analysisStrategy.id)
-
-      if (analysisVersion) {
-        const newVideos = readyVideos.filter(v => !alreadyAnalyzedVideoIds.has(v.id))
-        if (newVideos.length < readyVideos.length) {
-          console.log(`[broll-pipeline] Skipping ${readyVideos.length - newVideos.length} already-analyzed videos`)
-        }
-
-        for (const vid of newVideos) {
-          const pid = `${analysisStrategy.id}-${video_id}-${Date.now()}-ex${vid.id}`
-          allAnalysisIds.push(pid)
-          brollPipelineProgress.set(pid, { strategyId: analysisStrategy.id, videoId: video_id, groupId: group_id, status: 'running', stageName: 'Loading data...', stageIndex: 0, totalStages: 1, exampleVideoId: vid.id, strategyName: 'Reference Analysis' })
-          executePipeline(
-            analysisStrategy.id,
-            analysisVersion.id,
-            video_id,
-            group_id,
-            'raw',
-            null,
-            null,
-            null,
-            { exampleVideoId: vid.id, pipelineIdOverride: pid },
-          ).catch(err => console.error(`[broll-pipeline] Analysis for video ${vid.id} failed: ${err.message}`))
-        }
-      }
-    }
-
-    const newCount = allAnalysisIds.filter(id => brollPipelineProgress.get(id)?.status === 'running').length
-    console.log(`[broll-pipeline] run-all: prep=${prepPipelineId ? 'yes' : 'skip'}, analysis=${allAnalysisIds.length} (${newCount} new)`)
-
-    res.json({
-      prepPipelineId,
-      analysisPipelineIds: allAnalysisIds,
-      videoCount: readyVideos.length,
-      skippedAnalysis: readyVideos.length - newCount,
-      skippedPrep: !!existingPrepId,
-    })
+    const { runAllReferences } = await import('../services/broll-runner.js')
+    const r = await runAllReferences({ subGroupId: group_id, mainVideoId: video_id })
+    res.json(r)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1086,56 +994,12 @@ router.post('/pipeline/run-strategies', requireAuth, async (req, res) => {
     if (!prep_pipeline_id || !analysis_pipeline_ids?.length || !video_id) {
       return res.status(400).json({ error: 'prep_pipeline_id, analysis_pipeline_ids, and video_id required' })
     }
-
-    // Check which analysis pipelines already have a completed strategy (skip duplicates)
-    const db = (await import('../db.js')).default
-    const existingStratRuns = await db.prepare(
-      `SELECT metadata_json FROM broll_runs WHERE video_id = ? AND status = 'complete' AND metadata_json LIKE '%"phase":"create_strategy"%' AND metadata_json NOT LIKE '%"isSubRun":true%'`
-    ).all(video_id)
-    const alreadyDoneAnalysisIds = new Set()
-    for (const r of existingStratRuns) {
-      try {
-        const m = JSON.parse(r.metadata_json || '{}')
-        if (m.analysisPipelineId) alreadyDoneAnalysisIds.add(m.analysisPipelineId)
-      } catch {}
-    }
-
-    // Only fire strategies for analysis pipelines that don't have one yet
-    const newAnalysisIds = analysis_pipeline_ids.filter(id => !alreadyDoneAnalysisIds.has(id))
-    const skippedCount = analysis_pipeline_ids.length - newAnalysisIds.length
-    if (skippedCount) console.log(`[broll-pipeline] Skipping ${skippedCount} strategies (already exist)`)
-
-    // Generate pipeline IDs upfront and pre-register in progress map so polling works immediately
-    const allPipelineIds = []
-    for (const analysisPipelineId of newAnalysisIds) {
-      const pid = `strat-${video_id}-${Date.now()}-${analysisPipelineId.slice(-6)}`
-      allPipelineIds.push(pid)
-      brollPipelineProgress.set(pid, { videoId: video_id, groupId: group_id, status: 'running', stageName: 'Loading data...', stageIndex: 0, totalStages: 1, phase: 'create_strategy' })
-      executeCreateStrategy(prep_pipeline_id, analysisPipelineId, video_id, group_id || null, pid)
-        .catch(err => console.error(`[broll-pipeline] Create strategy failed for analysis ${analysisPipelineId}: ${err.message}`))
-    }
-
-    // Fire combined "best of all" strategy if 2+ references AND no existing combined strategy
-    let combinedPipelineId = null
-    const existingCombined = existingStratRuns.some(r => {
-      try { return JSON.parse(r.metadata_json || '{}').phase === 'create_combined_strategy' } catch { return false }
+    const { runStrategies } = await import('../services/broll-runner.js')
+    const r = await runStrategies({
+      subGroupId: group_id, mainVideoId: video_id,
+      prepPipelineId: prep_pipeline_id, analysisPipelineIds: analysis_pipeline_ids,
     })
-    // Re-fire combined if there are new references (more analyses than before)
-    const shouldFireCombined = analysis_pipeline_ids.length >= 2 && (!existingCombined || newAnalysisIds.length > 0)
-    if (shouldFireCombined) {
-      combinedPipelineId = `cstrat-${video_id}-${Date.now()}`
-      allPipelineIds.push(combinedPipelineId)
-      brollPipelineProgress.set(combinedPipelineId, { videoId: video_id, groupId: group_id, status: 'running', stageName: 'Loading data...', stageIndex: 0, totalStages: 1, phase: 'create_combined_strategy' })
-      executeCreateCombinedStrategy(prep_pipeline_id, analysis_pipeline_ids, video_id, group_id || null, combinedPipelineId)
-        .catch(err => console.error(`[broll-pipeline] Combined strategy failed: ${err.message}`))
-    }
-
-    console.log(`[broll-pipeline] run-strategies: firing ${allPipelineIds.length} pipelines (${newAnalysisIds.length} individual + ${shouldFireCombined ? 1 : 0} combined)`, allPipelineIds)
-
-    res.json({
-      strategyPipelineIds: allPipelineIds,
-      combinedPipelineId,
-    })
+    res.json(r)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1209,26 +1073,44 @@ router.post('/pipeline/run-plan', requireAuth, async (req, res) => {
     if (!prep_pipeline_id || !strategy_pipeline_id || !video_id) {
       return res.status(400).json({ error: 'prep_pipeline_id, strategy_pipeline_id, and video_id required' })
     }
-
-    const result = executeCreatePlan(prep_pipeline_id, strategy_pipeline_id, video_id, group_id || null)
-    result.catch(err => console.error(`[broll-pipeline] Create plan failed: ${err.message}`))
-
-    // Wait briefly for pipeline ID
-    await new Promise(r => setTimeout(r, 500))
-
-    // Find pipeline ID from progress map
-    let planPipelineId = null
-    for (const [pid, prog] of brollPipelineProgress.entries()) {
-      if (pid.startsWith('plan-') && prog.phase === 'create_plan') {
-        planPipelineId = pid
-        break
-      }
-    }
-
-    res.json({ planPipelineId })
+    const { runPlanForEachVariant } = await import('../services/broll-runner.js')
+    const r = await runPlanForEachVariant({
+      subGroupId: group_id, mainVideoId: video_id,
+      prepPipelineId: prep_pipeline_id, strategyPipelineIds: [strategy_pipeline_id],
+    })
+    res.json({ planPipelineId: r.planPipelineIds[0] || null })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
+})
+
+router.post('/groups/:subId/resume-chain', requireAuth, async (req, res) => {
+  const subId = parseInt(req.params.subId)
+  const fromStage = String(req.query.from || '')
+  if (!['plan', 'search'].includes(fromStage)) {
+    return res.status(400).json({ error: 'from must be "plan" or "search"' })
+  }
+  const sg = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`)
+    .get(subId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!sg) return res.status(404).json({ error: 'Sub-group not found' })
+
+  const { resumeChain } = await import('../services/auto-orchestrator.js')
+  resumeChain(subId, fromStage, req.body || {}).catch(err =>
+    console.error(`[resume-chain] ${err.message}`)
+  )
+  res.json({ ok: true })
+})
+
+router.post('/groups/:subId/retry-chain', requireAuth, async (req, res) => {
+  const subId = parseInt(req.params.subId)
+  const sg = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`)
+    .get(subId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!sg) return res.status(404).json({ error: 'Sub-group not found' })
+
+  await db.prepare("UPDATE video_groups SET broll_chain_status = NULL, broll_chain_error = NULL WHERE id = ?").run(subId)
+  const { runFullAutoBrollChain } = await import('../services/auto-orchestrator.js')
+  runFullAutoBrollChain(subId).catch(err => console.error(`[retry] ${err.message}`))
+  res.json({ ok: true })
 })
 
 // Transcript sources available for a video

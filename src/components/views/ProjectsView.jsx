@@ -9,6 +9,23 @@ import ProcessingModal from './ProcessingModal.jsx'
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
 const CONFIG_STEPS = new Set(['libraries', 'audience', 'references', 'roughcut', 'path'])
 
+// Compute how far through the slice-2 chain a project is. Stages mirror
+// the orchestrator's pipeline: upload → transcribe → classify → sync →
+// rough_cut → broll. We treat a project as terminal (full bar, no
+// "Processing" badge) when it's hit final assembly + (broll done OR no
+// auto-broll path). `total` is fixed at 6 so the badge reads stably.
+function aggregateProgress(p) {
+  const stages = ['upload', 'transcribe', 'classify', 'sync', 'rough_cut', 'broll']
+  const done = []
+  if (p.transcriptionStatus === 'done') { done.push('upload', 'transcribe') }
+  if (p.assembly_status === 'confirmed' || p.assembly_status === 'done') done.push('classify')
+  if (p.assembly_status === 'done') done.push('sync')
+  if (p.rough_cut_status === 'done' || !p.auto_rough_cut) done.push('rough_cut')
+  if (p.broll_chain_status === 'done') done.push('broll')
+  const isTerminal = p.assembly_status === 'done' && (p.broll_chain_status === 'done' || !p.path_id || p.path_id === 'guided')
+  return { done: done.length, total: stages.length, terminal: isTerminal }
+}
+
 export default function ProjectsView() {
   const { data: videos, loading, refetch } = useApi('/videos')
   const [activeTab, setActiveTab] = useState('Recent')
@@ -79,6 +96,10 @@ export default function ProjectsView() {
           audience: v.audience || null,
           path_id: v.path_id || null,
           auto_rough_cut: !!v.auto_rough_cut,
+          // Pipeline status fields used by aggregateProgress for the
+          // Full Auto / Strategy / Guided badge on the list row.
+          rough_cut_status: v.rough_cut_status || null,
+          broll_chain_status: v.broll_chain_status || null,
         }
       }
       groupMap[gid].videos.push(v)
@@ -232,30 +253,59 @@ export default function ProjectsView() {
                 <div className="text-xs text-muted mt-0.5 flex items-center gap-2">
                   <span>{project.videos.length} video{project.videos.length !== 1 ? 's' : ''}</span>
                   <span>· #{project.id}</span>
-                  {project.transcriptionStatus === 'done' ? (
-                    <span className="text-emerald-400 flex items-center gap-1">
-                      <CheckCircle2 size={11} /> Transcribed
-                    </span>
-                  ) : project.transcriptionStatus === 'transcribing' ? (
-                    <span className="text-amber-400 flex items-center gap-1">
-                      <Loader2 size={11} className="animate-spin" /> {project.transcriptionDone}/{project.transcriptionTotal} transcribed
-                    </span>
-                  ) : project.transcriptionStatus === 'partial' ? (
-                    <span className="text-amber-400">{project.transcriptionDone}/{project.transcriptionTotal} transcribed</span>
-                  ) : project.transcriptionStatus === 'failed' ? (
-                    <span className="text-red-400 flex items-center gap-1">
-                      <AlertCircle size={11} /> Transcription failed
-                    </span>
-                  ) : null}
-                  {project.assembly_status && (
-                    <span className={
-                      project.assembly_status === 'done' ? 'text-emerald-400' :
-                      project.assembly_status === 'failed' ? 'text-red-400' :
-                      'text-amber-400'
-                    }>
-                      · {project.assembly_status}
-                    </span>
-                  )}
+                  {(() => {
+                    // Auto-path projects show a single aggregate badge that
+                    // takes precedence over the per-stage transcription /
+                    // assembly statuses below — once the chain is mid-flight,
+                    // the user mostly cares about overall progress, not
+                    // which intermediate stage is currently running.
+                    const ap = aggregateProgress(project)
+                    if (project.path_id && ['hands-off', 'strategy-only', 'guided'].includes(project.path_id) && !ap.terminal) {
+                      return (
+                        <span className="text-amber-400 flex items-center gap-1">
+                          <Loader2 size={11} className="animate-spin" />
+                          Processing · {ap.done}/{ap.total}
+                        </span>
+                      )
+                    }
+                    return null
+                  })()}
+                  {(() => {
+                    // Fall through to the legacy per-stage badges only when
+                    // the aggregate badge isn't displayed (terminal or no
+                    // auto-path). Avoids two badges fighting for space.
+                    const ap = aggregateProgress(project)
+                    const aggregateActive = project.path_id && ['hands-off', 'strategy-only', 'guided'].includes(project.path_id) && !ap.terminal
+                    if (aggregateActive) return null
+                    return (
+                      <>
+                        {project.transcriptionStatus === 'done' ? (
+                          <span className="text-emerald-400 flex items-center gap-1">
+                            <CheckCircle2 size={11} /> Transcribed
+                          </span>
+                        ) : project.transcriptionStatus === 'transcribing' ? (
+                          <span className="text-amber-400 flex items-center gap-1">
+                            <Loader2 size={11} className="animate-spin" /> {project.transcriptionDone}/{project.transcriptionTotal} transcribed
+                          </span>
+                        ) : project.transcriptionStatus === 'partial' ? (
+                          <span className="text-amber-400">{project.transcriptionDone}/{project.transcriptionTotal} transcribed</span>
+                        ) : project.transcriptionStatus === 'failed' ? (
+                          <span className="text-red-400 flex items-center gap-1">
+                            <AlertCircle size={11} /> Transcription failed
+                          </span>
+                        ) : null}
+                        {project.assembly_status && (
+                          <span className={
+                            project.assembly_status === 'done' ? 'text-emerald-400' :
+                            project.assembly_status === 'failed' ? 'text-red-400' :
+                            'text-amber-400'
+                          }>
+                            · {project.assembly_status}
+                          </span>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
               </div>
               <div className="text-xs text-muted">

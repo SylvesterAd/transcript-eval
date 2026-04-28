@@ -800,8 +800,10 @@ export async function updateStatus(groupId, status, error = null, transcript = n
 
   if (status === 'done') {
     const flagRow = await db.prepare(
-      'SELECT user_id, auto_rough_cut FROM video_groups WHERE id = ?'
+      'SELECT user_id, auto_rough_cut, path_id FROM video_groups WHERE id = ?'
     ).get(groupId)
+    const isAutoPath = flagRow?.path_id && ['hands-off', 'strategy-only', 'guided'].includes(flagRow.path_id)
+
     if (flagRow?.auto_rough_cut) {
       await db.prepare(
         "UPDATE video_groups SET rough_cut_status = 'pending' WHERE id = ?"
@@ -827,13 +829,29 @@ export async function updateStatus(groupId, status, error = null, transcript = n
               "UPDATE video_groups SET rough_cut_status = 'running' WHERE id = ?"
             ).run(groupId)
           }
+          // After rough cut terminal — chain into the b-roll pipeline if the
+          // project picked an auto path. Fire-and-forget so pipeline failures
+          // don't block the rough_cut_status write above.
+          if (isAutoPath) {
+            const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
+            runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
+          }
         })
         .catch(async (err) => {
           console.error(`[auto-rough-cut] group ${groupId} failed:`, err.message)
           await db.prepare(
             "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
           ).run(groupId)
+          if (isAutoPath) {
+            const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
+            runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
+          }
         })
+    } else if (isAutoPath) {
+      // No rough cut requested but path is auto — fire b-roll chain directly
+      // after sync. Fire-and-forget; chain manages its own broll_chain_status.
+      const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
+      runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
     }
   }
 }

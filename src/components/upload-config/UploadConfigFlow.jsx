@@ -63,6 +63,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   // gate is closed until StepReferences signals otherwise.
   const [referencesValid, setReferencesValid] = useState(false)
   const [roughCutValid, setRoughCutValid] = useState(true)
+  const [pathValid, setPathValid] = useState(true)
 
   // Persist on step-forward. No-op without a valid groupId so navigation
   // never gets blocked by a doomed PUT (e.g. when the URL has no ?group=).
@@ -102,7 +103,8 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   const currentStepId = CONFIG_STEPS[current].id
   const continueDisabled =
     (currentStepId === 'references' && !referencesValid) ||
-    (currentStepId === 'roughcut'   && !roughCutValid)
+    (currentStepId === 'roughcut'   && !roughCutValid) ||
+    (currentStepId === 'path'       && !pathValid)
 
   const setState = {
     libraries: v => dispatch({ type: 'setLibraries', payload: v }),
@@ -118,7 +120,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   else if (current === 1) body = <StepAudience state={state} setState={setState} />
   else if (current === 2) body = <StepReferences groupId={groupId} onValidityChange={setReferencesValid} />
   else if (current === 3) body = <StepRoughCut groupId={groupId} state={state} setState={setState} onValidityChange={setRoughCutValid} />
-  else if (current === 4) body = <StepPath state={state} setState={setState} />
+  else if (current === 4) body = <StepPath state={state} setState={setState} groupId={groupId} onValidityChange={setPathValid} />
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-6">
@@ -168,6 +170,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
                 title={
                   continueDisabled && currentStepId === 'references' ? 'Add at least 2 reference videos and pick a favorite' :
                   continueDisabled && currentStepId === 'roughcut'   ? 'Not enough tokens for AI Rough Cut' :
+                  continueDisabled && currentStepId === 'path'       ? 'Full Auto requires ≥1 reference video and enough tokens for the chain' :
                   undefined
                 }
                 className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-8 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100"

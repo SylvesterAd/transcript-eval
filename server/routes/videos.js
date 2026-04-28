@@ -268,6 +268,12 @@ async function maybeAutoClassify(groupId) {
 
   console.log(`[transcribe] Group ${groupId} — all transcriptions terminal, auto-triggering classification`)
   classifyVideosForReview(groupId)
+    .then(async () => {
+      // For Full Auto (path_id='hands-off') projects, chain straight into
+      // confirmClassificationGroup so the user never has to click confirm.
+      const { chainAfterClassify } = await import('../services/auto-orchestrator.js')
+      await chainAfterClassify(groupId)
+    })
     .catch(err => console.error(`[transcribe] Auto-classify failed for group ${groupId}:`, err.message))
     .finally(() => classifyingGroups.delete(groupId))
 }
@@ -532,6 +538,8 @@ router.get('/', requireAuth, async (req, res) => {
       COALESCE(parent.audience_json, vg.audience_json) AS group_audience_json,
       COALESCE(parent.path_id, vg.path_id) AS group_path_id,
       COALESCE(parent.auto_rough_cut, vg.auto_rough_cut) AS group_auto_rough_cut,
+      COALESCE(parent.rough_cut_status, vg.rough_cut_status) AS group_rough_cut_status,
+      COALESCE(parent.broll_chain_status, vg.broll_chain_status) AS group_broll_chain_status,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'raw') AS has_raw,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'human_edited') AS has_human_edited
     FROM videos v
@@ -550,11 +558,15 @@ router.get('/', requireAuth, async (req, res) => {
     v.audience = v.group_audience_json ? JSON.parse(v.group_audience_json) : null
     v.path_id = v.group_path_id || null
     v.auto_rough_cut = !!v.group_auto_rough_cut
+    v.rough_cut_status = v.group_rough_cut_status || null
+    v.broll_chain_status = v.group_broll_chain_status || null
     delete v.group_libraries_json
     delete v.group_freepik_opt_in
     delete v.group_audience_json
     delete v.group_path_id
     delete v.group_auto_rough_cut
+    delete v.group_rough_cut_status
+    delete v.group_broll_chain_status
   }
   res.json(videos)
 })
@@ -623,6 +635,39 @@ router.get('/groups/:id/status', requireAuth, async (req, res) => {
     rough_cut_status: row.rough_cut_status,
     rough_cut_error_required: row.rough_cut_error_required,
   })
+})
+
+router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const parent = await db.prepare(`
+    SELECT id, name, path_id, auto_rough_cut, assembly_status, assembly_error, rough_cut_status, broll_chain_status
+    FROM video_groups
+    WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}
+  `).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!parent) return res.status(404).json({ error: 'Group not found' })
+
+  const videos = await db.prepare(`
+    SELECT id, title, transcription_status, duration_seconds, cf_stream_uid, file_path
+    FROM videos WHERE group_id = ? AND video_type = 'raw' ORDER BY id
+  `).all(groupId)
+
+  const subGroups = await db.prepare(`
+    SELECT id, name, assembly_status, assembly_error, rough_cut_status, broll_chain_status, broll_chain_error
+    FROM video_groups WHERE parent_group_id = ? ORDER BY id
+  `).all(groupId)
+
+  // Best-effort b-roll progress per sub-group
+  for (const sg of subGroups) {
+    const refs = await db.prepare(`
+      SELECT COUNT(*) AS cnt FROM broll_example_sources
+      WHERE example_set_id IN (SELECT id FROM broll_example_sets WHERE group_id = ?)
+    `).get(sg.id).catch(() => ({ cnt: 0 }))
+    sg.broll = {
+      references_total: refs?.cnt || 0,
+    }
+  }
+
+  res.json({ parent: { ...parent, videos }, subGroups })
 })
 
 // Get classification data + videos with media info
@@ -729,35 +774,16 @@ router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) 
   const { groups } = req.body
   if (!Array.isArray(groups) || groups.length === 0) return res.status(400).json({ error: 'groups array required' })
 
-  // Project (original group) stays as parent container.
-  // ALL videos move to new child sub-groups.
-  const subGroupIds = []
+  // Splitting + propagation lives in auto-orchestrator so Full Auto's
+  // chainAfterClassify and the manual click path execute identical logic.
+  const { confirmClassificationGroup } = await import('../services/auto-orchestrator.js')
+  const r = await confirmClassificationGroup(groupId, groups, {
+    propagateAutoRoughCut: !!group.auto_rough_cut,
+    propagatePathId: group.path_id,
+    userId: req.auth.userId,
+  })
 
-  for (const g of groups) {
-    const r = await db.prepare(
-      'INSERT INTO video_groups (name, assembly_status, parent_group_id, user_id) VALUES (?, ?, ?, ?)'
-    ).run(g.name, 'pending', groupId, req.auth.userId)
-    const subId = r.lastInsertRowid
-    subGroupIds.push(subId)
-
-    if (g.videoIds?.length) {
-      const placeholders = g.videoIds.map(() => '?').join(',')
-      await db.prepare(`UPDATE videos SET group_id = ? WHERE id IN (${placeholders})`)
-        .run(subId, ...g.videoIds)
-    }
-    console.log(`[confirm] Sub-group "${g.name}": ${g.videoIds?.length || 0} videos → group ${subId}`)
-  }
-
-  // Mark project as confirmed, store sub-group mapping
-  await db.prepare('UPDATE video_groups SET assembly_status = ? WHERE id = ?')
-    .run('confirmed', groupId)
-
-  // Start sync for each sub-group
-  for (const subId of subGroupIds) {
-    analyzeMulticam(subId, { skipClassification: true })
-  }
-
-  res.json({ ok: true, groupIds: subGroupIds })
+  res.json({ ok: true, groupIds: r.subGroupIds })
 })
 
 // Save editor state for a group
