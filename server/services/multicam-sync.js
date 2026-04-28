@@ -789,13 +789,52 @@ async function buildTimeline(groupId, multicamClusters, items) {
   }
 }
 
-async function updateStatus(groupId, status, error = null, transcript = null, details = null) {
+export async function updateStatus(groupId, status, error = null, transcript = null, details = null) {
   if (transcript !== null) {
     await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ?, assembled_transcript = ?, assembly_details_json = ? WHERE id = ?')
       .run(status, error, transcript, details, groupId)
   } else {
     await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
       .run(status, error, groupId)
+  }
+
+  if (status === 'done') {
+    const flagRow = await db.prepare(
+      'SELECT user_id, auto_rough_cut FROM video_groups WHERE id = ?'
+    ).get(groupId)
+    if (flagRow?.auto_rough_cut) {
+      await db.prepare(
+        "UPDATE video_groups SET rough_cut_status = 'pending' WHERE id = ?"
+      ).run(groupId)
+      const { runAiRoughCut } = await import('./rough-cut-runner.js')
+      runAiRoughCut({ groupId, userId: flagRow.user_id })
+        .then(async (r) => {
+          if (r.error === 'insufficient_tokens') {
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'insufficient_tokens', rough_cut_error_required = ? WHERE id = ?"
+            ).run(r.required, groupId)
+          } else if (r.error || (!r.ok && !r.already_exists)) {
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
+            ).run(groupId)
+          } else if (r.already_exists) {
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'done' WHERE id = ?"
+            ).run(groupId)
+          } else {
+            // ok=true — pipeline running; Task 6 flips to 'done' on completion.
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'running' WHERE id = ?"
+            ).run(groupId)
+          }
+        })
+        .catch(async (err) => {
+          console.error(`[auto-rough-cut] group ${groupId} failed:`, err.message)
+          await db.prepare(
+            "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
+          ).run(groupId)
+        })
+    }
   }
 }
 

@@ -5,6 +5,7 @@ import Stepper from './Stepper.jsx'
 import StepLibraries from './steps/StepLibraries.jsx'
 import StepAudience from './steps/StepAudience.jsx'
 import StepReferences from './steps/StepReferences.jsx'
+import StepRoughCut from './steps/StepRoughCut.jsx'
 import StepPath from './steps/StepPath.jsx'
 import StepDone from './steps/StepDone.jsx'
 
@@ -14,11 +15,12 @@ const UNIFIED_STEPS = [
   { id: 'libraries',  label: 'Libraries' },
   { id: 'audience',   label: 'Audience' },
   { id: 'references', label: 'Refs' },
+  { id: 'roughcut',   label: 'Rough Cut' },
   { id: 'path',       label: 'Path' },
   { id: 'transcribe', label: 'Transcribe' },
 ]
 // Config flow drives steps 1–4 of the unified list.
-const CONFIG_STEPS = UNIFIED_STEPS.slice(1, 5)
+const CONFIG_STEPS = UNIFIED_STEPS.slice(1, 6)
 const UNIFIED_OFFSET = 1
 
 const DEFAULT_STATE = {
@@ -33,6 +35,7 @@ const DEFAULT_STATE = {
     notes: '',
   },
   pathId: 'strategy-only',
+  autoRoughCut: false,
 }
 
 function reducer(state, action) {
@@ -42,6 +45,7 @@ function reducer(state, action) {
     case 'setFreepikOptIn': return { ...state, freepikOptIn: action.payload }
     case 'setAudience':  return { ...state, audience: action.payload }
     case 'setPathId':    return { ...state, pathId: action.payload }
+    case 'setAutoRoughCut': return { ...state, autoRoughCut: action.payload }
     default: return state
   }
 }
@@ -58,6 +62,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   // the value derivable from the (uninitialized) list — false — so the
   // gate is closed until StepReferences signals otherwise.
   const [referencesValid, setReferencesValid] = useState(false)
+  const [roughCutValid, setRoughCutValid] = useState(true)
 
   // Persist on step-forward. No-op without a valid groupId so navigation
   // never gets blocked by a doomed PUT (e.g. when the URL has no ?group=).
@@ -72,6 +77,8 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
       body.audience = state.audience
     } else if (stepId === 'path') {
       body.path_id = state.pathId
+    } else if (stepId === 'roughcut') {
+      body.auto_rough_cut = state.autoRoughCut
     }
     // references has no batched persistence — it hits its own API per-add
     if (Object.keys(body).length) {
@@ -93,13 +100,16 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
 
   const isLast = current === CONFIG_STEPS.length - 1
   const currentStepId = CONFIG_STEPS[current].id
-  const continueDisabled = currentStepId === 'references' && !referencesValid
+  const continueDisabled =
+    (currentStepId === 'references' && !referencesValid) ||
+    (currentStepId === 'roughcut'   && !roughCutValid)
 
   const setState = {
     libraries: v => dispatch({ type: 'setLibraries', payload: v }),
     freepikOptIn: v => dispatch({ type: 'setFreepikOptIn', payload: v }),
     audience: v => dispatch({ type: 'setAudience', payload: v }),
     pathId: v => dispatch({ type: 'setPathId', payload: v }),
+    autoRoughCut: v => dispatch({ type: 'setAutoRoughCut', payload: v }),
   }
 
   let body
@@ -107,7 +117,8 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   else if (current === 0) body = <StepLibraries state={state} setState={setState} />
   else if (current === 1) body = <StepAudience state={state} setState={setState} />
   else if (current === 2) body = <StepReferences groupId={groupId} onValidityChange={setReferencesValid} />
-  else if (current === 3) body = <StepPath state={state} setState={setState} />
+  else if (current === 3) body = <StepRoughCut groupId={groupId} state={state} setState={setState} onValidityChange={setRoughCutValid} />
+  else if (current === 4) body = <StepPath state={state} setState={setState} />
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-6">
@@ -154,7 +165,11 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
               <button
                 onClick={next}
                 disabled={continueDisabled}
-                title={continueDisabled ? 'Add at least 2 reference videos and pick a favorite' : undefined}
+                title={
+                  continueDisabled && currentStepId === 'references' ? 'Add at least 2 reference videos and pick a favorite' :
+                  continueDisabled && currentStepId === 'roughcut'   ? 'Not enough tokens for AI Rough Cut' :
+                  undefined
+                }
                 className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-8 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100"
               >
                 {isLast ? 'Review & Continue' : 'Continue'}

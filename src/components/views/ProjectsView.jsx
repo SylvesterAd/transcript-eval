@@ -7,7 +7,7 @@ import UploadConfigFlow from '../upload-config/UploadConfigFlow.jsx'
 import ProcessingModal from './ProcessingModal.jsx'
 
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
-const CONFIG_STEPS = new Set(['libraries', 'audience', 'references', 'path'])
+const CONFIG_STEPS = new Set(['libraries', 'audience', 'references', 'roughcut', 'path'])
 
 export default function ProjectsView() {
   const { data: videos, loading, refetch } = useApi('/videos')
@@ -78,6 +78,7 @@ export default function ProjectsView() {
           freepik_opt_in: v.freepik_opt_in === undefined ? true : v.freepik_opt_in,
           audience: v.audience || null,
           path_id: v.path_id || null,
+          auto_rough_cut: !!v.auto_rough_cut,
         }
       }
       groupMap[gid].videos.push(v)
@@ -115,6 +116,7 @@ export default function ProjectsView() {
     freepikOptIn: currentGroup.freepik_opt_in !== false,
     audience: currentGroup.audience || undefined,
     pathId: currentGroup.path_id || undefined,
+    autoRoughCut: !!currentGroup.auto_rough_cut,
   } : null
 
   const handleProjectClick = (project) => {
