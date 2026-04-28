@@ -622,7 +622,7 @@ function maybePushProgress(item) {
 
 // ------------------- State helpers -------------------
 
-function buildInitialRunState({ runId, manifest, targetFolder, options, userId }) {
+export function buildInitialRunState({ runId, manifest, targetFolder, options, userId }) {
   return {
     runId,
     started_at: Date.now(),
@@ -642,7 +642,11 @@ function buildInitialRunState({ runId, manifest, targetFolder, options, userId }
       error_code: null,
       retries: 0,
       resolved_uuid: null,
-      signed_url: null,
+      // Pre-populated by the server for A-roll items (Cloudflare Stream
+      // URL) so the queue skips the mint phase. Hardcoding null here
+      // forced aroll into getSignedUrlForSource → unknown-source throw,
+      // which the classifier mis-routed to freepik_404.
+      signed_url: m.signed_url || null,
       claimed: false,
       // Ext.6: timing fields for telemetry meta. Set when the phase starts.
       resolve_started_at: null,
