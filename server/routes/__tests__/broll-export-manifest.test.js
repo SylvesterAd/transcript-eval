@@ -239,6 +239,24 @@ describe('buildManifestFromPlacements', () => {
     expect(out.items[0].source_item_id).toBe('keep')
   })
 
+  it('ignores persistedSelectedResult when it is a number (contract: must be an object)', () => {
+    // Documents the buildManifestFromPlacements contract: persistedSelectedResult
+    // must be the resolved result OBJECT, not the index. getBRollEditorData
+    // resolves index -> object at the boundary; if a future change reintroduces
+    // a number index here, the manifest must NOT silently honor it as a pick —
+    // it should fall through to the auto-pick path (first non-storyblocks).
+    const placements = [makePlacement({
+      persistedSelectedResult: 1,
+      results: [
+        makeResult({ source: 'pexels', source_item_id: 'auto_pick' }),
+        makeResult({ source: 'envato', source_item_id: 'index_1' }),
+      ],
+    })]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].source_item_id).toBe('auto_pick')
+  })
+
   it('seq is 1-based and gap-free across kept placements', () => {
     const placements = [
       makePlacement({ results: [makeResult({ source: 'storyblocks', source_item_id: 's1' })] }),  // skipped

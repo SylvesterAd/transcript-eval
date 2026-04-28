@@ -5211,7 +5211,8 @@ export async function getBRollEditorData(planPipelineId) {
       p.userTimelineEnd = e.timelineEnd
     }
     if (e?.selectedResult != null) {
-      p.persistedSelectedResult = e.selectedResult
+      const resolved = Array.isArray(p.results) ? p.results[e.selectedResult] : undefined
+      if (resolved) p.persistedSelectedResult = resolved
     }
     editedPlacements.push(p)
   }
@@ -5231,7 +5232,7 @@ export async function getBRollEditorData(planPipelineId) {
       placementIndex: null,
       userTimelineStart: up.timelineStart,
       userTimelineEnd: up.timelineEnd,
-      persistedSelectedResult: up.selectedResult,
+      persistedSelectedResult: (up.selectedResult != null ? (up.results?.[up.selectedResult] ?? null) : null),
       results: up.results || [],
       searchStatus: (up.results || []).length > 0 ? 'complete' : 'pending',
       ...(up.snapshot || {}),
