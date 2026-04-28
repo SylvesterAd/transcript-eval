@@ -50,6 +50,25 @@ try {
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS freepik_opt_in BOOLEAN DEFAULT TRUE`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS audience_json TEXT`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS path_id TEXT`)
+    // Audit columns on videos for tracking transcription_status flips. Added
+    // 2026-04-28 after a 'done' status mysteriously regressed to NULL with no
+    // discoverable cause — without these we have no way to attribute future
+    // regressions to a specific code path.
+    await pool.query(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`)
+    await pool.query(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS transcription_history JSONB DEFAULT '[]'::jsonb`)
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION videos_set_updated_at() RETURNS TRIGGER AS $$
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `)
+    await pool.query(`DROP TRIGGER IF EXISTS videos_updated_at ON videos`)
+    await pool.query(`
+      CREATE TRIGGER videos_updated_at BEFORE UPDATE ON videos
+        FOR EACH ROW EXECUTE FUNCTION videos_set_updated_at()
+    `)
     await pool.query(`CREATE TABLE IF NOT EXISTS user_tokens (
       id SERIAL PRIMARY KEY,
       user_id TEXT NOT NULL UNIQUE,
