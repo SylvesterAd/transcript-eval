@@ -1,10 +1,10 @@
 // LRU cache of <link rel="preload" as="video"> tags appended to <head>.
 // Keeps network pressure low by capping at 20 concurrent preloads, evicting
-// least-recently-used URLs when new ones arrive. The first ~2 imminent clips
+// least-recently-used URLs when new ones arrive. The first ~4 imminent clips
 // use fetchpriority=high; the rest use low so they don't crowd out the high ones.
 
 const MAX_ENTRIES = 20
-const HIGH_PRIORITY_COUNT = 2
+const HIGH_PRIORITY_COUNT = 4
 const links = new Map() // url -> { el: HTMLLinkElement, priority: 'high'|'low' }
 let scheduleTimer = null
 
@@ -12,15 +12,20 @@ function addPreload(url, priority) {
   if (!url || typeof document === 'undefined') return
   if (links.has(url)) {
     const entry = links.get(url)
-    // Touch for LRU: re-insert to move to end
-    links.delete(url)
-    links.set(url, entry)
-    // Upgrade priority if the same URL is now in the high tier
-    if (entry.priority !== priority) {
-      entry.el.setAttribute('fetchpriority', priority)
-      entry.priority = priority
+    if (entry.priority === 'low' && priority === 'high') {
+      // Low→high upgrade: setAttribute('fetchpriority') on an existing <link>
+      // does NOT re-prioritize an in-flight or completed fetch. Remove the old
+      // <link> and fall through to create a fresh one so the browser actually
+      // issues a new request at the higher priority.
+      if (entry.el?.parentNode) entry.el.parentNode.removeChild(entry.el)
+      links.delete(url)
+    } else {
+      // Same priority (or high→low — re-fetching a completed high-priority
+      // request as low wouldn't help): just touch LRU recency.
+      links.delete(url)
+      links.set(url, entry)
+      return
     }
-    return
   }
   const link = document.createElement('link')
   link.rel = 'preload'
