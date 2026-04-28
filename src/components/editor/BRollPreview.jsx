@@ -24,7 +24,11 @@ export default function BRollPreview() {
       const resultIdx = activePlacement ? (b.selectedResults[activePlacement.index] ?? activePlacement.persistedSelectedResult ?? 0) : 0
       const activeResult = activePlacement?.results?.[resultIdx] || null
 
-      if (activeResult) {
+      const sourceDuration = activeResult ? (activeResult.duration || 30) : 0
+      const localTime = activeResult ? s.currentTime - activePlacement.timelineStart : 0
+      const withinSource = activeResult && localTime < sourceDuration
+
+      if (withinSource) {
         if (!showBRoll) setShowBRoll(true)
         if (brollVideoRef.current) {
           const v = brollVideoRef.current
@@ -35,8 +39,7 @@ export default function BRollPreview() {
             setVideoLoadState('loading')
             v.src = urlChain[0] || url
           }
-          const localTime = s.currentTime - activePlacement.timelineStart
-          const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
+          const clampedTime = Math.max(0, localTime)
           if (Math.abs(v.currentTime - clampedTime) > 0.5) v.currentTime = clampedTime
           if (s.isPlaying && v.paused) v.play().catch(() => {})
           else if (!s.isPlaying && !v.paused) v.pause()

@@ -344,18 +344,43 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
             }}
           >
             {hasResult ? (
-              <>
-                <img
-                  src={result.thumbnail_url || result.preview_url || result.url}
-                  alt=""
-                  className="w-full h-full object-cover pointer-events-none"
-                  loading="lazy"
-                  draggable={false}
-                />
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-1 py-0.5 pointer-events-none">
-                  <span className="text-[9px] text-white/80 truncate block">{result.title || result.source}</span>
-                </div>
-              </>
+              (() => {
+                const sourceDuration = result.duration || 0
+                const isShort = sourceDuration > 0 && sourceDuration < p.timelineDuration
+                const thumbWidth = isShort ? sourceDuration * zoom : width
+                const tailWidth = isShort ? width - thumbWidth : 0
+                return (
+                  <>
+                    <div
+                      className="absolute top-0 left-0 h-full overflow-hidden pointer-events-none"
+                      style={{ width: thumbWidth }}
+                    >
+                      <img
+                        src={result.thumbnail_url || result.preview_url || result.url}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                        draggable={false}
+                      />
+                      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-1 py-0.5">
+                        <span className="text-[9px] text-white/80 truncate block">{result.title || result.source}</span>
+                      </div>
+                    </div>
+                    {isShort && (
+                      <div
+                        className="absolute top-0 h-full bg-zinc-900/60 flex items-center justify-center pointer-events-none"
+                        style={{
+                          left: thumbWidth,
+                          width: tailWidth,
+                          backgroundImage: 'repeating-linear-gradient(45deg, rgba(255,255,255,0.04) 0 6px, transparent 6px 12px)',
+                        }}
+                      >
+                        {tailWidth > 40 && <span className="text-zinc-500 text-[9px]">A-roll</span>}
+                      </div>
+                    )}
+                  </>
+                )
+              })()
             ) : isSearching ? (
               <div className="w-full h-full bg-primary-fixed/10 flex items-center justify-center gap-1 pointer-events-none">
                 <Loader2 size={12} className="text-primary-fixed animate-spin" />
