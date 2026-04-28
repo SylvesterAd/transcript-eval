@@ -177,6 +177,7 @@ export default function App() {
     <Routes>
       {/* Export page — full-screen, outside UserLayout (sits between editor and extension) */}
       <Route path="/editor/:id/export" element={<ErrorBoundary><ExportPage /></ErrorBoundary>} />
+      <Route path="/editor/:id/export/:planPipelineId" element={<ErrorBoundary><ExportPage /></ErrorBoundary>} />
 
       {/* Editor — full-screen, outside UserLayout */}
       <Route path="/editor/:id" element={<ErrorBoundary><EditorView /></ErrorBoundary>} />

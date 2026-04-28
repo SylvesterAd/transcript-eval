@@ -6,15 +6,15 @@ import { buildManifest, formatBytes, estimateTimeRange } from '../../lib/buildMa
 // Spec § State C. Manifest summary + Start Export.
 //
 // Inputs the parent passes:
-//   variant            — current variant from URL ?variant=
-//   manifestResp       — { pipeline_id, variant, items, totals }
-//   additionalManifests— { variantLabel: manifestResp } map for multi-variant checkbox
+//   variant            — display label for the active plan (e.g. "Variant A")
+//   manifestResp       — { pipeline_id, items, totals }
+//   additionalManifests— { planPipelineId: manifestResp } map for multi-variant checkbox
 //   ping               — preflight ping value (for installed/version display)
 //   diskValue          — { quota, usage, available } or { available:null }
 //   onStart            — callback({ unifiedManifest, options }) → triggers POST /api/exports + sendExport
 //   onChangeFolder     — callback (Phase A: shows "coming soon" alert)
-//   onToggleVariant    — callback(variantLabel, on/off) for the multi-variant checkbox
-//   availableExtraVariants — string[] — variants other than the current one with completed broll_searches
+//   onTogglePlan       — callback(planPipelineId, on/off) for the multi-variant checkbox
+//   otherPlans         — [{plan_pipeline_id, label}] — other completed plans in this group
 
 const Wrap = styled.div`
   max-width: 720px;
@@ -137,18 +137,18 @@ const StartButton = styled.button`
 
 export default function StateC_Summary({
   variant, manifestResp, additionalManifests, ping, diskValue,
-  onStart, onChangeFolder, onToggleVariant, availableExtraVariants,
+  onStart, onChangeFolder, onTogglePlan, otherPlans = [],
   targetFolderOverride,
 }) {
   const [forceRedownload, setForceRedownload] = useState(false)
-  const [includeExtras, setIncludeExtras] = useState({})  // {variantLabel: true}
+  const [includeExtras, setIncludeExtras] = useState({})  // {planPipelineId: true}
   const [starting, setStarting] = useState(false)
 
   // Build the unified manifest from the current selection.
   const unified = useMemo(() => {
     const responses = [manifestResp]
-    for (const [v, on] of Object.entries(includeExtras)) {
-      if (on && additionalManifests[v]) responses.push(additionalManifests[v])
+    for (const [id, on] of Object.entries(includeExtras)) {
+      if (on && additionalManifests[id]) responses.push(additionalManifests[id])
     }
     return buildManifest({ manifests: responses, options: { force_redownload: forceRedownload } })
   }, [manifestResp, additionalManifests, includeExtras, forceRedownload])
@@ -157,11 +157,19 @@ export default function StateC_Summary({
   const sources = unified.totals.by_source
   const variantLabels = unified.variants.length ? unified.variants.join(', ') : variant
 
+  // Folder slug derives from the plan pipeline id's video segment + the
+  // variant letter. plan_pipeline_id format is `plan-<videoId>-<ts>`;
+  // variant labels look like "Variant A". Falls back to the raw id when
+  // the patterns don't match (defensive).
+  const planMatch = String(manifestResp?.pipeline_id || '').match(/^plan-(\d+)-/)
+  const folderRoot = planMatch ? planMatch[1] : (manifestResp?.pipeline_id || '')
+  const variantLetter = String(variant || '').replace(/^Variant\s+/i, '').toLowerCase() || 'a'
+
   // Default folder per spec § "Multi-variant exports" (multi: -all suffix).
   // User-edited override (via "Change folder") wins when present.
   const defaultFolder = unified.variants.length > 1
-    ? `~/Downloads/transcript-eval/export-${manifestResp?.pipeline_id || ''}-all/`
-    : `~/Downloads/transcript-eval/export-${manifestResp?.pipeline_id || ''}-${variant.toLowerCase()}/`
+    ? `~/Downloads/transcript-eval/export-${folderRoot}-all/`
+    : `~/Downloads/transcript-eval/export-${folderRoot}-${variantLetter}/`
   const folderName = targetFolderOverride || defaultFolder
 
   const diskAvailable = diskValue?.available ?? null
@@ -186,7 +194,7 @@ export default function StateC_Summary({
   return (
     <Wrap>
       <Card>
-        <Header>Variant {variantLabels} · {unified.totals.count} clips · ~{formatBytes(totalBytes)}</Header>
+        <Header>{variantLabels} · {unified.totals.count} clips · ~{formatBytes(totalBytes)}</Header>
         <SubHeader>Pre-flight checks complete.</SubHeader>
 
         <CheckRow><CheckCircle2 size={16} className="icon-ok" /> Export Helper installed{ping?.ext_version ? ` (v${ping.ext_version})` : ''}</CheckRow>
@@ -220,21 +228,21 @@ export default function StateC_Summary({
           </FolderRow>
         </Section>
 
-        {availableExtraVariants.length > 0 && (
+        {otherPlans.length > 0 && (
           <Section>
             <SectionLabel>Multi-variant export</SectionLabel>
-            {availableExtraVariants.map(v => (
-              <Checkbox key={v}>
+            {otherPlans.map(p => (
+              <Checkbox key={p.plan_pipeline_id}>
                 <input
                   type="checkbox"
-                  checked={!!includeExtras[v]}
+                  checked={!!includeExtras[p.plan_pipeline_id]}
                   onChange={(e) => {
-                    setIncludeExtras(prev => ({ ...prev, [v]: e.target.checked }))
-                    onToggleVariant(v, e.target.checked)
+                    setIncludeExtras(prev => ({ ...prev, [p.plan_pipeline_id]: e.target.checked }))
+                    onTogglePlan(p.plan_pipeline_id, e.target.checked)
                   }}
                 />
                 <span>
-                  Also export Variant {v}
+                  Also export {p.label}
                   <div className="desc">Shares the media folder, adds 1 more XML file.</div>
                 </span>
               </Checkbox>
