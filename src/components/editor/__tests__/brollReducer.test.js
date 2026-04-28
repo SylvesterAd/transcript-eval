@@ -118,3 +118,59 @@ describe('userPlacementToRawEntry', () => {
     expect(out.searchStatus).toBe('pending')
   })
 })
+
+describe('reducer REMOVE_ORPHAN_RAW_PLACEMENT', () => {
+  it('removes the matching synthetic from rawPlacements AND placements', () => {
+    const base = {
+      ...initialState,
+      rawPlacements: [
+        { index: 'user:u_a', userPlacementId: 'u_a', isUserPlacement: true },
+        { index: 'user:u_b', userPlacementId: 'u_b', isUserPlacement: true },
+      ],
+      placements: [
+        { index: 'user:u_a', userPlacementId: 'u_a' },
+        { index: 'user:u_b', userPlacementId: 'u_b' },
+      ],
+    }
+    const next = reducer(base, { type: 'REMOVE_ORPHAN_RAW_PLACEMENT', payload: { userPlacementId: 'u_a' } })
+    expect(next.rawPlacements.map(p => p.userPlacementId)).toEqual(['u_b'])
+    expect(next.placements.map(p => p.userPlacementId)).toEqual(['u_b'])
+  })
+
+  it('returns same state ref when userPlacementId does not match anything', () => {
+    const base = {
+      ...initialState,
+      rawPlacements: [{ index: 'user:u_b', userPlacementId: 'u_b', isUserPlacement: true }],
+      placements: [{ index: 'user:u_b', userPlacementId: 'u_b' }],
+    }
+    const next = reducer(base, { type: 'REMOVE_ORPHAN_RAW_PLACEMENT', payload: { userPlacementId: 'nope' } })
+    expect(next).toBe(base)
+  })
+
+  it('returns same state ref when payload is missing/malformed', () => {
+    const base = {
+      ...initialState,
+      rawPlacements: [{ index: 'user:u_b', userPlacementId: 'u_b', isUserPlacement: true }],
+    }
+    expect(reducer(base, { type: 'REMOVE_ORPHAN_RAW_PLACEMENT' })).toBe(base)
+    expect(reducer(base, { type: 'REMOVE_ORPHAN_RAW_PLACEMENT', payload: {} })).toBe(base)
+  })
+})
+
+describe('reducer SET_LOAD_ERROR / CLEAR_LOAD_ERROR', () => {
+  it('SET_LOAD_ERROR sets state.loadError', () => {
+    const next = reducer(initialState, { type: 'SET_LOAD_ERROR', payload: '502 Bad Gateway' })
+    expect(next.loadError).toBe('502 Bad Gateway')
+  })
+
+  it('CLEAR_LOAD_ERROR sets state.loadError to null', () => {
+    const base = { ...initialState, loadError: 'oops' }
+    const next = reducer(base, { type: 'CLEAR_LOAD_ERROR' })
+    expect(next.loadError).toBe(null)
+  })
+
+  it('CLEAR_LOAD_ERROR is a no-op (same ref) when already null', () => {
+    const next = reducer(initialState, { type: 'CLEAR_LOAD_ERROR' })
+    expect(next).toBe(initialState)
+  })
+})

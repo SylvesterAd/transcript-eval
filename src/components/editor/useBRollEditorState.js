@@ -155,8 +155,9 @@ export function useBRollEditorState(planPipelineId) {
             searchProgress: data.searchProgress,
             pipelineChanged: false,  // same pipeline — preserve selection (T5)
           }})
+          dispatch({ type: 'CLEAR_LOAD_ERROR' })
         })
-        .catch(() => {})
+        .catch(err => dispatch({ type: 'SET_LOAD_ERROR', payload: err.message }))
       return () => { cancelled = true }
     }
 
@@ -209,8 +210,9 @@ export function useBRollEditorState(planPipelineId) {
           } : data?.state,
         }
         dispatch({ type: 'LOAD_EDITOR_STATE', payload: sessionScoped })
+        dispatch({ type: 'CLEAR_LOAD_ERROR' })
       })
-      .catch(() => { /* non-fatal; empty state stays */ })
+      .catch(err => dispatch({ type: 'SET_LOAD_ERROR', payload: err.message }))
     return () => { cancelled = true }
   }, [planPipelineId])
 
@@ -480,7 +482,12 @@ export function useBRollEditorState(planPipelineId) {
       dispatch({ type: 'APPLY_ACTION', payload: entry })
     } else if (userPlacementId) {
       const up = state.userPlacements.find(u => u.id === userPlacementId)
-      if (!up) return
+      if (!up) {
+        console.warn('[broll] orphan synthetic — cleaning up', userPlacementId)
+        dispatch({ type: 'REMOVE_ORPHAN_RAW_PLACEMENT', payload: { userPlacementId } })
+        inactiveCacheSetterRef.current?.(planPipelineId, prev => (prev || []).filter(p => p.userPlacementId !== userPlacementId))
+        return
+      }
       const entry = {
         id: generateActionId(),
         ts: Date.now(),
@@ -491,7 +498,7 @@ export function useBRollEditorState(planPipelineId) {
       }
       dispatch({ type: 'APPLY_ACTION', payload: entry })
     }
-  }, [state.placements, state.edits, state.userPlacements])
+  }, [state.placements, state.edits, state.userPlacements, planPipelineId])
 
   // Async undo/redo: cross-pipeline drag actions carry targetPipelineId +
   // targetUserPlacementSnapshot. Undoing them must also remove the userPlacement
@@ -1013,6 +1020,7 @@ export function useBRollEditorState(planPipelineId) {
     searchProgress: state.searchProgress,
     loading: state.loading,
     error: state.error,
+    loadError: state.loadError,
     selectPlacement,
     selectResult,
     activePlacementAtTime,
@@ -1043,7 +1051,7 @@ export function useBRollEditorState(planPipelineId) {
     registerInactiveCacheSetter,
   }), [
     state.rawPlacements, state.placements, state.selectedIndex, selectedPlacement,
-    state.selectedResults, state.searchProgress, state.loading, state.error,
+    state.selectedResults, state.searchProgress, state.loading, state.error, state.loadError,
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
     searchPlacement, searchPlacementCustom, searchUserPlacement, hidePlacement, undo, redo,
     copyPlacement, pastePlacement, resetPlacement, dragCrossPlacement,

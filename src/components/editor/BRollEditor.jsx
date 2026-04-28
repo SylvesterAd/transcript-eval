@@ -548,6 +548,17 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
               />
             </div>
           </div>
+          {brollState.loadError && (
+            <div className="bg-red-900/30 text-red-400 text-xs px-4 py-1.5 border-t border-red-900/50 flex items-center gap-3">
+              <span className="shrink-0">Connection issue — data may be stale.</span>
+              <button
+                onClick={() => brollState.refetchEditorData?.()}
+                className="px-2 py-0.5 rounded text-red-400 hover:bg-red-900/40 border border-red-900/50 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
           <SearchStatusBar
             placements={brollState.placements}
             searchProgress={brollState.searchProgress}

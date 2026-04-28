@@ -316,6 +316,22 @@ export function reducer(state, action) {
     case 'SAVE_SUCCESS': {
       return { ...state, editorStateVersion: action.payload.version, dirty: false }
     }
+    case 'REMOVE_ORPHAN_RAW_PLACEMENT': {
+      const { userPlacementId } = action.payload || {}
+      if (!userPlacementId) return state
+      const filtered = state.rawPlacements.filter(p => p.userPlacementId !== userPlacementId)
+      if (filtered.length === state.rawPlacements.length) return state
+      return {
+        ...state,
+        rawPlacements: filtered,
+        placements: state.placements.filter(p => p.userPlacementId !== userPlacementId),
+      }
+    }
+    case 'SET_LOAD_ERROR':
+      return { ...state, loadError: action.payload }
+    case 'CLEAR_LOAD_ERROR':
+      if (state.loadError == null) return state
+      return { ...state, loadError: null }
     default:
       return state
   }
@@ -337,4 +353,5 @@ export const initialState = {
   editorStateVersion: 0,       // for optimistic concurrency
   dirty: false,                // true while a debounced save is pending
   editorStateLoaded: false,    // true once LOAD_EDITOR_STATE has populated for the current pipeline
+  loadError: null,
 }

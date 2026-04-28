@@ -49,6 +49,39 @@ describe('useBRollEditorState — surface', () => {
   })
 })
 
+describe('useBRollEditorState — hidePlacement orphan synthetic', () => {
+  let hookHandle = null
+  beforeEach(() => { globalThis.fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 200 })) })
+  afterEach(() => { if (hookHandle) { hookHandle.unmount(); hookHandle = null } vi.restoreAllMocks() })
+
+  it('removes orphan synthetic from rawPlacements and placements when not in userPlacements', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    hookHandle = renderHook(() => useBRollEditorState('pipe-A'))
+    const { result } = hookHandle
+    const synthetic = {
+      index: 'user:u_orphan',
+      userPlacementId: 'u_orphan',
+      isUserPlacement: true,
+      results: [],
+      searchStatus: 'pending',
+    }
+    act(() => {
+      result.current.seedFromCache('pipe-A', [synthetic])
+    })
+    expect(result.current.rawPlacements.some(p => p.userPlacementId === 'u_orphan')).toBe(true)
+    expect(result.current.placements.some(p => p.userPlacementId === 'u_orphan')).toBe(true)
+    expect(result.current.userPlacements.some(u => u.id === 'u_orphan')).toBe(false)
+
+    act(() => {
+      result.current.hidePlacement('user:u_orphan')
+    })
+    expect(result.current.rawPlacements.some(p => p.userPlacementId === 'u_orphan')).toBe(false)
+    expect(result.current.placements.some(p => p.userPlacementId === 'u_orphan')).toBe(false)
+    expect(warnSpy).toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+})
+
 describe('useBRollEditorState — dragCrossPlacement 409 retry', () => {
   beforeEach(() => { globalThis.fetch = vi.fn() })
   afterEach(() => { vi.restoreAllMocks() })
