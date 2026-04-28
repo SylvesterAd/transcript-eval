@@ -240,6 +240,15 @@ export function reducer(state, action) {
         redoStack: [...state.redoStack, entry],
       }
     }
+    case 'PATCH_UNDO_ENTRY': {
+      const { entryId, patch } = action.payload || {}
+      if (!entryId || !patch) return state
+      const idx = state.undoStack.findIndex(e => e.id === entryId)
+      if (idx === -1) return state
+      const updated = { ...state.undoStack[idx], ...patch }
+      const nextStack = [...state.undoStack.slice(0, idx), updated, ...state.undoStack.slice(idx + 1)]
+      return { ...state, undoStack: nextStack }
+    }
     case 'REDO': {
       const stack = state.redoStack
       if (!stack.length) return state
