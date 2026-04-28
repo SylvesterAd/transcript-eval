@@ -224,12 +224,18 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
             serverVideo = data.videos.find(v => v.title === name || v.title === f.name)
           }
           if (!serverVideo) return f
+          const newStatus = serverVideo.transcription_status || null
+          // Stamp stageStartedAt when the stage first changes (or on first observation).
+          // Used downstream to render an elapsed-in-stage timer so the user can see motion
+          // even when ElevenLabs is mid-call and the bar % stays fixed.
+          const stageStartedAt = newStatus !== f.transcriptionStatus ? Date.now() : (f.stageStartedAt || Date.now())
           return {
             ...f,
             serverId: serverVideo.id,
-            transcriptionStatus: serverVideo.transcription_status || null,
+            transcriptionStatus: newStatus,
             transcriptionError: serverVideo.transcription_error || null,
             fileSize: f.fileSize || serverVideo.file_size || null,
+            stageStartedAt,
           }
         }))
       } catch {
@@ -239,6 +245,13 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     }, 2000)
 
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [])
+
+  // 1Hz tick so the elapsed-in-stage timer in each FileCard updates between polls.
+  const [, forceTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => forceTick(n => n + 1), 1000)
+    return () => clearInterval(t)
   }, [])
 
   // Cancel transcriptions when browser window/tab is closed
@@ -545,19 +558,14 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
 
   if (state === 'transcribing') {
     const stage = file.transcriptionStatus
-    const stageLabel = stage?.startsWith('transcribing chunk') ? stage.replace('transcribing chunk', 'Transcribing part')
-      : stage === 'transcribing' ? 'Transcribing'
-      : stage === 'aligning' ? 'Aligning timestamps'
-      : stage === 'processing' ? 'Processing results'
-      : stage === 'waiting_for_cloudflare' ? 'Processing video...'
-      : (stage === 'downloading' || stage === 'extracting_audio') ? 'Preparing audio'
-      : 'Starting...'
+    const stageLabel = friendlyStageLabel(stage)
     const stageProgress = (stage === 'transcribing' || stage?.startsWith('transcribing chunk')) ? '60%'
       : stage === 'aligning' ? '80%'
       : stage === 'processing' ? '90%'
       : (stage === 'downloading' || stage === 'extracting_audio') ? '40%'
       : stage === 'waiting_for_cloudflare' ? '15%'
       : '20%'
+    const elapsed = file.stageStartedAt ? Math.max(0, Math.floor((Date.now() - file.stageStartedAt) / 1000)) : 0
     return (
       <div className="bg-surface-container-low/50 border border-white/5 rounded-2xl p-5" style={{ boxShadow: 'inset 0 0 12px rgba(193,128,255,0.1)' }}>
         <div className="flex items-center gap-4">
@@ -565,23 +573,26 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
             <span className="material-symbols-outlined text-secondary text-xl">audio_file</span>
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-on-surface truncate mb-2">{file.name}</p>
-            <div className="flex items-center gap-4 text-xs text-on-surface-variant">
+            <p className="text-sm font-medium text-on-surface truncate">{file.name}</p>
+            <p className="text-[13px] text-secondary font-bold mt-1 truncate">
+              {stageLabel}
+              {elapsed > 0 && (
+                <span className="text-on-surface-variant font-normal ml-2">· {formatElapsed(elapsed)}</span>
+              )}
+            </p>
+            <div className="flex items-center gap-3 mt-1.5 text-[11px] text-on-surface-variant">
               <span className="inline-flex items-center gap-1 text-emerald-400">
-                <span className="material-symbols-outlined text-xs">check_circle</span>
+                <span className="material-symbols-outlined text-[12px]">check_circle</span>
                 Uploaded
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="material-symbols-outlined text-xs">database</span>
+                <span className="material-symbols-outlined text-[12px]">database</span>
                 {formatSize(file.fileSize)}
               </span>
             </div>
           </div>
           <div className="text-right shrink-0 flex items-center gap-3">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/10 text-secondary text-[10px] font-bold uppercase tracking-wider">
-              <span className="w-1.5 h-1.5 rounded-full bg-secondary animate-pulse" />
-              {stageLabel}
-            </span>
+            <span className="w-2 h-2 rounded-full bg-secondary animate-pulse" />
           </div>
         </div>
         <div className="mt-3 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
@@ -645,6 +656,7 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
   }
 
   // Queued (uploaded, waiting for transcription slot)
+  const elapsed = file.stageStartedAt ? Math.max(0, Math.floor((Date.now() - file.stageStartedAt) / 1000)) : 0
   return (
     <div className="bg-surface-container-low/50 border border-white/5 rounded-2xl p-5">
       <div className="flex items-center gap-4">
@@ -652,23 +664,26 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
           <span className="material-symbols-outlined text-on-surface-variant text-xl">hourglass_top</span>
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-on-surface truncate mb-2">{file.name}</p>
-          <div className="flex items-center gap-4 text-xs text-on-surface-variant">
+          <p className="text-sm font-medium text-on-surface truncate">{file.name}</p>
+          <p className="text-[13px] text-on-surface-variant font-bold mt-1 truncate">
+            {friendlyStageLabel(file.transcriptionStatus)}
+            {elapsed > 0 && (
+              <span className="font-normal opacity-70 ml-2">· {formatElapsed(elapsed)}</span>
+            )}
+          </p>
+          <div className="flex items-center gap-3 mt-1.5 text-[11px] text-on-surface-variant">
             <span className="inline-flex items-center gap-1 text-emerald-400">
-              <span className="material-symbols-outlined text-xs">check_circle</span>
+              <span className="material-symbols-outlined text-[12px]">check_circle</span>
               Uploaded
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="material-symbols-outlined text-xs">database</span>
+              <span className="material-symbols-outlined text-[12px]">database</span>
               {formatSize(file.fileSize)}
             </span>
           </div>
         </div>
         <div className="text-right shrink-0">
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-container-highest text-on-surface-variant text-[10px] font-bold uppercase tracking-wider">
-            <span className="material-symbols-outlined text-xs">schedule</span>
-            In Queue
-          </span>
+          <span className="material-symbols-outlined text-on-surface-variant text-base animate-pulse">schedule</span>
         </div>
       </div>
       <div className="mt-3 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
@@ -676,4 +691,25 @@ function FileCard({ file, state, speed, eta, formatSpeed, formatEta, formatSize 
       </div>
     </div>
   )
+}
+
+function friendlyStageLabel(stage) {
+  if (!stage || stage === 'pending') return 'Queued — starting soon'
+  if (stage === 'waiting_for_cloudflare') return 'Cloudflare is encoding the video'
+  if (stage === 'downloading') return 'Fetching encoded video'
+  if (stage === 'extracting_audio') return 'Extracting audio'
+  if (stage === 'transcribing') return 'Transcribing audio'
+  if (stage === 'aligning') return 'Aligning timestamps'
+  if (stage === 'processing') return 'Finalizing transcript'
+  if (stage.startsWith('transcribing chunk')) return stage.replace('transcribing chunk', 'Transcribing part')
+  return stage
+}
+
+function formatElapsed(s) {
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  if (m < 60) return sec === 0 ? `${m}m` : `${m}m ${sec}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
 }

@@ -134,6 +134,38 @@ export default function AssetsView() {
     setConfirming(false)
   }
 
+  // Auto-confirm + advance for single-video projects (no multi-cam means there's nothing
+  // to sync, and surfacing an extra Confirm button is just friction). Fires only once
+  // per mount via autoConfirmRef so we don't loop on re-renders.
+  const autoConfirmRef = useRef(false)
+  useEffect(() => {
+    if (autoConfirmRef.current) return
+    if (data?.group?.assembly_status !== 'classified') return
+    if (groups.length !== 1 || (groups[0].videoIds?.length || 0) !== 1) return
+    autoConfirmRef.current = true
+    ;(async () => {
+      try {
+        const json = await apiPost(`/videos/groups/${id}/confirm-classification`, { groups })
+        if (json.ok) {
+          setConfirmedGroups(json.groupIds.map((gId, i) => ({
+            id: gId,
+            name: groups[i]?.name || `Group ${i + 1}`,
+            videoCount: groups[i]?.videoIds?.length || 0,
+          })))
+        }
+      } catch {}
+    })()
+  }, [id, data?.group?.assembly_status, groups])
+
+  // After auto-confirm completes, jump straight to the editor — skipping the
+  // "Proceed to Editor" click. Only fires for the auto-confirm path; users who
+  // confirmed manually still see the button so they can review before advancing.
+  useEffect(() => {
+    if (!autoConfirmRef.current) return
+    if (!effectiveConfirmedGroups || effectiveConfirmedGroups.length !== 1) return
+    navigate(`/editor/${effectiveConfirmedGroups[0].id}/sync`, { replace: true })
+  }, [effectiveConfirmedGroups, navigate])
+
   const handleReclassify = async () => {
     setReclassifying(true)
     setConfirmedGroups(null)
