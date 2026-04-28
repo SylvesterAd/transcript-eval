@@ -676,8 +676,57 @@ export function useBRollEditorState(planPipelineId) {
     }})
   }, [state.placements, state.edits])
 
-  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, targetDurationSec, mode, uuid: externalUuid }) => {
+  // Cross-drop helpers — split out so callers can hide source FIRST (instant visual)
+  // and only do the network round-trip after. The two-phase shape lets us update the
+  // undo entry's targetUserPlacementSnapshot once computeFitDropPosition produces the
+  // final adjusted range. Phase 1 hide uses provisional values; Phase 2 patches them.
+  const hideSourceForCrossDrop = useCallback(({ sourceIndex, mode, targetPipelineId, uuid, provisionalSnapshot }) => {
+    if (mode !== 'move') return null
     const placement = state.placements.find(p => p.index === sourceIndex)
+    if (!placement) return null
+    const actionId = generateActionId()
+    const crossMeta = {
+      targetPipelineId,
+      targetUserPlacementId: uuid,
+      targetUserPlacementSnapshot: provisionalSnapshot,
+    }
+    const placementKey = placement.chapterIndex != null && placement.placementIndex != null
+      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      : null
+    let sourceAction = null
+    if (placementKey) {
+      const prev = state.edits[placementKey] || {}
+      sourceAction = {
+        id: actionId, ts: Date.now(), kind: 'drag-cross', placementKey,
+        ...crossMeta,
+        before: { editsSlot: { hidden: !!prev.hidden } },
+        after:  { editsSlot: { hidden: true } },
+      }
+    } else if (placement.userPlacementId) {
+      sourceAction = {
+        id: actionId, ts: Date.now(), kind: 'drag-cross', userPlacementId: placement.userPlacementId,
+        ...crossMeta,
+        before: { userPlacementCreate: state.userPlacements.find(u => u.id === placement.userPlacementId) },
+        after:  { userPlacementDelete: true },
+      }
+    }
+    if (!sourceAction) return null
+    dispatch({ type: 'APPLY_ACTION', payload: sourceAction })
+    return { actionId, placement }
+  }, [state.placements, state.edits, state.userPlacements])
+
+  const revertCrossDropHide = useCallback((actionId) => {
+    if (!actionId) return
+    dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: actionId } })
+  }, [])
+
+  const updateCrossDropSnapshot = useCallback((actionId, patch) => {
+    if (!actionId || !patch) return
+    dispatch({ type: 'PATCH_UNDO_ENTRY', payload: { entryId: actionId, patch } })
+  }, [])
+
+  const dragCrossPlacement = useCallback(async ({ sourceIndex, targetPipelineId, targetStartSec, targetDurationSec, mode, uuid: externalUuid, presourceActionId, presourcePlacement }) => {
+    const placement = presourcePlacement || state.placements.find(p => p.index === sourceIndex)
     if (!placement) {
       throw new Error('source placement not found')
     }
@@ -738,7 +787,7 @@ export function useBRollEditorState(planPipelineId) {
           after:  { userPlacementDelete: true },
         }
       }
-      if (sourceAction) {
+      if (sourceAction && !presourceActionId) {
         dispatch({ type: 'APPLY_ACTION', payload: sourceAction })
       }
     }
@@ -776,8 +825,9 @@ export function useBRollEditorState(planPipelineId) {
         // Revert the source-side action only if it is still at the top of the
         // undo stack — CONDITIONAL_UNDO is a no-op when the user has dispatched
         // another action in the meantime (Bug #1).
-        if (sourceAction) {
-          dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: sourceAction.id } })
+        const revertId = presourceActionId || sourceAction?.id
+        if (revertId) {
+          dispatch({ type: 'CONDITIONAL_UNDO', payload: { entryId: revertId } })
         }
         // Propagate so the caller can revert any optimistic target-side insert.
         throw err
@@ -860,6 +910,9 @@ export function useBRollEditorState(planPipelineId) {
     pastePlacement,
     resetPlacement,
     dragCrossPlacement,
+    hideSourceForCrossDrop,
+    revertCrossDropHide,
+    updateCrossDropSnapshot,
     updatePlacementPosition,
     resetAllPlacements,
     refetchEditorData,
@@ -878,6 +931,7 @@ export function useBRollEditorState(planPipelineId) {
     seedFromCache, selectPlacement, selectResult, activePlacementAtTime,
     searchPlacement, searchPlacementCustom, searchUserPlacement, hidePlacement, undo, redo,
     copyPlacement, pastePlacement, resetPlacement, dragCrossPlacement,
+    hideSourceForCrossDrop, revertCrossDropHide, updateCrossDropSnapshot,
     updatePlacementPosition,
     resetAllPlacements, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
