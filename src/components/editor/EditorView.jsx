@@ -25,6 +25,28 @@ import EstimationModal from './EstimationModal.jsx'
 
 export const EditorContext = createContext(null)
 
+function RoughCutFailureBanner({ status, requiredTokens, balance, onRetry, onDismiss }) {
+  if (status !== 'insufficient_tokens' && status !== 'failed') return null
+  const insufficient = status === 'insufficient_tokens'
+  return (
+    <div className="bg-error/10 border-b border-error/20 px-6 py-3 flex items-center justify-between text-sm">
+      <div className="flex items-center gap-3 text-error">
+        <span className="material-symbols-outlined text-base">error</span>
+        {insufficient
+          ? <span>AI Rough Cut couldn't run — needs <strong>{requiredTokens?.toLocaleString()}</strong> tokens, you have <strong>{balance?.toLocaleString() ?? '—'}</strong>.</span>
+          : <span>AI Rough Cut failed. You can retry without re-paying tokens.</span>
+        }
+      </div>
+      <div className="flex items-center gap-2">
+        <button onClick={onRetry} className="px-4 py-1.5 rounded bg-error text-on-error font-bold uppercase tracking-wider text-xs hover:bg-error/90">
+          {insufficient ? 'Top up & retry' : 'Retry'}
+        </button>
+        <button onClick={onDismiss} className="px-3 py-1.5 text-error/70 hover:text-error text-xs">Dismiss</button>
+      </div>
+    </div>
+  )
+}
+
 export default function EditorView() {
   const { id, tab, sub, detail } = useParams()
   const navigate = useNavigate()
@@ -807,9 +829,16 @@ export default function EditorView() {
 
   // Show syncing screen if assembly is still in progress
   const assemblyStatus = groupDetail?.assembly_status
-  const isAssembling = assemblyStatus && !['done', 'error', 'classifying', 'classified', 'classification_failed', 'confirmed'].includes(assemblyStatus)
+  const roughCutStatus = groupDetail?.rough_cut_status
+  const inAssembly = assemblyStatus && !['done', 'error', 'classifying', 'classified', 'classification_failed', 'confirmed'].includes(assemblyStatus)
+  const inRoughCut = roughCutStatus === 'pending' || roughCutStatus === 'running'
+  const isAssembling = inAssembly || inRoughCut
   if (isAssembling) {
-    return <SyncingScreen groupId={id} status={assemblyStatus} onDone={() => { refetchDetail(); refetchTimestamps() }} />
+    return <SyncingScreen
+      groupId={id}
+      status={inRoughCut && !inAssembly ? 'rough_cut' : assemblyStatus}
+      onDone={() => { refetchDetail(); refetchTimestamps() }}
+    />
   }
 
   if (assemblyStatus === 'error') {
@@ -856,6 +885,17 @@ export default function EditorView() {
             </div>
           </div>
         </header>
+
+        <RoughCutFailureBanner
+          status={groupDetail?.rough_cut_status}
+          requiredTokens={groupDetail?.rough_cut_error_required}
+          balance={tokenBalance}
+          onRetry={handleStartAIRoughCut}
+          onDismiss={async () => {
+            await authFetch(`/videos/groups/${id}/dismiss-rough-cut-error`, { method: 'POST' })
+            refetchDetail()
+          }}
+        />
 
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
@@ -1073,6 +1113,7 @@ const STATUS_LABELS = {
   building_timeline: 'Building timeline...',
   ordering: 'Ordering segments...',
   assembling: 'Assembling transcript...',
+  rough_cut: 'Cleaning your transcript...',
 }
 
 function SyncingScreen({ groupId, status, onDone }) {
@@ -1083,11 +1124,20 @@ function SyncingScreen({ groupId, status, onDone }) {
       try {
         const res = await authFetch(`/videos/groups/${groupId}/status`)
         const data = await res.json()
-        setCurrentStatus(data.assembly_status)
-        if (data.assembly_status === 'done' || data.assembly_status === 'error') {
+
+        const assemblyDone = data.assembly_status === 'done' || data.assembly_status === 'error'
+        const roughCutInFlight = data.rough_cut_status === 'pending' || data.rough_cut_status === 'running'
+
+        if (assemblyDone && roughCutInFlight) {
+          setCurrentStatus('rough_cut')
+          return
+        }
+        if (assemblyDone) {
           clearInterval(interval)
           onDone()
+          return
         }
+        setCurrentStatus(data.assembly_status)
       } catch {}
     }, 1500)
     return () => clearInterval(interval)
@@ -1099,7 +1149,9 @@ function SyncingScreen({ groupId, status, onDone }) {
         <span className="material-symbols-outlined animate-spin text-5xl text-primary-fixed">progress_activity</span>
       </div>
       <div className="flex flex-col items-center gap-2">
-        <h2 className="text-lg font-bold text-on-surface">Syncing project</h2>
+        <h2 className="text-lg font-bold text-on-surface">
+          {currentStatus === 'rough_cut' ? 'Cleaning your transcript' : 'Syncing project'}
+        </h2>
         <p className="text-sm text-on-surface-variant">{STATUS_LABELS[currentStatus] || currentStatus}</p>
       </div>
       <div className="flex gap-1 mt-2">

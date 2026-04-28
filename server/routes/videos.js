@@ -14,6 +14,8 @@ import { analyzeMulticam, classifyVideosForReview } from '../services/multicam-s
 import { runStageProgress } from '../services/llm-runner.js'
 import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TEMP_DIR as STORAGE_TEMP_DIR } from '../services/storage.js'
 import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled, waitForStreamReady, enableMp4Downloads, waitForMp4Ready, mp4Url as cfMp4Url, thumbnailUrl as cfThumbnailUrl } from '../services/cloudflare-stream.js'
+import { runAiRoughCut } from '../services/rough-cut-runner.js'
+import { estimateTokenCost, estimateProcessingTime } from '../services/token-pricing.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -65,6 +67,9 @@ export function validateGroupUpdate(body) {
   }
   if (body.path_id !== undefined && !VALID_PATHS.includes(body.path_id)) {
     return { error: 'path_id must be one of: ' + VALID_PATHS.join(', ') }
+  }
+  if (body.auto_rough_cut !== undefined && typeof body.auto_rough_cut !== 'boolean') {
+    return { error: 'auto_rough_cut must be boolean' }
   }
   return { error: null }
 }
@@ -526,6 +531,7 @@ router.get('/', requireAuth, async (req, res) => {
       COALESCE(parent.freepik_opt_in, vg.freepik_opt_in) AS group_freepik_opt_in,
       COALESCE(parent.audience_json, vg.audience_json) AS group_audience_json,
       COALESCE(parent.path_id, vg.path_id) AS group_path_id,
+      COALESCE(parent.auto_rough_cut, vg.auto_rough_cut) AS group_auto_rough_cut,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'raw') AS has_raw,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'human_edited') AS has_human_edited
     FROM videos v
@@ -543,10 +549,12 @@ router.get('/', requireAuth, async (req, res) => {
     v.freepik_opt_in = v.group_freepik_opt_in === null || v.group_freepik_opt_in === undefined ? true : !!v.group_freepik_opt_in
     v.audience = v.group_audience_json ? JSON.parse(v.group_audience_json) : null
     v.path_id = v.group_path_id || null
+    v.auto_rough_cut = !!v.group_auto_rough_cut
     delete v.group_libraries_json
     delete v.group_freepik_opt_in
     delete v.group_audience_json
     delete v.group_path_id
+    delete v.group_auto_rough_cut
   }
   res.json(videos)
 })
@@ -591,6 +599,8 @@ router.get('/groups/:id/detail', requireAuth, async (req, res) => {
     assembly_details: group.assembly_details_json ? JSON.parse(group.assembly_details_json) : null,
     timeline: group.timeline_json ? JSON.parse(group.timeline_json) : null,
     rough_cut_config: group.rough_cut_config_json ? JSON.parse(group.rough_cut_config_json) : null,
+    rough_cut_status: group.rough_cut_status || null,
+    rough_cut_error_required: group.rough_cut_error_required || null,
     libraries: group.libraries_json ? JSON.parse(group.libraries_json) : [],
     freepik_opt_in: group.freepik_opt_in === null || group.freepik_opt_in === undefined ? true : !!group.freepik_opt_in,
     audience: group.audience_json ? JSON.parse(group.audience_json) : null,
@@ -602,9 +612,17 @@ router.get('/groups/:id/detail', requireAuth, async (req, res) => {
 
 // Poll assembly status (lightweight — no JSON parsing)
 router.get('/groups/:id/status', requireAuth, async (req, res) => {
-  const row = await db.prepare(`SELECT assembly_status, assembly_error FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  const row = await db.prepare(
+    `SELECT assembly_status, assembly_error, rough_cut_status, rough_cut_error_required
+     FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
+  ).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!row) return res.status(404).json({ error: 'Group not found' })
-  res.json({ assembly_status: row.assembly_status, assembly_error: row.assembly_error })
+  res.json({
+    assembly_status: row.assembly_status,
+    assembly_error: row.assembly_error,
+    rough_cut_status: row.rough_cut_status,
+    rough_cut_error_required: row.rough_cut_error_required,
+  })
 })
 
 // Get classification data + videos with media info
@@ -1033,16 +1051,6 @@ async function getOrCreateTokenBalance(userId) {
   return row.balance
 }
 
-function estimateTokenCost(durationSeconds) {
-  const minutes = (durationSeconds || 0) / 60
-  return Math.max(1, Math.ceil(minutes * 30)) // 30 tokens per minute, minimum 1
-}
-
-function estimateProcessingTime(durationSeconds) {
-  const minutes = (durationSeconds || 0) / 60
-  return Math.round(minutes * 0.375 * 60) // 0.375 min processing per min of video → seconds
-}
-
 router.get('/user/tokens', requireAuth, async (req, res) => {
   const balance = await getOrCreateTokenBalance(req.auth.userId)
   res.json({ balance })
@@ -1063,146 +1071,37 @@ router.post('/groups/:id/estimate-ai-roughcut', requireAuth, async (req, res) =>
 })
 
 router.post('/groups/:id/start-ai-roughcut', requireAuth, async (req, res) => {
-  const groupId = parseInt(req.params.id)
-  const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
-  if (!group) return res.status(404).json({ error: 'Group not found' })
-
-  // Calculate cost
-  const videos = await db.prepare('SELECT duration_seconds FROM videos WHERE group_id = ?').all(groupId)
-  const totalDuration = videos.reduce((sum, v) => sum + (v.duration_seconds || 0), 0)
-  const tokenCost = estimateTokenCost(totalDuration)
-
-  // Transactional token deduction
-  const client = await db.pool.connect()
-  let balanceAfter
-  try {
-    await client.query('BEGIN')
-    // Ensure user row exists
-    await client.query('INSERT INTO user_tokens (user_id, balance) VALUES ($1, 10000) ON CONFLICT (user_id) DO NOTHING', [req.auth.userId])
-    const { rows } = await client.query('SELECT balance FROM user_tokens WHERE user_id = $1 FOR UPDATE', [req.auth.userId])
-    const currentBalance = rows[0]?.balance ?? 0
-
-    if (currentBalance < tokenCost) {
-      await client.query('ROLLBACK')
-      return res.status(402).json({ error: 'insufficient_tokens', balance: currentBalance, required: tokenCost })
-    }
-
-    balanceAfter = currentBalance - tokenCost
-    await client.query('UPDATE user_tokens SET balance = $1, updated_at = NOW() WHERE user_id = $2', [balanceAfter, req.auth.userId])
-    await client.query(
-      "INSERT INTO token_transactions (user_id, amount, balance_after, type, description, group_id) VALUES ($1, $2, $3, 'debit', $4, $5)",
-      [req.auth.userId, -tokenCost, balanceAfter, `AI Rough Cut for project ${groupId}`, groupId]
-    )
-    await client.query('COMMIT')
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    client.release()
-  }
-
-  // ── Now execute the pipeline (same logic as run-main-flow lines 700-877) ──
-
-  // Check existing annotations
-  if (group.annotations_json) {
-    try {
-      const ann = JSON.parse(group.annotations_json)
-      if (ann?.items?.length > 0 && !req.query.force) {
-        return res.json({ already_exists: true, tokensDeducted: tokenCost, balanceAfter })
-      }
-    } catch { /* proceed */ }
-  }
-
-  // Clean up stale pending runs
-  await db.prepare(`
-    UPDATE experiment_runs SET status = 'failed'
-    WHERE id IN (
-      SELECT er.id FROM experiment_runs er
-      JOIN experiments e ON e.id = er.experiment_id
-      WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
-        AND er.status = 'pending'
-        AND e.name ILIKE 'Auto:%'
-        AND er.created_at < NOW() - INTERVAL '5 minutes'
-    )
-  `).run(groupId)
-
-  // Find main strategy + version
-  const mainStrategy = await db.prepare('SELECT * FROM strategies WHERE is_main = 1').get()
-  if (!mainStrategy) return res.status(400).json({ error: 'No main strategy configured' })
-
-  const version = await db.prepare(
-    'SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY version_number DESC LIMIT 1'
-  ).get(mainStrategy.id)
-  if (!version) return res.status(400).json({ error: 'Main strategy has no versions' })
-
-  const video = await db.prepare(`
-    SELECT v.* FROM videos v
-    JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
-    WHERE v.group_id = ? AND v.video_type = 'raw'
-    ORDER BY v.id LIMIT 1
-  `).get(groupId)
-  if (!video) return res.status(400).json({ error: 'No video with transcript found' })
-
-  const expResult = await db.prepare(
-    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json, user_id) VALUES (?, ?, ?, ?, ?)'
-  ).run(version.id, `Auto: ${mainStrategy.name}`, `Auto-run for group ${groupId}`, JSON.stringify([video.id]), req.auth.userId)
-
-  const experimentId = Number(expResult.lastInsertRowid)
-  const runResult = await db.prepare(
-    'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, 1, ?)'
-  ).run(experimentId, video.id, 'pending')
-  const runId = Number(runResult.lastInsertRowid)
-
-  let stageInfos = []
-  try {
-    const stages = JSON.parse(version.stages_json || '[]')
-    stageInfos = stages.map((s, i) => ({
-      name: s.name || `Stage ${i + 1}`,
-      type: s.type || 'llm',
-    }))
-  } catch {}
-
-  res.json({
-    experimentId, runId,
-    totalStages: stageInfos.length,
-    stageNames: stageInfos.map(s => s.name),
-    stageTypes: stageInfos.map(s => s.type),
-    tokensDeducted: tokenCost,
-    balanceAfter,
+  // Thin wrapper around runAiRoughCut. The helper handles ownership scope,
+  // token deduction, experiment/run creation, and the background pipeline.
+  const r = await runAiRoughCut({
+    groupId: parseInt(req.params.id),
+    userId: req.auth.userId,
+    isAdmin: isAdmin(req),
+    force: !!req.query.force,
   })
+  if (r.error === 'not_found') return res.status(404).json({ error: 'Group not found' })
+  if (r.error === 'no_main_strategy') return res.status(400).json({ error: 'No main strategy configured' })
+  if (r.error === 'no_strategy_versions') return res.status(400).json({ error: 'Main strategy has no versions' })
+  if (r.error === 'no_video_with_transcript') return res.status(400).json({ error: 'No video with transcript found' })
+  if (r.error === 'insufficient_tokens') return res.status(402).json({ error: 'insufficient_tokens', balance: r.balance, required: r.required })
+  if (r.already_exists) return res.json({ already_exists: true, tokensDeducted: r.tokensDeducted, balanceAfter: r.balanceAfter })
+  res.json({
+    experimentId: r.experimentId, runId: r.runId,
+    totalStages: r.totalStages, stageNames: r.stageNames, stageTypes: r.stageTypes,
+    tokensDeducted: r.tokensDeducted, balanceAfter: r.balanceAfter,
+  })
+})
 
-  // Execute pipeline in background (same as run-main-flow)
-  ;(async () => {
-    const MAX_ATTEMPTS = 2
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        const { executeRun } = await import('../services/llm-runner.js')
-        if (attempt > 1) {
-          console.log(`[start-ai-roughcut] Retry attempt ${attempt} for group ${groupId} (run ${runId})`)
-          await db.prepare("UPDATE experiment_runs SET status = 'pending', error_message = NULL WHERE id = ?").run(runId)
-        }
-        await executeRun(runId)
-        const completedRun = await db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(runId)
-        if (completedRun.status !== 'complete' && completedRun.status !== 'partial') {
-          if (attempt < MAX_ATTEMPTS) continue
-          return
-        }
-        const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await annotationMapper()
-        let wordTimestamps = await getTimelineWordTimestamps(groupId)
-        if (!wordTimestamps?.length) {
-          const transcript = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(video.id)
-          if (transcript?.word_timestamps_json) try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch {}
-        }
-        if (!wordTimestamps?.length) return
-        const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
-        const annotations = await buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
-        await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?').run(JSON.stringify(annotations), groupId)
-        return
-      } catch (err) {
-        console.error(`[start-ai-roughcut] Attempt ${attempt} failed for group ${groupId}:`, err.message)
-      }
-    }
-  })()
+router.post('/groups/:id/dismiss-rough-cut-error', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const group = await db.prepare(
+    `SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
+  ).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+  await db.prepare(
+    "UPDATE video_groups SET rough_cut_status = NULL, rough_cut_error_required = NULL WHERE id = ? AND rough_cut_status IN ('insufficient_tokens', 'failed')"
+  ).run(groupId)
+  res.json({ ok: true })
 })
 
 // Rebuild annotations from existing run (re-maps without re-running LLMs)
@@ -2355,7 +2254,7 @@ router.put('/groups/:id', requireAuth, async (req, res) => {
   const validation = validateGroupUpdate(req.body)
   if (validation.error) return res.status(400).json({ error: validation.error })
 
-  const { rough_cut_config_json, libraries, freepik_opt_in, audience, path_id } = req.body
+  const { rough_cut_config_json, libraries, freepik_opt_in, audience, path_id, auto_rough_cut } = req.body
 
   const group = await db.prepare(
     `SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
@@ -2384,6 +2283,10 @@ router.put('/groups/:id', requireAuth, async (req, res) => {
   if (path_id !== undefined) {
     updates.push('path_id = ?')
     values.push(path_id)
+  }
+  if (auto_rough_cut !== undefined) {
+    updates.push('auto_rough_cut = ?')
+    values.push(auto_rough_cut)
   }
 
   if (updates.length === 0) {
