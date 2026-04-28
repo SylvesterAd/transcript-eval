@@ -417,20 +417,46 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 onCrossPaste={handleCrossPaste}
                 inactiveVariantPlacements={inactiveVariantPlacements}
                 onCrossDrop={async (args) => {
-                  // Determine source duration and target's existing placements (for gap-fit).
                   const sourcePlacement = brollState.placements.find(p => p.index === args.sourceIndex)
+                  if (!sourcePlacement) return
                   const sourceDur = Math.max(0.5, sourcePlacement?.timelineDuration || 1)
+                  const mode = args.mode || 'move'
                   const targetIsActive = args.targetPipelineId === variants[activeVariantIdx]?.id
 
-                  // For inactive targets, refresh from server right before the fit-check so the
-                  // gap math is current. The 5s fetchInactive interval only runs while a search
-                  // is active, so cached data can be stale (or missing entirely if the initial
-                  // fetch silently failed). Without this refresh, computeFitDropPosition runs
-                  // against `[]` → infinite gap → drops succeed in occupied space.
-                  //
-                  // We also merge any locally-cached optimistic synthetics (from prior drops in
-                  // this session whose PUT may not have committed yet on the server) so two
-                  // rapid drops into the same gap don't both pass fit-check and overlap.
+                  // Mint uuid up front so the optimistic synthetic and the server-saved entry share an id.
+                  const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+                  const resultIdx = brollState.selectedResults?.[args.sourceIndex] ?? sourcePlacement.persistedSelectedResult ?? 0
+                  const buildSnapshot = (start, dur) => ({
+                    id: uuid,
+                    sourcePipelineId: variants[activeVariantIdx]?.id,
+                    sourceChapterIndex: sourcePlacement.chapterIndex ?? null,
+                    sourcePlacementIndex: sourcePlacement.placementIndex ?? null,
+                    timelineStart: start,
+                    timelineEnd: start + dur,
+                    selectedResult: resultIdx,
+                    results: sourcePlacement.results || [],
+                    snapshot: {
+                      description: sourcePlacement.description,
+                      audio_anchor: sourcePlacement.audio_anchor,
+                      function: sourcePlacement.function,
+                      type_group: sourcePlacement.type_group,
+                      source_feel: sourcePlacement.source_feel,
+                      style: sourcePlacement.style,
+                    },
+                  })
+
+                  // PHASE 1: hide source IMMEDIATELY using a provisional snapshot (requested start + source duration).
+                  // The snapshot is patched to the final adjusted values after fit-check.
+                  const provisionalSnapshot = buildSnapshot(args.targetStartSec, sourceDur)
+                  const hideHandle = brollState.hideSourceForCrossDrop({
+                    sourceIndex: args.sourceIndex,
+                    mode,
+                    targetPipelineId: args.targetPipelineId,
+                    uuid,
+                    provisionalSnapshot,
+                  })
+
+                  // PHASE 2: refresh inactive target placements so fit-check sees current data.
                   let targetPlacements
                   if (targetIsActive) {
                     targetPlacements = brollState.placements
@@ -446,6 +472,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                       setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: merged }))
                     } catch (err) {
                       console.error('[broll-cross-drop] fit-check refresh failed:', err.message)
+                      if (hideHandle) brollState.revertCrossDropHide(hideHandle.actionId)
                       window.alert('Could not load target variant. Try again in a moment.')
                       return
                     }
@@ -453,38 +480,19 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
                   const adjusted = computeFitDropPosition(targetPlacements, args.targetStartSec, sourceDur)
                   if (!adjusted) {
+                    if (hideHandle) brollState.revertCrossDropHide(hideHandle.actionId)
                     window.alert('Not enough space at this drop position.')
                     return
                   }
 
-                  // Generate the userPlacement uuid up-front so the optimistic insert and
-                  // the server-saved entry share one id — React reconciles by key, no remount
-                  // when the eventual refetch replaces the synthetic with the server version.
-                  const uuid = 'u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12)
+                  // Patch the source-hide undo entry to carry the FINAL snapshot (so undo/redo is correct).
+                  const finalSnapshot = buildSnapshot(adjusted.start, adjusted.duration)
+                  if (hideHandle) {
+                    brollState.updateCrossDropSnapshot(hideHandle.actionId, { targetUserPlacementSnapshot: finalSnapshot })
+                  }
 
-                  // Optimistic insert: target is always inactive (handleBoxMove only triggers
-                  // cross-mode when the dragged-over row differs from active). Insert a synthetic
-                  // entry matching the server's merged shape so the b-roll is visible immediately
-                  // and the gap-fit logic for subsequent drops sees it.
-                  const resultIdx = brollState.selectedResults?.[args.sourceIndex] ?? sourcePlacement.persistedSelectedResult ?? 0
-                  const synthetic = userPlacementToRawEntry({
-                    id: uuid,
-                    sourcePipelineId: variants[activeVariantIdx]?.id,
-                    sourceChapterIndex: sourcePlacement.chapterIndex ?? null,
-                    sourcePlacementIndex: sourcePlacement.placementIndex ?? null,
-                    timelineStart: adjusted.start,
-                    timelineEnd: adjusted.start + adjusted.duration,
-                    selectedResult: resultIdx,
-                    results: sourcePlacement.results || [],
-                    snapshot: {
-                      description: sourcePlacement.description,
-                      audio_anchor: sourcePlacement.audio_anchor,
-                      function: sourcePlacement.function,
-                      type_group: sourcePlacement.type_group,
-                      source_feel: sourcePlacement.source_feel,
-                      style: sourcePlacement.style,
-                    },
-                  })
+                  // PHASE 3: optimistic insert into target with pendingWrite spinner flag.
+                  const synthetic = { ...userPlacementToRawEntry(finalSnapshot), pendingWrite: true }
                   let optimisticInserted = false
                   if (!targetIsActive) {
                     setRawInactivePlacements(prev => ({
@@ -494,20 +502,29 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                     optimisticInserted = true
                   }
 
+                  // PHASE 4: server PUT. dragCrossPlacement skips its internal source-hide because we pre-hid.
                   try {
                     await brollState.dragCrossPlacement({
                       ...args,
+                      mode,
                       targetStartSec: adjusted.start,
                       targetDurationSec: adjusted.duration,
                       uuid,
+                      presourceActionId: hideHandle?.actionId,
+                      presourcePlacement: hideHandle?.placement,
                     })
-                    // Skip the success-path refetch: the synthetic shares the server uuid and
-                    // matches the server's merged shape, so the inactive view is already correct.
-                    // A natural fetchInactive (variant switch or 5s search interval) will reconcile
-                    // any later changes.
+                    // Clear pendingWrite on success.
+                    if (optimisticInserted) {
+                      setRawInactivePlacements(prev => ({
+                        ...prev,
+                        [args.targetPipelineId]: (prev[args.targetPipelineId] || []).map(p =>
+                          p.userPlacementId === uuid ? { ...p, pendingWrite: false } : p
+                        ),
+                      }))
+                    }
                   } catch (err) {
-                    // Server write failed — revert the optimistic insert. dragCrossPlacement
-                    // already reverted its source-side hide.
+                    // Server write failed — dragCrossPlacement already reverted the source-hide.
+                    // Remove the optimistic synthetic so the target row reflects reality.
                     if (optimisticInserted) {
                       setRawInactivePlacements(prev => ({
                         ...prev,
