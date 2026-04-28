@@ -9,7 +9,7 @@ import Timeline from './Timeline.jsx'
 import PlaybackControls from './PlaybackControls.jsx'
 import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
-import { scheduleBrollPreload, clearBrollPreload } from './brollPreloader.js'
+import BRollPreloadPool from './BRollPreloadPool.jsx'
 
 export function resolveDetailToIndex(detail) {
   if (detail == null || detail === '') return null
@@ -342,18 +342,8 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     return () => window.removeEventListener('keydown', handler)
   }, [brollState.selectedIndex, brollState.hidePlacement, brollState.selectPlacement, brollState.undo, brollState.redo, brollState.copyPlacement, brollState.pastePlacement, brollState.selectedPlacement, editorCtx])
 
-  // Preload next few b-roll clips on the active variant and inactive variants.
-  useEffect(() => {
-    scheduleBrollPreload({
-      activePlacements: brollState.placements || [],
-      inactivePlacementsByPid: inactiveVariantPlacements || {},
-      currentTime: editorCtx?.state?.currentTime || 0,
-      selectedResultsByIndex: brollState.selectedResults || {},
-    })
-  }, [brollState.placements, inactiveVariantPlacements, editorCtx?.state?.currentTime, brollState.selectedResults])
-
-  // Clean up preload tags on unmount
-  useEffect(() => () => clearBrollPreload(), [])
+  // (Preloading is rendered as <BRollPreloadPool> hidden videos in the JSX
+  // tree below — see that component for the rationale.)
 
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
@@ -393,6 +383,12 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   return (
     <BRollContext.Provider value={brollState}>
+      <BRollPreloadPool
+        activePlacements={brollState.placements}
+        inactivePlacementsByPid={inactiveVariantPlacements}
+        currentTime={editorCtx?.state?.currentTime || 0}
+        selectedResultsByIndex={brollState.selectedResults}
+      />
       <div ref={splitRef} className="flex-1 flex bg-surface-dim overflow-hidden">
         {/* Left: video + timeline stacked */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
