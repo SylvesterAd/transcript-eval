@@ -39,6 +39,14 @@ describe('useBRollEditorState — surface', () => {
     expect(typeof result.current.undo).toBe('function')
     expect(typeof result.current.redo).toBe('function')
   })
+
+  it('exposes hideSourceForCrossDrop, revertCrossDropHide, and updateCrossDropSnapshot', () => {
+    hookHandle = renderHook(() => useBRollEditorState('pipe-A'))
+    const { result } = hookHandle
+    expect(typeof result.current.hideSourceForCrossDrop).toBe('function')
+    expect(typeof result.current.revertCrossDropHide).toBe('function')
+    expect(typeof result.current.updateCrossDropSnapshot).toBe('function')
+  })
 })
 
 describe('useBRollEditorState — dragCrossPlacement 409 retry', () => {

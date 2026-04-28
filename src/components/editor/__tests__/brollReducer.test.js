@@ -71,6 +71,37 @@ describe('reducer CONDITIONAL_UNDO', () => {
   })
 })
 
+describe('reducer PATCH_UNDO_ENTRY', () => {
+  it('patches the matching entry crossMeta and leaves edits untouched', () => {
+    const before = {
+      undoStack: [
+        { id: 'a', kind: 'drag-cross', placementKey: '0:1',
+          targetPipelineId: 'pipe-X', targetUserPlacementId: 'u_1',
+          targetUserPlacementSnapshot: { id: 'u_1', timelineStart: 5, timelineEnd: 6 },
+          before: { editsSlot: { hidden: false } }, after: { editsSlot: { hidden: true } },
+        },
+      ],
+      edits: { '0:1': { hidden: true } },
+      redoStack: [], userPlacements: [], rawPlacements: [], placements: [],
+    }
+    const next = reducer(before, {
+      type: 'PATCH_UNDO_ENTRY',
+      payload: { entryId: 'a', patch: { targetUserPlacementSnapshot: { id: 'u_1', timelineStart: 5, timelineEnd: 7.5 } } },
+    })
+    expect(next.undoStack[0].targetUserPlacementSnapshot.timelineEnd).toBe(7.5)
+    expect(next.edits).toBe(before.edits)
+  })
+
+  it('is a no-op when entryId is not in undoStack', () => {
+    const before = {
+      undoStack: [{ id: 'a', kind: 'drag-cross' }],
+      edits: {}, redoStack: [], userPlacements: [], rawPlacements: [], placements: [],
+    }
+    const next = reducer(before, { type: 'PATCH_UNDO_ENTRY', payload: { entryId: 'z', patch: {} } })
+    expect(next).toBe(before)
+  })
+})
+
 describe('userPlacementToRawEntry', () => {
   it('preserves provided results array as-is', () => {
     const out = userPlacementToRawEntry({
