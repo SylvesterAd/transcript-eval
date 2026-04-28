@@ -61,26 +61,44 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
   const planPrepStrategy = (strategies || []).find(s => s.strategy_kind === 'plan_prep')
   const createStrategyKind = (strategies || []).find(s => s.strategy_kind === 'create_strategy')
   const createPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'create_plan')
-  const videoRuns = videoRunsData?.runs || []
-  const activePipelines = videoRunsData?.activePipelines || []
+  // Memoized so reference identity is stable across re-renders (incl. the 10Hz
+  // SET_CURRENT_TIME ticks during playback that propagate from EditorView).
+  // Without this, every dependent (pipelineMap → planVariants → BRollEditor.variants
+  // → the inactive-variants fetch effect) churns each render and aborts in-flight
+  // editor-data fetches in a tight loop.
+  const videoRuns = useMemo(() => videoRunsData?.runs || [], [videoRunsData])
+  const activePipelines = useMemo(() => videoRunsData?.activePipelines || [], [videoRunsData])
 
   // Group runs by pipelineId
-  const pipelineMap = {}
-  for (const run of videoRuns) {
-    try {
-      const meta = JSON.parse(run.metadata_json || '{}')
-      const pid = meta.pipelineId
-      if (!pid) continue
-      if (!pipelineMap[pid]) pipelineMap[pid] = { stages: [], status: 'complete', lastRunId: null }
-      pipelineMap[pid].stages.push({ ...run, _meta: meta })
-      if (run.status === 'failed') pipelineMap[pid].status = 'failed'
-      // Track the last (highest stageIndex) run id for reference_run_id
-      if (!pipelineMap[pid].lastRunId || (meta.stageIndex || 0) > (pipelineMap[pid].lastStageIndex || 0)) {
-        pipelineMap[pid].lastRunId = run.id
-        pipelineMap[pid].lastStageIndex = meta.stageIndex || 0
-      }
-    } catch {}
-  }
+  const pipelineMap = useMemo(() => {
+    const map = {}
+    for (const run of videoRuns) {
+      try {
+        const meta = JSON.parse(run.metadata_json || '{}')
+        const pid = meta.pipelineId
+        if (!pid) continue
+        if (!map[pid]) map[pid] = { stages: [], status: 'complete', lastRunId: null }
+        map[pid].stages.push({ ...run, _meta: meta })
+        if (run.status === 'failed') map[pid].status = 'failed'
+        // Track the last (highest stageIndex) run id for reference_run_id
+        if (!map[pid].lastRunId || (meta.stageIndex || 0) > (map[pid].lastStageIndex || 0)) {
+          map[pid].lastRunId = run.id
+          map[pid].lastStageIndex = meta.stageIndex || 0
+        }
+      } catch {}
+    }
+    return map
+  }, [videoRuns])
+
+  // Hoisted out of the `sub === 'edit'` branch and memoized so the array
+  // reference passed to <BRollEditor allPlanPipelineIds={...}> is stable;
+  // otherwise the variants useMemo + inactive-fetch effect downstream re-fire
+  // every render and abort in-flight requests.
+  const allPlanPipelineIds = useMemo(() =>
+    Object.entries(pipelineMap)
+      .filter(([pid, p]) => p.status === 'complete' && pid.startsWith('plan-'))
+      .map(([pid]) => pid)
+  , [pipelineMap])
 
   // Parse chapters, stats, and patterns per example video from analysis runs
   // pipelineId format: "{strategyId}-{videoId}-{ts}-ex{exampleVideoId}"
@@ -855,9 +873,6 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
       navigate(`/editor/${id}/brolls/strategy/${currentStageKey}`, { replace: true })
       return null
     }
-    const allPlanPipelineIds = Object.entries(pipelineMap)
-      .filter(([pid, p]) => p.status === 'complete' && pid.startsWith('plan-'))
-      .map(([pid]) => pid)
     return <BRollEditor groupId={groupId} videoId={videoId} planPipelineId={editorPlanPid} allPlanPipelineIds={allPlanPipelineIds} planVariants={planVariants} />
   }
 
