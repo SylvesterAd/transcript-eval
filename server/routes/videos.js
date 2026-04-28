@@ -100,7 +100,7 @@ const router = Router()
     if (stuck.length > 0) {
       console.log(`[transcribe] Re-queuing ${stuck.length} interrupted transcription(s)`)
       for (const v of stuck) {
-        await db.prepare("UPDATE videos SET transcription_status = NULL WHERE id = ?").run(v.id)
+        await setTranscriptionStatus(v.id, null, 'startup_requeue')
         // Delay slightly to let server finish booting
         setTimeout(() => startBackgroundTranscription(v.id), 3000)
       }
@@ -147,6 +147,30 @@ const activeTranscriptionIds = new Set()  // videoIds currently running
 const queuedIds = new Set()              // videoIds waiting in queue
 const abortControllers = new Map()       // videoId → AbortController
 const classifyingGroups = new Set()      // groupId — in-flight auto-classification dedup
+
+// Update transcription_status and append the transition to transcription_history.
+// `src` is the debugging value that lets us attribute future status regressions
+// to a specific code path. Pass `error: <string|null>` in opts to also update
+// transcription_error; omit to preserve the existing error column.
+async function setTranscriptionStatus(videoId, status, src, opts = {}) {
+  const setError = 'error' in opts
+  const sql = setError
+    ? `UPDATE videos SET
+        transcription_status = ?,
+        transcription_error = ?,
+        transcription_history = COALESCE(transcription_history, '[]'::jsonb)
+          || jsonb_build_array(jsonb_build_object('t', NOW(), 'status', ?::text, 'src', ?::text, 'error', ?::text))
+       WHERE id = ?`
+    : `UPDATE videos SET
+        transcription_status = ?,
+        transcription_history = COALESCE(transcription_history, '[]'::jsonb)
+          || jsonb_build_array(jsonb_build_object('t', NOW(), 'status', ?::text, 'src', ?::text))
+       WHERE id = ?`
+  const params = setError
+    ? [status, opts.error, status, src, opts.error, videoId]
+    : [status, status, src, videoId]
+  await db.prepare(sql).run(...params)
+}
 
 function enqueueTranscription(videoId) {
   // Dedup: skip if already running or already queued
@@ -201,7 +225,11 @@ async function cancelGroupTranscriptions(groupId) {
   }
   // Reset DB status for non-done videos
   await db.prepare(`
-    UPDATE videos SET transcription_status = NULL, transcription_error = NULL
+    UPDATE videos SET
+      transcription_status = NULL,
+      transcription_error = NULL,
+      transcription_history = COALESCE(transcription_history, '[]'::jsonb)
+        || jsonb_build_array(jsonb_build_object('t', NOW(), 'status', NULL, 'src', 'cancelGroupTranscriptions'))
     WHERE group_id = ? AND (transcription_status IS NULL OR transcription_status NOT IN ('done'))
   `).run(groupId)
   console.log(`[cancel] Group ${groupId}: removed ${removedFromQueue} from queue, aborted ${aborted} active`)
@@ -247,8 +275,7 @@ async function runTranscription(videoId, signal) {
   }
   if (!video.file_path && !video.cf_stream_uid) {
     console.error(`[transcribe] Video ${videoId} has no file_path or cf_stream_uid — skipping`)
-    await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
-      .run('failed', 'No file path — video may not have uploaded correctly', videoId)
+    await setTranscriptionStatus(videoId, 'failed', 'no_filepath', { error: 'No file path — video may not have uploaded correctly' })
     return
   }
 
@@ -260,15 +287,14 @@ async function runTranscription(videoId, signal) {
 
   // Wait for Cloudflare Stream to finish transcoding if needed
   if (video.cf_stream_uid) {
-    await db.prepare('UPDATE videos SET transcription_status = ? WHERE id = ?').run('waiting_for_cloudflare', videoId)
+    await setTranscriptionStatus(videoId, 'waiting_for_cloudflare', 'cf_wait')
     console.log(`[transcribe] Video ${videoId} waiting for CF stream ${video.cf_stream_uid}...`)
     try {
       await waitForStreamReady(video.cf_stream_uid, 600000, signal)
       await enableMp4Downloads(video.cf_stream_uid)
       await waitForMp4Ready(video.cf_stream_uid, 300000, signal)
     } catch (err) {
-      await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
-        .run('failed', `Cloudflare Stream not ready: ${err.message}`, videoId)
+      await setTranscriptionStatus(videoId, 'failed', 'cf_not_ready', { error: `Cloudflare Stream not ready: ${err.message}` })
       return
     }
   }
@@ -301,8 +327,7 @@ async function runTranscription(videoId, signal) {
       actualPath = join(__dirname, '..', '..', downloadUrl)
     }
   } catch (err) {
-    await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
-      .run('failed', `Download failed: ${err.message}`, videoId)
+    await setTranscriptionStatus(videoId, 'failed', 'download_failed', { error: `Download failed: ${err.message}` })
     return
   }
   const transcriptType = video.video_type === 'human_edited' ? 'human_edited' : 'raw'
@@ -313,7 +338,7 @@ async function runTranscription(videoId, signal) {
     const onProgress = async (stage) => {
       if (signal?.aborted) throw new Error('Transcription cancelled')
       console.log(`[transcribe] Video ${videoId} → ${stage}`)
-      await db.prepare('UPDATE videos SET transcription_status = ? WHERE id = ?').run(stage, videoId)
+      await setTranscriptionStatus(videoId, stage, 'progress')
     }
 
     onProgress('downloading')
@@ -344,8 +369,7 @@ async function runTranscription(videoId, signal) {
       }
     }
 
-    await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = NULL WHERE id = ?')
-      .run('done', videoId)
+    await setTranscriptionStatus(videoId, 'done', 'runTranscription_done', { error: null })
     console.log(`[transcribe] Video ${videoId} DONE: ${result.words?.length} words`)
 
     maybeAutoClassify(video.group_id)
@@ -358,7 +382,7 @@ async function runTranscription(videoId, signal) {
     // Don't mark as failed if cancelled — cancelGroupTranscriptions handles cleanup
     if (signal?.aborted || err.message === 'Transcription cancelled') {
       console.log(`[transcribe] Video ${videoId} cancelled`)
-      await db.prepare('UPDATE videos SET transcription_status = NULL, transcription_error = NULL WHERE id = ?').run(videoId)
+      await setTranscriptionStatus(videoId, null, 'runTranscription_cancelled', { error: null })
       return
     }
     const reason = err.message || String(err)
@@ -373,8 +397,7 @@ async function runTranscription(videoId, signal) {
       : `Whisper error: ${reason}`
     console.error(`[transcribe] Video ${videoId} FAILED:`, detail)
     console.error(`[transcribe] Video ${videoId} raw error:`, err)
-    await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
-      .run('failed', detail, videoId)
+    await setTranscriptionStatus(videoId, 'failed', 'runTranscription_failed', { error: detail })
     maybeAutoClassify(video.group_id)
   }
 }
@@ -439,8 +462,7 @@ async function startBackgroundTranscription(videoId) {
   }
 
   console.log(`[transcribe] startBackgroundTranscription: video ${videoId} "${video.title}" — enqueueing`)
-  await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = NULL WHERE id = ?')
-    .run('pending', videoId)
+  await setTranscriptionStatus(videoId, 'pending', 'startBackgroundTranscription', { error: null })
 
   enqueueTranscription(videoId)
 }
@@ -1375,8 +1397,7 @@ router.post('/groups/:id/transcribe', requireAuth, async (req, res) => {
 
   let enqueued = 0
   for (const v of videos) {
-    await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = NULL WHERE id = ?')
-      .run('pending', v.id)
+    await setTranscriptionStatus(v.id, 'pending', 'batch_transcribe', { error: null })
     enqueueTranscription(v.id)
     enqueued++
   }
