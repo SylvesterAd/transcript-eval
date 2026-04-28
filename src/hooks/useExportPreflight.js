@@ -18,7 +18,7 @@ import { apiGet } from './useApi.js'
 
 const initial = {
   ping:     { status: 'idle' },
-  manifest: { status: 'idle', additional: {} },  // additional: {variant -> manifest}
+  manifest: { status: 'idle', additional: {} },  // additional: {planPipelineId -> manifest}
   disk:     { status: 'idle' },
 }
 
@@ -30,10 +30,10 @@ function reducer(state, action) {
     case 'manifest_loading':   return { ...state, manifest: { ...state.manifest, status: 'loading' } }
     case 'manifest_ok':        return { ...state, manifest: { status: 'ok', value: action.value, additional: {} } }
     case 'manifest_error':     return { ...state, manifest: { status: 'error', error: action.error, additional: {} } }
-    case 'manifest_add_ok':    return { ...state, manifest: { ...state.manifest, additional: { ...state.manifest.additional, [action.variant]: action.value } } }
+    case 'manifest_add_ok':    return { ...state, manifest: { ...state.manifest, additional: { ...state.manifest.additional, [action.planPipelineId]: action.value } } }
     case 'manifest_add_drop':  {
       const next = { ...state.manifest.additional }
-      delete next[action.variant]
+      delete next[action.planPipelineId]
       return { ...state, manifest: { ...state.manifest, additional: next } }
     }
     case 'disk_loading':       return { ...state, disk: { status: 'loading' } }
@@ -46,15 +46,14 @@ function reducer(state, action) {
 /**
  * @param {{
  *   pipelineId: string,
- *   variant: string,
  *   phase: 'init' | 'state_a' | 'state_b' | 'state_c' | 'starting',
- *   additionalVariants?: string[]   // for multi-variant export checkbox in State C
+ *   additionalPlanPipelineIds?: string[]   // for multi-variant export checkbox in State C
  * }} opts
  */
-export function useExportPreflight({ pipelineId, variant, phase, additionalVariants = [] }) {
+export function useExportPreflight({ pipelineId, phase, additionalPlanPipelineIds = [] }) {
   const ext = useExtension()
   const [state, dispatch] = useReducer(reducer, initial)
-  // Track the most recent additionalVariants for diff-based fetch / drop.
+  // Track the most recent additionalPlanPipelineIds for diff-based fetch / drop.
   const lastAdditionalRef = useRef([])
 
   // Extension ping. Poll every 2s in state_a; otherwise fire once on
@@ -87,37 +86,37 @@ export function useExportPreflight({ pipelineId, variant, phase, additionalVaria
     }
   }, [phase, ext])
 
-  // Manifest fetch — one-shot per (pipelineId, variant). Re-runs when
-  // either changes (e.g., user navigates from variant=A to variant=C).
+  // Manifest fetch — one-shot per pipelineId. Re-runs when pipelineId
+  // changes (e.g. user navigates from one plan_pipeline_id to another).
   useEffect(() => {
     let cancelled = false
-    if (!pipelineId || !variant) return
+    if (!pipelineId) return
     dispatch({ type: 'manifest_loading' })
-    apiGet(`/broll-searches/${encodeURIComponent(pipelineId)}/manifest?variant=${encodeURIComponent(variant)}`)
+    apiGet(`/broll-searches/${encodeURIComponent(pipelineId)}/manifest`)
       .then(value => { if (!cancelled) dispatch({ type: 'manifest_ok', value }) })
       .catch(e => { if (!cancelled) dispatch({ type: 'manifest_error', error: e.message }) })
     return () => { cancelled = true }
-  }, [pipelineId, variant])
+  }, [pipelineId])
 
-  // Additional-variant manifests (multi-variant export checkbox).
+  // Additional-plan manifests (multi-variant export checkbox).
   // Diff against last list: fetch newly-added, drop newly-removed.
   useEffect(() => {
     const prev = lastAdditionalRef.current
-    const next = additionalVariants
+    const next = additionalPlanPipelineIds
     const added = next.filter(v => !prev.includes(v))
     const removed = prev.filter(v => !next.includes(v))
     lastAdditionalRef.current = next.slice()
 
-    for (const v of removed) dispatch({ type: 'manifest_add_drop', variant: v })
+    for (const id of removed) dispatch({ type: 'manifest_add_drop', planPipelineId: id })
 
     let cancelled = false
-    for (const v of added) {
-      apiGet(`/broll-searches/${encodeURIComponent(pipelineId)}/manifest?variant=${encodeURIComponent(v)}`)
-        .then(value => { if (!cancelled) dispatch({ type: 'manifest_add_ok', variant: v, value }) })
-        .catch(() => { /* error per additional variant ignored — treat as zero items */ })
+    for (const id of added) {
+      apiGet(`/broll-searches/${encodeURIComponent(id)}/manifest`)
+        .then(value => { if (!cancelled) dispatch({ type: 'manifest_add_ok', planPipelineId: id, value }) })
+        .catch(() => { /* error per additional plan ignored — treat as zero items */ })
     }
     return () => { cancelled = true }
-  }, [additionalVariants, pipelineId])
+  }, [additionalPlanPipelineIds])
 
   // Disk estimate — one-shot on mount; navigator.storage.estimate() is
   // cheap, no need to poll. Browsers without `quota` (Safari) get an

@@ -373,6 +373,57 @@ router.put('/runs/:id/output', requireAuth, async (req, res) => {
   }
 })
 
+// Pure transform: rows from broll_runs (with metadata_json + status +
+// created_at) → ordered list of {plan_pipeline_id, label} for plans
+// whose every run is complete. Exported for unit testing without a DB.
+export function buildExportPlansList(rows) {
+  const byPipeline = new Map()
+  for (const r of rows || []) {
+    let meta = {}
+    try { meta = JSON.parse(r.metadata_json || '{}') } catch { continue }
+    const pid = meta.pipelineId
+    if (!pid || !pid.startsWith('plan-')) continue
+    let entry = byPipeline.get(pid)
+    if (!entry) {
+      entry = { plan_pipeline_id: pid, status: 'complete', firstSeen: r.created_at }
+      byPipeline.set(pid, entry)
+    }
+    if (r.status === 'failed') entry.status = 'failed'
+  }
+  return [...byPipeline.values()]
+    .filter(p => p.status === 'complete')
+    .sort((a, b) => new Date(a.firstSeen) - new Date(b.firstSeen))
+    .map((p, i) => ({
+      plan_pipeline_id: p.plan_pipeline_id,
+      label: `Variant ${String.fromCharCode(65 + i)}`,
+    }))
+}
+
+// Lists complete b-roll plan pipelines for a video group, A/B/C-labelled in
+// generation order. Drives the export page's variant chooser + the
+// multi-variant export checkbox; consumers expect plan_pipeline_id values
+// they can pass straight to /broll-searches/:pipelineId/manifest.
+router.get('/groups/:groupId/export-plans', requireAuth, async (req, res) => {
+  try {
+    const groupId = parseInt(req.params.groupId, 10)
+    if (!Number.isFinite(groupId)) return res.status(400).json({ error: 'invalid groupId' })
+
+    const videos = await db.prepare(`SELECT id FROM videos WHERE group_id = ?`).all(groupId)
+    if (!videos.length) return res.json({ plans: [] })
+
+    const videoIds = videos.map(v => v.id)
+    const placeholders = videoIds.map(() => '?').join(',')
+    const rows = await db.prepare(
+      `SELECT metadata_json, status, created_at FROM broll_runs WHERE video_id IN (${placeholders}) ORDER BY created_at ASC`
+    ).all(...videoIds)
+
+    res.json({ plans: buildExportPlansList(rows) })
+  } catch (err) {
+    console.error('[broll-export-plans] error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // Example sources (per group)
 router.get('/groups/:groupId/examples', requireAuth, async (req, res) => {
   const sources = await listExampleSources(req.params.groupId)

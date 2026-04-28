@@ -1,7 +1,10 @@
 # Export page (WebApp.1 Phase A — States A/B/C)
 
-Pre-flight UI rendered at `/editor/:id/export?variant=<X>` that walks the user
-through three states before handing off to the Chrome Export Helper extension:
+Pre-flight UI rendered at `/editor/:videoGroupId/export/:planPipelineId` that
+walks the user through three states before handing off to the Chrome Export
+Helper extension. The `:planPipelineId` segment selects which b-roll variant
+to export; `/editor/:videoGroupId/export` (no plan id) auto-redirects to the
+sole completed plan or shows a chooser when there are several.
 
 | State | Renders when | Component |
 |---|---|---|

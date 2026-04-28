@@ -1,5 +1,5 @@
-import { useEffect, useReducer, useCallback, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useEffect, useReducer, useCallback, useMemo, useState } from 'react'
+import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import styled from 'styled-components'
 import { useExportPreflight } from '../hooks/useExportPreflight.js'
 import { useExtension } from '../hooks/useExtension.js'
@@ -26,7 +26,7 @@ import { useExportPort } from '../hooks/useExportPort.js'
 function reducer(state, action) {
   switch (action.type) {
     case 'goto':                  return { ...state, phase: action.phase }
-    case 'set_extra_variants':    return { ...state, additionalVariants: action.variants }
+    case 'set_extra_plans':       return { ...state, additionalPlanPipelineIds: action.ids }
     case 'override_session':      return { ...state, sessionOverridden: true }
     case 'set_target_folder':     return { ...state, targetFolder: action.targetFolder }
     case 'export_started':        return {
@@ -48,7 +48,7 @@ function reducer(state, action) {
 
 const initialState = {
   phase: 'init',
-  additionalVariants: [],
+  additionalPlanPipelineIds: [],
   sessionOverridden: false,
   export_id: null,
   run_id: null,
@@ -78,10 +78,103 @@ const ErrorBox = styled.div`
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
 `
+
+const ChooserWrap = styled.div`
+  max-width: 640px;
+  margin: 80px auto;
+  padding: 0 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+`
+const ChooserCard = styled.div`
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 28px 32px;
+  background: #fff;
+`
+const ChooserButton = styled.button`
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 16px;
+  margin: 8px 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  &:hover { background: #f9fafb; border-color: #9ca3af; }
+`
+
 export default function ExportPage() {
-  const { id: pipelineId } = useParams()
+  const { id: videoGroupId, planPipelineId: planPipelineIdParam } = useParams()
+  const navigate = useNavigate()
+
+  // Available plans for this video group. Drives the chooser UI when no
+  // planPipelineId is in the URL, the variant label display in State C,
+  // and the multi-variant export checkbox.
+  const [plans, setPlans] = useState(null)  // null = loading, [] = none
+  const [plansError, setPlansError] = useState(null)
+
+  useEffect(() => {
+    if (!videoGroupId) return
+    let cancelled = false
+    apiGet(`/broll/groups/${encodeURIComponent(videoGroupId)}/export-plans`)
+      .then(r => { if (!cancelled) setPlans(Array.isArray(r?.plans) ? r.plans : []) })
+      .catch(e => { if (!cancelled) { setPlans([]); setPlansError(e.message) } })
+    return () => { cancelled = true }
+  }, [videoGroupId])
+
+  // No planPipelineId → chooser flow. Auto-redirect when there's exactly
+  // one plan; otherwise render the picker.
+  useEffect(() => {
+    if (planPipelineIdParam) return
+    if (!plans || plans.length !== 1) return
+    navigate(`/editor/${videoGroupId}/export/${encodeURIComponent(plans[0].plan_pipeline_id)}`, { replace: true })
+  }, [planPipelineIdParam, plans, videoGroupId, navigate])
+
+  if (!videoGroupId) {
+    return <ErrorBox>Missing project id in URL — expected /editor/:id/export</ErrorBox>
+  }
+
+  if (!planPipelineIdParam) {
+    if (plans === null) return <Loader>Loading variants…</Loader>
+    if (plans.length === 0) {
+      return <ErrorBox>{plansError ? `Failed to load plans: ${plansError}` : 'No completed B-Roll plans for this project yet.'}</ErrorBox>
+    }
+    if (plans.length === 1) return <Loader>Opening variant…</Loader>
+    return (
+      <ChooserWrap>
+        <ChooserCard>
+          <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0, marginBottom: 4 }}>Choose a variant to export</h1>
+          <p style={{ fontSize: 13, color: '#6b7280', margin: 0, marginBottom: 16 }}>
+            This project has {plans.length} completed B-Roll plans. Pick one to export — you'll have a chance to export additional variants on the next screen.
+          </p>
+          {plans.map(p => (
+            <ChooserButton
+              key={p.plan_pipeline_id}
+              type="button"
+              onClick={() => navigate(`/editor/${videoGroupId}/export/${encodeURIComponent(p.plan_pipeline_id)}`)}
+            >
+              <div style={{ fontWeight: 600 }}>{p.label}</div>
+              <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>{p.plan_pipeline_id}</div>
+            </ChooserButton>
+          ))}
+        </ChooserCard>
+      </ChooserWrap>
+    )
+  }
+
+  return (
+    <ExportFlow
+      videoGroupId={videoGroupId}
+      planPipelineId={planPipelineIdParam}
+      plans={plans || []}
+    />
+  )
+}
+
+function ExportFlow({ videoGroupId, planPipelineId, plans }) {
   const [searchParams, setSearchParams] = useSearchParams()
-  const variant = searchParams.get('variant') || 'A'
   const ext = useExtension()
   const [state, dispatch] = useReducer(reducer, initialState)
 
@@ -102,11 +195,16 @@ export default function ExportPage() {
     setSearchParams(next, { replace: true })
   }, [state.phase, searchParams, setSearchParams])
 
+  const currentPlan = useMemo(
+    () => plans.find(p => p.plan_pipeline_id === planPipelineId),
+    [plans, planPipelineId],
+  )
+  const variantLabel = currentPlan?.label || 'Variant'
+
   const preflight = useExportPreflight({
-    pipelineId,
-    variant,
+    pipelineId: planPipelineId,
     phase: state.phase,
-    additionalVariants: state.additionalVariants,
+    additionalPlanPipelineIds: state.additionalPlanPipelineIds,
   })
 
   // Decide which phase to enter based on preflight results.
@@ -130,36 +228,36 @@ export default function ExportPage() {
     }
   }, [preflight.ping, preflight.manifest, state.sessionOverridden, state.phase])
 
-  // Discover other variants for the multi-variant checkbox. Phase A
-  // approach: hit the manifest endpoint without ?variant to learn what
-  // variants exist for this pipeline. To keep this cheap and avoid a
-  // schema change, a lightweight implementation is: fetch the all-
-  // variant endpoint and inspect distinct `variant_label` values from
-  // the items array. Caveat: returns up to N items; for large pipelines
-  // this is wasteful. Alternative (deferred): a dedicated endpoint
-  // returning just the variant list. Acceptable for Phase A.
-  const [knownVariants, setKnownVariants] = useState([])
+  // Other plans available for the multi-variant export checkbox — every
+  // plan in the group except the current one.
+  const otherPlans = useMemo(
+    () => plans.filter(p => p.plan_pipeline_id !== planPipelineId),
+    [plans, planPipelineId],
+  )
 
-  useEffect(() => {
-    if (!pipelineId) return
-    let cancelled = false
-    apiGet(`/broll-searches/${encodeURIComponent(pipelineId)}/manifest`)
-      .then(r => {
-        if (cancelled) return
-        const labels = new Set()
-        for (const it of r.items || []) {
-          if (it.variant_label) labels.add(it.variant_label)
-        }
-        // Filter to labels that aren't the current variant. Variant
-        // values in broll_searches are stored as "Variant X" strings;
-        // the URL ?variant param is just the letter. Match flexibly.
-        const norm = (v) => String(v).replace(/^Variant\s+/i, '').trim()
-        const others = [...labels].map(norm).filter(v => v && v !== variant)
-        setKnownVariants([...new Set(others)])
-      })
-      .catch(() => { if (!cancelled) setKnownVariants([]) })
-    return () => { cancelled = true }
-  }, [pipelineId, variant])
+  // Tag each manifest response with its plan's display label so
+  // buildManifest() in StateC can populate `unified.variants` (the server
+  // returns variant=null now that the URL ?variant param is gone). This is
+  // a thin client-side decoration — no schema change needed.
+  const labelByPlan = useMemo(() => {
+    const m = {}
+    for (const p of plans) m[p.plan_pipeline_id] = p.label
+    return m
+  }, [plans])
+
+  const labelledManifest = useMemo(() => {
+    if (preflight.manifest.status !== 'ok' || !preflight.manifest.value) return preflight.manifest.value
+    const label = labelByPlan[planPipelineId] || variantLabel
+    return { ...preflight.manifest.value, variant: label }
+  }, [preflight.manifest, labelByPlan, planPipelineId, variantLabel])
+
+  const labelledAdditional = useMemo(() => {
+    const out = {}
+    for (const [id, m] of Object.entries(preflight.manifest.additional || {})) {
+      out[id] = { ...m, variant: labelByPlan[id] || m?.variant || null }
+    }
+    return out
+  }, [preflight.manifest.additional, labelByPlan])
 
   const onContinueOverride = useCallback(() => {
     dispatch({ type: 'override_session' })
@@ -189,20 +287,20 @@ export default function ExportPage() {
     dispatch({ type: 'set_target_folder', targetFolder: trimmed })
   }, [state.targetFolder])
 
-  const onToggleVariant = useCallback((v, on) => {
+  const onTogglePlan = useCallback((id, on) => {
     dispatch({
-      type: 'set_extra_variants',
-      variants: on
-        ? [...new Set([...state.additionalVariants, v])]
-        : state.additionalVariants.filter(x => x !== v),
+      type: 'set_extra_plans',
+      ids: on
+        ? [...new Set([...state.additionalPlanPipelineIds, id])]
+        : state.additionalPlanPipelineIds.filter(x => x !== id),
     })
-  }, [state.additionalVariants])
+  }, [state.additionalPlanPipelineIds])
 
   const onStart = useCallback(async ({ unifiedManifest, options, targetFolder }) => {
     // 1. POST /api/exports → returns export_id
-    const variantLabels = unifiedManifest.variants.length ? unifiedManifest.variants : [variant]
+    const variantLabels = unifiedManifest.variants.length ? unifiedManifest.variants : [variantLabel]
     const exportRow = await apiPost('/exports', {
-      plan_pipeline_id: pipelineId,
+      plan_pipeline_id: planPipelineId,
       variant_labels: variantLabels,
       manifest: unifiedManifest,
     })
@@ -240,7 +338,7 @@ export default function ExportPage() {
       unified_manifest: unifiedManifest,
       variant_labels: variantLabels,
     })
-  }, [pipelineId, variant, ext])
+  }, [planPipelineId, variantLabel, ext])
 
   // Retry failed items — State F button callback. Rebuilds a filtered
   // unified manifest containing only items whose source_item_id is in
@@ -276,11 +374,6 @@ export default function ExportPage() {
     })
   }, [state.unified_manifest, state.variant_labels, onStart])
 
-  // Fail-fast on missing pipelineId.
-  if (!pipelineId) {
-    return <ErrorBox>Missing pipeline id in URL — expected /editor/:id/export</ErrorBox>
-  }
-
   // Surface explicit errors from the manifest endpoint.
   if (preflight.manifest.status === 'error') {
     return <ErrorBox>Failed to load manifest: {preflight.manifest.error}</ErrorBox>
@@ -295,7 +388,7 @@ export default function ExportPage() {
   if (state.phase === 'state_a') {
     return (
       <StateA_Install
-        variant={variant}
+        variant={variantLabel}
         ping={preflight.ping}
       />
     )
@@ -306,7 +399,7 @@ export default function ExportPage() {
     const envatoCount = preflight.manifest.value?.totals?.by_source?.envato || 0
     return (
       <StateB_Session
-        variant={variant}
+        variant={variantLabel}
         envatoItemCount={envatoCount}
         onContinue={onContinueOverride}
       />
@@ -317,16 +410,16 @@ export default function ExportPage() {
   if (state.phase === 'state_c') {
     return (
       <StateC_Summary
-        variant={variant}
-        manifestResp={preflight.manifest.value}
-        additionalManifests={preflight.manifest.additional}
+        variant={variantLabel}
+        manifestResp={labelledManifest}
+        additionalManifests={labelledAdditional}
         ping={preflight.ping.value}
         diskValue={preflight.disk.status === 'ok' ? preflight.disk.value : { available: null }}
         onStart={onStart}
         onChangeFolder={onChangeFolder}
         targetFolderOverride={state.targetFolder}
-        onToggleVariant={onToggleVariant}
-        availableExtraVariants={knownVariants || []}
+        onTogglePlan={onTogglePlan}
+        otherPlans={otherPlans}
       />
     )
   }
@@ -335,7 +428,7 @@ export default function ExportPage() {
   if (state.phase === 'state_d' || state.phase === 'state_e' || state.phase === 'state_f') {
     return (
       <ActiveRun
-        variant={variant}
+        variant={variantLabel}
         exportId={state.export_id}
         expectedRunId={state.run_id}
         phase={state.phase}
