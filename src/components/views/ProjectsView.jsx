@@ -229,6 +229,7 @@ export default function ProjectsView() {
                 </div>
                 <div className="text-xs text-muted mt-0.5 flex items-center gap-2">
                   <span>{project.videos.length} video{project.videos.length !== 1 ? 's' : ''}</span>
+                  <span>· #{project.id}</span>
                   {project.transcriptionStatus === 'done' ? (
                     <span className="text-emerald-400 flex items-center gap-1">
                       <CheckCircle2 size={11} /> Transcribed
@@ -289,7 +290,7 @@ export default function ProjectsView() {
                 {project.name}
               </div>
               <div className="text-xs text-muted mt-1">
-                {project.videos.length} video{project.videos.length !== 1 ? 's' : ''} · {new Date(project.created_at).toLocaleDateString()}
+                {project.videos.length} video{project.videos.length !== 1 ? 's' : ''} · #{project.id} · {new Date(project.created_at).toLocaleDateString()}
               </div>
               {project.transcriptionStatus === 'done' ? (
                 <div className="text-[10px] text-emerald-400 mt-1 flex items-center gap-1">
