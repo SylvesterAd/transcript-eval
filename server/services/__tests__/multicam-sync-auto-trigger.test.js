@@ -9,7 +9,7 @@ vi.mock('../../db.js', () => ({
     prepare(sql) {
       return {
         async get(id) {
-          if (/SELECT user_id, auto_rough_cut FROM video_groups WHERE id/.test(sql)) {
+          if (/SELECT user_id, auto_rough_cut(?:, path_id)? FROM video_groups WHERE id/.test(sql)) {
             return state.group
           }
           throw new Error(`unexpected .get SQL: ${sql}`)

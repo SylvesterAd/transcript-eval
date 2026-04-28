@@ -1,7 +1,17 @@
 // src/components/upload-config/steps/StepPath.jsx
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { apiGet, apiPost } from '../../../hooks/useApi.js'
 import Eyebrow from '../primitives/Eyebrow.jsx'
 import PageTitle from '../primitives/PageTitle.jsx'
+
+// Heuristic for b-roll token cost — must roughly match the planner's true
+// usage so we don't green-light a Full Auto run that will OOM mid-chain.
+// Numbers picked to be conservative: a 30-min video with 2 refs should
+// estimate around 4–5k tokens.
+function brollHeuristicTokens(durationSeconds, refCount) {
+  const minutes = durationSeconds / 60
+  return Math.round(minutes * 50 * Math.max(1, refCount) + 500 + 500 * Math.max(1, refCount))
+}
 
 const PATHS = [
   {
@@ -165,7 +175,42 @@ function PathCard({ path, active, onSelect }) {
   )
 }
 
-export default function StepPath({ state, setState }) {
+export default function StepPath({ state, setState, groupId, onValidityChange }) {
+  // Pre-flight only matters for hands-off — strategy/guided always pass.
+  // We fetch refs/balance/estimate in parallel; on any error we soft-fail
+  // (let the user proceed, server-side will catch real shortfalls).
+  const [refCount, setRefCount] = useState(null)
+  const [balance, setBalance] = useState(null)
+  const [estimate, setEstimate] = useState(null)
+
+  useEffect(() => {
+    if (state.pathId !== 'hands-off') { onValidityChange?.(true); return }
+    if (!groupId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const [refs, bal, est] = await Promise.all([
+          apiGet(`/broll/groups/${groupId}/examples`).then(r => Array.isArray(r) ? r.length : 0).catch(() => 0),
+          apiGet('/videos/user/tokens').then(r => r?.balance ?? 0).catch(() => 0),
+          apiPost(`/videos/groups/${groupId}/estimate-ai-roughcut`, {}).then(r => r?.tokenCost ?? 0).catch(() => 0),
+        ])
+        if (cancelled) return
+        setRefCount(refs)
+        setBalance(bal)
+        setEstimate(est)
+        const required = est + brollHeuristicTokens(1800, refs)
+        onValidityChange?.(refs >= 1 && bal >= required)
+      } catch {
+        if (!cancelled) onValidityChange?.(true)  // soft-fail; trust server-side validation
+      }
+    })()
+    return () => { cancelled = true }
+  }, [state.pathId, groupId, onValidityChange])
+
+  const required = (estimate ?? 0) + brollHeuristicTokens(1800, refCount ?? 1)
+  const showRefError = state.pathId === 'hands-off' && refCount !== null && refCount < 1
+  const showBalanceError = state.pathId === 'hands-off' && refCount !== null && refCount >= 1 && balance !== null && balance < required
+
   return (
     <div>
       <div className="mb-6">
@@ -185,6 +230,14 @@ export default function StepPath({ state, setState }) {
           <PathCard key={p.id} path={p} active={state.pathId === p.id} onSelect={setState.pathId} />
         ))}
       </div>
+
+      {(showRefError || showBalanceError) && (
+        <p className="text-error text-sm mt-3 mb-3">
+          {showRefError
+            ? 'Full Auto needs ≥1 reference video. Add some on Step 4.'
+            : 'Not enough tokens. Try Strategy Review for a smaller cost.'}
+        </p>
+      )}
 
       <div className="px-[18px] py-3.5 rounded-[10px] bg-orange-500/5 ring-1 ring-inset ring-orange-500/20 flex items-start gap-3">
         <span className="material-symbols-outlined text-[18px] text-orange-400 shrink-0 mt-px" style={{ fontVariationSettings: '"FILL" 1' }}>report</span>
