@@ -256,9 +256,13 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   // Sync URL detail (placementId) → selection on mount / URL change.
   // Defers to pendingSelectionRef when a fresh inactive-variant click is in flight —
   // the click is fresher intent than a stale URL detail from the previous variant.
+  // Also defers for 1s AFTER a pending was set: pending-select clears the ref
+  // synchronously, then detail-sync runs in the same render and would otherwise
+  // re-apply the stale URL detail, clobbering the fresh selection.
   useEffect(() => {
     if (!brollState.placements?.length) return
     if (pendingSelectionRef.current != null) return
+    if (Date.now() - pendingSelectionTsRef.current < 1000) return
     const idx = resolveDetailToIndex(detail)
     if (idx != null && idx !== brollState.selectedIndex) {
       brollState.selectPlacement(idx)
