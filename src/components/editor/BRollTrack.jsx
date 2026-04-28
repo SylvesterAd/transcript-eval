@@ -383,6 +383,12 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
               </div>
             )}
 
+            {p.pendingWrite && (
+              <div className="absolute inset-0 z-20 bg-black/40 flex items-center justify-center pointer-events-none" title="Saving…">
+                <Loader2 size={14} className="text-primary-fixed animate-spin" />
+              </div>
+            )}
+
             {p.isUserPlacement && (
               <div className="absolute top-1 right-1 z-10 bg-black/50 rounded p-0.5 pointer-events-none" title="Copied clip">
                 <Copy size={8} className="text-white/70" />
