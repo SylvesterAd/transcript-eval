@@ -59,8 +59,10 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   // gate is closed until StepReferences signals otherwise.
   const [referencesValid, setReferencesValid] = useState(false)
 
-  // Persist on step-forward
+  // Persist on step-forward. No-op without a valid groupId so navigation
+  // never gets blocked by a doomed PUT (e.g. when the URL has no ?group=).
   async function persistCurrent() {
+    if (!Number.isFinite(groupId)) return
     const stepId = CONFIG_STEPS[current].id
     const body = {}
     if (stepId === 'libraries') {
@@ -78,13 +80,13 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   }
 
   const next = async () => {
-    await persistCurrent()
+    try { await persistCurrent() } catch {}
     if (current < CONFIG_STEPS.length - 1) setCurrent(current + 1)
     else setSubmitted(true)
   }
   const back = async () => {
     if (submitted) { setSubmitted(false); return }
-    await persistCurrent()
+    try { await persistCurrent() } catch {}
     if (current > 0) setCurrent(current - 1)
     else onBack?.()
   }
@@ -118,7 +120,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
             onJump={async i => {
               if (i === 0) { onBack?.(); return }
               if (i >= UNIFIED_OFFSET && i < UNIFIED_OFFSET + CONFIG_STEPS.length) {
-                await persistCurrent()
+                try { await persistCurrent() } catch {}
                 setSubmitted(false)
                 setCurrent(i - UNIFIED_OFFSET)
               }

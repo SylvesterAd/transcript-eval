@@ -38,6 +38,16 @@ export default function ProjectsView() {
     }
   }, [step, groupId, setSearchParams])
 
+  // Guard against malformed URLs: config/processing steps require a valid
+  // numeric group id. Without one, polling/persistence hits /groups/NaN
+  // (or /groups/null) and silently fails — strand the user on a dead page.
+  useEffect(() => {
+    const needsGroup = CONFIG_STEPS.has(step) || step === 'processing'
+    if (needsGroup && !Number.isFinite(groupId)) {
+      setSearchParams({}, { replace: true })
+    }
+  }, [step, groupId, setSearchParams])
+
   const setStep = useCallback((newStep, newGroupId, files) => {
     if (files !== undefined) filesRef.current = files
     if (!newStep) {
