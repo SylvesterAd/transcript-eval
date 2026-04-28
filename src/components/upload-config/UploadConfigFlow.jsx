@@ -101,7 +101,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   }
 
   let body
-  if (submitted) body = <StepDone state={state} onEdit={() => setSubmitted(false)} onComplete={onComplete} />
+  if (submitted) body = <StepDone state={state} onEdit={() => setSubmitted(false)} onComplete={() => onComplete(groupId)} />
   else if (current === 0) body = <StepLibraries state={state} setState={setState} />
   else if (current === 1) body = <StepAudience state={state} setState={setState} />
   else if (current === 2) body = <StepReferences groupId={groupId} onValidityChange={setReferencesValid} />

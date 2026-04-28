@@ -71,7 +71,7 @@ export default function StepDone({ state, onEdit, onComplete }) {
         </button>
         <button
           type="button"
-          onClick={onComplete}
+          onClick={() => onComplete()}
           className="inline-flex items-center gap-2.5 bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-7 py-3.5 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all"
         >
           <span className="material-symbols-outlined text-sm">play_arrow</span>
