@@ -146,6 +146,7 @@ const transcriptionQueue = []     // [{ videoId, resolve }]
 const activeTranscriptionIds = new Set()  // videoIds currently running
 const queuedIds = new Set()              // videoIds waiting in queue
 const abortControllers = new Map()       // videoId → AbortController
+const classifyingGroups = new Set()      // groupId — in-flight auto-classification dedup
 
 function enqueueTranscription(videoId) {
   // Dedup: skip if already running or already queued
@@ -205,6 +206,37 @@ async function cancelGroupTranscriptions(groupId) {
   `).run(groupId)
   console.log(`[cancel] Group ${groupId}: removed ${removedFromQueue} from queue, aborted ${aborted} active`)
   return { removedFromQueue, aborted }
+}
+
+// Auto-trigger classification once every video in a group has reached a terminal
+// transcription state. Replaces the frontend-driven trigger in ProcessingModal
+// which silently broke when the modal unmounted before its poll caught 'done',
+// or when its groupId captured as NaN from a malformed URL — leaving groups
+// permanently stuck at assembly_status=null. Only fires for groups that have
+// never been classified; user-owned states (classified/confirmed/etc) are left
+// alone so re-transcription doesn't blow away their sub-group splits.
+async function maybeAutoClassify(groupId) {
+  if (!groupId) return
+  if (classifyingGroups.has(groupId)) return
+
+  const pending = await db.prepare(
+    "SELECT 1 FROM videos WHERE group_id = ? AND (transcription_status IS NULL OR transcription_status NOT IN ('done', 'failed')) LIMIT 1"
+  ).get(groupId)
+  if (pending) return
+
+  const group = await db.prepare(
+    'SELECT classification_json, assembly_status FROM video_groups WHERE id = ?'
+  ).get(groupId)
+  if (!group) return
+  if (group.classification_json || group.assembly_status) return
+
+  if (classifyingGroups.has(groupId)) return
+  classifyingGroups.add(groupId)
+
+  console.log(`[transcribe] Group ${groupId} — all transcriptions terminal, auto-triggering classification`)
+  classifyVideosForReview(groupId)
+    .catch(err => console.error(`[transcribe] Auto-classify failed for group ${groupId}:`, err.message))
+    .finally(() => classifyingGroups.delete(groupId))
 }
 
 async function runTranscription(videoId, signal) {
@@ -316,9 +348,7 @@ async function runTranscription(videoId, signal) {
       .run('done', videoId)
     console.log(`[transcribe] Video ${videoId} DONE: ${result.words?.length} words`)
 
-    // Note: classification is triggered by the frontend (ProcessingModal)
-    // after ALL uploads + transcriptions complete, not per-video here.
-    // This avoids race conditions with parallel uploads.
+    maybeAutoClassify(video.group_id)
 
     // Clean up temp file if we downloaded from Supabase
     if (tempTranscribeFile) { try { unlinkSync(actualPath) } catch {} }
@@ -345,6 +375,7 @@ async function runTranscription(videoId, signal) {
     console.error(`[transcribe] Video ${videoId} raw error:`, err)
     await db.prepare('UPDATE videos SET transcription_status = ?, transcription_error = ? WHERE id = ?')
       .run('failed', detail, videoId)
+    maybeAutoClassify(video.group_id)
   }
 }
 
