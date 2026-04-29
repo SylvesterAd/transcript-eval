@@ -649,13 +649,21 @@ router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
   `).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!parent) return res.status(404).json({ error: 'Group not found' })
 
+  // AFTER — videos live on the parent group OR on any sub-group whose
+  // parent_group_id points back here. Sub-group MAIN holds the raw
+  // uploads in Full Auto / Strategy / Guided projects, so without the
+  // IN clause the modal sees zero videos and ships "Transcribing —
+  // Pending" even when it's actually done.
   const videos = await db.prepare(`
     SELECT id, title, transcription_status, duration_seconds, cf_stream_uid, file_path
-    FROM videos WHERE group_id = ? AND video_type = 'raw' ORDER BY id
-  `).all(groupId)
+    FROM videos
+    WHERE video_type = 'raw'
+      AND (group_id = ? OR group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?))
+    ORDER BY id
+  `).all(groupId, groupId)
 
   const subGroups = await db.prepare(`
-    SELECT id, name, assembly_status, assembly_error, rough_cut_status, broll_chain_status, broll_chain_error
+    SELECT id, name, assembly_status, assembly_error, rough_cut_status, broll_chain_status, broll_chain_substage, broll_chain_error
     FROM video_groups WHERE parent_group_id = ? ORDER BY id
   `).all(groupId)
 
