@@ -5064,6 +5064,131 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   }
 }
 
+// Indirection holder so tests can stub executePipeline without driving the
+// real (very large) pipeline. resumePipeline calls through this object;
+// production code path is identical to a direct call.
+export const __pipelineRunner = { executePipeline }
+
+// Callable resume — same logic as POST /broll/pipeline/:id/resume.
+// Lifted from the route so the boot-time auto-resume can call it directly.
+// Throws on validation failures; the route translates them to HTTP errors.
+export async function resumePipeline(pipelineId, opts = {}) {
+  const { fromStage } = opts
+
+  if (pipelineId.startsWith('alt-')) throw new Error('Alt plan pipelines must be re-run via "Generate Alt Plans" button, not resumed')
+  if (pipelineId.startsWith('kw-')) throw new Error('Keywords pipelines must be re-run via "Generate Keywords" button, not resumed')
+  if (pipelineId.startsWith('bs-')) throw new Error('B-Roll search pipelines must be re-run via "Search B-Roll" button, not resumed')
+
+  const allRuns = await db.prepare(`
+    SELECT * FROM broll_runs
+    WHERE metadata_json LIKE ? AND status = 'complete'
+    ORDER BY id
+  `).all(`%"pipelineId":"${pipelineId}"%`)
+
+  if (!allRuns.length) throw new Error('No completed stages found for this pipeline')
+
+  const mainRuns = []
+  const subRunsByStage = {}
+  for (const run of allRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.isSubRun) {
+      const si = meta.stageIndex
+      if (si != null) {
+        if (!subRunsByStage[si]) subRunsByStage[si] = []
+        subRunsByStage[si].push({ ...run, _meta: meta })
+      }
+    } else {
+      mainRuns.push(run)
+    }
+  }
+
+  if (!mainRuns.length) throw new Error('No completed stages found for this pipeline')
+
+  const firstMeta = JSON.parse(mainRuns[0].metadata_json || '{}')
+  const strategyId = mainRuns[0].strategy_id
+  const videoId = mainRuns[0].video_id
+  let groupId = firstMeta.groupId || null
+  if (!groupId && videoId) {
+    const video = await db.prepare('SELECT group_id FROM videos WHERE id = ?').get(videoId)
+    groupId = video?.group_id || null
+  }
+
+  const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategyId)
+  if (!version) throw new Error('No strategy version found')
+  const newTemplateStages = JSON.parse(version.stages_json || '[]')
+
+  const videoGroups = {}
+  for (const run of mainRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.stageIndex == null) continue
+    const vl = meta.videoLabel || ''
+    if (!videoGroups[vl]) videoGroups[vl] = []
+    videoGroups[vl].push({ stageIndex: meta.stageIndex, stageName: meta.stageName, output: run.output_text || '' })
+  }
+  const videoLabelOrder = Object.keys(videoGroups)
+
+  const completedStages = {}
+  for (let v = 0; v < videoLabelOrder.length; v++) {
+    const vl = videoLabelOrder[v]
+    const offset = v * newTemplateStages.length
+    for (const run of videoGroups[vl]) {
+      const newTemplateIdx = newTemplateStages.findIndex(s => s.name === run.stageName)
+      if (newTemplateIdx >= 0) {
+        const newIndex = newTemplateIdx + offset
+        completedStages[newIndex] = run.output
+        console.log(`[broll-resume] "${run.stageName}" [${vl || 'default'}] old:${run.stageIndex} → new:${newIndex}`)
+      } else {
+        console.log(`[broll-resume] Skipping "${run.stageName}" — not in new strategy`)
+      }
+    }
+  }
+
+  if (fromStage != null) {
+    const keptStages = new Set()
+    for (const key of Object.keys(completedStages)) {
+      if (Number(key) >= fromStage) {
+        delete completedStages[key]
+      } else {
+        keptStages.add(Number(key))
+      }
+    }
+    console.log(`[broll-resume] Re-running from stage ${fromStage}, keeping ${keptStages.size} completed stages`)
+    for (const run of allRuns) {
+      const meta = JSON.parse(run.metadata_json || '{}')
+      if (meta.stageIndex == null || keptStages.has(meta.stageIndex)) continue
+      if (meta.stageIndex >= fromStage) {
+        await db.prepare('DELETE FROM broll_runs WHERE id = ?').run(run.id)
+      }
+    }
+  }
+
+  let editorCuts = null
+  if (groupId) {
+    const group = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
+    if (group?.editor_state_json) {
+      try {
+        const stateObj = JSON.parse(group.editor_state_json)
+        if (stateObj.cuts?.length) editorCuts = { cuts: stateObj.cuts, cutExclusions: stateObj.cutExclusions || [] }
+      } catch {}
+    }
+  }
+
+  const completedSubRuns = {}
+  for (const [si, subs] of Object.entries(subRunsByStage)) {
+    completedSubRuns[si] = new Set(subs.map(s => s._meta.subIndex).filter(i => i != null))
+  }
+
+  abortedBrollPipelines.delete(pipelineId)
+
+  // Call via the holder so tests can stub executePipeline.
+  return __pipelineRunner.executePipeline(
+    strategyId, version.id, videoId, groupId,
+    firstMeta.transcriptSource || 'raw',
+    editorCuts, null,
+    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0 },
+  )
+}
+
 // ── B-Roll Editor Data ────────────────────────────────────────────────
 
 /**
