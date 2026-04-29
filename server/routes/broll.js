@@ -168,6 +168,10 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
             target_filename: aroll.target_filename,
             resolution: { width: aroll.width || 1920, height: aroll.height || 1080 },
             frame_rate: aroll.frame_rate || 30,
+            // For A-roll the source duration IS the timeline duration —
+            // we play the whole thing. Forwarded to xmeml-generator so
+            // the <file><duration> reflects reality (Premiere validates).
+            duration_seconds: aroll.duration_seconds || null,
             est_size_bytes: null,
             variant_label: null,
             signed_url: aroll.signed_url,  // pre-populated → extension skips the mint phase

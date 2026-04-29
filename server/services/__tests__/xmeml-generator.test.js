@@ -9,6 +9,7 @@ import {
   secondsToFrames,
   assignTracks,
   generateXmeml,
+  buildPathUrl,
 } from '../xmeml-generator.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -253,9 +254,11 @@ describe('generateXmeml — sanitization + edge cases', () => {
     // Reserved chars replaced with _; the raw input never appears.
     expect(xml).not.toContain('bad<name>')
     expect(xml).toContain('bad_name_')
-    // <name> and <pathurl> both use the sanitized form
+    // <name> and <pathurl> both use the sanitized form (bare filename
+    // when mediaFolderAbsolute is unset — Premiere relinks via Match
+    // File Properties → File Name in the XML's folder).
     expect(xml).toMatch(/<name>bad_name_[^<]*<\/name>/)
-    expect(xml).toContain('file://./bad_name_')
+    expect(xml).toMatch(/<pathurl>bad_name_[^<]*<\/pathurl>/)
   })
 
   it('Case 5b: XML reserved chars in sequenceName are escaped', () => {
@@ -303,6 +306,112 @@ describe('generateXmeml — sanitization + edge cases', () => {
     expect(a).toBe(b)
     // Also verify: byte-identical length as a pure sanity check
     expect(Buffer.byteLength(a)).toBe(Buffer.byteLength(b))
+  })
+})
+
+describe('buildPathUrl', () => {
+  it('returns bare filename when no folder is provided', () => {
+    expect(buildPathUrl(null, 'foo.mp4')).toBe('foo.mp4')
+    expect(buildPathUrl(undefined, '001_pexels_x.mp4')).toBe('001_pexels_x.mp4')
+    expect(buildPathUrl('', 'a.mov')).toBe('a.mov')
+  })
+
+  it('emits absolute file:/// URL when folder is provided', () => {
+    expect(
+      buildPathUrl('/Users/laurynas/Downloads/transcript-eval/export-370-a', '001_aroll_370.mp4'),
+    ).toBe('file:///Users/laurynas/Downloads/transcript-eval/export-370-a/001_aroll_370.mp4')
+  })
+
+  it('URL-encodes spaces and special chars in folder + filename', () => {
+    expect(
+      buildPathUrl('/Users/jane doe/My Movies', 'clip with space.mov'),
+    ).toBe('file:///Users/jane%20doe/My%20Movies/clip%20with%20space.mov')
+  })
+
+  it('strips leading/trailing slashes from folder', () => {
+    expect(buildPathUrl('//Users/foo//', 'x.mp4')).toBe('file:///Users/foo/x.mp4')
+  })
+})
+
+describe('generateXmeml — pathurl + source duration semantics', () => {
+  it('emits absolute file:/// URL when mediaFolderAbsolute provided', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+      mediaFolderAbsolute: '/Users/laurynas/Downloads/transcript-eval/export-370-a',
+    })
+    expect(xml).toContain('<pathurl>file:///Users/laurynas/Downloads/transcript-eval/export-370-a/001_pexels_123.mp4</pathurl>')
+  })
+
+  it('falls back to bare filename when mediaFolderAbsolute is null', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    expect(xml).toContain('<pathurl>001_pexels_123.mp4</pathurl>')
+    // Negative: the historical malformed form must NOT appear.
+    expect(xml).not.toContain('file://./')
+  })
+
+  it('emits source duration on <file><duration> when sourceDurationSeconds is set', () => {
+    // Stock clip is 30s long, but we're only using a 2s slice on the
+    // timeline. <file><duration> should be 30s × 30fps = 900 frames so
+    // Premiere shows trim handles past the cut.
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          sourceDurationSeconds: 30,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    // Source IN/OUT frames the cut WITHIN the source.
+    expect(xml).toContain('<in>0</in>')
+    expect(xml).toContain('<out>60</out>')   // 2s × 30fps
+    // The clipitem AND the file both report the SOURCE duration.
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-001">\s*<name>001_pexels_123\.mp4<\/name>\s*<duration>900<\/duration>/)
+    expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<duration>900<\/duration>/)
+  })
+
+  it('falls back to timeline duration when sourceDurationSeconds is missing', () => {
+    // Backwards compatibility: old manifests without duration_seconds
+    // still produce playable XML — file <duration> = timeline duration.
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    // No source-duration override → <duration> mirrors timeline span.
+    expect(xml).toMatch(/<file id="file-pexels-123">[\s\S]*<duration>60<\/duration>/)
+  })
+
+  it('emits absolute pathurl on the A-roll track too', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [],
+      aroll: { filename: 'aroll_370.mp4', frameRate: 30, sourceDurationSeconds: 120 },
+      mediaFolderAbsolute: '/Users/x/Downloads/export-370-a',
+    })
+    expect(xml).toContain('<pathurl>file:///Users/x/Downloads/export-370-a/aroll_370.mp4</pathurl>')
+    // A-roll's source duration is the source's full length (120s × 30 = 3600 frames)
+    // not the sequence duration (which is 0 here).
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-aroll">\s*<name>aroll_370\.mp4<\/name>\s*<duration>3600<\/duration>/)
   })
 })
 

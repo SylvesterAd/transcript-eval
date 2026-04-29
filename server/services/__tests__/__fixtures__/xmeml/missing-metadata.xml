@@ -16,13 +16,14 @@
         <track>
           <clipitem id="clip-variant-b-001">
             <name>001_freepik_xyz.mp4</name>
+            <duration>90</duration>
             <start>0</start>
             <end>90</end>
             <in>0</in>
             <out>90</out>
             <file id="file-freepik-xyz">
               <name>001_freepik_xyz.mp4</name>
-              <pathurl>file://./001_freepik_xyz.mp4</pathurl>
+              <pathurl>001_freepik_xyz.mp4</pathurl>
               <duration>90</duration>
               <rate><timebase>30</timebase></rate>
               <media>

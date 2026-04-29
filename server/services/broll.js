@@ -5328,6 +5328,12 @@ export function buildManifestFromPlacements(placements, { variant } = {}) {
       target_filename: targetFilename,
       resolution: pick.resolution || { width: pick.width || 1920, height: pick.height || 1080 },
       frame_rate: pick.frame_rate || 30,
+      // Source media's full length. Distinct from timeline_duration_s
+      // (the trimmed cut). XMEML emits this on <file><duration> so
+      // Premiere knows the clip has trim handles past the cut points.
+      duration_seconds: typeof pick.duration_seconds === 'number' && pick.duration_seconds > 0
+        ? pick.duration_seconds
+        : null,
       est_size_bytes: typeof pick.est_size_bytes === 'number'
         ? pick.est_size_bytes
         : (pick.duration_seconds ? Math.round(pick.duration_seconds * 25 * 1024 * 1024) : 100 * 1024 * 1024),
