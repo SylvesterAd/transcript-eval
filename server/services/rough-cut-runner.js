@@ -28,6 +28,13 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
   ).get(...args)
   if (!group) return { error: 'not_found' }
 
+  const groupRow = await db.prepare(
+    'SELECT assembly_status FROM video_groups WHERE id = ?'
+  ).get(groupId)
+  if (!groupRow || groupRow.assembly_status === 'deleting') {
+    return { cancelled: true }
+  }
+
   const videos = await db.prepare(
     'SELECT duration_seconds FROM videos WHERE group_id = ?'
   ).all(groupId)
@@ -139,6 +146,10 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
           await db.prepare("UPDATE experiment_runs SET status = 'pending', error_message = NULL WHERE id = ?").run(runId)
         }
         await executeRun(runId)
+        const stillThere = await db.prepare(
+          'SELECT assembly_status FROM video_groups WHERE id = ?'
+        ).get(groupId)
+        if (!stillThere || stillThere.assembly_status === 'deleting') return
         const completedRun = await db.prepare('SELECT * FROM experiment_runs WHERE id = ?').get(runId)
         if (completedRun.status !== 'complete' && completedRun.status !== 'partial') {
           if (attempt < MAX_ATTEMPTS) continue
