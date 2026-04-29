@@ -8,6 +8,11 @@ import { mp4Url } from './cloudflare-stream.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
 import { extractYouTubeId } from './youtube.js'
 import { formatAudience } from './audience-formatter.js'
+import {
+  loadPriorChapterStrategies,
+  assertNoSelfReference,
+  assertPriorsComplete,
+} from './broll-prior-strategies.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -2385,7 +2390,7 @@ export async function executePlanPrep(videoId, groupId, editorCuts = null, pipel
 }
 
 // Run per-chapter B-Roll strategy for ONE reference video using completed prep + analysis pipelines
-export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, videoId, groupId, pipelineIdOverride) {
+export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, videoId, groupId, pipelineIdOverride, priorStrategyPipelineIds = []) {
   // 1. Load create_strategy strategy and version
   const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_strategy' ORDER BY id LIMIT 1").get()
   if (!strategy) throw new Error('No create_strategy strategy found')
@@ -2393,6 +2398,13 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   if (!version) throw new Error('No create_strategy version found')
   const stages = JSON.parse(version.stages_json || '[]')
   if (!stages.length) throw new Error('create_strategy strategy has no stages')
+
+  // Chain integrity: variant cannot reference itself, and every prior must
+  // have completed before we run. Logs upfront so a paste-able trail exists
+  // for production debugging.
+  assertNoSelfReference(pipelineIdOverride, priorStrategyPipelineIds)
+  await assertPriorsComplete(priorStrategyPipelineIds)
+  console.log(`[broll-chain] executeCreateStrategy ${pipelineIdOverride || '(no-override)'} priors=[${priorStrategyPipelineIds.join(',')}]`)
 
   // 2. Load prep pipeline data from DB
   const prepRuns = await db.prepare(
@@ -2609,7 +2621,15 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
             .replace(/\{\{a_rolls\}\}/g, allChaptersCtx.split('## Chapters')[0] || '')
             .replace(/\{\{prev_chapter_output\}\}/g, prevChapterOutput)
 
-          const chSystem = replacePlaceholders(stage.system_instruction || '')
+          let chSystem = replacePlaceholders(stage.system_instruction || '')
+
+          const priorChapterText = await loadPriorChapterStrategies(priorStrategyPipelineIds, c)
+          if (priorStrategyPipelineIds.length > 0 && !priorChapterText) {
+            throw new Error(`[broll-chain] expected non-empty priors text for chapter ${c}, got empty`)
+          }
+          chPrompt = chPrompt.replace(/\{\{prior_chapter_strategies\}\}/g, priorChapterText)
+          chSystem = chSystem.replace(/\{\{prior_chapter_strategies\}\}/g, priorChapterText)
+          console.log(`[broll-chain] variant ${pipelineIdOverride || '(no-override)'} chapter ${c} injecting priors n=${priorStrategyPipelineIds.length} bytes=${priorChapterText.length}`)
 
           const { callLLM } = await import('./llm-runner.js')
           const result = await callLLM({
