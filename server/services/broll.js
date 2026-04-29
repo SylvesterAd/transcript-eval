@@ -6,6 +6,7 @@ import { downloadToTemp, uploadFile, deleteFile, getPublicUrl } from './storage.
 import { extractVideoSegment } from './video-processor.js'
 import { mp4Url } from './cloudflare-stream.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
+import { extractYouTubeId } from './youtube.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -530,39 +531,6 @@ export async function listExampleSources(groupId) {
   `).all(...groupIds)
 }
 
-// Extract the canonical YouTube video ID from a URL so we can dedupe
-// add requests where the same video is pasted twice with different
-// query strings (e.g. /watch?v=ID vs /watch?v=ID&t=2s, youtu.be short
-// link, /shorts/ID, /embed/ID, m.youtube.com). Returns null on non-YT
-// URLs and parse failures.
-//
-// YouTube video IDs are always exactly 11 chars from [A-Za-z0-9_-].
-// We pull the v-param (or path segment) and slice to that 11-char
-// prefix so malformed pastes like ?v=ID=20s (a typo for &t=20s — the
-// `=20s` ends up inside the v-value) still match the canonical URL.
-const YT_ID_PREFIX = /^[A-Za-z0-9_-]{11}/
-function extractYouTubeId(url) {
-  if (!url) return null
-  try {
-    const u = new URL(url)
-    const host = u.hostname.replace(/^www\.|^m\./, '')
-    let raw = null
-    if (host === 'youtu.be') {
-      raw = u.pathname.slice(1).split('/')[0]
-    } else if (host === 'youtube.com' || host === 'music.youtube.com') {
-      if (u.pathname === '/watch') raw = u.searchParams.get('v')
-      else {
-        const m = u.pathname.match(/^\/(?:shorts|embed|live)\/([^/?#]+)/)
-        if (m) raw = m[1]
-      }
-    }
-    if (!raw) return null
-    const m = raw.match(YT_ID_PREFIX)
-    return m ? m[0] : null
-  } catch {}
-  return null
-}
-
 export async function addExampleSource(groupId, { kind, source_url, label, createdBy }) {
   if (!['upload', 'yt_video', 'yt_channel'].includes(kind)) throw new Error('Invalid kind')
   const set = await getOrCreateExampleSet(groupId, createdBy)
@@ -612,14 +580,20 @@ export async function downloadYouTubeVideo(exampleSourceId) {
   try {
     await updateExampleSourceStatus(exampleSourceId, 'processing')
 
-    // Check if a video with this YouTube URL already exists — reuse it
-    const existing = await db.prepare(
-      'SELECT id FROM videos WHERE youtube_url = ? AND file_path IS NOT NULL LIMIT 1'
-    ).get(url)
-    if (existing) {
-      console.log(`[broll-dl] Reusing existing video ${existing.id} for ${url}`)
-      await updateExampleSourceStatus(exampleSourceId, 'ready', null, { videoId: existing.id })
-      return
+    // Reuse any prior download of the same YouTube video (across all
+    // groups/users). Match by canonical 11-char video ID, not by raw
+    // URL — same video pasted with different query strings (e.g.
+    // ?v=ID vs ?v=ID&t=2s vs youtu.be/ID) all collapse to one ID.
+    const ytId = extractYouTubeId(url)
+    if (ytId) {
+      const existing = await db.prepare(
+        'SELECT id FROM videos WHERE youtube_id = ? AND file_path IS NOT NULL LIMIT 1'
+      ).get(ytId)
+      if (existing) {
+        console.log(`[broll-dl] Reusing existing video ${existing.id} for YT id ${ytId}`)
+        await updateExampleSourceStatus(exampleSourceId, 'ready', null, { videoId: existing.id })
+        return
+      }
     }
 
     const fileId = Date.now() + '-' + Math.round(Math.random() * 1E6)
@@ -663,8 +637,8 @@ export async function downloadYouTubeVideo(exampleSourceId) {
 
     // Create videos record (not linked to group — linkage is via broll_example_sources)
     const result = await db.prepare(
-      'INSERT INTO videos (title, file_path, video_type, duration_seconds, youtube_url) VALUES (?, ?, ?, ?, ?)'
-    ).run(videoTitle, storageUrl, 'human_edited', duration, url)
+      'INSERT INTO videos (title, file_path, video_type, duration_seconds, youtube_url, youtube_id) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(videoTitle, storageUrl, 'human_edited', duration, url, ytId)
     const videoId = Number(result.lastInsertRowid)
     console.log(`[broll-dl] Video record created: id=${videoId}`)
 

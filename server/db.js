@@ -2,6 +2,7 @@ import pg from 'pg'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { extractYouTubeId } from './services/youtube.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -56,6 +57,27 @@ try {
     // regressions to a specific code path.
     await pool.query(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`)
     await pool.query(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS transcription_history JSONB DEFAULT '[]'::jsonb`)
+    // Canonical 11-char YouTube video ID for cross-project download
+    // reuse. Indexed so the lookup at download time stays cheap as the
+    // videos table grows. Backfilled below for any rows that already
+    // have a youtube_url but no youtube_id (one-time, on next deploy).
+    await pool.query(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS youtube_id TEXT`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_videos_youtube_id ON videos(youtube_id) WHERE youtube_id IS NOT NULL`)
+    {
+      const { rows: pending } = await pool.query(
+        `SELECT id, youtube_url FROM videos WHERE youtube_url IS NOT NULL AND youtube_id IS NULL`
+      )
+      if (pending.length) {
+        let backfilled = 0
+        for (const row of pending) {
+          const ytId = extractYouTubeId(row.youtube_url)
+          if (!ytId) continue
+          await pool.query(`UPDATE videos SET youtube_id = $1 WHERE id = $2`, [ytId, row.id])
+          backfilled++
+        }
+        console.log(`[db] Backfilled youtube_id on ${backfilled}/${pending.length} videos rows`)
+      }
+    }
     await pool.query(`
       CREATE OR REPLACE FUNCTION videos_set_updated_at() RETURNS TRIGGER AS $$
       BEGIN

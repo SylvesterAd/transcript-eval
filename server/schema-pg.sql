@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS videos (
   id SERIAL PRIMARY KEY,
   title TEXT NOT NULL,
   youtube_url TEXT,
+  youtube_id TEXT,
   duration_seconds INTEGER,
   metadata_json TEXT DEFAULT '{}',
   file_path TEXT,
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS videos (
   cf_stream_uid TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_videos_youtube_id ON videos(youtube_id) WHERE youtube_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS transcripts (
   id SERIAL PRIMARY KEY,
