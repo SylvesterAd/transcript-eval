@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS video_groups (
   rough_cut_status TEXT,
   rough_cut_error_required INTEGER,
   broll_chain_status TEXT,
+  broll_chain_substage TEXT,
   broll_chain_error TEXT,
   notified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
