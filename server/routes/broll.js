@@ -142,23 +142,25 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
           const words = (await getTimelineWordTimestamps(groupId)) || []
           const refined = matchPlacementsToTranscript(placements, words)
           // matchPlacementsToTranscript returns NEW objects keyed by
-          // (chapterIndex, placementIndex) for plan placements, or by
-          // userPlacementId for manual ones. Push the refined timing
-          // back onto the original `placements` array (in place) so
-          // buildManifestFromPlacements sees it via p.start/p.end as
-          // numeric seconds. coerceTimingToSeconds passes numbers
-          // through unchanged.
+          // placement.uuid (preferred — stable across reorders/edits) for
+          // plan placements with backfilled uuids, falling back to
+          // (chapterIndex, placementIndex) for legacy rows that pre-date
+          // the uuid backfill, or by userPlacementId for manual ones.
+          // Push the refined timing back onto the original `placements`
+          // array (in place) so buildManifestFromPlacements sees it via
+          // p.start/p.end as numeric seconds. coerceTimingToSeconds
+          // passes numbers through unchanged.
           const byKey = new Map()
           for (const r of refined) {
             const key = r.isUserPlacement
               ? `user:${r.userPlacementId}`
-              : `${r.chapterIndex}:${r.placementIndex}`
+              : (r.uuid || `${r.chapterIndex}:${r.placementIndex}`)
             byKey.set(key, r)
           }
           for (const p of placements) {
             const key = p.isUserPlacement
               ? `user:${p.userPlacementId}`
-              : `${p.chapterIndex}:${p.placementIndex}`
+              : (p.uuid || `${p.chapterIndex}:${p.placementIndex}`)
             const r = byKey.get(key)
             if (r && typeof r.timelineStart === 'number' && typeof r.timelineEnd === 'number') {
               p.start = r.timelineStart
