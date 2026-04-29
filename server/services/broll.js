@@ -18,6 +18,22 @@ const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(TEMP_DIR, { recursive: true })
 const execFileAsync = promisify(execFile)
 
+// Retry helper for transient LLM failures inside executePipeline.
+// 2 retries (tries=3 total) with exponential backoff. Aborts immediately if the
+// pipeline was stopped by the user. See spec 2026-04-29-broll-auto-resume-design.md.
+export async function withRetry(fn, { tries = 3, backoff = [5_000, 30_000], pipelineId, label } = {}) {
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    if (pipelineId && abortedBrollPipelines.has(pipelineId)) throw new Error('Aborted')
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt === tries) throw err
+      console.log(`[broll-retry] ${label || '(unnamed)'} attempt ${attempt}/${tries} failed: ${err.message}, retrying in ${backoff[attempt - 1]}ms`)
+      await new Promise(r => setTimeout(r, backoff[attempt - 1]))
+    }
+  }
+}
+
 // Common yt-dlp args that help bypass YouTube's "sign in to confirm you're
 // not a bot" block on datacenter IPs (Railway, etc.). Tries multiple player
 // clients in order — android/tv often work when web is blocked. Optional
