@@ -69,6 +69,13 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
           ...(item.resolution?.width ? { width: item.resolution.width } : {}),
           ...(item.resolution?.height ? { height: item.resolution.height } : {}),
           ...(item.frame_rate ? { sourceFrameRate: item.frame_rate } : {}),
+          // Source media's full length, used by the generator for
+          // <file><duration> so Premiere can show trim handles past
+          // the cut. Optional — falls back to timeline duration if
+          // missing (no handles, but the cut still plays).
+          ...(typeof item.duration_seconds === 'number' && item.duration_seconds > 0
+            ? { sourceDurationSeconds: item.duration_seconds }
+            : {}),
         })
       }
     }
@@ -194,9 +201,18 @@ export function useExportXmlKickoff({
       await _apiPost(`/exports/${encodeURIComponent(exportId)}/result`, body)
       if (reqId !== activeRequestRef.current) return  // superseded
       setStatus(STATUS_GENERATING)
+      // Forward the extension-resolved absolute folder so the server
+      // can emit <pathurl>file:///<absolute>/<file>.mp4</pathurl> per
+      // Apple's FCP7 XMEML spec. When undefined (older extension that
+      // hasn't published folder_path_absolute yet, or browser-fallback
+      // XML save), the generator falls back to bare filenames.
+      const targetFolderAbsolute = complete?.folder_path_absolute || null
       const resp = await _apiPost(
         `/exports/${encodeURIComponent(exportId)}/generate-xml`,
-        { variants: variantLabels },
+        {
+          variants: variantLabels,
+          ...(targetFolderAbsolute ? { target_folder_absolute: targetFolderAbsolute } : {}),
+        },
       )
       if (reqId !== activeRequestRef.current) return
       const xmls = resp?.xml_by_variant || {}

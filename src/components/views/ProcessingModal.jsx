@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
 
@@ -7,7 +8,62 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
 const MAX_SIZE = 50 * 1024 * 1024 * 1024
 
+// ---------------------------------------------------------------------------
+// Pure helpers — exported for unit tests in __tests__/ProcessingModal-stages.test.jsx
+// ---------------------------------------------------------------------------
+
+export function deriveMode({ parent, files = [], subGroups = [] }) {
+  const anyUploading = files.some(f => f.status === 'uploading')
+  if (anyUploading) return 'uploading'
+  const transcribed = parent?.videos?.every(v => v.transcription_status === 'done' || v.transcription_status === 'failed')
+  if (!transcribed) return 'pipeline'
+  if (subGroups?.length === 0) return 'pipeline'
+  const allTerminal = subGroups.every(sg =>
+    (sg.assembly_status === 'done' || sg.assembly_status === 'error') &&
+    (parent.auto_rough_cut === false || sg.rough_cut_status === 'done' || sg.rough_cut_status === 'failed' || sg.rough_cut_status === 'insufficient_tokens') &&
+    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed' || sg.broll_chain_status === 'paused_at_strategy' || sg.broll_chain_status === 'paused_at_plan')
+  )
+  return allTerminal ? 'done' : 'pipeline'
+}
+
+export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
+  const videos = parent.videos || []
+  const uploadDone = videos.every(v => v.cf_stream_uid || v.file_path)
+  const transcribed = videos.filter(v => v.transcription_status === 'done').length
+  const transcribing = videos.some(v => v.transcription_status && v.transcription_status !== 'done' && v.transcription_status !== 'failed')
+
+  const classifyDone = parent.assembly_status === 'confirmed' || parent.assembly_status === 'done' || subGroups.length > 0
+  const classifying = parent.assembly_status === 'classifying'
+
+  const sgDone = (sg) => sg.assembly_status === 'done' || sg.assembly_status === 'error'
+  const syncDone = subGroups.length > 0 && subGroups.every(sgDone)
+  const syncActive = subGroups.some(sg => sg.assembly_status && !sgDone(sg))
+
+  const rcSkipped = !parent.auto_rough_cut
+  const rcDone = rcSkipped || (subGroups.length > 0 && subGroups.every(sg => ['done','failed','insufficient_tokens'].includes(sg.rough_cut_status)))
+  const rcActive = subGroups.some(sg => sg.rough_cut_status === 'pending' || sg.rough_cut_status === 'running')
+
+  const brollPausedAtStrat = subGroups.some(sg => sg.broll_chain_status === 'paused_at_strategy')
+  const brollPausedAtPlan  = subGroups.some(sg => sg.broll_chain_status === 'paused_at_plan')
+  const brollDone = subGroups.length > 0 && subGroups.every(sg => sg.broll_chain_status === 'done')
+  const brollActive = subGroups.some(sg => sg.broll_chain_status === 'running')
+
+  return [
+    { id: 'upload',         label: 'Upload',                 done: uploadDone, active: !uploadDone },
+    { id: 'transcribe',     label: 'Transcribing',           done: videos.length > 0 && transcribed === videos.length, active: transcribing, sub: `${transcribed} of ${videos.length} done` },
+    { id: 'classify',       label: 'Classifying',            done: classifyDone, active: classifying },
+    { id: 'sync',           label: 'Multi-cam sync',         done: syncDone, active: syncActive },
+    { id: 'rough_cut',      label: 'AI Rough Cut',           skipped: rcSkipped, done: rcDone, active: rcActive },
+    { id: 'broll_refs',     label: 'References analyzed',    active: brollActive && !brollPausedAtStrat && !brollPausedAtPlan, done: brollDone },
+    { id: 'broll_strategy', label: 'B-roll strategy',        paused: brollPausedAtStrat, active: brollActive && !brollPausedAtStrat, done: brollDone },
+    { id: 'broll_plan',     label: 'B-roll plan',            paused: brollPausedAtPlan, active: brollActive && !brollPausedAtPlan, done: brollDone },
+    { id: 'broll_search',   label: 'B-roll search (first 10)', active: brollActive && !brollPausedAtStrat && !brollPausedAtPlan, done: brollDone },
+    { id: 'done',           label: 'Done',                   done: brollDone },
+  ]
+}
+
 export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBack, onComplete }) {
+  const navigate = useNavigate()
   const [files, setFiles] = useState(() => (initialFiles || []).map(f => ({ ...f })))
 
   // Sync from live upload progress (UploadModal stays mounted and pushes updates)
@@ -147,6 +203,12 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // Only on mount
 
+  // Aggregate state from /full-auto-status — used by deriveMode/deriveStages for pipeline+done modes.
+  // The `files` array remains the source of truth for upload-mode UI (per-file rows + ETAs).
+  const [parent, setParent] = useState(null)
+  const [subGroups, setSubGroups] = useState([])
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+
   // Bootstrap files from server if we have none (e.g. navigated here after b-roll step)
   const bootstrappedRef = useRef(false)
   useEffect(() => {
@@ -159,11 +221,14 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
           const { data } = await supabase.auth.getSession()
           if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
         }
-        const res = await fetch(`${API_BASE}/videos/groups/${groupIdRef.current}/detail`, { headers })
+        const res = await fetch(`${API_BASE}/videos/groups/${groupIdRef.current}/full-auto-status`, { headers })
         if (!res.ok) return
         const data = await res.json()
-        if (!data.videos?.length) return
-        setFiles(data.videos.map(v => ({
+        const videos = data?.parent?.videos || []
+        if (data?.parent) setParent(data.parent)
+        if (Array.isArray(data?.subGroups)) setSubGroups(data.subGroups)
+        if (!videos.length) return
+        setFiles(videos.map(v => ({
           id: `server-${v.id}`,
           name: v.title || `Video ${v.id}`,
           file: null,
@@ -192,7 +257,9 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     apiPost(`/videos/groups/${groupIdRef.current}/transcribe`, {}).catch(() => {})
   }, [allUploadsFinished])
 
-  // Poll for transcription status
+  // Poll for transcription status + project-level pipeline state.
+  // Uses /full-auto-status (returns { parent: {…, videos: […]}, subGroups: […] }) so the same
+  // fetch feeds both the per-file upload UI and deriveMode/deriveStages for pipeline+done modes.
   useEffect(() => {
     let consecutiveErrors = 0
     pollRef.current = setInterval(async () => {
@@ -202,7 +269,7 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
           const { data } = await supabase.auth.getSession()
           if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`
         }
-        const res = await fetch(`${API_BASE}/videos/groups/${groupIdRef.current}/detail`, { headers })
+        const res = await fetch(`${API_BASE}/videos/groups/${groupIdRef.current}/full-auto-status`, { headers })
         if (!res.ok) {
           consecutiveErrors++
           if (consecutiveErrors >= 5) clearInterval(pollRef.current)
@@ -210,18 +277,21 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
         }
         consecutiveErrors = 0
         const data = await res.json()
-        if (!data.videos) return
+        const videos = data?.parent?.videos || []
+        if (data?.parent) setParent(data.parent)
+        if (Array.isArray(data?.subGroups)) setSubGroups(data.subGroups)
+        if (!videos.length) return
 
         setFiles(prev => prev.map(f => {
           if (f.status !== 'complete') return f
           // Match by serverId first, then by filename
           let serverVideo = f.serverId != null
-            ? data.videos.find(v => v.id === f.serverId || v.id === Number(f.serverId))
+            ? videos.find(v => v.id === f.serverId || v.id === Number(f.serverId))
             : null
           if (!serverVideo) {
             // Fallback: match by title/filename
             const name = f.name?.replace(/\.[^.]+$/, '')
-            serverVideo = data.videos.find(v => v.title === name || v.title === f.name)
+            serverVideo = videos.find(v => v.title === name || v.title === f.name)
           }
           if (!serverVideo) return f
           const newStatus = serverVideo.transcription_status || null
@@ -414,6 +484,12 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     return `${(bytes / 1024).toFixed(0)} KB`
   }
 
+  // Three-mode render switch: 'uploading' keeps slice-1 per-file UI;
+  // 'pipeline' shows the project-level StageTimeline (+ Full Auto banner for hands-off path);
+  // 'done' shows entry points into the resulting project(s).
+  const mode = deriveMode({ parent, files, subGroups })
+  const stages = deriveStages({ parent: parent || { videos: [] }, subGroups })
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       {/* Modal */}
@@ -422,91 +498,332 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
         {/* Decorative accent line */}
         <div className="h-1 bg-gradient-to-r from-transparent via-primary-container/40 to-transparent" />
 
-        {/* Header */}
-        <div className="text-center p-8 pb-4">
-          <h1 className="font-extrabold text-3xl lg:text-4xl text-on-surface tracking-tight">
-            {uploadingCount > 0
-              ? 'Uploading files...'
-              : allTranscriptionsComplete
-              ? 'All files processed'
-              : 'Transcribing files...'}
-          </h1>
-          <p className="text-on-surface-variant opacity-80 mt-2">
-            {uploadingCount > 0
-              ? 'Please wait while we upload your files'
-              : allTranscriptionsComplete
-              ? 'All transcriptions are complete'
-              : 'Your files are uploaded — now transcribing audio'}
-          </p>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="mt-4 inline-flex items-center gap-2 px-5 py-2 rounded-full border border-outline-variant/30 text-on-surface-variant text-sm hover:bg-surface-container-highest/50 transition-colors"
-          >
-            <span className="material-symbols-outlined text-base">add</span>
-            Add more files
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={VIDEO_EXTS.join(',')}
-            multiple
-            className="hidden"
-            onChange={(e) => { if (e.target.files?.length) handleAddFiles(e.target.files); e.target.value = '' }}
+        {mode === 'uploading' && (
+          <UploadingFileList
+            files={files}
+            uploadingCount={uploadingCount}
+            allUploadsComplete={allUploadsComplete}
+            allTranscriptionsComplete={allTranscriptionsComplete}
+            totalFiles={totalFiles}
+            totalEta={totalEta}
+            transcribedCount={transcribedCount}
+            completedFiles={completedFiles}
+            activelyTranscribing={activelyTranscribing}
+            queuedCount={queuedCount}
+            speedRef={speedRef}
+            fileInputRef={fileInputRef}
+            handleAddFiles={handleAddFiles}
+            handleBack={handleBack}
+            handleComplete={handleComplete}
+            getDisplayState={getDisplayState}
+            formatSpeed={formatSpeed}
+            formatEta={formatEta}
+            formatSize={formatSize}
           />
-        </div>
+        )}
 
-        {/* File list */}
-        <div className="flex-1 overflow-y-auto px-8 pb-4 space-y-3">
-          {files.map(f => {
-            const state = getDisplayState(f)
-            const stats = speedRef.current[f.id]
-            return (
-              <FileCard
-                key={f.id}
-                file={f}
-                state={state}
-                speed={stats?.speed}
-                eta={stats?.eta}
-                formatSpeed={formatSpeed}
-                formatEta={formatEta}
-                formatSize={formatSize}
+        {mode === 'pipeline' && (
+          <div className="flex-1 overflow-y-auto">
+            {parent?.path_id === 'hands-off' && !bannerDismissed && (
+              <FullAutoBanner
+                onTakeMeToProjects={() => navigate('/')}
+                onDismiss={() => setBannerDismissed(true)}
               />
-            )
-          })}
-        </div>
-
-        {/* Summary footer */}
-        <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
-          <div className="flex items-center justify-between">
-            <button
-              onClick={handleBack}
-              className="font-black uppercase tracking-[0.15em] text-xs text-on-surface-variant hover:text-on-surface transition-colors"
-            >
-              Back
-            </button>
-            <div className="flex items-center gap-6">
-              {(!allUploadsComplete || !allTranscriptionsComplete) && (
-                <span className="text-[11px] italic text-on-surface-variant">
-                  {uploadingCount > 0
-                    ? `Uploading ${uploadingCount} of ${totalFiles} files — ~${formatEta(totalEta)} remaining`
-                    : allUploadsComplete && !allTranscriptionsComplete
-                    ? `${transcribedCount}/${completedFiles.length} done${activelyTranscribing > 0 ? `, ${activelyTranscribing} transcribing` : ''}${queuedCount > 0 ? `, ${queuedCount} in queue` : ''}`
-                    : `Processing ${totalFiles} files...`
-                  }
-                </span>
-              )}
-              <button
-                onClick={handleComplete}
-                disabled={!allUploadsComplete || !allTranscriptionsComplete}
-                className="bg-primary-container text-on-primary-fixed font-black uppercase tracking-[0.15em] text-xs px-8 py-3 rounded-xl shadow-[0_0_20px_rgba(206,252,0,0.2)] hover:shadow-[0_0_30px_rgba(206,252,0,0.4)] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
-              >
-                {allUploadsComplete && !allTranscriptionsComplete ? 'Waiting for transcriptions...' : 'Continue'}
-              </button>
+            )}
+            <div className="text-center p-8 pb-4">
+              <h1 className="font-extrabold text-3xl lg:text-4xl text-on-surface tracking-tight">
+                Building your project...
+              </h1>
+              <p className="text-on-surface-variant opacity-80 mt-2">
+                We're running the pipeline — feel free to keep an eye on the stages below.
+              </p>
             </div>
+            <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} />
+            <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={handleBack}
+                  className="font-black uppercase tracking-[0.15em] text-xs text-on-surface-variant hover:text-on-surface transition-colors"
+                >
+                  Back
+                </button>
+                <span className="text-[11px] italic text-on-surface-variant">
+                  Processing on the server — you can close this tab
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {mode === 'done' && (
+          <DoneView subGroups={subGroups} navigate={navigate} onComplete={handleComplete} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function UploadingFileList({
+  files, uploadingCount, allUploadsComplete, allTranscriptionsComplete,
+  totalFiles, totalEta, transcribedCount, completedFiles, activelyTranscribing,
+  queuedCount, speedRef, fileInputRef, handleAddFiles, handleBack, handleComplete,
+  getDisplayState, formatSpeed, formatEta, formatSize,
+}) {
+  return (
+    <>
+      {/* Header */}
+      <div className="text-center p-8 pb-4">
+        <h1 className="font-extrabold text-3xl lg:text-4xl text-on-surface tracking-tight">
+          {uploadingCount > 0
+            ? 'Uploading files...'
+            : allTranscriptionsComplete
+            ? 'All files processed'
+            : 'Transcribing files...'}
+        </h1>
+        <p className="text-on-surface-variant opacity-80 mt-2">
+          {uploadingCount > 0
+            ? 'Please wait while we upload your files'
+            : allTranscriptionsComplete
+            ? 'All transcriptions are complete'
+            : 'Your files are uploaded — now transcribing audio'}
+        </p>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="mt-4 inline-flex items-center gap-2 px-5 py-2 rounded-full border border-outline-variant/30 text-on-surface-variant text-sm hover:bg-surface-container-highest/50 transition-colors"
+        >
+          <span className="material-symbols-outlined text-base">add</span>
+          Add more files
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={VIDEO_EXTS.join(',')}
+          multiple
+          className="hidden"
+          onChange={(e) => { if (e.target.files?.length) handleAddFiles(e.target.files); e.target.value = '' }}
+        />
+      </div>
+
+      {/* File list */}
+      <div className="flex-1 overflow-y-auto px-8 pb-4 space-y-3">
+        {files.map(f => {
+          const state = getDisplayState(f)
+          const stats = speedRef.current[f.id]
+          return (
+            <FileCard
+              key={f.id}
+              file={f}
+              state={state}
+              speed={stats?.speed}
+              eta={stats?.eta}
+              formatSpeed={formatSpeed}
+              formatEta={formatEta}
+              formatSize={formatSize}
+            />
+          )
+        })}
+      </div>
+
+      {/* Summary footer */}
+      <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={handleBack}
+            className="font-black uppercase tracking-[0.15em] text-xs text-on-surface-variant hover:text-on-surface transition-colors"
+          >
+            Back
+          </button>
+          <div className="flex items-center gap-6">
+            {(!allUploadsComplete || !allTranscriptionsComplete) && (
+              <span className="text-[11px] italic text-on-surface-variant">
+                {uploadingCount > 0
+                  ? `Uploading ${uploadingCount} of ${totalFiles} files — ~${formatEta(totalEta)} remaining`
+                  : allUploadsComplete && !allTranscriptionsComplete
+                  ? `${transcribedCount}/${completedFiles.length} done${activelyTranscribing > 0 ? `, ${activelyTranscribing} transcribing` : ''}${queuedCount > 0 ? `, ${queuedCount} in queue` : ''}`
+                  : `Processing ${totalFiles} files...`
+                }
+              </span>
+            )}
+            <button
+              onClick={handleComplete}
+              disabled={!allUploadsComplete || !allTranscriptionsComplete}
+              className="bg-primary-container text-on-primary-fixed font-black uppercase tracking-[0.15em] text-xs px-8 py-3 rounded-xl shadow-[0_0_20px_rgba(206,252,0,0.2)] hover:shadow-[0_0_30px_rgba(206,252,0,0.4)] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+            >
+              {allUploadsComplete && !allTranscriptionsComplete ? 'Waiting for transcriptions...' : 'Continue'}
+            </button>
           </div>
         </div>
       </div>
+    </>
+  )
+}
+
+function FullAutoBanner({ onTakeMeToProjects, onDismiss }) {
+  return (
+    <div className="mx-8 mt-6 p-5 rounded-2xl bg-primary-container/10 border border-primary-container/30 flex items-center gap-4">
+      <span className="material-symbols-outlined text-primary-container text-2xl shrink-0">mark_email_read</span>
+      <p className="flex-1 text-sm text-on-surface">
+        You can close this tab — we'll keep processing and email you when it's ready.
+      </p>
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          onClick={onTakeMeToProjects}
+          className="px-4 py-2 rounded-lg bg-primary-container text-on-primary-fixed font-bold text-xs uppercase tracking-wider hover:opacity-90 transition-opacity"
+        >
+          Take me to Projects
+        </button>
+        <button
+          onClick={onDismiss}
+          className="px-4 py-2 rounded-lg border border-outline-variant/30 text-on-surface-variant font-bold text-xs uppercase tracking-wider hover:bg-surface-container-highest/40 transition-colors"
+        >
+          Stay here
+        </button>
+      </div>
     </div>
+  )
+}
+
+function StageTimeline({ stages, subGroups = [], navigate }) {
+  // Pick the first paused sub-group for the "Open project to pick" CTA per stage.
+  const pausedAtStrategySg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_strategy')
+  const pausedAtPlanSg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_plan')
+
+  return (
+    <div className="px-8 pb-4 space-y-2">
+      {stages.map(stage => {
+        const isPending = !stage.done && !stage.active && !stage.paused && !stage.skipped
+        let icon = 'radio_button_unchecked'
+        let iconClass = 'text-on-surface-variant/50'
+        let labelClass = 'text-on-surface-variant'
+        if (stage.skipped) {
+          icon = 'remove_circle_outline'
+          iconClass = 'text-on-surface-variant/40'
+          labelClass = 'text-on-surface-variant/50 line-through'
+        } else if (stage.done) {
+          icon = 'check_circle'
+          iconClass = 'text-emerald-400'
+          labelClass = 'text-on-surface'
+        } else if (stage.paused) {
+          icon = 'pause_circle'
+          iconClass = 'text-amber-400'
+          labelClass = 'text-on-surface'
+        } else if (stage.active) {
+          icon = 'progress_activity'
+          iconClass = 'text-secondary animate-spin'
+          labelClass = 'text-on-surface'
+        }
+
+        let pausedSg = null
+        let pausedRoute = null
+        if (stage.paused) {
+          if (stage.id === 'broll_strategy' && pausedAtStrategySg) {
+            pausedSg = pausedAtStrategySg
+            pausedRoute = `/editor/${pausedAtStrategySg.id}/brolls/strategy/strategy`
+          } else if (stage.id === 'broll_plan' && pausedAtPlanSg) {
+            pausedSg = pausedAtPlanSg
+            pausedRoute = `/editor/${pausedAtPlanSg.id}/brolls/strategy/plan`
+          }
+        }
+
+        return (
+          <div
+            key={stage.id}
+            className="flex items-center gap-4 p-4 rounded-xl bg-surface-container-low/50 border border-white/5"
+          >
+            <span className={`material-symbols-outlined text-2xl shrink-0 ${iconClass}`}>{icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className={`text-sm font-medium truncate ${labelClass}`}>{stage.label}</p>
+              {stage.active && stage.sub && (
+                <p className="text-[12px] text-on-surface-variant mt-0.5">{stage.sub}</p>
+              )}
+              {stage.skipped && (
+                <p className="text-[12px] text-on-surface-variant/60 mt-0.5">Skipped</p>
+              )}
+              {isPending && (
+                <p className="text-[12px] text-on-surface-variant/60 mt-0.5">Pending</p>
+              )}
+              {stage.paused && (
+                <p className="text-[12px] text-amber-400/80 mt-0.5">Paused — needs your input</p>
+              )}
+            </div>
+            {stage.paused && pausedRoute && (
+              <button
+                onClick={() => navigate(pausedRoute)}
+                className="px-4 py-2 rounded-lg bg-amber-400/15 text-amber-300 border border-amber-400/30 font-bold text-xs uppercase tracking-wider hover:bg-amber-400/25 transition-colors shrink-0"
+              >
+                Open project to pick
+              </button>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function DoneView({ subGroups = [], navigate, onComplete }) {
+  const single = subGroups.length === 1
+  const multi = subGroups.length > 1
+  return (
+    <>
+      <div className="text-center p-8 pb-4">
+        <span className="inline-flex w-14 h-14 rounded-full bg-emerald-400/15 items-center justify-center">
+          <span className="material-symbols-outlined text-emerald-400 text-3xl">check_circle</span>
+        </span>
+        <h1 className="font-extrabold text-3xl lg:text-4xl text-on-surface tracking-tight mt-4">
+          All done
+        </h1>
+        <p className="text-on-surface-variant opacity-80 mt-2">
+          {multi
+            ? `We split your footage into ${subGroups.length} projects.`
+            : 'Your project is ready to open.'}
+        </p>
+      </div>
+
+      <div className="px-8 pb-4 space-y-3">
+        {single && (
+          <button
+            onClick={() => navigate(`/editor/${subGroups[0].id}/sync`)}
+            className="w-full p-5 rounded-2xl bg-primary-container text-on-primary-fixed font-bold text-sm uppercase tracking-wider hover:opacity-90 transition-opacity"
+          >
+            Open project
+          </button>
+        )}
+        {multi && subGroups.map(sg => (
+          <button
+            key={sg.id}
+            onClick={() => navigate(`/editor/${sg.id}/sync`)}
+            className="w-full p-4 rounded-2xl bg-surface-container-low/50 border border-white/5 hover:bg-surface-container-highest/40 transition-colors text-left flex items-center gap-3"
+          >
+            <span className="material-symbols-outlined text-primary-container">folder_open</span>
+            <span className="flex-1 text-sm font-medium text-on-surface truncate">{sg.name || `Project ${sg.id}`}</span>
+            <span className="text-[11px] uppercase tracking-wider text-on-surface-variant">Open</span>
+          </button>
+        ))}
+        {multi && (
+          <button
+            onClick={() => navigate('/')}
+            className="w-full p-3 rounded-xl border border-outline-variant/30 text-on-surface-variant text-sm font-bold uppercase tracking-wider hover:bg-surface-container-highest/40 transition-colors"
+          >
+            View all in Projects
+          </button>
+        )}
+        {!single && !multi && (
+          <button
+            onClick={onComplete}
+            className="w-full p-5 rounded-2xl bg-primary-container text-on-primary-fixed font-bold text-sm uppercase tracking-wider hover:opacity-90 transition-opacity"
+          >
+            Continue
+          </button>
+        )}
+      </div>
+
+      <div className="mx-8 mt-2 mb-8" />
+    </>
   )
 }
 

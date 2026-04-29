@@ -58,6 +58,25 @@ function broadcast(msg) {
   return broadcastToPort(msg)
 }
 
+// Strip the filename from a chrome.downloads-resolved absolute path to
+// get the parent folder. Returns null if no item carries final_path
+// (e.g. a 0-success run, or Chrome dropped final_path before we polled).
+// Exported for unit testing.
+export function pickAbsoluteFolder(items) {
+  if (!Array.isArray(items)) return null
+  for (const it of items) {
+    const p = it?.final_path
+    if (typeof p !== 'string' || !p) continue
+    // Use the OS-appropriate separator. On macOS / Linux it's `/`; on
+    // Windows it's `\` — Chrome reports native paths. We only need the
+    // dirname so any trailing-separator search works.
+    const lastSlash = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    if (lastSlash <= 0) continue
+    return p.slice(0, lastSlash)
+  }
+  return null
+}
+
 // Unified signed-URL fetcher for non-Envato sources (JIT).
 // Envato has its own two-phase resolver/licenser so the queue
 // calls resolveOldIdToNewUuid + getSignedDownloadUrl directly.
@@ -622,7 +641,7 @@ function maybePushProgress(item) {
 
 // ------------------- State helpers -------------------
 
-function buildInitialRunState({ runId, manifest, targetFolder, options, userId }) {
+export function buildInitialRunState({ runId, manifest, targetFolder, options, userId }) {
   return {
     runId,
     started_at: Date.now(),
@@ -642,7 +661,11 @@ function buildInitialRunState({ runId, manifest, targetFolder, options, userId }
       error_code: null,
       retries: 0,
       resolved_uuid: null,
-      signed_url: null,
+      // Pre-populated by the server for A-roll items (Cloudflare Stream
+      // URL) so the queue skips the mint phase. Hardcoding null here
+      // forced aroll into getSignedUrlForSource → unknown-source throw,
+      // which the classifier mis-routed to freepik_404.
+      signed_url: m.signed_url || null,
       claimed: false,
       // Ext.6: timing fields for telemetry meta. Set when the phase starts.
       resolve_started_at: null,
@@ -769,11 +792,20 @@ async function finalize() {
   // between the two writes still leaves the run visible.
   await persist()
   broadcast({ type: 'state', export: snapshot() })
+  // Derive the OS-resolved absolute folder from any item's final_path
+  // (set by chrome.downloads.search after each item completes — the
+  // Chrome runtime resolves "~/Downloads/..." to "/Users/<u>/Downloads/...").
+  // The web app forwards this to /generate-xml so <pathurl> can be
+  // emitted as the spec-compliant `file:///<absolute>/<file>` form.
+  // Falls back to null if no item carries final_path; the server then
+  // emits bare filenames (Premiere relinks via Match File Properties).
+  const folderPathAbsolute = pickAbsoluteFolder(state.items)
   broadcast({
     type: 'complete',
     ok_count: state.stats.ok_count,
     fail_count: state.stats.fail_count,
     folder_path: state.target_folder_path,
+    folder_path_absolute: folderPathAbsolute,
     xml_paths: [], // web app generates XMLs
   })
   emitTelemetry('export_completed', {

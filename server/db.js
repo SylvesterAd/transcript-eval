@@ -222,7 +222,48 @@ async function exec(sql) {
   await queryWithRetry(pgSql, [])
 }
 
+// transaction(fn) — runs `fn(tx)` inside a Postgres BEGIN/COMMIT on a single
+// pinned client. `tx` exposes the same `prepare(sql)` shape as the default db
+// wrapper, but every query routes through the held client so all writes land
+// in the same transaction. Throws → ROLLBACK; returns normally → COMMIT.
+// The client is always released back to the pool in `finally`.
+async function transaction(fn) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const tx = {
+      prepare(sql) {
+        const pgSql = convertSql(sql)
+        return {
+          async run(...params) {
+            const isInsert = /^\s*INSERT\s/i.test(pgSql)
+            const execSql = isInsert && !/RETURNING\s/i.test(pgSql) ? pgSql + ' RETURNING id' : pgSql
+            const result = await client.query(execSql, params)
+            return { lastInsertRowid: result.rows?.[0]?.id ?? null, changes: result.rowCount }
+          },
+          async get(...params) {
+            const result = await client.query(pgSql, params)
+            return result.rows[0] || undefined
+          },
+          async all(...params) {
+            const result = await client.query(pgSql, params)
+            return result.rows
+          },
+        }
+      },
+    }
+    const out = await fn(tx)
+    await client.query('COMMIT')
+    return out
+  } catch (err) {
+    try { await client.query('ROLLBACK') } catch {}
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
 // No-op save for backward compatibility (PostgreSQL persists automatically)
 function save() {}
 
-export default { prepare, exec, save, pool }
+export default { prepare, exec, save, pool, transaction }

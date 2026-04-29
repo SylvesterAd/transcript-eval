@@ -21,6 +21,12 @@ CREATE TABLE IF NOT EXISTS video_groups (
   freepik_opt_in BOOLEAN DEFAULT TRUE,
   audience_json TEXT,
   path_id TEXT,
+  auto_rough_cut BOOLEAN DEFAULT FALSE,
+  rough_cut_status TEXT,
+  rough_cut_error_required INTEGER,
+  broll_chain_status TEXT,
+  broll_chain_error TEXT,
+  notified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

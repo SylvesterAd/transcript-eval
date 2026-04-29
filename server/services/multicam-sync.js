@@ -46,32 +46,22 @@ export { buildTimeline as buildTimelineForGroup }
  * Classify videos in a group for user review before sync.
  * Uses Gemini to propose groupings, stores in classification_json.
  */
-export async function classifyVideosForReview(groupId) {
-  const videos = await db.prepare(`
-    SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
-    FROM videos v
-    LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
-    WHERE v.group_id = ? AND v.video_type = 'raw'
-    ORDER BY v.id
-  `).all(groupId)
-
-  if (videos.length === 0) {
-    return await updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
+// Pure-ish classifier: given a list of video rows (with transcripts), return
+// `{ groups, gemini }`. No DB writes. Used by classifyVideosForReview (which
+// then persists the result) and by reclassifyGroup (which persists only when
+// the new partitioning differs from the existing sub-group structure).
+export async function runClassification(videos) {
+  if (!Array.isArray(videos) || videos.length === 0) {
+    throw new Error('runClassification: no videos to classify')
   }
 
-  // Single video or no API key — auto-classify as one MAIN group
+  // Single video or no API key — auto-classify as one MAIN group.
   if (videos.length === 1 || !process.env.GOOGLE_API_KEY) {
-    const classification = {
+    return {
       groups: [{ name: 'MAIN', videoIds: videos.map(v => v.id) }],
       gemini: null,
     }
-    await db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
-      .run(JSON.stringify(classification), 'classified', groupId)
-    console.log(`[classify] Group ${groupId}: auto-classified ${videos.length} video(s) as MAIN`)
-    return
   }
-
-  await updateStatus(groupId, 'classifying')
 
   const previews = videos.map(v => {
     const text = (v.transcript || '')
@@ -130,11 +120,7 @@ ${previews}`
             new Set(returnedIds).size === returnedIds.length
 
           if (valid) {
-            const classification = { groups: parsed.groups, gemini: geminiData }
-            await db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
-              .run(JSON.stringify(classification), 'classified', groupId)
-            console.log(`[classify] Group ${groupId}: ${parsed.groups.length} groups — ${parsed.groups.map(g => `${g.name}(${g.videoIds.length})`).join(', ')}`)
-            return
+            return { groups: parsed.groups, gemini: geminiData }
           }
         }
       }
@@ -158,10 +144,38 @@ ${previews}`
     }
   }
 
-  // Both attempts failed — set error status so user sees it
-  console.error(`[classify] Group ${groupId} classification failed after ${MAX_RETRIES} attempts: ${lastError}`)
-  await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
-    .run('classification_failed', `Classification failed: ${lastError}`, groupId)
+  throw new Error(lastError || 'Classification failed')
+}
+
+export async function classifyVideosForReview(groupId) {
+  const videos = await db.prepare(`
+    SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
+    FROM videos v
+    LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+    WHERE v.group_id = ? AND v.video_type = 'raw'
+    ORDER BY v.id
+  `).all(groupId)
+
+  if (videos.length === 0) {
+    return await updateStatus(groupId, 'failed', 'No transcribed raw videos in group')
+  }
+
+  // Show "classifying" only when we'll actually call Gemini.
+  if (videos.length > 1 && process.env.GOOGLE_API_KEY) {
+    await updateStatus(groupId, 'classifying')
+  }
+
+  try {
+    const classification = await runClassification(videos)
+    await db.prepare('UPDATE video_groups SET classification_json = ?, assembly_status = ? WHERE id = ?')
+      .run(JSON.stringify(classification), 'classified', groupId)
+    console.log(`[classify] Group ${groupId}: ${classification.groups.length} groups — ${classification.groups.map(g => `${g.name}(${g.videoIds.length})`).join(', ')}`)
+  } catch (err) {
+    const reason = err.message || String(err)
+    console.error(`[classify] Group ${groupId} classification failed: ${reason}`)
+    await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
+      .run('classification_failed', `Classification failed: ${reason}`, groupId)
+  }
 }
 
 export async function analyzeMulticam(groupId, options = {}) {
@@ -789,13 +803,70 @@ async function buildTimeline(groupId, multicamClusters, items) {
   }
 }
 
-async function updateStatus(groupId, status, error = null, transcript = null, details = null) {
+export async function updateStatus(groupId, status, error = null, transcript = null, details = null) {
   if (transcript !== null) {
     await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ?, assembled_transcript = ?, assembly_details_json = ? WHERE id = ?')
       .run(status, error, transcript, details, groupId)
   } else {
     await db.prepare('UPDATE video_groups SET assembly_status = ?, assembly_error = ? WHERE id = ?')
       .run(status, error, groupId)
+  }
+
+  if (status === 'done') {
+    const flagRow = await db.prepare(
+      'SELECT user_id, auto_rough_cut, path_id FROM video_groups WHERE id = ?'
+    ).get(groupId)
+    const isAutoPath = flagRow?.path_id && ['hands-off', 'strategy-only', 'guided'].includes(flagRow.path_id)
+
+    if (flagRow?.auto_rough_cut) {
+      await db.prepare(
+        "UPDATE video_groups SET rough_cut_status = 'pending' WHERE id = ?"
+      ).run(groupId)
+      const { runAiRoughCut } = await import('./rough-cut-runner.js')
+      runAiRoughCut({ groupId, userId: flagRow.user_id })
+        .then(async (r) => {
+          if (r.error === 'insufficient_tokens') {
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'insufficient_tokens', rough_cut_error_required = ? WHERE id = ?"
+            ).run(r.required, groupId)
+          } else if (r.error || (!r.ok && !r.already_exists)) {
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
+            ).run(groupId)
+          } else if (r.already_exists) {
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'done' WHERE id = ?"
+            ).run(groupId)
+          } else {
+            // ok=true — pipeline running; Task 6 flips to 'done' on completion.
+            await db.prepare(
+              "UPDATE video_groups SET rough_cut_status = 'running' WHERE id = ?"
+            ).run(groupId)
+          }
+          // After rough cut terminal — chain into the b-roll pipeline if the
+          // project picked an auto path. Fire-and-forget so pipeline failures
+          // don't block the rough_cut_status write above.
+          if (isAutoPath) {
+            const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
+            runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
+          }
+        })
+        .catch(async (err) => {
+          console.error(`[auto-rough-cut] group ${groupId} failed:`, err.message)
+          await db.prepare(
+            "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
+          ).run(groupId)
+          if (isAutoPath) {
+            const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
+            runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
+          }
+        })
+    } else if (isAutoPath) {
+      // No rough cut requested but path is auto — fire b-roll chain directly
+      // after sync. Fire-and-forget; chain manages its own broll_chain_status.
+      const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
+      runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
+    }
   }
 }
 

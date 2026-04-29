@@ -78,4 +78,14 @@ describe('validateGroupUpdate', () => {
     const { error } = validateGroupUpdate({ audience: 'some string' })
     expect(error).toMatch(/audience must be/)
   })
+
+  it('accepts boolean auto_rough_cut', () => {
+    const { error } = validateGroupUpdate({ auto_rough_cut: true })
+    expect(error).toBe(null)
+  })
+
+  it('rejects non-boolean auto_rough_cut', () => {
+    const { error } = validateGroupUpdate({ auto_rough_cut: 'yes' })
+    expect(error).toMatch(/auto_rough_cut/)
+  })
 })

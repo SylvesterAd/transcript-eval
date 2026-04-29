@@ -39,13 +39,22 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'export id required' })
     }
 
-    const { variants } = req.body || {}
+    const { variants, target_folder_absolute } = req.body || {}
     if (!Array.isArray(variants) || variants.length === 0) {
       return res.status(400).json({ error: 'variants must be a non-empty array of labels' })
     }
     if (!variants.every((v) => typeof v === 'string' && v)) {
       return res.status(400).json({ error: 'each variant must be a non-empty string' })
     }
+    // Optional. The web app forwards complete.folder_path_absolute (the
+    // OS-resolved download folder reported by the extension) so we can
+    // emit absolute file:// URLs in <pathurl>. When missing or invalid,
+    // the generator falls back to bare filenames — Premiere relinks
+    // those via Match File Properties → File Name in the XML's folder.
+    const mediaFolderAbsolute =
+      typeof target_folder_absolute === 'string' && target_folder_absolute.startsWith('/')
+        ? target_folder_absolute
+        : null
 
     // Fetch + owner-check. getExportResult collapses missing/not-owned to
     // null, so from here on we can 404 uniformly.
@@ -79,6 +88,9 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
         frameRate: Number.isFinite(a.sourceFrameRate) ? a.sourceFrameRate : null,
         width: Number.isFinite(a.width) ? a.width : null,
         height: Number.isFinite(a.height) ? a.height : null,
+        // A-roll's source duration (when known) — feeds <file><duration>.
+        // Falls back to the timeline span inside the generator.
+        sourceDurationSeconds: Number.isFinite(a.sourceDurationSeconds) ? a.sourceDurationSeconds : null,
       }
     }
 
@@ -97,6 +109,7 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
         sequenceName: v.sequenceName || `Variant ${label}`,
         placements: brollPlacements,
         aroll,
+        mediaFolderAbsolute,
         // frameRate + sequenceSize fall through to generator defaults;
         // future manifest fields could override here.
       })

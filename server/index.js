@@ -92,3 +92,12 @@ app.listen(PORT, async () => {
   }
   startGpuFailurePoller()
 })
+
+;(async () => {
+  try {
+    const { resumeStuckFullAutoChains } = await import('./services/auto-orchestrator.js')
+    await resumeStuckFullAutoChains()
+  } catch (err) {
+    console.error('[startup] resumeStuckFullAutoChains failed:', err.message)
+  }
+})()
