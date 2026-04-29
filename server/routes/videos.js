@@ -540,6 +540,7 @@ router.get('/', requireAuth, async (req, res) => {
       COALESCE(parent.auto_rough_cut, vg.auto_rough_cut) AS group_auto_rough_cut,
       COALESCE(parent.rough_cut_status, vg.rough_cut_status) AS group_rough_cut_status,
       COALESCE(parent.broll_chain_status, vg.broll_chain_status) AS group_broll_chain_status,
+      COALESCE(parent.broll_chain_substage, vg.broll_chain_substage) AS group_broll_chain_substage,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'raw') AS has_raw,
       (SELECT COUNT(*) FROM transcripts t WHERE t.video_id = v.id AND t.type = 'human_edited') AS has_human_edited
     FROM videos v
@@ -560,6 +561,7 @@ router.get('/', requireAuth, async (req, res) => {
     v.auto_rough_cut = !!v.group_auto_rough_cut
     v.rough_cut_status = v.group_rough_cut_status || null
     v.broll_chain_status = v.group_broll_chain_status || null
+    v.broll_chain_substage = v.group_broll_chain_substage || null
     delete v.group_libraries_json
     delete v.group_freepik_opt_in
     delete v.group_audience_json
@@ -567,6 +569,7 @@ router.get('/', requireAuth, async (req, res) => {
     delete v.group_auto_rough_cut
     delete v.group_rough_cut_status
     delete v.group_broll_chain_status
+    delete v.group_broll_chain_substage
   }
   res.json(videos)
 })
