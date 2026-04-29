@@ -48,6 +48,7 @@ describe('withRetry', () => {
   it('throws the last error after exhausting tries', async () => {
     const fn = vi.fn(async () => { throw new Error('always fails') })
     const promise = withRetry(fn, { tries: 3, backoff: [5_000, 30_000], pipelineId: 'p1', label: 'test' })
+    promise.catch(() => {})
     await vi.advanceTimersByTimeAsync(5_000)
     await vi.advanceTimersByTimeAsync(30_000)
     await expect(promise).rejects.toThrow('always fails')
@@ -73,6 +74,7 @@ describe('withRetry', () => {
       return 'should not reach'
     })
     const promise = withRetry(fn, { tries: 3, backoff: [5_000, 30_000], pipelineId: 'p1', label: 'test' })
+    promise.catch(() => {})
     await vi.advanceTimersByTimeAsync(5_000)
     await expect(promise).rejects.toThrow('Aborted')
     expect(fn).toHaveBeenCalledTimes(1)
@@ -81,6 +83,7 @@ describe('withRetry', () => {
   it('uses backoff[attempt-1] for sleep between attempts', async () => {
     const fn = vi.fn(async () => { throw new Error('fail') })
     const promise = withRetry(fn, { tries: 3, backoff: [1_000, 2_000], pipelineId: 'p1', label: 'test' })
+    promise.catch(() => {})
     await vi.advanceTimersByTimeAsync(999)
     expect(fn).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1)
