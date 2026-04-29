@@ -1046,13 +1046,21 @@ export async function loadExampleVideos(groupId) {
   `).all(...groupIds)
 
   const videos = []
+  const seen = new Set()
   for (const src of sources) {
     try {
       const meta = JSON.parse(src.meta_json || '{}')
-      if (meta.videoId) {
-        const v = await db.prepare('SELECT id, title, file_path, cf_stream_uid FROM videos WHERE id = ?').get(meta.videoId)
-        if (v) videos.push({ ...v, isFavorite: !!src.is_favorite })
+      if (!meta.videoId || seen.has(meta.videoId)) {
+        // If this duplicate has isFavorite=true and the existing entry doesn't, promote it.
+        if (meta.videoId && src.is_favorite) {
+          const existing = videos.find(v => v.id === meta.videoId)
+          if (existing && !existing.isFavorite) existing.isFavorite = true
+        }
+        continue
       }
+      seen.add(meta.videoId)
+      const v = await db.prepare('SELECT id, title, file_path, cf_stream_uid FROM videos WHERE id = ?').get(meta.videoId)
+      if (v) videos.push({ ...v, isFavorite: !!src.is_favorite })
     } catch {}
   }
   return videos
