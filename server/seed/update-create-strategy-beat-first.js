@@ -63,6 +63,10 @@ From the dominant reference chapter's pattern_analysis, ADAPT the following:
 
 ## Step 5: Build per-beat strategies (CRITICAL)
 
+{{prior_chapter_strategies}}
+
+If prior strategies for this chapter are shown above, your strategy MUST be meaningfully different. Do not produce the same or a similar approach. Choose different visual angles, different beat strategies, different style/motion choices. The goal is genuine variety across reference videos — not minor re-wordings.
+
 This is the most important part. For each beat in THIS chapter:
 
 1. Use the best-matching reference beat you found in Step 3 — it can be from ANY reference chapter
