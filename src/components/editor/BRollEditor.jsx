@@ -156,7 +156,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
       // and skip the SET_LOADING clear, avoiding a blank frame.
       brollState.seedFromCache(newPid, cached)
     }
-    // selectIdentity may be: { chapterIndex, placementIndex, userPlacementId } object,
+    // selectIdentity may be: { uuid, chapterIndex, placementIndex, userPlacementId } object,
     // or a bare numeric index (legacy). Stash for the pending-selection effect to resolve
     // once the new variant's placements are loaded.
     if (selectIdentity != null) {
@@ -220,7 +220,9 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   }, [rawInactivePlacements, transcriptWords])
 
   // Apply pending selection after variant switch data loads. The pending value can be:
-  //   - { chapterIndex, placementIndex, userPlacementId } — stable cross-variant identity (preferred)
+  //   - { uuid } — same-pipeline stable identity (preferred when staying in one variant)
+  //   - { chapterIndex, placementIndex } — cross-variant identity (different plan = different uuids)
+  //   - { userPlacementId } — user paste/cross-drag identity (preserved across variants in editor state)
   //   - bare number — legacy / direct-index path
   // Re-runs as placements/userPlacements change so userPlacement matches arrive after
   // LOAD_EDITOR_STATE populates state.userPlacements (which lands AFTER editor-data).
@@ -236,9 +238,16 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
     if (typeof pending === 'object') {
       let match = null
-      if (pending.userPlacementId) {
+      if (pending.uuid) {
+        // Same-pipeline (or cross-pipeline if uuids ever align): the strongest identity.
+        match = brollState.placements.find(p => p.uuid === pending.uuid)
+      }
+      if (!match && pending.userPlacementId) {
         match = brollState.placements.find(p => p.userPlacementId === pending.userPlacementId)
-      } else if (pending.chapterIndex != null && pending.placementIndex != null) {
+      }
+      if (!match && pending.chapterIndex != null && pending.placementIndex != null) {
+        // Cross-variant fallback: different plan = different uuids, so position-based match
+        // is the right heuristic for "the same chapter/index slot in another variant".
         match = brollState.placements.find(p =>
           p.chapterIndex === pending.chapterIndex && p.placementIndex === pending.placementIndex
         )
