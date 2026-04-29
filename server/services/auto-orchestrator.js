@@ -17,6 +17,24 @@ import { analyzeMulticam, runClassification } from './multicam-sync.js'
 import { pathToFlags } from '../routes/broll.js'
 import * as emailNotifier from './email-notifier.js'
 
+// Note: resumePipeline is dynamically imported from './broll.js' inside
+// resumeStuckFullAutoChains to avoid pulling broll.js (which has heavy
+// transitive deps including llm-runner.js side-effects) into the module
+// graph at orchestrator load time. The dynamic import still respects
+// vi.mock('../broll.js', ...) in tests.
+
+// Indirection holder for orchestrator-internal helpers that
+// resumeStuckFullAutoChains delegates to. Tests stub these by reassigning
+// fields on the holder (see resume-stuck-chains-v2.test.js). The pattern
+// mirrors __pipelineRunner in broll.js — ESM live bindings make vi.spyOn
+// on the named exports unreliable, so we route through a mutable object.
+// Populated below the function declarations.
+export const __orchestratorDeps = {
+  findInterruptedPipelinesForGroup: null,
+  resumeChain: null,
+  runFullAutoBrollChain: null,
+}
+
 // Find pipelineIds belonging to a video_group whose expected stages exceed the
 // completed-main-stages count (i.e., interrupted by a server crash). Skips
 // alt-/kw-/bs- pipelines (they have dedicated re-trigger endpoints). When
@@ -568,8 +586,12 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
   }
 }
 
-// Called from server boot. Re-fires chains for sub-groups that should be running
-// but aren't (interrupted by server restart, etc.).
+// Called from server boot. Resumes b-roll work that the previous server
+// process left in flight: stuck chains (status IS NULL but ought to start) and
+// interrupted chains (status='running' when the process died). For interrupted
+// chains, uses smart per-pipeline resume + advance-from-substage rather than
+// re-firing the whole chain (which previously caused 50+ spurious analysis runs).
+// See spec docs/superpowers/specs/2026-04-29-broll-auto-resume-design.md.
 export async function resumeStuckFullAutoChains() {
   const stuck = await db.prepare(`
     SELECT id FROM video_groups
@@ -580,15 +602,65 @@ export async function resumeStuckFullAutoChains() {
       AND broll_chain_status IS NULL
   `).all()
   for (const sg of stuck) {
-    setTimeout(() => runFullAutoBrollChain(sg.id), 3000)
+    setTimeout(() => __orchestratorDeps.runFullAutoBrollChain(sg.id), 3000)
   }
 
   const interrupted = await db.prepare(
     "SELECT id FROM video_groups WHERE broll_chain_status = 'running'"
   ).all()
+
+  // Lazy-import resumePipeline so broll.js (and its transitive llm-runner deps)
+  // isn't pulled into the module graph at orchestrator load time. vi.mock in
+  // tests still intercepts this dynamic import.
+  const { resumePipeline } = await import('./broll.js')
+
+  let resumedPipelinesCount = 0
+  let advancedChainsCount = 0
   for (const sg of interrupted) {
-    await db.prepare("UPDATE video_groups SET broll_chain_status = NULL WHERE id = ?").run(sg.id)
-    setTimeout(() => runFullAutoBrollChain(sg.id), 3000)
+    try {
+      const row = await db.prepare(
+        'SELECT broll_chain_substage FROM video_groups WHERE id = ?'
+      ).get(sg.id)
+      const substage = row?.broll_chain_substage || null
+
+      // Step 1: resume interrupted pipelines for this group.
+      // Per Task 3.5 contract, resumePipeline returns { pipelineId, completedStages,
+      // executePromise }. We MUST await executePromise so the chain doesn't advance
+      // (Step 2) until the resumed pipeline has actually finished its work.
+      const pids = await __orchestratorDeps.findInterruptedPipelinesForGroup(sg.id, substage)
+      for (const pid of pids) {
+        try {
+          const { executePromise } = await resumePipeline(pid)
+          await executePromise
+          resumedPipelinesCount++
+        } catch (err) {
+          console.error(`[startup] resumePipeline(${pid}) failed for group ${sg.id}: ${err.message}`)
+        }
+      }
+
+      // Step 2: advance the chain. Use setTimeout(... 3000) to mirror the
+      // first loop's startup delay — gives the rest of the boot path a moment
+      // to settle before kicking off chain advancement.
+      if (substage === 'plan' || substage === 'search') {
+        setTimeout(() => __orchestratorDeps.resumeChain(sg.id, substage), 3000)
+      } else {
+        // 'refs', 'strategy', or NULL → use runFullAutoBrollChain with the new option
+        setTimeout(
+          () => __orchestratorDeps.runFullAutoBrollChain(sg.id, { resumeFromSubstage: substage || 'refs' }),
+          3000,
+        )
+      }
+      advancedChainsCount++
+    } catch (err) {
+      console.error(`[startup] resume failed for group ${sg.id}: ${err.message}`)
+    }
   }
-  console.log(`[startup] resumed ${stuck.length} stuck + ${interrupted.length} interrupted chains`)
+
+  console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interrupted.length} chains; advanced ${advancedChainsCount} chains from substage`)
 }
+
+// Populate the indirection holder now that all helper functions are declared.
+// Tests can override these fields to swap in mocks (see resume-stuck-chains-v2.test.js).
+__orchestratorDeps.findInterruptedPipelinesForGroup = findInterruptedPipelinesForGroup
+__orchestratorDeps.resumeChain = resumeChain
+__orchestratorDeps.runFullAutoBrollChain = runFullAutoBrollChain
