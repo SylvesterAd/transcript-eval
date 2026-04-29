@@ -801,9 +801,9 @@ router.post('/pipeline/:pipelineId/resume', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
     const { fromStage } = req.body || {}
-    const result = resumePipeline(pipelineId, { fromStage })
-    res.json({ pipelineId, resumed: true })
-    result.catch(err => console.error(`[broll-pipeline] Resume failed for ${pipelineId}:`, err.message))
+    const { completedStages, executePromise } = await resumePipeline(pipelineId, { fromStage })
+    res.json({ pipelineId, resumed: true, completedStages })
+    executePromise.catch(err => console.error(`[broll-pipeline] Resume failed for ${pipelineId}:`, err.message))
   } catch (err) {
     const msg = err.message || 'Resume failed'
     if (/must be re-run via/.test(msg)) return res.status(400).json({ error: msg })

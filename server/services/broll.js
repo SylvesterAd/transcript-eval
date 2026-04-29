@@ -5180,13 +5180,30 @@ export async function resumePipeline(pipelineId, opts = {}) {
 
   abortedBrollPipelines.delete(pipelineId)
 
+  // Recover exampleVideoId from the pipelineId suffix. The runner embeds
+  // -ex<N> for per-reference-video analysis pipelines (broll-runner.js:103).
+  // Without this, resume re-runs without the filter and triggers the
+  // analysis-expansion branch at line ~3777, producing phantom duplicate
+  // stages across multiple reference videos.
+  const exMatch = pipelineId.match(/-ex(\d+)$/)
+  const exampleVideoId = exMatch ? Number(exMatch[1]) : null
+
+  // Fire executePipeline but DO NOT await — return the promise so callers can
+  // decide. The HTTP route fires-and-forgets; the boot-time auto-resume awaits
+  // each pipeline before advancing the chain.
   // Call via the holder so tests can stub executePipeline.
-  return __pipelineRunner.executePipeline(
+  const executePromise = __pipelineRunner.executePipeline(
     strategyId, version.id, videoId, groupId,
     firstMeta.transcriptSource || 'raw',
     editorCuts, null,
-    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0 },
+    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0, exampleVideoId },
   )
+
+  return {
+    pipelineId,
+    completedStages: Object.keys(completedStages).length,
+    executePromise,
+  }
 }
 
 // ── B-Roll Editor Data ────────────────────────────────────────────────

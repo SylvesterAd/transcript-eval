@@ -102,6 +102,48 @@ describe('resumePipeline', () => {
     expect(opts.originalPipelineId).toBe('p1')
   })
 
+  it('returns { pipelineId, completedStages, executePromise } with the count', async () => {
+    state.brollRuns = [
+      { id: 1, strategy_id: 5, video_id: 100, output_text: 'OUT_A',
+        metadata_json: JSON.stringify({ pipelineId: 'p1', stageIndex: 0, stageName: 'StageA', videoLabel: '', groupId: 7 }) },
+      { id: 2, strategy_id: 5, video_id: 100, output_text: 'OUT_B',
+        metadata_json: JSON.stringify({ pipelineId: 'p1', stageIndex: 1, stageName: 'StageB', videoLabel: '', groupId: 7 }) },
+    ]
+    state.latestVersion = { id: 50, stages_json: JSON.stringify([{ name: 'StageA' }, { name: 'StageB' }]) }
+
+    const result = await resumePipeline('p1')
+    expect(result.pipelineId).toBe('p1')
+    expect(result.completedStages).toBe(2)
+    expect(result.executePromise).toBeInstanceOf(Promise)
+    await result.executePromise // drain so vitest doesn't warn
+  })
+
+  it('parses exampleVideoId from pipelineId -ex<N> suffix and forwards it', async () => {
+    state.brollRuns = [
+      { id: 1, strategy_id: 5, video_id: 100, output_text: 'OUT_A',
+        metadata_json: JSON.stringify({ pipelineId: '5-100-1700000000-ex400', stageIndex: 0, stageName: 'StageA', videoLabel: '', groupId: 7 }) },
+    ]
+    state.latestVersion = { id: 50, stages_json: JSON.stringify([{ name: 'StageA' }]) }
+
+    await resumePipeline('5-100-1700000000-ex400')
+
+    const [, , , , , , , opts] = state.executePipelineCalls[0]
+    expect(opts.exampleVideoId).toBe(400)
+  })
+
+  it('passes exampleVideoId=null when pipelineId has no -ex suffix', async () => {
+    state.brollRuns = [
+      { id: 1, strategy_id: 5, video_id: 100, output_text: 'OUT_A',
+        metadata_json: JSON.stringify({ pipelineId: 'p1', stageIndex: 0, stageName: 'StageA', videoLabel: '', groupId: 7 }) },
+    ]
+    state.latestVersion = { id: 50, stages_json: JSON.stringify([{ name: 'StageA' }]) }
+
+    await resumePipeline('p1')
+
+    const [, , , , , , , opts] = state.executePipelineCalls[0]
+    expect(opts.exampleVideoId == null).toBe(true)
+  })
+
   it('with fromStage drops completed stages from that index onwards and deletes their rows', async () => {
     state.brollRuns = [
       { id: 1, strategy_id: 5, video_id: 100, output_text: 'OUT_A',
