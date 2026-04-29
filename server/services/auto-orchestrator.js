@@ -17,6 +17,17 @@ import { analyzeMulticam, runClassification } from './multicam-sync.js'
 import { pathToFlags } from '../routes/broll.js'
 import * as emailNotifier from './email-notifier.js'
 
+// Cooperative cancel signal. The DELETE handler sets assembly_status='deleting'
+// on the sub-group (and the parent) before purging. We poll this between
+// chain stages and bail — no more executePipeline calls, no more email
+// notifications, no more status writes against rows that are about to vanish.
+async function isCancelled(subGroupId) {
+  const row = await db.prepare(
+    'SELECT assembly_status FROM video_groups WHERE id = ?'
+  ).get(subGroupId)
+  return !row || row.assembly_status === 'deleting'
+}
+
 // Pure helper. Returns true iff `snapshot` (existing sub-groups with their
 // videoIds) and `newGroups` (a fresh classification's groups[]) cover the
 // same videos in the same partitioning. Group names are ignored — only the
@@ -256,6 +267,7 @@ export async function runFullAutoBrollChain(subGroupId) {
   await db.prepare(
     "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = 'refs' WHERE id = ?"
   ).run(subGroupId)
+  if (await isCancelled(subGroupId)) return
 
   const sg = await db.prepare(
     'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
@@ -276,6 +288,7 @@ export async function runFullAutoBrollChain(subGroupId) {
 
     const refs = await runner.runAllReferences({ subGroupId, mainVideoId: mainVideo.id })
     await runner.waitForPipelinesComplete([refs.prepPipelineId, ...refs.analysisPipelineIds].filter(Boolean))
+    if (await isCancelled(subGroupId)) return
 
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'strategy' WHERE id = ?").run(subGroupId)
     const strats = await runner.runStrategies({
@@ -283,6 +296,7 @@ export async function runFullAutoBrollChain(subGroupId) {
       prepPipelineId: refs.prepPipelineId, analysisPipelineIds: refs.analysisPipelineIds,
     })
     await runner.waitForPipelinesComplete(strats.strategyPipelineIds)
+    if (await isCancelled(subGroupId)) return
 
     if (flags.stopAfterStrategy) {
       await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_strategy' WHERE id = ?").run(subGroupId)
@@ -297,6 +311,7 @@ export async function runFullAutoBrollChain(subGroupId) {
       strategyPipelineIds: strats.strategyPipelineIds,
     })
     await runner.waitForPipelinesComplete(plans.planPipelineIds)
+    if (await isCancelled(subGroupId)) return
 
     if (flags.stopAfterPlan) {
       await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_plan' WHERE id = ?").run(subGroupId)
@@ -332,6 +347,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
   await db.prepare(
     "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = ? WHERE id = ?"
   ).run(startSubstage, subGroupId)
+  if (await isCancelled(subGroupId)) return
 
   try {
     const runner = await import('./broll-runner.js')
@@ -347,6 +363,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
         prepPipelineId: opts.prepPipelineId,
       })
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
+      if (await isCancelled(subGroupId)) return
 
       if (sg.path_id === 'guided') {
         await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_plan' WHERE id = ?").run(subGroupId)
