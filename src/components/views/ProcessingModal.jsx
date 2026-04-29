@@ -48,16 +48,22 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
   const brollDone = subGroups.length > 0 && subGroups.every(sg => sg.broll_chain_status === 'done')
   const brollActive = subGroups.some(sg => sg.broll_chain_status === 'running')
 
+  // Pick the substage of the first sub-group that's still running.
+  // In Full Auto we have one sub-group per parent; if multiple are in
+  // flight at once for some reason, we surface whichever is currently
+  // active (they all walk the chain in parallel).
+  const brollSubstage = subGroups.find(sg => sg.broll_chain_status === 'running')?.broll_chain_substage || null
+
   return [
     { id: 'upload',         label: 'Upload',                 done: uploadDone, active: !uploadDone },
     { id: 'transcribe',     label: 'Transcribing',           done: videos.length > 0 && transcribed === videos.length, active: transcribing, sub: `${transcribed} of ${videos.length} done` },
     { id: 'classify',       label: 'Classifying',            done: classifyDone, active: classifying },
     { id: 'sync',           label: 'Multi-cam sync',         done: syncDone, active: syncActive },
     { id: 'rough_cut',      label: 'AI Rough Cut',           skipped: rcSkipped, done: rcDone, active: rcActive },
-    { id: 'broll_refs',     label: 'References analyzed',    active: brollActive && !brollPausedAtStrat && !brollPausedAtPlan, done: brollDone },
-    { id: 'broll_strategy', label: 'B-roll strategy',        paused: brollPausedAtStrat, active: brollActive && !brollPausedAtStrat, done: brollDone },
-    { id: 'broll_plan',     label: 'B-roll plan',            paused: brollPausedAtPlan, active: brollActive && !brollPausedAtPlan, done: brollDone },
-    { id: 'broll_search',   label: 'B-roll search (first 10)', active: brollActive && !brollPausedAtStrat && !brollPausedAtPlan, done: brollDone },
+    { id: 'broll_refs',     label: 'References analyzed',     active: brollActive && brollSubstage === 'refs',     done: brollDone || (brollActive && ['strategy','plan','search'].includes(brollSubstage)) },
+    { id: 'broll_strategy', label: 'B-roll strategy',         paused: brollPausedAtStrat, active: brollActive && brollSubstage === 'strategy', done: brollDone || (brollActive && ['plan','search'].includes(brollSubstage)) },
+    { id: 'broll_plan',     label: 'B-roll plan',             paused: brollPausedAtPlan,  active: brollActive && brollSubstage === 'plan',     done: brollDone || (brollActive && brollSubstage === 'search') },
+    { id: 'broll_search',   label: 'B-roll search (first 10)', active: brollActive && brollSubstage === 'search', done: brollDone },
     { id: 'done',           label: 'Done',                   done: brollDone },
   ]
 }
