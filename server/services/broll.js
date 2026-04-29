@@ -4998,7 +4998,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           `).run(
             strategyId, videoId, 'analysis', 'complete',
             '', output, '', '', 'programmatic', 0, 0, 0, stageRuntime,
-            JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, analysisStageCount, transcriptSource: resolvedSource, groupId }),
+            JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, videoId: stage._videoId || null, analysisStageCount, transcriptSource: resolvedSource, groupId }),
           )
           console.log(`[broll-pipeline] Resume: re-inserted programmatic stage ${i + 1} to DB`)
         }
@@ -5014,7 +5014,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           resolvedPrompt || stage.prompt || '', resolvedSystem || stage.system_instruction || '',
           stage.model || 'gemini-3-flash-preview',
           stageTokensIn, stageTokensOut, stageCost, stageRuntime,
-          JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, analysisStageCount, transcriptSource: resolvedSource, groupId }),
+          JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, videoId: stage._videoId || null, analysisStageCount, transcriptSource: resolvedSource, groupId }),
         )
 
         // Persist spending to spending_log — survives run deletion
@@ -5137,19 +5137,38 @@ export async function resumePipeline(pipelineId, opts = {}) {
   }
   const videoLabelOrder = Object.keys(videoGroups)
 
-  // Sanity check: old videoLabels must align with the current example videos.
-  // Mismatch (e.g., user added/removed a reference between original run and resume)
-  // would cause the offset math below to slot outputs into wrong stage positions.
+  // Sanity check: old runs' video set must align with current example videos.
+  // Mismatch (e.g., reference video added/removed since the original run) would
+  // cause the offset math below to slot outputs into wrong stage positions.
   // Conservatively drop completedStages and start fresh in that case.
+  //
+  // Prefer videoId-based comparison (stable across renames). Fall back to
+  // videoLabel for runs stored before videoId was persisted.
   const currentExampleVideos = groupId ? await __pipelineRunner.loadExampleVideos(groupId) : []
+  const currentVideoIds = new Set(currentExampleVideos.map(v => v.id))
   const currentLabels = new Set(currentExampleVideos.map(v => v.title || `Video #${v.id}`))
-  const oldLabels = new Set(videoLabelOrder.filter(l => l !== ''))
-  const mismatch = oldLabels.size > 0 && (
-    oldLabels.size !== currentLabels.size ||
-    [...oldLabels].some(l => !currentLabels.has(l))
-  )
+
+  // Collect old videoIds (preferred) and old labels (fallback) from mainRuns metadata
+  const oldVideoIds = new Set()
+  const oldLabels = new Set()
+  for (const run of mainRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.videoId != null) oldVideoIds.add(meta.videoId)
+    if (meta.videoLabel) oldLabels.add(meta.videoLabel)
+  }
+
+  let mismatch = false
+  if (oldVideoIds.size > 0) {
+    // Prefer videoId comparison
+    mismatch = oldVideoIds.size !== currentVideoIds.size ||
+               [...oldVideoIds].some(id => !currentVideoIds.has(id))
+  } else if (oldLabels.size > 0) {
+    // Fall back to label comparison for legacy runs without videoId in metadata
+    mismatch = oldLabels.size !== currentLabels.size ||
+               [...oldLabels].some(l => !currentLabels.has(l))
+  }
   if (mismatch) {
-    console.warn(`[broll-resume] ${pipelineId}: video set mismatch (old=${[...oldLabels].join(',')} new=${[...currentLabels].join(',')}). Starting fresh.`)
+    console.warn(`[broll-resume] ${pipelineId}: video set mismatch (oldIds=${[...oldVideoIds].join(',') || 'none'} oldLabels=${[...oldLabels].join(',') || 'none'} currentIds=${[...currentVideoIds].join(',')}). Starting fresh.`)
   }
 
   const completedStages = {}

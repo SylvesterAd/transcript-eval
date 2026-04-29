@@ -203,4 +203,38 @@ describe('resumePipeline', () => {
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('video set mismatch'))
     consoleSpy.mockRestore()
   })
+  it('uses videoId-preferred match: same videoId with renamed title does NOT trigger mismatch', async () => {
+    state.brollRuns = [
+      { id: 1, strategy_id: 5, video_id: 100, output_text: 'OUT_A',
+        metadata_json: JSON.stringify({ pipelineId: 'p1', stageIndex: 0, stageName: 'StageA', videoLabel: 'OldTitle', videoId: 388, groupId: 7 }) },
+    ]
+    state.latestVersion = { id: 50, stages_json: JSON.stringify([{ name: 'StageA' }]) }
+    // Current example videos: same videoId 388 but renamed to "NewTitle"
+    state.exampleVideos = [{ id: 388, title: 'NewTitle' }]
+
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await resumePipeline('p1')
+    const [, , , , , , , opts] = state.executePipelineCalls[0]
+    // No mismatch → completedStages preserved
+    expect(opts.completedStages).toEqual({ 0: 'OUT_A' })
+    expect(consoleSpy).not.toHaveBeenCalled()
+    consoleSpy.mockRestore()
+  })
+
+  it('detects mismatch via videoId when current set differs', async () => {
+    state.brollRuns = [
+      { id: 1, strategy_id: 5, video_id: 100, output_text: 'OUT_A',
+        metadata_json: JSON.stringify({ pipelineId: 'p1', stageIndex: 0, stageName: 'StageA', videoLabel: 'Renamed', videoId: 388, groupId: 7 }) },
+    ]
+    state.latestVersion = { id: 50, stages_json: JSON.stringify([{ name: 'StageA' }]) }
+    // Current example videos: different videoId 999
+    state.exampleVideos = [{ id: 999, title: 'Other' }]
+
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await resumePipeline('p1')
+    const [, , , , , , , opts] = state.executePipelineCalls[0]
+    expect(opts.completedStages).toEqual({})
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('video set mismatch'))
+    consoleSpy.mockRestore()
+  })
 })
