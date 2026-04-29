@@ -2407,55 +2407,102 @@ router.put('/:id', requireAuth, async (req, res) => {
 // Background worker: actually delete group data + storage files
 async function purgeGroup(groupId) {
   try {
-    // Clean up broll example sources/sets for this group
-    const exampleSets = await db.prepare('SELECT id FROM broll_example_sets WHERE group_id = ?').all(groupId)
-    for (const set of exampleSets) {
-      await db.prepare('DELETE FROM broll_example_sources WHERE example_set_id = ?').run(set.id)
-    }
-    await db.prepare('DELETE FROM broll_example_sets WHERE group_id = ?').run(groupId)
+    // Collect every group to purge: parent + all sub-groups. We delete
+    // children first, then the parent, so foreign-key references resolve.
+    const subGroupIds = (
+      await db.prepare('SELECT id FROM video_groups WHERE parent_group_id = ?').all(groupId)
+    ).map(r => r.id)
+    const allGroupIds = [...subGroupIds, groupId]
 
-    const videos = await db.prepare('SELECT id, file_path, thumbnail_path, cf_stream_uid FROM videos WHERE group_id = ?').all(groupId)
-    for (const v of videos) {
-      const runs = await db.prepare('SELECT id FROM experiment_runs WHERE video_id = ?').all(v.id)
-      for (const run of runs) {
-        await db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
-        await db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
-        await db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
-        await db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
+    for (const gid of allGroupIds) {
+      // broll_example_sources → broll_example_sets
+      const exampleSets = await db.prepare(
+        'SELECT id FROM broll_example_sets WHERE group_id = ?'
+      ).all(gid)
+      for (const set of exampleSets) {
+        await db.prepare('DELETE FROM broll_example_sources WHERE example_set_id = ?').run(set.id)
       }
-      await db.prepare('DELETE FROM experiment_runs WHERE video_id = ?').run(v.id)
-      await db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(v.id)
-      await db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(v.id)
-      await db.prepare('DELETE FROM videos WHERE id = ?').run(v.id)
-      if (v.file_path?.startsWith('http')) { await deleteByUrl(v.file_path).catch(() => {}) }
-      else if (v.file_path) { try { unlinkSync(join(__dirname, '..', '..', v.file_path)) } catch {} }
-      if (v.thumbnail_path?.startsWith('http')) { await deleteByUrl(v.thumbnail_path).catch(() => {}) }
-      else if (v.thumbnail_path) { try { unlinkSync(join(__dirname, '..', '..', v.thumbnail_path)) } catch {} }
-      await deleteFolder('frames', String(v.id)).catch(() => {})
-      try { rmSync(join(__dirname, '..', '..', 'uploads', 'frames', String(v.id)), { recursive: true }) } catch {}
-      if (v.cf_stream_uid) await deleteStream(v.cf_stream_uid).catch(() => {})
+      await db.prepare('DELETE FROM broll_example_sets WHERE group_id = ?').run(gid)
+
+      // Per-video cleanup: experiment runs / transcripts / broll_runs /
+      // broll_searches / files / frames / cf streams.
+      const videos = await db.prepare(
+        'SELECT id, file_path, thumbnail_path, cf_stream_uid FROM videos WHERE group_id = ?'
+      ).all(gid)
+      for (const v of videos) {
+        const runs = await db.prepare(
+          'SELECT id FROM experiment_runs WHERE video_id = ?'
+        ).all(v.id)
+        for (const run of runs) {
+          await db.prepare('DELETE FROM deletion_annotations WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
+          await db.prepare('DELETE FROM metrics WHERE run_stage_output_id IN (SELECT id FROM run_stage_outputs WHERE experiment_run_id = ?)').run(run.id)
+          await db.prepare('DELETE FROM analysis_records WHERE experiment_run_id = ?').run(run.id)
+          await db.prepare('DELETE FROM run_stage_outputs WHERE experiment_run_id = ?').run(run.id)
+        }
+        await db.prepare('DELETE FROM experiment_runs WHERE video_id = ?').run(v.id)
+        await db.prepare('DELETE FROM deletion_annotations WHERE video_id = ?').run(v.id)
+        await db.prepare('DELETE FROM transcripts WHERE video_id = ?').run(v.id)
+        // broll_runs / broll_searches reference the video via video_id /
+        // plan_pipeline_id strings. Drop everything keyed by video_id.
+        await db.prepare('DELETE FROM broll_runs WHERE video_id = ?').run(v.id)
+        await db.prepare('DELETE FROM videos WHERE id = ?').run(v.id)
+        if (v.file_path?.startsWith('http')) { await deleteByUrl(v.file_path).catch(() => {}) }
+        else if (v.file_path) { try { unlinkSync(join(__dirname, '..', '..', v.file_path)) } catch {} }
+        if (v.thumbnail_path?.startsWith('http')) { await deleteByUrl(v.thumbnail_path).catch(() => {}) }
+        else if (v.thumbnail_path) { try { unlinkSync(join(__dirname, '..', '..', v.thumbnail_path)) } catch {} }
+        await deleteFolder('frames', String(v.id)).catch(() => {})
+        try { rmSync(join(__dirname, '..', '..', 'uploads', 'frames', String(v.id)), { recursive: true }) } catch {}
+        if (v.cf_stream_uid) await deleteStream(v.cf_stream_uid).catch(() => {})
+      }
     }
-    // Delete child groups (sub-groups created during classification)
-    await db.prepare('UPDATE video_groups SET parent_group_id = NULL WHERE parent_group_id = ?').run(groupId)
+
+    // Detach + delete groups, children first.
+    for (const sgId of subGroupIds) {
+      await db.prepare('DELETE FROM video_groups WHERE id = ?').run(sgId)
+    }
     await db.prepare('DELETE FROM video_groups WHERE id = ?').run(groupId)
-    console.log(`[delete] Group ${groupId} purged (${videos.length} videos)`)
+    console.log(`[delete] Group ${groupId} purged (parent + ${subGroupIds.length} sub-groups)`)
   } catch (err) {
     console.error(`[delete] Purge failed for group ${groupId}:`, err.message)
   }
 }
 
 router.delete('/groups/:id', requireAuth, async (req, res) => {
-  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  const groupId = parseInt(req.params.id)
+  const group = await db.prepare(
+    `SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
+  ).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
-  // Soft-hide immediately: set a deleted marker so it disappears from lists
-  await db.prepare("UPDATE video_groups SET name = name || ' [deleting]', assembly_status = 'deleting' WHERE id = ?").run(req.params.id)
+  // Mark parent + every sub-group as 'deleting'. The chain orchestrators
+  // poll this between stages (see isCancelled in auto-orchestrator.js)
+  // and bail without writing more rows. Soft-hide on the parent's name
+  // so it disappears from the projects list immediately.
+  const subGroupIds = (
+    await db.prepare('SELECT id FROM video_groups WHERE parent_group_id = ?').all(groupId)
+  ).map(r => r.id)
+  await db.prepare(
+    "UPDATE video_groups SET name = name || ' [deleting]', assembly_status = 'deleting' WHERE id = ?"
+  ).run(groupId)
+  for (const sgId of subGroupIds) {
+    await db.prepare("UPDATE video_groups SET assembly_status = 'deleting' WHERE id = ?").run(sgId)
+  }
 
-  // Respond instantly
+  // Cancel transcriptions on parent + sub-groups so any in-flight Whisper
+  // calls abort and queued ones drop. cancelGroupTranscriptions already
+  // handles AbortControllers + queue removal — just call it per group.
+  await cancelGroupTranscriptions(groupId).catch(err =>
+    console.error(`[delete] cancelGroupTranscriptions(${groupId}) failed:`, err.message))
+  for (const sgId of subGroupIds) {
+    await cancelGroupTranscriptions(sgId).catch(err =>
+      console.error(`[delete] cancelGroupTranscriptions(${sgId}) failed:`, err.message))
+  }
+
   res.json({ success: true })
 
-  // Purge in background
-  purgeGroup(req.params.id)
+  // Give the orchestrator ~3s to notice the 'deleting' flag before we
+  // start ripping rows out from under it. Then recursive purge.
+  setTimeout(() => purgeGroup(groupId), 3000)
 })
 
 // Delete video (and all related experiment data)
