@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useApi, apiDelete } from '../../hooks/useApi.js'
+import { resolveProjectRoute } from '../../lib/projectRoute.js'
 import { Home, LayoutGrid, List, Film, Loader2, CheckCircle2, AlertCircle, Trash2 } from 'lucide-react'
 import UploadModal from './UploadModal.jsx'
 import UploadConfigFlow from '../upload-config/UploadConfigFlow.jsx'
@@ -142,7 +143,7 @@ export default function ProjectsView() {
   } : null
 
   const handleProjectClick = (project) => {
-    navigate(`/editor/${project.id}/assets`)
+    navigate(resolveProjectRoute(project))
   }
 
   const handleDelete = async (e, project) => {
