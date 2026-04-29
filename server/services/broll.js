@@ -1900,9 +1900,13 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
   }
   if (!workItems.length) throw new Error('No broll placements found')
 
-  // Pick items to process: either caller-supplied list (forItems) or auto-pick next batch
+  // Pick items to process: either caller-supplied list (forItems) or auto-pick next batch.
+  // kwDone is hoisted out of the else branch so the trailing console.log below
+  // (which references kwDone.size) is always in scope. In the forItems path it stays
+  // empty — accurate, since forItems explicitly chose its own placements.
   let itemsToProcess
   let pendingCount = 0
+  const kwDone = new Set()
   if (forItems?.length) {
     // Caller specified exact (chapterIndex, placementIndex) pairs — use those, ignore kwDone
     itemsToProcess = []
@@ -1916,7 +1920,6 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
     const existingKwRuns = await db.prepare(
       `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
     ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
-    const kwDone = new Set()
     for (const r of existingKwRuns) {
       try {
         const m = JSON.parse(r.metadata_json || '{}')
