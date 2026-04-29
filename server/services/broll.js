@@ -31,6 +31,40 @@ function ytDlpCommonArgs() {
   return args
 }
 
+// Build an Oxylabs residential proxy URL when creds are set. Used as a paid
+// fallback after the player_client trick fails — datacenter IPs (Railway)
+// get bot-blocked even with mobile/TV clients, so we route through a US
+// residential exit node. ~$0.02 per request, only used on retry.
+function oxylabsProxyUrl() {
+  const user = process.env.OXYLABS_USER
+  const pass = process.env.OXYLABS_PASS
+  const host = process.env.OXYLABS_HOST
+  const cc = process.env.OXYLABS_CC || 'US'
+  if (!user || !pass || !host) return null
+  return `http://customer-${user}-cc-${cc}:${encodeURIComponent(pass)}@${host}`
+}
+
+// Detect YouTube's bot/sign-in challenge — the only error worth burning a
+// proxy retry on. Other errors (private video, geo-blocked, network) won't
+// be fixed by a different IP.
+function isYoutubeBotBlock(stderr) {
+  return /Sign in to confirm|requires.*sign[\s-]in|Use --cookies/i.test(stderr || '')
+}
+
+// Run yt-dlp; on bot-block error, retry once via the Oxylabs proxy.
+async function ytDlpRun(args, options) {
+  try {
+    return await execFileAsync('yt-dlp', args, options)
+  } catch (err) {
+    const proxy = oxylabsProxyUrl()
+    if (proxy && isYoutubeBotBlock(err.stderr)) {
+      console.log('[broll-dl] YouTube bot-block detected, retrying via Oxylabs proxy...')
+      return await execFileAsync('yt-dlp', ['--proxy', proxy, ...args], options)
+    }
+    throw err
+  }
+}
+
 // yt-dlp dumps stderr with command + warnings on failure. Pull the first
 // ERROR: line (without the [extractor] videoId: prefix) so the UI shows
 // something readable instead of the whole stderr.
@@ -553,27 +587,27 @@ export async function downloadYouTubeVideo(exampleSourceId) {
 
     const commonArgs = ytDlpCommonArgs()
 
-    // Get video info
+    // Get video info — proxy fallback on bot-block
     console.log(`[broll-dl] Fetching info: ${url}`)
-    const { stdout: infoJson } = await execFileAsync('yt-dlp', [
+    const { stdout: infoJson } = await ytDlpRun([
       '--dump-json', '--no-download',
       ...commonArgs,
       url
-    ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 })
+    ], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 })
     const info = JSON.parse(infoJson)
     const videoTitle = source.label || info.title || 'YouTube Reference'
     const duration = Math.round(info.duration || 0)
     console.log(`[broll-dl] Title: "${videoTitle}", Duration: ${duration}s`)
 
-    // Download at 360p
+    // Download at 360p — proxy fallback on bot-block
     console.log(`[broll-dl] Downloading 360p video...`)
-    await execFileAsync('yt-dlp', [
+    await ytDlpRun([
       '-f', 'best[height<=360]',
       '-o', mp4Path,
       '--no-post-overwrites',
       ...commonArgs,
       url
-    ], { timeout: 600000 })
+    ], { timeout: 900000 })
 
     if (!existsSync(mp4Path)) {
       throw new Error('Video download completed but file not found')
