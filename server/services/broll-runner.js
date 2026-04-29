@@ -128,12 +128,10 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
   if (!prepPipelineId || !analysisPipelineIds?.length || !mainVideoId) {
     throw new Error('runStrategies: prepPipelineId, analysisPipelineIds, and mainVideoId required')
   }
-  const { executeCreateStrategy, executeCreateCombinedStrategy, brollPipelineProgress } =
+  const { executeCreateStrategy, executeCreateCombinedStrategy, brollPipelineProgress, loadExampleVideos } =
     await import('./broll.js')
 
-  // Skip analysis pipelines that already have a completed strategy.
-  // Match by strategy_id (column) — old LIKE on metadata_json's "phase"
-  // never matched, see plan-prep dedup above for the same fix pattern.
+  // Skip analyses that already have a completed strategy (column-based dedup).
   const createStrategy = await db.prepare(
     "SELECT id FROM broll_strategies WHERE strategy_kind = 'create_strategy' ORDER BY id LIMIT 1"
   ).get()
@@ -156,22 +154,51 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
   const skippedCount = analysisPipelineIds.length - newAnalysisIds.length
   if (skippedCount) console.log(`[broll-runner] Skipping ${skippedCount} strategies (already exist)`)
 
+  // ── Order analysis IDs: favorite first, then variants in example order ──
+  // Map each analysis pipeline ID to its reference video via the -ex<videoId>
+  // suffix already encoded in the ID (see runAllReferences pid construction).
+  const exampleVideos = subGroupId ? await loadExampleVideos(subGroupId) : []
+  const favoriteVideoId = (exampleVideos.find(v => v.isFavorite) || exampleVideos[0])?.id ?? null
+
+  function videoIdFromAnalysisId(analysisId) {
+    const m = String(analysisId).match(/-ex(\d+)$/)
+    if (!m) throw new Error(`[broll-chain] cannot extract videoId from analysisPipelineId: ${analysisId}`)
+    return Number(m[1])
+  }
+
+  const orderedAnalysisIds = [...newAnalysisIds].sort((a, b) => {
+    const va = videoIdFromAnalysisId(a)
+    const vb = videoIdFromAnalysisId(b)
+    if (va === favoriteVideoId && vb !== favoriteVideoId) return -1
+    if (vb === favoriteVideoId && va !== favoriteVideoId) return 1
+    // Preserve example-order for non-favorites (loadExampleVideos returns insertion order)
+    const ia = exampleVideos.findIndex(v => v.id === va)
+    const ib = exampleVideos.findIndex(v => v.id === vb)
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib)
+  })
+
+  // ── Reserve all strategy pipeline IDs upfront ──
   const allPipelineIds = []
-  for (const analysisPipelineId of newAnalysisIds) {
-    const pid = `strat-${mainVideoId}-${Date.now()}-${analysisPipelineId.slice(-6)}`
+  const variantPlan = []  // [{ analysisPipelineId, pid }] in execution order, excluding favorite
+  let favoritePid = null
+  const baseTs = Date.now()
+  for (let idx = 0; idx < orderedAnalysisIds.length; idx++) {
+    const analysisPipelineId = orderedAnalysisIds[idx]
+    const pid = `strat-${mainVideoId}-${baseTs + idx}-${analysisPipelineId.slice(-6)}`
     allPipelineIds.push(pid)
     brollPipelineProgress.set(pid, {
       videoId: mainVideoId, groupId: subGroupId, status: 'running',
-      stageName: 'Loading data...', stageIndex: 0, totalStages: 1, phase: 'create_strategy',
+      stageName: idx === 0 ? 'Loading data...' : 'Waiting for favorite...',
+      stageIndex: 0, totalStages: 1, phase: 'create_strategy',
     })
-    executeCreateStrategy(prepPipelineId, analysisPipelineId, mainVideoId, subGroupId || null, pid)
-      .catch(err => console.error(`[broll-runner] Create strategy failed for analysis ${analysisPipelineId}: ${err.message}`))
+    if (idx === 0) {
+      favoritePid = pid
+    } else {
+      variantPlan.push({ analysisPipelineId, pid })
+    }
   }
 
-  // Combined "best of all" strategy if 2+ refs AND (no existing combined OR new analyses).
-  // Detect via strategy_id (column) — phase JSON-match never worked,
-  // and existingStratRuns above only contains create_strategy rows now,
-  // not create_combined_strategy ones, so we need a separate query.
+  // ── Combined strategy (independent, parallel, unchanged from before) ──
   let combinedPipelineId = null
   const combinedStrategy = await db.prepare(
     "SELECT id FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy' ORDER BY id LIMIT 1"
@@ -186,17 +213,61 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
     : false
   const shouldFireCombined = analysisPipelineIds.length >= 2 && (!existingCombined || newAnalysisIds.length > 0)
   if (shouldFireCombined) {
-    combinedPipelineId = `cstrat-${mainVideoId}-${Date.now()}`
+    combinedPipelineId = `cstrat-${mainVideoId}-${baseTs}`
     allPipelineIds.push(combinedPipelineId)
     brollPipelineProgress.set(combinedPipelineId, {
       videoId: mainVideoId, groupId: subGroupId, status: 'running',
       stageName: 'Loading data...', stageIndex: 0, totalStages: 1, phase: 'create_combined_strategy',
     })
+  }
+
+  console.log(`[broll-chain] favorite=${favoritePid} variants=[${variantPlan.map(v => v.pid).join(', ')}] combined=${combinedPipelineId || 'none'}`)
+
+  // ── Fire favorite + combined immediately, parallel ──
+  if (favoritePid) {
+    executeCreateStrategy(prepPipelineId, orderedAnalysisIds[0], mainVideoId, subGroupId || null, favoritePid, [])
+      .catch(err => {
+        console.error(`[broll-runner] Favorite strategy failed: ${err.message}`)
+        const p = brollPipelineProgress.get(favoritePid)
+        if (p) brollPipelineProgress.set(favoritePid, { ...p, status: 'failed', error: err.message })
+      })
+  }
+  if (shouldFireCombined) {
     executeCreateCombinedStrategy(prepPipelineId, analysisPipelineIds, mainVideoId, subGroupId || null, combinedPipelineId)
       .catch(err => console.error(`[broll-runner] Combined strategy failed: ${err.message}`))
   }
 
-  console.log(`[broll-runner] runStrategies: firing ${allPipelineIds.length} pipelines (${newAnalysisIds.length} individual + ${shouldFireCombined ? 1 : 0} combined)`)
+  // ── Spawn fire-and-forget chain for variants ──
+  if (variantPlan.length > 0 && favoritePid) {
+    ;(async () => {
+      await waitForPipelinesComplete([favoritePid])
+      console.log(`[broll-chain] favorite ${favoritePid} complete; starting variant chain`)
+      const completed = [favoritePid]
+      for (const v of variantPlan) {
+        const priors = completed.slice()
+        console.log(`[broll-chain] firing variant ${v.pid} priors=[${priors.join(',')}] (n=${priors.length})`)
+        const p = brollPipelineProgress.get(v.pid)
+        if (p) brollPipelineProgress.set(v.pid, { ...p, stageName: 'Loading data...' })
+        await executeCreateStrategy(
+          prepPipelineId, v.analysisPipelineId,
+          mainVideoId, subGroupId || null,
+          v.pid, priors,
+        )
+        completed.push(v.pid)
+        console.log(`[broll-chain] variant ${v.pid} complete`)
+      }
+    })().catch(err => {
+      console.error(`[broll-chain] chain failed: ${err.message}`)
+      for (const v of variantPlan) {
+        const p = brollPipelineProgress.get(v.pid)
+        if (p && p.status === 'running') {
+          brollPipelineProgress.set(v.pid, { ...p, status: 'failed', error: `chain aborted: ${err.message}` })
+        }
+      }
+    })
+  }
+
+  console.log(`[broll-runner] runStrategies: reserved ${allPipelineIds.length} pipelines (1 favorite + ${variantPlan.length} variants + ${shouldFireCombined ? 1 : 0} combined)`)
 
   return { strategyPipelineIds: allPipelineIds, combinedPipelineId }
 }
