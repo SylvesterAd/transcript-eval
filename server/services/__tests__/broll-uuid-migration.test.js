@@ -1,10 +1,11 @@
 // Tests for the one-time backfill of broll_placement_uuids and
 // broll_searches.placement_uuid. Mirrors the pattern from
 // broll-placement-uuid.test.js: real Postgres, default db import, fixture
-// rows scoped to plan_pipeline_id LIKE 'test-uuid-backfill-%' so cleanup
-// in beforeEach does not touch real data.
+// rows scoped to plan_pipeline_id LIKE 'test-uuid-backfill-%'. Cleanup runs
+// in beforeEach (suite isolation) AND afterAll (so the LAST test's fixtures
+// don't leak into production — they were surfacing in /admin/broll-runs).
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import db from '../../db.js'
 import { backfillPlacementUuids } from '../broll-placement-uuid.js'
 
@@ -14,16 +15,22 @@ import { backfillPlacementUuids } from '../broll-placement-uuid.js'
 // placement; 30s gives headroom for that and for Supavisor latency spikes.
 const TEST_TIMEOUT = 30000
 
+async function cleanupTestRows() {
+  await db.prepare(`DELETE FROM broll_placement_uuids WHERE plan_pipeline_id LIKE ?`).run('test-uuid-backfill-%')
+  await db.prepare(`DELETE FROM broll_runs WHERE metadata_json LIKE ?`).run('%test-uuid-backfill%')
+  await db.prepare(`DELETE FROM broll_searches WHERE plan_pipeline_id LIKE ?`).run('test-uuid-backfill-%')
+}
+
 describe('backfillPlacementUuids', () => {
   let strategyId, videoId
 
   beforeEach(async () => {
-    await db.prepare(`DELETE FROM broll_placement_uuids WHERE plan_pipeline_id LIKE ?`).run('test-uuid-backfill-%')
-    await db.prepare(`DELETE FROM broll_runs WHERE metadata_json LIKE ?`).run('%test-uuid-backfill%')
-    await db.prepare(`DELETE FROM broll_searches WHERE plan_pipeline_id LIKE ?`).run('test-uuid-backfill-%')
+    await cleanupTestRows()
     if (!strategyId) strategyId = (await db.prepare(`SELECT id FROM broll_strategies LIMIT 1`).get()).id
     if (!videoId) videoId = (await db.prepare(`SELECT id FROM videos LIMIT 1`).get()).id
   })
+
+  afterAll(cleanupTestRows)
 
   async function insertChapterRun(planPid, subIndex, outputJson) {
     await db.prepare(

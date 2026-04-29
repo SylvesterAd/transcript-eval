@@ -3,20 +3,26 @@
 // Strategy: real Postgres. The side table `broll_placement_uuids` and
 // the parent `broll_runs` table are both real, and the helper writes
 // to / reads from them directly. Tests scope all fixture inserts to
-// `plan_pipeline_id LIKE 'test-uuid-helper-%'` so cleanup in
-// beforeEach does not touch real data.
+// `plan_pipeline_id LIKE 'test-uuid-helper-%'`. Cleanup runs in
+// beforeEach (suite isolation) AND afterAll (so the LAST test's fixtures
+// don't leak into production — they were surfacing in /admin/broll-runs).
 //
 // This file uses the `import db from '../../db.js'` (default import)
 // pattern to match the rest of the codebase. The plan's draft used a
 // named import — that's not how server/db.js exports.
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import db from '../../db.js'
 import {
   getOrCreatePlacementUuid,
   ensurePlanUuids,
   lookupPlacementUuid,
 } from '../broll-placement-uuid.js'
+
+async function cleanupTestRows() {
+  await db.prepare(`DELETE FROM broll_placement_uuids WHERE plan_pipeline_id LIKE ?`).run('test-uuid-helper-%')
+  await db.prepare(`DELETE FROM broll_runs WHERE metadata_json LIKE ?`).run('%test-uuid-helper%')
+}
 
 describe('broll-placement-uuid helper (side table)', () => {
   // broll_runs has NOT NULL FKs to broll_strategies(id), videos(id) and a
@@ -26,8 +32,7 @@ describe('broll-placement-uuid helper (side table)', () => {
   let videoId
 
   beforeEach(async () => {
-    await db.prepare(`DELETE FROM broll_placement_uuids WHERE plan_pipeline_id LIKE ?`).run('test-uuid-helper-%')
-    await db.prepare(`DELETE FROM broll_runs WHERE metadata_json LIKE ?`).run('%test-uuid-helper%')
+    await cleanupTestRows()
     if (!strategyId) {
       const s = await db.prepare(`SELECT id FROM broll_strategies LIMIT 1`).get()
       strategyId = s.id
@@ -37,6 +42,8 @@ describe('broll-placement-uuid helper (side table)', () => {
       videoId = v.id
     }
   })
+
+  afterAll(cleanupTestRows)
 
   // Helper to insert a chapter sub-run with the minimum required columns.
   async function insertChapterRun(planPid, subIndex, outputJson) {
