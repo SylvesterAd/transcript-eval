@@ -304,3 +304,22 @@ async function transaction(fn) {
 function save() {}
 
 export default { prepare, exec, save, pool, transaction }
+
+// Backfill placement UUIDs (idempotent — safe to run on every boot).
+// Deferred via setImmediate so it executes AFTER this module's top-level
+// await chain settles and the default export binding is live — otherwise
+// the helper's `import db from '../db.js'` resolves to an undefined
+// default (circular dependency: db.js → helper → db.js).
+// Skipped in vitest because the test process imports this module solely to
+// exercise the helper directly; running a full-DB backfill in parallel
+// with the test starves the connection pool and causes 30s+ stalls.
+if (!process.env.VITEST) {
+  setImmediate(async () => {
+    try {
+      const { backfillPlacementUuids } = await import('./services/broll-placement-uuid.js')
+      await backfillPlacementUuids()
+    } catch (err) {
+      console.error('[db.js] placement uuid backfill failed:', err.message)
+    }
+  })
+}
