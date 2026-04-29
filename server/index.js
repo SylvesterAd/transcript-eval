@@ -32,11 +32,31 @@ process.on('uncaughtException', (err) => {
   console.error('[process] Uncaught exception:', err?.message || err)
 })
 
-const allowedOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(',')
-  : undefined
+// CORS: explicit list from CORS_ORIGIN env var (web app origins),
+// PLUS any chrome-extension:// origin. The extension's ID differs
+// between the Web Store build (key-derived, stable) and Load Unpacked
+// builds (manifest key stripped during packaging → Chrome falls back
+// to a hash-derived ID that varies per user machine), so listing
+// exact extension URLs is fragile. Allowing all chrome-extension://
+// origins is safe because every extension API endpoint sits behind
+// requireExtAuth (signed JWT) — CORS just controls which origins
+// can READ responses; it doesn't grant API access.
+const allowedOriginsList = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean)
+  : null
+function corsOrigin(origin, cb) {
+  // No Origin header (server-to-server, curl, same-origin) → allow.
+  if (!origin) return cb(null, true)
+  // Any chrome-extension origin — see comment above.
+  if (origin.startsWith('chrome-extension://')) return cb(null, true)
+  // No env list → reflect any origin (dev mode).
+  if (!allowedOriginsList) return cb(null, true)
+  // Otherwise, explicit allow-list match.
+  if (allowedOriginsList.includes(origin)) return cb(null, true)
+  cb(null, false)
+}
 app.use(cors({
-  origin: allowedOrigins || true,
+  origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Tus-Resumable', 'Upload-Length', 'Upload-Metadata', 'Upload-Offset'],
