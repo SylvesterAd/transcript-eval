@@ -253,7 +253,9 @@ export async function chainAfterClassify(groupId) {
 // hands-off / strategy-only / guided. Respects pathToFlags pauses.
 export async function runFullAutoBrollChain(subGroupId) {
   if (!subGroupId) return
-  await db.prepare("UPDATE video_groups SET broll_chain_status = 'running' WHERE id = ?").run(subGroupId)
+  await db.prepare(
+    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = 'refs' WHERE id = ?"
+  ).run(subGroupId)
 
   const sg = await db.prepare(
     'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
@@ -275,6 +277,7 @@ export async function runFullAutoBrollChain(subGroupId) {
     const refs = await runner.runAllReferences({ subGroupId, mainVideoId: mainVideo.id })
     await runner.waitForPipelinesComplete([refs.prepPipelineId, ...refs.analysisPipelineIds].filter(Boolean))
 
+    await db.prepare("UPDATE video_groups SET broll_chain_substage = 'strategy' WHERE id = ?").run(subGroupId)
     const strats = await runner.runStrategies({
       subGroupId, mainVideoId: mainVideo.id,
       prepPipelineId: refs.prepPipelineId, analysisPipelineIds: refs.analysisPipelineIds,
@@ -287,6 +290,7 @@ export async function runFullAutoBrollChain(subGroupId) {
       return
     }
 
+    await db.prepare("UPDATE video_groups SET broll_chain_substage = 'plan' WHERE id = ?").run(subGroupId)
     const plans = await runner.runPlanForEachVariant({
       subGroupId, mainVideoId: mainVideo.id,
       prepPipelineId: refs.prepPipelineId,
@@ -300,13 +304,16 @@ export async function runFullAutoBrollChain(subGroupId) {
       return
     }
 
+    await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
     await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: plans.planPipelineIds })
 
-    await db.prepare("UPDATE video_groups SET broll_chain_status = 'done' WHERE id = ?").run(subGroupId)
+    await db.prepare(
+      "UPDATE video_groups SET broll_chain_status = 'done', broll_chain_substage = NULL WHERE id = ?"
+    ).run(subGroupId)
     await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
   } catch (err) {
     await db.prepare(
-      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
+      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_substage = NULL, broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
   }
@@ -321,7 +328,10 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
   ).get(subGroupId)
   if (!sg) return
 
-  await db.prepare("UPDATE video_groups SET broll_chain_status = 'running' WHERE id = ?").run(subGroupId)
+  const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
+  await db.prepare(
+    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = ? WHERE id = ?"
+  ).run(startSubstage, subGroupId)
 
   try {
     const runner = await import('./broll-runner.js')
@@ -343,17 +353,22 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
         await emailNotifier.send('paused_at_plan', { subGroupId, userId: sg.user_id })
         return
       }
+      await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
       await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: plans.planPipelineIds })
-      await db.prepare("UPDATE video_groups SET broll_chain_status = 'done' WHERE id = ?").run(subGroupId)
+      await db.prepare(
+        "UPDATE video_groups SET broll_chain_status = 'done', broll_chain_substage = NULL WHERE id = ?"
+      ).run(subGroupId)
       await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
     } else if (fromStage === 'search') {
       await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: opts.planPipelineIds || [opts.planPipelineId] })
-      await db.prepare("UPDATE video_groups SET broll_chain_status = 'done' WHERE id = ?").run(subGroupId)
+      await db.prepare(
+        "UPDATE video_groups SET broll_chain_status = 'done', broll_chain_substage = NULL WHERE id = ?"
+      ).run(subGroupId)
       await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
     }
   } catch (err) {
     await db.prepare(
-      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
+      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_substage = NULL, broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
   }
