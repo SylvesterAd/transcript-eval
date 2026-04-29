@@ -1987,10 +1987,38 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
     // Track which global indices were processed
     const processedIndices = itemsToProcess.map((item) => workItems.indexOf(item))
 
+    // Override the LLM's `placement_index` with the original input values, and
+    // attach `chapter_index` per entry. Gemini occasionally renumbers its output
+    // 0..N-1 (anchoring on the prompt's example) instead of preserving the
+    // input's `placement_index` — when that happens, _buildSearchParams's lookup
+    // returns no keywords for any placement whose chapter-relative index is
+    // larger than the batch size, and Phase 2.5 throws "No keywords for ...".
+    // We own the truth here: itemsToProcess[i] has the canonical chapterIndex
+    // / placementIndex, so we remap deterministically before storing.
+    let kwOutputText = kwResult.text
+    try {
+      const cleaned = (kwResult.text || '').replace(/^```json\n?/, '').replace(/\n?```$/, '')
+      const kwData = JSON.parse(cleaned)
+      if (Array.isArray(kwData)) {
+        const remapped = kwData.map((entry, i) => {
+          const item = itemsToProcess[i]
+          if (!item) return entry
+          return {
+            ...entry,
+            chapter_index: item.chapterIndex,
+            placement_index: item.placementIndex,
+          }
+        })
+        kwOutputText = JSON.stringify(remapped, null, 2)
+      }
+    } catch (err) {
+      console.warn(`[broll-keywords] Could not remap kw output (storing raw): ${err.message}`)
+    }
+
     // Store keyword run
     await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       keywordsStrategy.id, videoId, 'analysis', 'complete',
-      filteredPlacements.slice(0, 500), kwResult.text, prompt, kwSystemTemplate, kwModel,
+      filteredPlacements.slice(0, 500), kwOutputText, prompt, kwSystemTemplate, kwModel,
       kwResult.tokensIn || 0, kwResult.tokensOut || 0, kwResult.cost || 0, Date.now() - pipelineStart,
       JSON.stringify({
         pipelineId, stageIndex: 0, stageName: 'Generate Keywords',
@@ -2268,17 +2296,31 @@ async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex, 
   ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
   const kwSubRuns = kwRuns.filter(r => JSON.parse(r.metadata_json || '{}').isSubRun)
 
+  // Lookup strategy across kw sub-runs (newest first):
+  //   Method 1 — new format: entry has explicit `chapter_index` + `placement_index`
+  //              (added by the post-LLM remap in executeKeywordsBatch). Match both.
+  //   Method 2 — legacy per-chapter format: kw sub-run's `metadata.subIndex`
+  //              equals the chapter, and entries are positionally aligned to the
+  //              chapter's broll-only placements. Fall back to find-by-pi or [pi].
+  // Iterate ALL matching sub-runs (no early break) so a partial newer batch
+  // doesn't shadow a complete older one.
   let keywords = []
   for (const r of kwSubRuns) {
     const m = JSON.parse(r.metadata_json || '{}')
-    if (m.subIndex === chapterIndex) {
-      try {
-        const kwData = extractJSON(r.output_text || '')
-        const kwEntry = (Array.isArray(kwData) ? kwData : []).find(k => k.placement_index === placementIndex) || kwData[placementIndex]
-        if (kwEntry?.keywords) {
-          keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
-        }
-      } catch {}
+    let kwData
+    try { kwData = extractJSON(r.output_text || '') } catch { continue }
+    if (!Array.isArray(kwData)) continue
+
+    // Method 1: explicit (chapter_index, placement_index) match
+    let kwEntry = kwData.find(k => k.chapter_index === chapterIndex && k.placement_index === placementIndex)
+
+    // Method 2: legacy per-chapter (only if this sub-run was emitted for this chapter)
+    if (!kwEntry && m.subIndex === chapterIndex) {
+      kwEntry = kwData.find(k => k.placement_index === placementIndex && k.chapter_index == null) || (kwData[placementIndex]?.chapter_index == null ? kwData[placementIndex] : null)
+    }
+
+    if (kwEntry?.keywords) {
+      keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
       break
     }
   }
@@ -5652,17 +5694,23 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
   ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
   const kwSubRuns = kwRuns.filter(r => JSON.parse(r.metadata_json || '{}').isSubRun)
 
+  // Same widened lookup as _buildSearchParams: prefer (chapter_index, placement_index)
+  // match (new format), fall back to legacy positional within a sub-run whose
+  // metadata.subIndex matches the chapter. Iterate all sub-runs (no early break)
+  // so a partial newer batch doesn't shadow a complete older one.
   let keywords = []
   for (const r of kwSubRuns) {
     const m = JSON.parse(r.metadata_json || '{}')
-    if (m.subIndex === chapterIndex) {
-      try {
-        const kwData = extractJSON(r.output_text || '')
-        const kwEntry = (Array.isArray(kwData) ? kwData : []).find(k => k.placement_index === placementIndex) || kwData[placementIndex]
-        if (kwEntry?.keywords) {
-          keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
-        }
-      } catch {}
+    let kwData
+    try { kwData = extractJSON(r.output_text || '') } catch { continue }
+    if (!Array.isArray(kwData)) continue
+
+    let kwEntry = kwData.find(k => k.chapter_index === chapterIndex && k.placement_index === placementIndex)
+    if (!kwEntry && m.subIndex === chapterIndex) {
+      kwEntry = kwData.find(k => k.placement_index === placementIndex && k.chapter_index == null) || (kwData[placementIndex]?.chapter_index == null ? kwData[placementIndex] : null)
+    }
+    if (kwEntry?.keywords) {
+      keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
       break
     }
   }
