@@ -149,10 +149,15 @@ async function renderTeRow() {
 
   if (connected) {
     const expires = new Date(jwt.expires_at).toLocaleString()
+    // Defensive slice — older stored JWTs (pre-validation) may lack
+    // user_id; guard so a bad row can't break the whole popup.
+    const uidPrefix = typeof jwt.user_id === 'string' && jwt.user_id
+      ? jwt.user_id.slice(0, 8) + '…'
+      : 'session'
     setRow(rowTe, statusTe, detailTe, {
       text: 'connected',
       className: 'ok',
-      detail: `user ${jwt.user_id.slice(0, 8)}… · expires ${expires}`,
+      detail: `user ${uidPrefix} · expires ${expires}`,
     })
   } else {
     setRow(rowTe, statusTe, detailTe, {
@@ -273,16 +278,24 @@ async function renderOptOutRow() {
   })
 }
 
+// Each render step is wrapped in a guard so a single failure (e.g.
+// a malformed stored JWT, missing config row, etc.) cannot block
+// later steps — most importantly the diagnostic-bundle button wiring,
+// which is what users reach for when the popup misbehaves.
+async function safe(fn, label) {
+  try { await fn() }
+  catch (err) { console.error(`[popup] ${label} failed:`, err) }
+}
 async function render() {
-  document.getElementById('version').textContent = `v${EXT_VERSION}`
-  const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
-  await renderConfigBanner()  // Ext.9 — first, so banner is up top
-  await renderTeRow()
-  await renderEnvatoRow(envato_session_status)
-  await renderBanner()
-  await renderDiskErrorIfAny()
-  await renderDiagRow()
-  await renderOptOutRow()
+  await safe(() => { document.getElementById('version').textContent = `v${EXT_VERSION}` }, 'version')
+  const { envato_session_status } = await chrome.storage.local.get('envato_session_status').catch(() => ({}))
+  await safe(renderConfigBanner, 'renderConfigBanner')
+  await safe(renderTeRow, 'renderTeRow')
+  await safe(() => renderEnvatoRow(envato_session_status), 'renderEnvatoRow')
+  await safe(renderBanner, 'renderBanner')
+  await safe(renderDiskErrorIfAny, 'renderDiskErrorIfAny')
+  await safe(renderDiagRow, 'renderDiagRow')
+  await safe(renderOptOutRow, 'renderOptOutRow')
 }
 
 // Live updates: if a new JWT arrives OR the cookie watcher updates

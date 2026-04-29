@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useCallback, useMemo, useState } from 'react'
+import { useEffect, useReducer, useCallback, useMemo, useState, useRef } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import styled from 'styled-components'
 import { useExportPreflight } from '../hooks/useExportPreflight.js'
@@ -271,19 +271,34 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
   // accepts plain names ("export"), leading-slash paths ("/export"),
   // and full display paths ("~/Downloads/export/") and normalizes
   // them all to "~/Downloads/<name>/".
+  // Hidden <input type="file" webkitdirectory> trick — opens the
+  // native Finder/Explorer dialog. chrome.downloads is sandboxed to
+  // ~/Downloads, so the user's pick is read for its NAME only and
+  // re-prefixed under ~/Downloads/. Empty-folder selection falls back
+  // to a text prompt for the name.
+  const folderInputRef = useRef(null)
   const onChangeFolder = useCallback(() => {
+    folderInputRef.current?.click()
+  }, [])
+  const onFolderInputChange = useCallback((e) => {
+    const files = e.target.files
+    e.target.value = ''
     const stripChrome = (s) => String(s || '')
       .replace(/^~?\/?Downloads\//i, '')
       .replace(/^\/+|\/+$/g, '')
-    const proposed = window.prompt(
-      'Folder name (saved under ~/Downloads/):',
-      stripChrome(state.targetFolder) || 'export',
-    )
-    if (proposed == null) return
-    const trimmed = stripChrome(proposed)
-    if (!trimmed) return
-    dispatch({ type: 'set_target_folder', targetFolder: `~/Downloads/${trimmed}/` })
-  }, [state.targetFolder])
+    if (!files || files.length === 0) {
+      const proposed = window.prompt('Folder name under ~/Downloads/:', '')
+      if (proposed == null) return
+      const trimmed = stripChrome(proposed)
+      if (!trimmed) return
+      dispatch({ type: 'set_target_folder', targetFolder: `~/Downloads/${trimmed}/` })
+      return
+    }
+    const firstPath = files[0].webkitRelativePath || ''
+    const dirName = firstPath.split('/')[0].trim()
+    if (!dirName) return
+    dispatch({ type: 'set_target_folder', targetFolder: `~/Downloads/${dirName}/` })
+  }, [])
 
   const onTogglePlan = useCallback((id, on) => {
     dispatch({
@@ -407,18 +422,27 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
   // State C — summary.
   if (state.phase === 'state_c') {
     return (
-      <StateC_Summary
-        variant={variantLabel}
-        manifestResp={labelledManifest}
-        additionalManifests={labelledAdditional}
-        ping={preflight.ping.value}
-        diskValue={preflight.disk.status === 'ok' ? preflight.disk.value : { available: null }}
-        onStart={onStart}
-        onChangeFolder={onChangeFolder}
-        targetFolderOverride={state.targetFolder}
-        onTogglePlan={onTogglePlan}
-        otherPlans={otherPlans}
-      />
+      <>
+        <StateC_Summary
+          variant={variantLabel}
+          manifestResp={labelledManifest}
+          additionalManifests={labelledAdditional}
+          ping={preflight.ping.value}
+          diskValue={preflight.disk.status === 'ok' ? preflight.disk.value : { available: null }}
+          onStart={onStart}
+          onChangeFolder={onChangeFolder}
+          targetFolderOverride={state.targetFolder}
+          onTogglePlan={onTogglePlan}
+          otherPlans={otherPlans}
+        />
+        <input
+          ref={folderInputRef}
+          type="file"
+          {...{ webkitdirectory: '', directory: '' }}
+          onChange={onFolderInputChange}
+          style={{ display: 'none' }}
+        />
+      </>
     )
   }
 
