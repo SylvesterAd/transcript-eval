@@ -127,6 +127,13 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     onBack()
   }, [cancelTranscriptions, onBack])
 
+  const handleExitToProjects = useCallback(() => {
+    // Pipeline keeps running on the server. We just leave the modal —
+    // do NOT call onBack(), which would drop the user back into the
+    // config flow and let them mutate settings mid-run.
+    navigate('/')
+  }, [navigate])
+
   const handleComplete = useCallback(() => {
     completedRef.current = true
     onComplete(groupIdRef.current, files)
@@ -214,6 +221,10 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   const [parent, setParent] = useState(null)
   const [subGroups, setSubGroups] = useState([])
   const [bannerDismissed, setBannerDismissed] = useState(false)
+  // True when the user clicks X / backdrop during pipeline mode and we're
+  // asking whether to exit to the projects list. The pipeline keeps
+  // running on the server regardless — exit just closes this modal view.
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
 
   // Bootstrap files from server if we have none (e.g. navigated here after b-roll step)
   const bootstrappedRef = useRef(false)
@@ -497,12 +508,28 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   const stages = deriveStages({ parent: parent || { videos: [] }, subGroups })
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      onClick={mode === 'pipeline' ? () => setExitConfirmOpen(true) : undefined}
+    >
       {/* Modal */}
-      <div className="w-full max-w-4xl bg-glass rounded-[2rem] shadow-2xl border border-outline-variant/20 flex flex-col max-h-[90vh] overflow-hidden">
+      <div
+        className="w-full max-w-4xl bg-glass rounded-[2rem] shadow-2xl border border-outline-variant/20 flex flex-col max-h-[90vh] overflow-hidden relative"
+        onClick={(e) => e.stopPropagation()}
+      >
 
         {/* Decorative accent line */}
         <div className="h-1 bg-gradient-to-r from-transparent via-primary-container/40 to-transparent" />
+
+        {mode === 'pipeline' && (
+          <button
+            onClick={() => setExitConfirmOpen(true)}
+            aria-label="Close"
+            className="absolute top-4 right-4 w-9 h-9 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-white/10 hover:text-on-surface transition-colors z-10"
+          >
+            <span className="material-symbols-outlined text-xl">close</span>
+          </button>
+        )}
 
         {mode === 'uploading' && (
           <UploadingFileList
@@ -546,15 +573,9 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
             </div>
             <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} />
             <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
-              <div className="flex items-center justify-between">
-                <button
-                  onClick={handleBack}
-                  className="font-black uppercase tracking-[0.15em] text-xs text-on-surface-variant hover:text-on-surface transition-colors"
-                >
-                  Back
-                </button>
+              <div className="flex items-center justify-end">
                 <span className="text-[11px] italic text-on-surface-variant">
-                  Processing on the server — you can close this tab
+                  Processing on the server — close this tab or hit ✕ to return to projects.
                 </span>
               </div>
             </div>
@@ -563,6 +584,37 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
 
         {mode === 'done' && (
           <DoneView subGroups={subGroups} navigate={navigate} onComplete={handleComplete} />
+        )}
+
+        {exitConfirmOpen && (
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 backdrop-blur-sm rounded-[2rem]"
+            onClick={(e) => { e.stopPropagation(); setExitConfirmOpen(false) }}
+          >
+            <div
+              className="w-full max-w-sm mx-4 bg-glass rounded-2xl shadow-2xl border border-outline-variant/20 p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-extrabold text-on-surface">Leave processing view?</h3>
+              <p className="mt-2 text-sm text-on-surface-variant">
+                The pipeline keeps running on the server. You can come back from the projects list any time.
+              </p>
+              <div className="mt-5 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setExitConfirmOpen(false)}
+                  className="px-4 py-2 rounded-lg text-xs font-extrabold uppercase tracking-[0.15em] text-on-surface-variant hover:text-on-surface transition-colors"
+                >
+                  Stay here
+                </button>
+                <button
+                  onClick={() => { setExitConfirmOpen(false); handleExitToProjects() }}
+                  className="px-5 py-2 rounded-lg text-xs font-extrabold uppercase tracking-[0.15em] bg-primary-container text-on-primary-container hover:opacity-90 transition-opacity"
+                >
+                  Exit to projects
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
