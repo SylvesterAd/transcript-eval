@@ -218,13 +218,20 @@ export default function AssetsView() {
 
   // Loading, classifying, or about-to-redirect to the parent project's assets
   // view (sub-groups don't get an assets-management surface — see the redirect
-  // useEffect above). Render a spinner to avoid a flash of the wrong UI.
-  if (loading || data?.group?.assembly_status === 'classifying' || data?.group?.parent_group_id) {
+  // useEffect above). Distinct labels for each state so the user doesn't read
+  // a data-loading spinner as an in-progress classification operation.
+  const isClassifying = data?.group?.assembly_status === 'classifying' || reclassifying
+  const isRedirectingToParent = !!data?.group?.parent_group_id
+  if (loading || isClassifying || isRedirectingToParent) {
+    let label
+    if (isClassifying) label = 'Classifying videos...'
+    else if (isRedirectingToParent) label = 'Opening parent project...'
+    else label = 'Loading...'
     return (
       <main className="flex-1 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
           <span className="material-symbols-outlined animate-spin text-4xl text-primary-fixed">progress_activity</span>
-          <p className="text-on-surface-variant text-sm">Classifying videos...</p>
+          <p className="text-on-surface-variant text-sm">{label}</p>
         </div>
       </main>
     )
