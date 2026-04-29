@@ -5244,7 +5244,8 @@ export async function resumePipeline(pipelineId, opts = {}) {
     strategyId, version.id, videoId, groupId,
     firstMeta.transcriptSource || 'raw',
     editorCuts, null,
-    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0, exampleVideoId },
+    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0 },
+    { exampleVideoId },
   )
 
   return {

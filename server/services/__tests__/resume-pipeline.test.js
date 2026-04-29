@@ -132,8 +132,8 @@ describe('resumePipeline', () => {
 
     await resumePipeline('5-100-1700000000-ex400')
 
-    const [, , , , , , , opts] = state.executePipelineCalls[0]
-    expect(opts.exampleVideoId).toBe(400)
+    const [, , , , , , , resumeData, options] = state.executePipelineCalls[0]
+    expect(options.exampleVideoId).toBe(400)
   })
 
   it('passes exampleVideoId=null when pipelineId has no -ex suffix', async () => {
@@ -145,8 +145,8 @@ describe('resumePipeline', () => {
 
     await resumePipeline('p1')
 
-    const [, , , , , , , opts] = state.executePipelineCalls[0]
-    expect(opts.exampleVideoId == null).toBe(true)
+    const [, , , , , , , resumeData, options] = state.executePipelineCalls[0]
+    expect(options.exampleVideoId == null).toBe(true)
   })
 
   it('with fromStage drops completed stages from that index onwards and deletes their rows', async () => {
