@@ -5097,6 +5097,12 @@ export async function getBRollEditorData(planPipelineId) {
     return (ma.subIndex || 0) - (mb.subIndex || 0)
   })
 
+  // Ensure side-table uuids exist for every placement in this plan (idempotent).
+  // Returns Map<chapterIndex, Map<placementIndex, uuid>>. Reads broll_runs.output_text
+  // but does NOT mutate it.
+  const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+  const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+
   // Flatten placements from all chapters
   const placements = []
   for (let chIdx = 0; chIdx < chapterRuns.length; chIdx++) {
@@ -5121,6 +5127,7 @@ export async function getBRollEditorData(planPipelineId) {
       if (p.category && p.category !== 'broll') continue
       placements.push({
         index: placements.length,
+        uuid: uuidsByChapter.get(chIdx)?.get(brollIdx) || null, // ← stable identity from side table
         chapterIndex: chIdx,
         placementIndex: brollIdx++,
         start: p.start,
@@ -5174,7 +5181,14 @@ export async function getBRollEditorData(planPipelineId) {
     }
 
     for (const row of queueRows) {
-      const match = placements.find(p => p.chapterIndex === row.chapter_index && p.placementIndex === row.placement_index)
+      // Prefer uuid match (stable across reorders/edits); fall back to indices for legacy rows.
+      let match = null
+      if (row.placement_uuid) {
+        match = placements.find(p => p.uuid === row.placement_uuid)
+      }
+      if (!match) {
+        match = placements.find(p => p.chapterIndex === row.chapter_index && p.placementIndex === row.placement_index)
+      }
       if (!match) continue
 
       match.brollSearchId = row.id
