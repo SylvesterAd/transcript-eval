@@ -530,9 +530,39 @@ export async function listExampleSources(groupId) {
   `).all(...groupIds)
 }
 
+// Extract the canonical YouTube video ID from a URL so we can dedupe
+// add requests where the same video is pasted twice with different
+// query strings (e.g. /watch?v=ID vs /watch?v=ID&t=2s, youtu.be short
+// link, /shorts/ID, /embed/ID, m.youtube.com). Returns null on non-YT
+// URLs and parse failures.
+function extractYouTubeId(url) {
+  if (!url) return null
+  try {
+    const u = new URL(url)
+    const host = u.hostname.replace(/^www\.|^m\./, '')
+    if (host === 'youtu.be') return u.pathname.slice(1).split('/')[0] || null
+    if (host === 'youtube.com' || host === 'music.youtube.com') {
+      if (u.pathname === '/watch') return u.searchParams.get('v') || null
+      const m = u.pathname.match(/^\/(?:shorts|embed|live)\/([^/?#]+)/)
+      if (m) return m[1]
+    }
+  } catch {}
+  return null
+}
+
 export async function addExampleSource(groupId, { kind, source_url, label, createdBy }) {
   if (!['upload', 'yt_video', 'yt_channel'].includes(kind)) throw new Error('Invalid kind')
   const set = await getOrCreateExampleSet(groupId, createdBy)
+  if (kind === 'yt_video' && source_url) {
+    const videoId = extractYouTubeId(source_url)
+    if (videoId) {
+      const existing = await db.prepare(
+        `SELECT source_url FROM broll_example_sources WHERE example_set_id = ? AND kind = 'yt_video'`
+      ).all(set.id)
+      const dupe = existing.find(row => extractYouTubeId(row.source_url) === videoId)
+      if (dupe) throw new Error('That YouTube video has already been added to this project.')
+    }
+  }
   const res = await db.prepare(`
     INSERT INTO broll_example_sources (example_set_id, kind, source_url, label, status)
     VALUES (?, ?, ?, ?, 'pending')
@@ -5349,6 +5379,27 @@ export async function getBRollEditorData(planPipelineId) {
   return { placements: editedPlacements, searchProgress, totalPlacements: editedPlacements.length, editorStateVersion: editorVersion }
 }
 
+// Coerce a placement's start/end value to a number of seconds. The
+// chapter-plan generator emits timecode strings like "[00:00:03]" or
+// "00:01:30" because that's what the LLM produces; user-edits write
+// numeric seconds via broll_editor_state. Both must reach the export
+// manifest as a number, otherwise XML emission silently drops the
+// placement (NaN → JSON null → "no timing" in buildVariantsPayload).
+// Returns null when neither form is parseable.
+export function coerceTimingToSeconds(value) {
+  if (value == null) return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string') return null
+  const m = String(value).match(/(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d+))?/)
+  if (!m) return null
+  const h = parseInt(m[1], 10)
+  const min = parseInt(m[2], 10)
+  const s = parseInt(m[3], 10)
+  const frac = m[4] ? parseFloat(`0.${m[4]}`) : 0
+  if (!Number.isFinite(h) || !Number.isFinite(min) || !Number.isFinite(s)) return null
+  return h * 3600 + min * 60 + s + frac
+}
+
 // Pure transform: getBRollEditorData() placements → export manifest items.
 // Filters Storyblocks (export pipeline non-goal). Picks the user-selected
 // result if present, else the top-ranked candidate. Variant filter is
@@ -5357,10 +5408,22 @@ export async function getBRollEditorData(planPipelineId) {
 // (legacy data), the filter is a no-op pass-through (legacy data is
 // per-pipelineId, not per-variant — there's no label to filter on).
 //
+// `allowedSources` (optional, lowercase array) restricts both the
+// auto-pick and the explicit-pick paths to those sources only —
+// placements whose top non-Storyblocks result isn't in the list, and
+// placements whose persistedSelectedResult source isn't in the list,
+// are dropped. Passed through by the export route to pin Pexels-only
+// while envato/freepik integrations are still being shaken out. Default
+// `null` preserves the legacy "all non-storyblocks" behavior tests
+// rely on.
+//
 // This function is exported separately from getBRollEditorData so the
 // route handler can stay thin and the transform is unit-testable
 // without a DB.
-export function buildManifestFromPlacements(placements, { variant } = {}) {
+export function buildManifestFromPlacements(placements, { variant, allowedSources = null } = {}) {
+  const sourceAllowlist = Array.isArray(allowedSources) && allowedSources.length
+    ? new Set(allowedSources.map(s => String(s).toLowerCase()))
+    : null
   // Variant normalization: accept "A" or "Variant A".
   const variantNorm = variant
     ? variant.trim().replace(/^Variant\s+/i, '').toLowerCase()
@@ -5389,18 +5452,27 @@ export function buildManifestFromPlacements(placements, { variant } = {}) {
       if (label !== variantNorm) continue
     }
 
-    // Selection rule: user pick > top-ranked-non-storyblocks.
-    // If the user explicitly picked a result, honor it (even if storyblocks —
-    // we only filter storyblocks from auto-selection, not from explicit picks
-    // because the editor wouldn't let them pick a non-existent source).
-    // Otherwise scan results[] in rank order for the first non-storyblocks
-    // result. Storyblocks is an export-pipeline non-goal per master spec, so
-    // dropping it ENTIRELY (i.e. skipping the placement when storyblocks is
-    // results[0]) means losing placements that have a perfectly good Pexels/
-    // Envato/Freepik clip at index 1+. Fall through instead.
+    // Selection rule:
+    //   1. User explicit pick (persistedSelectedResult) wins over auto.
+    //   2. With sourceAllowlist present (export route): pick = results[0]
+    //      only if its source is in the allowlist; else SKIP the placement.
+    //      This matches what the editor displays per placement (the rank-#1
+    //      result) — no silent fall-through to lower-ranked alternatives.
+    //   3. Without allowlist (legacy): pick the top-ranked non-Storyblocks
+    //      result, falling through past Storyblocks (an export non-goal).
+    //
+    // Why no fall-through with the allowlist: when the editor shows
+    // Storyblocks at rank #1 but a deeper Pexels result, fall-through
+    // produced an export the user couldn't see in the editor — confusing.
+    // The route pins ['pexels'] today; loosening to e.g. ['pexels','freepik']
+    // re-enables those sources without re-introducing fall-through.
     let pick
     if (p.persistedSelectedResult && typeof p.persistedSelectedResult === 'object') {
       pick = p.persistedSelectedResult
+    } else if (sourceAllowlist) {
+      const top = p.results[0]
+      const topSrc = String(top?.source || '').toLowerCase()
+      pick = topSrc && sourceAllowlist.has(topSrc) ? top : null
     } else {
       pick = p.results.find(r => {
         const s = String(r?.source || '').toLowerCase()
@@ -5412,6 +5484,7 @@ export function buildManifestFromPlacements(placements, { variant } = {}) {
     const source = String(pick.source || '').toLowerCase()
     if (!source) continue
     if (source === 'storyblocks') continue   // Defensive: if user picked storyblocks explicitly, still drop.
+    if (sourceAllowlist && !sourceAllowlist.has(source)) continue   // sourceAllowlist applies to user-picked results too.
 
     const sourceItemId = pick.source_item_id || pick.id || pick.uid || null
     if (!sourceItemId) continue
@@ -5422,9 +5495,18 @@ export function buildManifestFromPlacements(placements, { variant } = {}) {
     const targetFilename = `${String(seq).padStart(3, '0')}_${source}_${safeId}.${ext}`
 
     // Timeline: prefer user-edited positions over plan defaults.
-    const startS = (p.userTimelineStart != null) ? p.userTimelineStart : (p.start ?? null)
-    const endS   = (p.userTimelineEnd   != null) ? p.userTimelineEnd   : (p.end   ?? null)
-    const durS   = (startS != null && endS != null) ? Math.max(0, endS - startS) : null
+    // Plan defaults are timecode strings (e.g. "[00:00:03]") because the
+    // LLM emits them in TC form; user edits are already numeric seconds
+    // (broll_editor_state.timelineStart). coerceTimingToSeconds handles
+    // both. Returning null here makes downstream skip the placement
+    // (which is what we want for placements with no usable timing).
+    const startS = (p.userTimelineStart != null)
+      ? coerceTimingToSeconds(p.userTimelineStart)
+      : coerceTimingToSeconds(p.start)
+    const endS = (p.userTimelineEnd != null)
+      ? coerceTimingToSeconds(p.userTimelineEnd)
+      : coerceTimingToSeconds(p.end)
+    const durS = (startS != null && endS != null) ? Math.max(0, endS - startS) : null
 
     const item = {
       seq,
