@@ -92,7 +92,14 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
 
     if (analysisVersion) {
       const newVideos = readyVideos.filter(v => !alreadyAnalyzedVideoIds.has(v.id))
-      for (const vid of newVideos) {
+      // Stagger the parallel pipeline starts so CF Stream doesn't get hit with
+      // 1 (main) + N (reference) MP4 fetches in the same tick. CF occasionally
+      // 502s under bursty MP4 downloads, especially right after enableMp4Downloads.
+      // 800ms is enough to spread the connect-time without meaningfully delaying
+      // the chain (analysis itself is the dominant cost).
+      for (let i = 0; i < newVideos.length; i++) {
+        const vid = newVideos[i]
+        if (i > 0) await new Promise(r => setTimeout(r, 800))
         const pid = `${analysisStrategy.id}-${mainVideoId}-${Date.now()}-ex${vid.id}`
         allAnalysisIds.push(pid)
         brollPipelineProgress.set(pid, {

@@ -673,24 +673,40 @@ export async function setExampleFavorite(id) {
 
 /**
  * Get a local video file path for a video. Downloads from CF Stream if needed.
+ *
+ * Retries transient 5xx / network errors. CF Stream's MP4 endpoint occasionally
+ * returns 502 under bursty concurrent downloads (e.g. when runAllReferences
+ * fires N reference-analysis pipelines + 1 plan-prep + 1 main-video fetch in
+ * the same tick). Mirrors the retry pattern in runTranscription
+ * (server/routes/videos.js around the downloadToTemp loop).
  */
 async function getVideoFilePath(videoId) {
   const video = await db.prepare('SELECT file_path, cf_stream_uid FROM videos WHERE id = ?').get(videoId)
   if (!video) throw new Error(`Video ${videoId} not found`)
 
-  // If we have a CF Stream UID, download the MP4
+  const url = video.cf_stream_uid ? mp4Url(video.cf_stream_uid) : video.file_path
+  if (!url) throw new Error(`Video ${videoId} has no file_path or cf_stream_uid`)
+
+  const dest = `broll-analysis-${videoId}.mp4`
   if (video.cf_stream_uid) {
-    const url = mp4Url(video.cf_stream_uid)
     console.log(`[broll] Downloading video ${videoId} from CF Stream for analysis...`)
-    return downloadToTemp(url, `broll-analysis-${videoId}.mp4`)
   }
 
-  // Otherwise use local/Supabase file_path
-  if (video.file_path) {
-    return downloadToTemp(video.file_path, `broll-analysis-${videoId}.mp4`)
+  let lastErr
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      return await downloadToTemp(url, dest)
+    } catch (err) {
+      lastErr = err
+      const msg = err?.message || ''
+      const transient = /\b50[0-9]\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|fetch failed/i.test(msg)
+      if (!transient || attempt === 5) throw err
+      const wait = attempt * 3000
+      console.log(`[broll-dl] video ${videoId} attempt ${attempt}/5 failed (${msg}) — retry in ${wait / 1000}s`)
+      await new Promise(r => setTimeout(r, wait))
+    }
   }
-
-  throw new Error(`Video ${videoId} has no file_path or cf_stream_uid`)
+  throw lastErr
 }
 
 export async function analyzeVideo(strategyId, videoId, stage = 'main') {
