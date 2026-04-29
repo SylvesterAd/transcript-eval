@@ -81,10 +81,11 @@ export default function ProjectsView() {
     if (!videos) return []
     const groupMap = {}
     for (const v of videos) {
-      const gid = v.group_id || `solo-${v.id}`
+      if (v.group_id == null) continue
+      const gid = v.group_id
       if (!groupMap[gid]) {
         groupMap[gid] = {
-          id: v.group_id || v.id,
+          id: v.group_id,
           name: v.group_name || v.title,
           videos: [],
           created_at: v.created_at,
