@@ -780,7 +780,7 @@ import('./server/services/broll.js').then(async ({ getBRollEditorData }) => {
   const row = await dbm.default.prepare(\"SELECT (metadata_json::jsonb->>'pipelineId') AS pid, (metadata_json::jsonb->>'videoId')::int AS vid FROM broll_runs WHERE (metadata_json::jsonb->>'pipelineId') LIKE 'plan-%' AND status = 'complete' AND (metadata_json::jsonb->>'isSubRun') IS NULL ORDER BY id DESC LIMIT 1\").get()
   if (!row) { console.log('no plan_pipeline found'); process.exit(0) }
   console.log('using pid:', row.pid, 'videoId:', row.vid)
-  const data = await getBRollEditorData(row.vid, row.pid)
+  const data = await getBRollEditorData(row.pid) // signature is (planPipelineId), single arg
   console.log('first placement:', { index: data.placements[0]?.index, uuid: data.placements[0]?.uuid, chapterIndex: data.placements[0]?.chapterIndex, placementIndex: data.placements[0]?.placementIndex, description: data.placements[0]?.description?.slice(0, 60) })
   console.log('placements with uuid:', data.placements.filter(p => p.uuid).length, '/', data.placements.length)
   process.exit(0)
