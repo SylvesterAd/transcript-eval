@@ -472,6 +472,16 @@ async function startBackgroundTranscription(videoId) {
     return
   }
 
+  // Don't downgrade a finished transcription to 'pending'. The startup_requeue
+  // path schedules this 3s after resetting status to NULL, which races against
+  // the original runTranscription's final 'done' write when a redeploy hits
+  // mid-transcription — without this guard, the requeue clobbers 'done' and
+  // the UI ships "Transcribing — Pending" forever.
+  if (video.transcription_status === 'done') {
+    console.log(`[transcribe] startBackgroundTranscription: video ${videoId} already done — skipping`)
+    return
+  }
+
   console.log(`[transcribe] startBackgroundTranscription: video ${videoId} "${video.title}" — enqueueing`)
   await setTranscriptionStatus(videoId, 'pending', 'startBackgroundTranscription', { error: null })
 
