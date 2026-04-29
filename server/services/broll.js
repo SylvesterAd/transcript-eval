@@ -5075,7 +5075,9 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 // Indirection holder so tests can stub executePipeline without driving the
 // real (very large) pipeline. resumePipeline calls through this object;
 // production code path is identical to a direct call.
-export const __pipelineRunner = { executePipeline }
+// Also holds loadExampleVideos for the same reason — Task 3.7's mismatch
+// check needs to substitute the example-video set in tests.
+export const __pipelineRunner = { executePipeline, loadExampleVideos }
 
 // Callable resume — same logic as POST /broll/pipeline/:id/resume.
 // Lifted from the route so the boot-time auto-resume can call it directly.
@@ -5135,23 +5137,40 @@ export async function resumePipeline(pipelineId, opts = {}) {
   }
   const videoLabelOrder = Object.keys(videoGroups)
 
+  // Sanity check: old videoLabels must align with the current example videos.
+  // Mismatch (e.g., user added/removed a reference between original run and resume)
+  // would cause the offset math below to slot outputs into wrong stage positions.
+  // Conservatively drop completedStages and start fresh in that case.
+  const currentExampleVideos = groupId ? await __pipelineRunner.loadExampleVideos(groupId) : []
+  const currentLabels = new Set(currentExampleVideos.map(v => v.title || `Video #${v.id}`))
+  const oldLabels = new Set(videoLabelOrder.filter(l => l !== ''))
+  const mismatch = oldLabels.size > 0 && (
+    oldLabels.size !== currentLabels.size ||
+    [...oldLabels].some(l => !currentLabels.has(l))
+  )
+  if (mismatch) {
+    console.warn(`[broll-resume] ${pipelineId}: video set mismatch (old=${[...oldLabels].join(',')} new=${[...currentLabels].join(',')}). Starting fresh.`)
+  }
+
   const completedStages = {}
-  for (let v = 0; v < videoLabelOrder.length; v++) {
-    const vl = videoLabelOrder[v]
-    const offset = v * newTemplateStages.length
-    for (const run of videoGroups[vl]) {
-      const newTemplateIdx = newTemplateStages.findIndex(s => s.name === run.stageName)
-      if (newTemplateIdx >= 0) {
-        const newIndex = newTemplateIdx + offset
-        completedStages[newIndex] = run.output
-        console.log(`[broll-resume] "${run.stageName}" [${vl || 'default'}] old:${run.stageIndex} → new:${newIndex}`)
-      } else {
-        console.log(`[broll-resume] Skipping "${run.stageName}" — not in new strategy`)
+  if (!mismatch) {
+    for (let v = 0; v < videoLabelOrder.length; v++) {
+      const vl = videoLabelOrder[v]
+      const offset = v * newTemplateStages.length
+      for (const run of videoGroups[vl]) {
+        const newTemplateIdx = newTemplateStages.findIndex(s => s.name === run.stageName)
+        if (newTemplateIdx >= 0) {
+          const newIndex = newTemplateIdx + offset
+          completedStages[newIndex] = run.output
+          console.log(`[broll-resume] "${run.stageName}" [${vl || 'default'}] old:${run.stageIndex} → new:${newIndex}`)
+        } else {
+          console.log(`[broll-resume] Skipping "${run.stageName}" — not in new strategy`)
+        }
       }
     }
   }
 
-  if (fromStage != null) {
+  if (!mismatch && fromStage != null) {
     const keptStages = new Set()
     for (const key of Object.keys(completedStages)) {
       if (Number(key) >= fromStage) {
@@ -5182,8 +5201,10 @@ export async function resumePipeline(pipelineId, opts = {}) {
   }
 
   const completedSubRuns = {}
-  for (const [si, subs] of Object.entries(subRunsByStage)) {
-    completedSubRuns[si] = new Set(subs.map(s => s._meta.subIndex).filter(i => i != null))
+  if (!mismatch) {
+    for (const [si, subs] of Object.entries(subRunsByStage)) {
+      completedSubRuns[si] = new Set(subs.map(s => s._meta.subIndex).filter(i => i != null))
+    }
   }
 
   abortedBrollPipelines.delete(pipelineId)

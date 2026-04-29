@@ -7,6 +7,7 @@ const state = {
   groupEditorState: null,
   deletedRunIds: [],
   executePipelineCalls: [],
+  exampleVideos: [],
 }
 
 vi.mock('../../db.js', () => ({
@@ -44,6 +45,7 @@ vi.mock('../../db.js', () => ({
 import { resumePipeline, __pipelineRunner } from '../broll.js'
 
 const realExecutePipeline = __pipelineRunner.executePipeline
+const realLoadExampleVideos = __pipelineRunner.loadExampleVideos
 
 beforeEach(() => {
   state.brollRuns = []
@@ -52,14 +54,17 @@ beforeEach(() => {
   state.groupEditorState = null
   state.deletedRunIds = []
   state.executePipelineCalls = []
+  state.exampleVideos = []
   __pipelineRunner.executePipeline = (...args) => {
     state.executePipelineCalls.push(args)
     return Promise.resolve({ pipelineId: 'fake' })
   }
+  __pipelineRunner.loadExampleVideos = async () => state.exampleVideos
 })
 
 afterEach(() => {
   __pipelineRunner.executePipeline = realExecutePipeline
+  __pipelineRunner.loadExampleVideos = realLoadExampleVideos
 })
 
 describe('resumePipeline', () => {
@@ -178,5 +183,24 @@ describe('resumePipeline', () => {
 
     const [, , , , , , , opts] = state.executePipelineCalls[0]
     expect(opts.completedSubRuns[1]).toEqual(new Set([0, 2]))
+  })
+
+  it('drops completedStages when old videoLabels do not match current exampleVideos', async () => {
+    state.brollRuns = [
+      { id: 1, strategy_id: 5, video_id: 100, output_text: 'OLD',
+        metadata_json: JSON.stringify({ pipelineId: 'p1', stageIndex: 0, stageName: 'StageA', videoLabel: 'OldVideoLabel', groupId: 7 }) },
+    ]
+    state.latestVersion = { id: 50, stages_json: JSON.stringify([{ name: 'StageA' }]) }
+    // Mock loadExampleVideos to return a set that doesn't include OldVideoLabel
+    state.exampleVideos = [{ id: 999, title: 'NewVideoLabel' }]
+
+    // Expected behaviour: resume proceeds but with empty completedStages (full re-run)
+    // and a console warning is logged.
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await resumePipeline('p1')
+    const [, , , , , , , opts] = state.executePipelineCalls[0]
+    expect(opts.completedStages).toEqual({})
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('video set mismatch'))
+    consoleSpy.mockRestore()
   })
 })
