@@ -4,8 +4,8 @@ const items = [
   { icon: 'folder', label: 'Assets', id: 'assets', filled: true },
   { icon: 'sync', label: 'Sync', id: 'sync', needsSync: true },
   { icon: 'movie_edit', label: 'Rough Cut', id: 'roughcut', needsSync: true },
-  { icon: 'auto_awesome', label: 'B-Roll Strategy', id: 'brolls-strategy', navTo: 'brolls/strategy', tab: 'brolls', needsSync: true, adminOnly: true },
-  { icon: 'video_library', label: 'B-Roll Editor', id: 'brolls-edit', navTo: 'brolls/edit', tab: 'brolls', needsSync: true, adminOnly: true, needsBrollSearch: true },
+  { icon: 'auto_awesome', label: 'B-Roll Strategy', id: 'brolls-strategy', navTo: 'brolls/strategy', tab: 'brolls', needsSync: true },
+  { icon: 'video_library', label: 'B-Roll Editor', id: 'brolls-edit', navTo: 'brolls/edit', tab: 'brolls', needsSync: true, needsBrollSearch: true },
 ]
 
 const SYNC_READY_STATUSES = ['done', 'confirmed']
