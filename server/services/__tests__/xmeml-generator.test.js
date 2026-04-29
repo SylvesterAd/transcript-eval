@@ -415,6 +415,56 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
   })
 })
 
+describe('generateXmeml — pproTicks sub-frame precision', () => {
+  // Adobe-specific extension at 254,016,000,000 ticks per second.
+  // Lets Premiere position cuts to picosecond precision; without these
+  // <in>/<out> snap to integer frames (±16.7ms at 30fps).
+  it('emits pproTicksIn=0 and pproTicksOut for every b-roll clipitem', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,        // 2.0s × 254,016,000,000 = 508,032,000,000
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    expect(xml).toContain('<pproTicksIn>0</pproTicksIn>')
+    expect(xml).toContain('<pproTicksOut>508032000000</pproTicksOut>')
+  })
+
+  it('preserves sub-frame precision for fractional-second timings', () => {
+    // 0.51s at 30fps rounds to 15 frames = 0.5s (10ms loss). pproTicksOut
+    // keeps the exact 0.51s without rounding.
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 0.51,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+    })
+    expect(xml).toContain('<out>15</out>')                // frame-snapped
+    expect(xml).toContain('<pproTicksOut>129548160000</pproTicksOut>')   // exact: 0.51 × 254e9
+  })
+
+  it('emits pproTicksIn/Out on the A-roll track too', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30 },
+      ],
+      aroll: { filename: 'aroll.mp4', frameRate: 30 },
+    })
+    // A-roll spans the full sequence (60 frames at 30fps = 2s).
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-aroll">[\s\S]*?<pproTicksIn>0<\/pproTicksIn>[\s\S]*?<pproTicksOut>508032000000<\/pproTicksOut>/)
+  })
+})
+
 describe('generateXmeml — input validation', () => {
   it('throws on non-string sequenceName', () => {
     expect(() => generateXmeml({ sequenceName: '', placements: [] })).toThrow()

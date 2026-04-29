@@ -19,7 +19,7 @@ vi.mock('../../db.js', () => ({
   },
 }))
 
-import { buildManifestFromPlacements } from '../../services/broll.js'
+import { buildManifestFromPlacements, coerceTimingToSeconds } from '../../services/broll.js'
 
 function makePlacement(overrides = {}) {
   return {
@@ -248,5 +248,174 @@ describe('buildManifestFromPlacements', () => {
     ]
     const out = buildManifestFromPlacements(placements, { variant: null })
     expect(out.items.map(i => i.seq)).toEqual([1, 2])
+  })
+})
+
+describe('buildManifestFromPlacements — allowedSources allowlist', () => {
+  // The export route pins allowedSources to ['pexels'] while
+  // envato/freepik are gated. These tests exercise the allowlist as a
+  // pure transform — the route choice is independent.
+
+  it('without allowedSources, picks first non-storyblocks regardless of source', () => {
+    const placements = [
+      makePlacement({ results: [
+        makeResult({ source: 'storyblocks', source_item_id: 'sb1' }),
+        makeResult({ source: 'envato',      source_item_id: 'env1' }),
+        makeResult({ source: 'pexels',      source_item_id: 'p1' }),
+      ] }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items[0].source).toBe('envato')
+  })
+
+  it('with allowedSources, only picks rank-#1 — no fall-through past out-of-allowlist sources', () => {
+    // Storyblocks is at rank 0, pexels is at rank 2. Without an allowlist
+    // the legacy fall-through would pick pexels. With the allowlist the
+    // editor's displayed pick (results[0] = storyblocks) is out of the
+    // allowlist → placement is SKIPPED. This avoids the silent
+    // editor/export disagreement that confused users.
+    const placements = [
+      makePlacement({ results: [
+        makeResult({ source: 'storyblocks', source_item_id: 'sb1' }),
+        makeResult({ source: 'envato',      source_item_id: 'env1' }),
+        makeResult({ source: 'pexels',      source_item_id: 'p1' }),
+      ] }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null, allowedSources: ['pexels'] })
+    expect(out.items).toHaveLength(0)
+  })
+
+  it('with allowedSources, picks rank-#1 when it IS in the allowlist', () => {
+    const placements = [
+      makePlacement({ results: [
+        makeResult({ source: 'pexels',      source_item_id: 'p1' }),
+        makeResult({ source: 'storyblocks', source_item_id: 'sb1' }),
+      ] }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null, allowedSources: ['pexels'] })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].source_item_id).toBe('p1')
+  })
+
+  it('drops placements whose rank-#1 source is out of the allowlist', () => {
+    const placements = [
+      makePlacement({ results: [
+        makeResult({ source: 'storyblocks', source_item_id: 'sb1' }),
+        makeResult({ source: 'envato',      source_item_id: 'env1' }),
+      ] }),
+      makePlacement({ results: [
+        makeResult({ source: 'pexels',      source_item_id: 'p1' }),
+      ] }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null, allowedSources: ['pexels'] })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].source_item_id).toBe('p1')
+  })
+
+  it('also restricts user-picked results (persistedSelectedResult)', () => {
+    // User explicitly clicked an envato clip. With pexels-only allowlist,
+    // we still drop the placement — not silently substitute a pexels.
+    const placements = [
+      makePlacement({
+        persistedSelectedResult: makeResult({ source: 'envato', source_item_id: 'env1' }),
+        results: [makeResult({ source: 'pexels', source_item_id: 'p1' })],
+      }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null, allowedSources: ['pexels'] })
+    expect(out.items).toHaveLength(0)
+  })
+
+  it('multi-source allowlist accepts every entry', () => {
+    const placements = [
+      makePlacement({ results: [makeResult({ source: 'pexels',  source_item_id: 'p1' })] }),
+      makePlacement({ results: [makeResult({ source: 'envato',  source_item_id: 'e1' })] }),
+      makePlacement({ results: [makeResult({ source: 'freepik', source_item_id: 'f1' })] }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null, allowedSources: ['pexels', 'freepik'] })
+    expect(out.items.map(i => i.source).sort()).toEqual(['freepik', 'pexels'])
+  })
+})
+
+describe('coerceTimingToSeconds', () => {
+  it('passes finite numbers through', () => {
+    expect(coerceTimingToSeconds(0)).toBe(0)
+    expect(coerceTimingToSeconds(42.5)).toBe(42.5)
+    expect(coerceTimingToSeconds(-1)).toBe(-1)
+  })
+
+  it('parses bracketed timecode strings (LLM plan output format)', () => {
+    expect(coerceTimingToSeconds('[00:00:03]')).toBe(3)
+    expect(coerceTimingToSeconds('[00:01:30]')).toBe(90)
+    expect(coerceTimingToSeconds('[01:02:03]')).toBe(3723)
+  })
+
+  it('parses bare hh:mm:ss strings', () => {
+    expect(coerceTimingToSeconds('00:00:00')).toBe(0)
+    expect(coerceTimingToSeconds('00:00:42')).toBe(42)
+    expect(coerceTimingToSeconds('00:01:30')).toBe(90)
+  })
+
+  it('parses fractional seconds (commas + dots)', () => {
+    expect(coerceTimingToSeconds('00:00:01.5')).toBe(1.5)
+    expect(coerceTimingToSeconds('[00:00:01,250]')).toBe(1.25)
+  })
+
+  it('returns null for missing / non-parseable values', () => {
+    expect(coerceTimingToSeconds(null)).toBe(null)
+    expect(coerceTimingToSeconds(undefined)).toBe(null)
+    expect(coerceTimingToSeconds(NaN)).toBe(null)
+    expect(coerceTimingToSeconds('not a tc')).toBe(null)
+    expect(coerceTimingToSeconds({})).toBe(null)
+  })
+})
+
+describe('buildManifestFromPlacements — timing coercion (regression)', () => {
+  // The LLM-emitted plan stores start/end as bracketed timecode
+  // strings. Before the fix, these became NaN durations which the
+  // web app silently dropped during XML construction. Now they
+  // parse to numeric seconds and reach the timeline.
+  it('parses bracketed timecode strings from plan output into numeric timing', () => {
+    const placements = [
+      makePlacement({
+        start: '[00:00:03]',
+        end: '[00:00:11]',
+        results: [makeResult({ source: 'pexels', source_item_id: 'p1' })],
+      }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].timeline_start_s).toBe(3)
+    expect(out.items[0].timeline_duration_s).toBe(8)
+  })
+
+  it('user-edited numeric timing wins over the plan default', () => {
+    const placements = [
+      makePlacement({
+        start: '[00:00:03]',
+        end: '[00:00:11]',
+        userTimelineStart: 25,
+        userTimelineEnd: 27,
+        results: [makeResult({ source: 'pexels', source_item_id: 'p1' })],
+      }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items[0].timeline_start_s).toBe(25)
+    expect(out.items[0].timeline_duration_s).toBe(2)
+  })
+
+  it('placement with unparseable timing produces null duration (skipped downstream)', () => {
+    const placements = [
+      makePlacement({
+        start: 'garbage',
+        end: 'also garbage',
+        results: [makeResult({ source: 'pexels', source_item_id: 'p1' })],
+      }),
+    ]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    // Item still emitted (download still useful) but timing is null →
+    // buildVariantsPayload will skip it from the XML.
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].timeline_start_s).toBe(null)
+    expect(out.items[0].timeline_duration_s).toBe(null)
   })
 })

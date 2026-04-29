@@ -3,14 +3,14 @@
 <xmeml version="5">
   <sequence id="seq-variant-b">
     <name>Variant B</name>
-    <duration>90</duration>
-    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+    <duration>150</duration>
+    <rate><timebase>50</timebase><ntsc>FALSE</ntsc></rate>
     <media>
       <video>
         <format>
           <samplecharacteristics>
             <width>1920</width><height>1080</height>
-            <rate><timebase>30</timebase></rate>
+            <rate><timebase>50</timebase></rate>
           </samplecharacteristics>
         </format>
         <track>
@@ -18,9 +18,11 @@
             <name>001_freepik_xyz.mp4</name>
             <duration>90</duration>
             <start>0</start>
-            <end>90</end>
+            <end>150</end>
             <in>0</in>
             <out>90</out>
+            <pproTicksIn>0</pproTicksIn>
+            <pproTicksOut>762048000000</pproTicksOut>
             <file id="file-freepik-xyz">
               <name>001_freepik_xyz.mp4</name>
               <pathurl>001_freepik_xyz.mp4</pathurl>

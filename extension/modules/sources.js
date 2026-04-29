@@ -9,8 +9,8 @@
 // The backend holds Pexels and Freepik API keys; extension never sees
 // them. Every call requires a valid JWT from Ext.1's storage.
 
-import { BACKEND_URL, FREEPIK_URL_GRACE_MS } from '../config.js'
-import { getJwt, refreshSessionViaPort } from './auth.js'
+import { FREEPIK_URL_GRACE_MS } from '../config.js'
+import { getJwt, refreshSessionViaPort, getBackendUrl } from './auth.js'
 
 // Backend fetch with one retry on 401. Called by the Pexels + Freepik
 // URL fetchers so we avoid copy-pasting the refresh dance.
@@ -64,7 +64,7 @@ export async function fetchPexelsUrl({ itemId, preferredResolution = '1080p' }) 
   await ensureJwtFresh()
   let resp
   try {
-    resp = await backendFetchWithRefresh(`${BACKEND_URL}/api/pexels-url`, {
+    resp = await backendFetchWithRefresh(`${await getBackendUrl()}/api/pexels-url`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item_id: itemId, preferred_resolution: preferredResolution }),
@@ -112,7 +112,7 @@ export async function fetchFreepikUrl({ itemId, format = 'mp4' }) {
   await ensureJwtFresh()
   let resp
   try {
-    resp = await backendFetchWithRefresh(`${BACKEND_URL}/api/freepik-url`, {
+    resp = await backendFetchWithRefresh(`${await getBackendUrl()}/api/freepik-url`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item_id: itemId, format }),

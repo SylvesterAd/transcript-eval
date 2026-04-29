@@ -3,24 +3,26 @@
 <xmeml version="5">
   <sequence id="seq-variant-c">
     <name>Variant C</name>
-    <duration>882</duration>
-    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+    <duration>1470</duration>
+    <rate><timebase>50</timebase><ntsc>FALSE</ntsc></rate>
     <media>
       <video>
         <format>
           <samplecharacteristics>
             <width>1920</width><height>1080</height>
-            <rate><timebase>30</timebase></rate>
+            <rate><timebase>50</timebase></rate>
           </samplecharacteristics>
         </format>
         <track>
           <clipitem id="clip-variant-c-001">
             <name>001_envato_NX9WYGQ.mov</name>
             <duration>120</duration>
-            <start>762</start>
-            <end>882</end>
+            <start>1270</start>
+            <end>1470</end>
             <in>0</in>
             <out>120</out>
+            <pproTicksIn>0</pproTicksIn>
+            <pproTicksOut>1016064000000</pproTicksOut>
             <file id="file-envato-NX9WYGQ">
               <name>001_envato_NX9WYGQ.mov</name>
               <pathurl>001_envato_NX9WYGQ.mov</pathurl>

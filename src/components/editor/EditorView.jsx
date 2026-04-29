@@ -58,12 +58,6 @@ export default function EditorView() {
   const cutDragRef = useRef(false) // true during cut edge drag — blocks AI cut regeneration
   // shape: { experimentId, runId, status: 'running'|'complete'|'error', progress: {...} }
 
-  // Active b-roll plan pipeline id, surfaced to the header Export button
-  // so it can deep-link straight to that variant's export page. Updated
-  // by BRollPanel/BRollEditor as the user switches variants. Stays null
-  // outside the brolls tab — Export button falls back to the chooser.
-  const [activePlanPipelineId, setActivePlanPipelineId] = useState(null)
-
   // Lightweight check: does this video have completed broll search (kw- pipeline)?
   const videoId = groupDetail?.videos?.[0]?.id
   const { data: videoRunsData } = useApi(videoId ? `/broll/runs/video/${videoId}` : null)
@@ -813,8 +807,8 @@ export default function EditorView() {
   }, [state.isPlaying, state.currentTime, state.activeTab, state.transcriptSelection, totalDuration, dispatch])
 
   const editorContextValue = useMemo(
-    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, activePlanPipelineId, setActivePlanPipelineId }),
-    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, activePlanPipelineId]
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading]
   )
 
   if (loading) {
@@ -881,12 +875,7 @@ export default function EditorView() {
               </div>
             )}
             <button
-              onClick={() => {
-                const url = activePlanPipelineId
-                  ? `/editor/${id}/export/${encodeURIComponent(activePlanPipelineId)}`
-                  : `/editor/${id}/export`
-                window.open(url, '_blank')
-              }}
+              onClick={() => window.open(`/editor/${id}/export`, '_blank')}
               className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
             >
               Export

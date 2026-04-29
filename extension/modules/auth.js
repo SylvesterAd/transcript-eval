@@ -2,7 +2,19 @@
 // nothing persists in service worker memory because MV3 service
 // workers are terminated aggressively. Every caller reads fresh.
 
+import { BACKEND_URL as DEFAULT_BACKEND_URL } from '../config.js'
+
 const STORAGE_KEY = 'te:jwt'
+// Backend URL the web app pushed via {type:"session", backend_url}.
+// The extension uses this for /api/<source>-url, /api/export-events,
+// and /api/ext-config. Falls back to config.js's compile-time value
+// when unset (older web app, or pre-Ext.13 packaged extension).
+//
+// Why dynamic: a single packaged extension installed from the Chrome
+// Web Store needs to talk to whichever backend the user's open web
+// app is talking to. In dev that's localhost:3001; in prod it's
+// Railway. The web app knows; it tells us on every session message.
+const BACKEND_URL_KEY = 'te:backend_url'
 
 // Envato session cookies — watched for appear/disappear transitions
 // that mean the user signed in or out. Both are required for a
@@ -66,6 +78,23 @@ export async function setJwt(jwt) {
 
 export async function clearJwt() {
   await chrome.storage.local.remove(STORAGE_KEY)
+}
+
+// Backend URL persistence: web app sends absolute URL on session, every
+// fetch helper reads it back. Validated on write so a malformed value
+// can't poison subsequent fetches.
+export async function setBackendUrl(url) {
+  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+    throw new Error('setBackendUrl: url must be an absolute http(s) URL')
+  }
+  // Strip trailing slashes so callers can safely template `${base}/api/...`.
+  const normalized = url.replace(/\/+$/, '')
+  await chrome.storage.local.set({ [BACKEND_URL_KEY]: normalized })
+}
+
+export async function getBackendUrl() {
+  const { [BACKEND_URL_KEY]: stored } = await chrome.storage.local.get(BACKEND_URL_KEY)
+  return (typeof stored === 'string' && /^https?:\/\//.test(stored)) ? stored : DEFAULT_BACKEND_URL
 }
 
 // True if a JWT is present AND not expired. Called by popup + SW

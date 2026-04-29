@@ -10,7 +10,7 @@
 
 import { EXT_VERSION, MESSAGE_VERSION } from './config.js'
 import {
-  getJwt, setJwt, hasValidJwt,
+  getJwt, setJwt, hasValidJwt, setBackendUrl,
   hasEnvatoSession, checkEnvatoSessionLive, onEnvatoSessionChange,
 } from './modules/auth.js'
 import { downloadEnvato } from './modules/envato.js'
@@ -46,9 +46,18 @@ async function handlePing() {
 }
 
 async function handleSession(msg) {
-  const { token, kid, user_id, expires_at } = msg
+  const { token, kid, user_id, expires_at, backend_url } = msg
   try {
     await setJwt({ token, kid, user_id, expires_at })
+    // Optional: pre-Ext.13 web app builds don't send backend_url. The
+    // extension keeps the previously-stored value (or config.js
+    // default). When provided, switch the backend the extension talks
+    // to so a single packaged extension serves both prod and dev users.
+    if (typeof backend_url === 'string' && backend_url) {
+      try { await setBackendUrl(backend_url) } catch (err) {
+        return { ok: false, error: 'invalid_backend_url', detail: String(err?.message || err) }
+      }
+    }
     return { ok: true }
   } catch (err) {
     return { ok: false, error: 'invalid_session_shape', detail: String(err?.message || err) }

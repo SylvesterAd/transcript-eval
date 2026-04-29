@@ -163,7 +163,10 @@ describe('enforceConfigBeforeExport', () => {
     const refreshPromise = mod.refreshConfigOnStartup()
     // Enforcement awaits the refresh.
     const enforcePromise = mod.enforceConfigBeforeExport({ items: [{ source: 'envato' }] })
-    // Resolve the refresh NOW.
+    // Yield so refreshConfigOnStartup's pre-fetch awaits (chrome.storage
+    // get for the dynamic backend URL) drain and the mocked fetch gets
+    // invoked — only then is `resolveFetch` defined.
+    await new Promise(r => setTimeout(r, 0))
     resolveFetch()
     await refreshPromise
     const result = await enforcePromise

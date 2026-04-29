@@ -263,28 +263,26 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
     dispatch({ type: 'override_session' })
   }, [])
 
+  // chrome.downloads.download is sandboxed to ~/Downloads/, so the
+  // only thing the user can actually choose is the subfolder NAME.
+  // We tried the native picker (showDirectoryPicker hits Chrome's
+  // blocklist, webkitdirectory hits the empty-folder + Upload-N-files
+  // edge case). A prompt is honest, predictable, and always works —
+  // accepts plain names ("export"), leading-slash paths ("/export"),
+  // and full display paths ("~/Downloads/export/") and normalizes
+  // them all to "~/Downloads/<name>/".
   const onChangeFolder = useCallback(() => {
-    // Chrome's chrome.downloads.download requires paths relative to
-    // the user's OS Downloads folder. We can't escape that sandbox
-    // from a web page (and even from the extension, true arbitrary
-    // folders need the File System Access API + per-file streaming —
-    // out of scope). What we CAN do is let the user pick the SUBFOLDER
-    // name under Downloads. Default looks like
-    // "~/Downloads/transcript-eval/export-<runId>-a/"; user can rename
-    // the subfolder portion. Result is dispatched onto state.targetFolder
-    // and threaded through to onStart's targetFolder arg.
-    const current = state.targetFolder || ''
+    const stripChrome = (s) => String(s || '')
+      .replace(/^~?\/?Downloads\//i, '')
+      .replace(/^\/+|\/+$/g, '')
     const proposed = window.prompt(
-      'Save to (path under your Downloads folder):\n\nThe extension can only write inside the OS Downloads folder. Edit the subfolder portion below — leading "~/Downloads/" is for display only.',
-      current,
+      'Folder name (saved under ~/Downloads/):',
+      stripChrome(state.targetFolder) || 'export',
     )
-    if (proposed == null) return  // user cancelled
-    const trimmed = String(proposed).trim()
-    if (!trimmed) {
-      window.alert('Folder cannot be empty.')
-      return
-    }
-    dispatch({ type: 'set_target_folder', targetFolder: trimmed })
+    if (proposed == null) return
+    const trimmed = stripChrome(proposed)
+    if (!trimmed) return
+    dispatch({ type: 'set_target_folder', targetFolder: `~/Downloads/${trimmed}/` })
   }, [state.targetFolder])
 
   const onTogglePlan = useCallback((id, on) => {

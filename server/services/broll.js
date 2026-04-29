@@ -531,6 +531,11 @@ export async function listExampleSources(groupId) {
   `).all(...groupIds)
 }
 
+// Extract the canonical YouTube video ID from a URL so we can dedupe
+// (extractYouTubeId moved to ./youtube.js — imported at top of file.
+// Keeping the original docstring for context: handles youtu.be, /shorts,
+// /embed, /live, m.youtube.com, and query-string variants.)
+
 export async function addExampleSource(groupId, { kind, source_url, label, createdBy }) {
   if (!['upload', 'yt_video', 'yt_channel'].includes(kind)) throw new Error('Invalid kind')
   const set = await getOrCreateExampleSet(groupId, createdBy)

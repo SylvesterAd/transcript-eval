@@ -176,6 +176,20 @@ export function assignTracks(placements) {
 //     subset Premiere accepts; regressions are caught by golden fixture
 //     tests in Task 5.
 
+// Adobe-specific sub-frame precision constant. Premiere uses these tick
+// values to position clips with picosecond accuracy independent of the
+// sequence framerate — without pproTicks, in/out/start/end snap to the
+// nearest integer frame (±16.7ms at 30fps). Verified against multiple
+// real Premiere-exported XMLs.
+//
+// Source: https://community.adobe.com/t5/premiere-pro-discussions/how-to-parse-pproticksin-and-pproticksout-to-frames/td-p/10878160
+const PPRO_TICKS_PER_SECOND = 254016000000
+
+function secondsToPproTicks(seconds) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return 0
+  return Math.round(seconds * PPRO_TICKS_PER_SECOND)
+}
+
 function slugifyForId(input) {
   // Deterministic id segment: ASCII alphanumerics + dashes. Anything
   // else becomes -. Used for <clipitem id> and <file id> — these are
@@ -213,7 +227,14 @@ export function buildPathUrl(mediaFolderAbsolute, filename) {
 export function generateXmeml({
   sequenceName,
   placements,
-  frameRate = 30,
+  // Sequence timebase (timeline frame granularity). 50fps gives 20ms
+  // resolution — enough for editor edits at .02s boundaries (e.g.
+  // 73.64s = frame 3682 exactly) AND it's a Premiere-supported
+  // timebase (FCP7 XMEML spec enumerates 24/25/30/50/60). Source
+  // clip framerates remain whatever the source was — we decouple
+  // sequence from source rate via the per-placement sourceFrameRate
+  // field, with a hardcoded 30 fallback (the typical b-roll rate).
+  frameRate = 50,
   sequenceSize = { w: 1920, h: 1080 },
   aroll = null,  // optional: { filename, frameRate, width, height, sourceDurationSeconds } — emits a V1 track spanning the entire timeline
   mediaFolderAbsolute = null,  // absolute filesystem folder, e.g. "/Users/laurynas/Downloads/transcript-eval/export-370-a"; when null we emit bare filenames (Premiere relinks via Match File Properties → File Name when the XML sits next to the media)
@@ -247,20 +268,30 @@ export function generateXmeml({
     if (typeof p.filename !== 'string' || !p.filename) {
       throw new Error(`generateXmeml: placement seq=${p.seq} missing filename`)
     }
+    // Source clip's native rate. Decoupled from sequence rate so a
+    // 50fps timeline can carry 30fps b-roll without the source
+    // duration being mis-scaled. Falls back to 30 (typical Pexels/
+    // Storyblocks/Envato rate) when manifest didn't carry it.
+    const sourceFrameRate = Number.isFinite(p.sourceFrameRate) && p.sourceFrameRate > 0
+      ? p.sourceFrameRate : 30
+    // Two duration coordinates. <start>/<end> use sequence-rate
+    // frames (timeline grid); <in>/<out> use source-rate frames (cut
+    // points in the source media). Equal only when sequence rate ==
+    // source rate. With a 50fps sequence and 30fps source, a 2s clip
+    // is 100 sequence frames AND 60 source frames.
     const startFrame = secondsToFrames(p.timelineStart, frameRate)
-    const duration = secondsToFrames(p.timelineDuration, frameRate)
-    const endFrame = startFrame + duration
+    const durationSeqFrames = secondsToFrames(p.timelineDuration, frameRate)
+    const durationSrcFrames = secondsToFrames(p.timelineDuration, sourceFrameRate)
+    const endFrame = startFrame + durationSeqFrames
     const width = Number.isFinite(p.width) && p.width > 0 ? p.width : seqW
     const height = Number.isFinite(p.height) && p.height > 0 ? p.height : seqH
-    const sourceFrameRate = Number.isFinite(p.sourceFrameRate) && p.sourceFrameRate > 0
-      ? p.sourceFrameRate : frameRate
     // Source media's full duration in frames (in the file's own framerate).
-    // When unknown, fall back to the timeline duration so the clip plays —
+    // When unknown, fall back to the source-rate duration so the clip plays —
     // the cost is no trim handles past the cut, but at least the import
     // succeeds and the clip is the right length.
     const sourceDurationFrames = Number.isFinite(p.sourceDurationSeconds) && p.sourceDurationSeconds > 0
       ? Math.round(p.sourceDurationSeconds * sourceFrameRate)
-      : duration
+      : durationSrcFrames
     const cleanName = sanitizeFilename(p.filename)
     return {
       seq: p.seq,
@@ -269,8 +300,13 @@ export function generateXmeml({
       filename: cleanName,
       _startFrame: startFrame,
       _endFrame: endFrame,
-      _duration: duration,
+      _duration: durationSeqFrames,
+      _durationSrcFrames: durationSrcFrames,
       _sourceDurationFrames: sourceDurationFrames,
+      // Sub-frame-precise versions of the timing fields. Carried alongside
+      // the integer-frame values; emitted as <pproTicks*> in the XML.
+      _timelineStartSec: p.timelineStart,
+      _timelineDurationSec: p.timelineDuration,
       _width: width,
       _height: height,
       _sourceFrameRate: sourceFrameRate,
@@ -334,11 +370,19 @@ export function generateXmeml({
     lines.push(`        <track>`)
     lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
     lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
+    // <out> is in SOURCE-rate frames (FCP7 spec), so convert:
+    // sequenceDuration (sequence frames) → seconds → source frames.
+    const arollOutSrcFrames = Math.round((sequenceDuration / frameRate) * arollFrameRate)
     lines.push(`            <duration>${arollSourceFrames}</duration>`)
     lines.push(`            <start>0</start>`)
     lines.push(`            <end>${sequenceDuration}</end>`)
     lines.push(`            <in>0</in>`)
-    lines.push(`            <out>${sequenceDuration}</out>`)
+    lines.push(`            <out>${arollOutSrcFrames}</out>`)
+    // Sub-frame precision (Adobe extension). A-roll spans the full
+    // sequence so source IN=0 and source OUT = sequenceDuration in
+    // sequence frames. Convert frames → seconds → ticks.
+    lines.push(`            <pproTicksIn>0</pproTicksIn>`)
+    lines.push(`            <pproTicksOut>${secondsToPproTicks(sequenceDuration / frameRate)}</pproTicksOut>`)
     lines.push(`            <file id="${escapeXml(arollFileId)}">`)
     lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
     lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
@@ -361,10 +405,17 @@ export function generateXmeml({
   // For each clipitem we model two distinct durations per the FCP7
   // XMEML spec:
   //   <clipitem><duration> + <file><duration> = the SOURCE media's full
-  //     length (so Premiere shows trim handles past the cut).
-  //   <in>/<out> = the slice OF the source we're using (sequence frames).
-  //     out − in = (timeline end − timeline start).
-  //   <start>/<end> = where on the sequence timeline this slice lands.
+  //     length, in SOURCE-rate frames (so Premiere shows trim handles
+  //     past the cut).
+  //   <in>/<out> = the slice OF the source we're using, in SOURCE-rate
+  //     frames. out − in = the source-frame count covering this cut.
+  //   <start>/<end> = where on the sequence timeline this slice lands,
+  //     in SEQUENCE-rate frames.
+  //
+  // The two coordinate systems match only when sequence rate == source
+  // rate. For a 50fps timeline carrying 30fps b-roll, a 2s clip is 100
+  // sequence frames AND 60 source frames — both are emitted, each in
+  // its own field's expected unit.
   //
   // Today every cut starts at source frame 0; if/when the b-roll editor
   // exposes a per-placement source-IN, plumb it through and adjust the
@@ -376,7 +427,7 @@ export function generateXmeml({
       const clipId = `clip-${seqSlug}-${padSeq(p.seq)}`
       const fileId = `file-${slugifyForId(p.source)}-${slugifyForId(p.sourceItemId) || padSeq(p.seq)}`
       const inFrame = 0
-      const outFrame = inFrame + p._duration
+      const outFrame = inFrame + p._durationSrcFrames
       lines.push(`          <clipitem id="${escapeXml(clipId)}">`)
       lines.push(`            <name>${escapeXml(p.filename)}</name>`)
       lines.push(`            <duration>${p._sourceDurationFrames}</duration>`)
@@ -384,6 +435,14 @@ export function generateXmeml({
       lines.push(`            <end>${p._endFrame}</end>`)
       lines.push(`            <in>${inFrame}</in>`)
       lines.push(`            <out>${outFrame}</out>`)
+      // Sub-frame precision (Adobe extension). pproTicksIn/Out hold the
+      // source IN/OUT at picosecond resolution (254,016,000,000 ticks/sec)
+      // so Premiere uses the exact float seconds rather than the integer
+      // <in>/<out> frames, which round to the nearest sequence-rate frame.
+      const pproIn = secondsToPproTicks(0)
+      const pproOut = secondsToPproTicks(p._timelineDurationSec)
+      lines.push(`            <pproTicksIn>${pproIn}</pproTicksIn>`)
+      lines.push(`            <pproTicksOut>${pproOut}</pproTicksOut>`)
       lines.push(`            <file id="${escapeXml(fileId)}">`)
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
       lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)

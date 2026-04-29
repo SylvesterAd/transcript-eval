@@ -29,9 +29,8 @@ import {
   TELEMETRY_RETRY_MAX_MS,
   TELEMETRY_RETRY_JITTER,
   TELEMETRY_FLUSH_INTERVAL_MS,
-  BACKEND_URL,
 } from '../config.js'
-import { attachBearer, onSessionRefreshed } from './auth.js'
+import { attachBearer, onSessionRefreshed, getBackendUrl } from './auth.js'
 
 const STORAGE_KEY_QUEUE = 'telemetry_queue'
 const STORAGE_KEY_OVERFLOW_TOTAL = 'telemetry_overflow_total'
@@ -369,7 +368,7 @@ async function postSingleEvent(entry) {
   }
   let resp
   try {
-    resp = await fetch(BACKEND_URL + '/api/export-events', {
+    resp = await fetch((await getBackendUrl()) + '/api/export-events', {
       method: 'POST',
       headers,
       body: JSON.stringify(entry),

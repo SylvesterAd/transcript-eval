@@ -53,13 +53,6 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
   const brollState = useBRollEditorState(activePipelineId)
 
-  // Surface the active variant's pipeline id to the EditorView header so
-  // its Export button can deep-link straight to /export/<planPipelineId>.
-  // Cleared on unmount so other tabs fall back to the chooser flow.
-  useEffect(() => {
-    editorCtx?.setActivePlanPipelineId?.(activePipelineId || null)
-    return () => editorCtx?.setActivePlanPipelineId?.(null)
-  }, [activePipelineId, editorCtx])
   useEffect(() => {
     brollState.registerInactiveCacheSetter?.((pid, updater) => {
       setRawInactivePlacements(prev => ({ ...prev, [pid]: updater(prev[pid]) }))

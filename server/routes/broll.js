@@ -123,8 +123,63 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
     const editorData = await getBRollEditorData(pipelineId)
     const placements = Array.isArray(editorData?.placements) ? editorData.placements : []
 
-    // Pure transform: pick → filter → manifest item shape.
-    const { items, totals } = buildManifestFromPlacements(placements, { variant })
+    // Refine each placement's start/end to the same transcript-snapped
+    // times the b-roll editor displays. The plan generator emits whole-
+    // second timecodes (e.g. "[00:01:13]"); the editor calls
+    // matchPlacementsToTranscript to find the actual transcript word
+    // matching the placement's audio_anchor (~73.64s instead of 73s).
+    // Without this step the export's start times disagree with the
+    // editor's display by up to ~1 second per clip.
+    try {
+      const planMatchForVideo = pipelineId.match(/^plan-(\d+)-/)
+      if (planMatchForVideo) {
+        const videoId = parseInt(planMatchForVideo[1], 10)
+        const vRow = await db.prepare('SELECT group_id FROM videos WHERE id = ?').get(videoId)
+        const groupId = vRow?.group_id || null
+        if (groupId) {
+          const { getTimelineWordTimestamps } = await import('../services/annotation-mapper.js')
+          const { matchPlacementsToTranscript } = await import('../services/placement-match.js')
+          const words = (await getTimelineWordTimestamps(groupId)) || []
+          const refined = matchPlacementsToTranscript(placements, words)
+          // matchPlacementsToTranscript returns NEW objects keyed by
+          // (chapterIndex, placementIndex) for plan placements, or by
+          // userPlacementId for manual ones. Push the refined timing
+          // back onto the original `placements` array (in place) so
+          // buildManifestFromPlacements sees it via p.start/p.end as
+          // numeric seconds. coerceTimingToSeconds passes numbers
+          // through unchanged.
+          const byKey = new Map()
+          for (const r of refined) {
+            const key = r.isUserPlacement
+              ? `user:${r.userPlacementId}`
+              : `${r.chapterIndex}:${r.placementIndex}`
+            byKey.set(key, r)
+          }
+          for (const p of placements) {
+            const key = p.isUserPlacement
+              ? `user:${p.userPlacementId}`
+              : `${p.chapterIndex}:${p.placementIndex}`
+            const r = byKey.get(key)
+            if (r && typeof r.timelineStart === 'number' && typeof r.timelineEnd === 'number') {
+              p.start = r.timelineStart
+              p.end = r.timelineEnd
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[broll-export-manifest] transcript-match refinement failed; falling back to plan timecodes:', e.message)
+    }
+
+    // Pure transform: pick → filter → manifest item shape. We pin
+    // allowedSources to ['pexels'] for now — envato + freepik download
+    // paths are still being shaken out, and silently mixing sources
+    // confuses users when the editor displays one source as "selected"
+    // but the export pipeline picks a different one via fall-through.
+    // To re-enable additional sources, expand the allowlist (or remove
+    // it entirely to restore "any non-storyblocks" behavior).
+    const ALLOWED_SOURCES = ['pexels']
+    const { items, totals } = buildManifestFromPlacements(placements, { variant, allowedSources: ALLOWED_SOURCES })
 
     // A-roll injection: parse pipelineId for the videoId (pattern is
     // 'plan-<videoId>-<timestamp>'); look up the user's source video;
@@ -380,6 +435,15 @@ router.put('/runs/:id/output', requireAuth, async (req, res) => {
 // Pure transform: rows from broll_runs (with metadata_json + status +
 // created_at) → ordered list of {plan_pipeline_id, label} for plans
 // whose every run is complete. Exported for unit testing without a DB.
+//
+// Labels MUST match BRollPanel.strategyVariants so "Variant B" in the
+// editor and the export page point at the same plan. The editor sorts
+// strategies lexically by pipeline id (combined-strategies always
+// last, identified by the `cstrat-` prefix) and inherits each
+// strategy's letter onto its plan via metadata.strategyPipelineId.
+// We mirror that here. Plans whose runs don't carry a
+// strategyPipelineId fall back to firstSeen order after the labelled
+// ones — defensive only; well-formed plans always have it.
 export function buildExportPlansList(rows) {
   const byPipeline = new Map()
   for (const r of rows || []) {
@@ -389,14 +453,32 @@ export function buildExportPlansList(rows) {
     if (!pid || !pid.startsWith('plan-')) continue
     let entry = byPipeline.get(pid)
     if (!entry) {
-      entry = { plan_pipeline_id: pid, status: 'complete', firstSeen: r.created_at }
+      entry = {
+        plan_pipeline_id: pid,
+        status: 'complete',
+        firstSeen: r.created_at,
+        strategyPipelineId: null,
+      }
       byPipeline.set(pid, entry)
     }
     if (r.status === 'failed') entry.status = 'failed'
+    if (!entry.strategyPipelineId && typeof meta.strategyPipelineId === 'string' && meta.strategyPipelineId) {
+      entry.strategyPipelineId = meta.strategyPipelineId
+    }
   }
   return [...byPipeline.values()]
     .filter(p => p.status === 'complete')
-    .sort((a, b) => new Date(a.firstSeen) - new Date(b.firstSeen))
+    .sort((a, b) => {
+      const aCombined = (a.strategyPipelineId || '').startsWith('cstrat-')
+      const bCombined = (b.strategyPipelineId || '').startsWith('cstrat-')
+      if (aCombined !== bCombined) return aCombined ? 1 : -1
+      if (a.strategyPipelineId && b.strategyPipelineId) {
+        return a.strategyPipelineId.localeCompare(b.strategyPipelineId)
+      }
+      if (a.strategyPipelineId) return -1
+      if (b.strategyPipelineId) return 1
+      return new Date(a.firstSeen) - new Date(b.firstSeen)
+    })
     .map((p, i) => ({
       plan_pipeline_id: p.plan_pipeline_id,
       label: `Variant ${String.fromCharCode(65 + i)}`,

@@ -79,9 +79,13 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
         })
       }
     }
+    // Plans-list labels arrive as "Variant A" already; older callers
+    // pass just the letter ("A"). Normalize so sequenceName is always
+    // "Variant <letter>" without doubling the prefix.
+    const letter = String(label).replace(/^Variant\s+/i, '').trim()
     variants.push({
       label,
-      sequenceName: `Variant ${label}`,
+      sequenceName: `Variant ${letter || label}`,
       placements,
     })
   }
@@ -221,7 +225,10 @@ export function useExportXmlKickoff({
       for (const label of variantLabels) {
         const xml = xmls[label]
         if (typeof xml !== 'string' || !xml) continue
-        const filename = `variant-${String(label).toLowerCase()}.xml`
+        // Strip the "Variant " prefix from the label before slugging so
+        // the filename is `variant-a.xml`, not `variant-variant a.xml`.
+        const letter = String(label).replace(/^Variant\s+/i, '').trim().toLowerCase()
+        const filename = `variant-${letter || String(label).toLowerCase()}.xml`
         // Don't await — fire-and-forget per variant. Each call resolves
         // either through the extension or falls back to a browser
         // download; we don't block the State E transition on either.

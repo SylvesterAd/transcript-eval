@@ -14,7 +14,6 @@
 // error codes without a coordinated WebApp.4 update.
 
 import {
-  BACKEND_URL,
   EXT_VERSION,
   EXT_CONFIG_ENDPOINT,
   EXT_CONFIG_CACHE_TTL_MS,
@@ -22,6 +21,7 @@ import {
   CONFIG_FALL_OPEN_DEFAULTS,
   CONFIG_ERROR_CODES,
 } from '../config.js'
+import { getBackendUrl } from './auth.js'
 
 const CACHE_KEY = 'cached_ext_config'
 
@@ -59,7 +59,7 @@ export function compareSemver(a, b) {
 // persist to chrome.storage.local.cached_ext_config with fetched_at.
 // On network failure or non-2xx, rethrow — callers decide fall-open.
 export async function fetchConfig() {
-  const url = `${BACKEND_URL}${EXT_CONFIG_ENDPOINT}`
+  const url = `${await getBackendUrl()}${EXT_CONFIG_ENDPOINT}`
   let resp
   try {
     resp = await fetch(url, { method: 'GET', credentials: 'omit' })

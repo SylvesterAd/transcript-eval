@@ -18,6 +18,7 @@
 
 import { useMemo } from 'react'
 import { EXT_ID } from '../lib/extension-id.js'
+import { resolveBackendUrl } from '../lib/backendUrl.js'
 
 // Chrome reports a few distinct phrasings when the extension isn't
 // reachable. Match on substrings rather than exact equality so we
@@ -99,8 +100,15 @@ export function useExtension() {
     // extension. Caller passes the minted token object; this helper
     // only does the chrome.runtime.sendMessage half so callers can
     // mint once and reuse.
+    //
+    // Also pushes the absolute backend URL the web app is using so a
+    // single packaged extension can serve both prod and dev users
+    // without recompiling — extension persists it and routes all
+    // /api/<source>-url / /api/export-events / /api/ext-config calls
+    // there. See extension/modules/auth.js setBackendUrl.
     sendSession: async ({ token, kid, user_id, expires_at }) => {
-      const r = await send({ type: 'session', version: 1, token, kid, user_id, expires_at })
+      const backend_url = resolveBackendUrl()
+      const r = await send({ type: 'session', version: 1, token, kid, user_id, expires_at, backend_url })
       if (!r?.ok) throw new Error(r?.error || 'extension rejected session')
       return r
     },
