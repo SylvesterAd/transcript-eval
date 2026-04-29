@@ -1015,15 +1015,15 @@ router.put('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) =
 router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
-    const { chapterIndex, placementIndex, description, style, sources } = req.body
-    if (chapterIndex == null || placementIndex == null) {
-      return res.status(400).json({ error: 'chapterIndex and placementIndex required' })
+    const { placementUuid, chapterIndex, placementIndex, description, style, sources } = req.body
+    if (!placementUuid && (chapterIndex == null || placementIndex == null)) {
+      return res.status(400).json({ error: 'placementUuid OR (chapterIndex, placementIndex) required' })
     }
     const overrides = {}
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchSinglePlacement(pipelineId, chapterIndex, placementIndex, overrides)
+    const result = await searchSinglePlacement(pipelineId, { placementUuid, chapterIndex, placementIndex }, overrides)
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })

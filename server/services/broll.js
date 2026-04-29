@@ -2168,7 +2168,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       await db.prepare(`UPDATE broll_searches SET status = 'running', started_at = NOW() WHERE id = ?`).run(item.brollSearchId)
 
       try {
-        const result = await searchSinglePlacement(item.pid, item.chapterIndex, item.placementIndex)
+        const result = await searchSinglePlacement(item.pid, { placementUuid: item.uuid, chapterIndex: item.chapterIndex, placementIndex: item.placementIndex })
         // If we got zero results because the GPU job is still running or failed, surface that
         // in the row status — don't lie by marking 'complete'. UI can then show a real state.
         const rowStatus = result.gpuJobStatus === 'running' ? 'timeout'
@@ -5565,7 +5565,31 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
  * Search a single B-Roll placement by its chapterIndex + placementIndex.
  * Reuses the same brief/keyword building as executeBrollSearch but for one item.
  */
-export async function searchSinglePlacement(planPipelineId, chapterIndex, placementIndex, overrides = {}) {
+export async function searchSinglePlacement(planPipelineId, identity, overrides = {}) {
+  // identity = { placementUuid?, chapterIndex?, placementIndex? }
+  let { placementUuid, chapterIndex, placementIndex } = identity || {}
+
+  // If only uuid was given, resolve to (chapterIndex, placementIndex) using ensurePlanUuids.
+  if (placementUuid && (chapterIndex == null || placementIndex == null)) {
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    outer: for (const [chIdx, m] of uuidsByChapter.entries()) {
+      for (const [pIdx, u] of m.entries()) {
+        if (u === placementUuid) { chapterIndex = chIdx; placementIndex = pIdx; break outer }
+      }
+    }
+    if (chapterIndex == null || placementIndex == null) {
+      throw new Error(`searchSinglePlacement: uuid ${placementUuid} not found in plan ${planPipelineId}`)
+    }
+  }
+
+  // If only indices were given, resolve uuid for the INSERT.
+  if (!placementUuid) {
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    placementUuid = uuidsByChapter.get(chapterIndex)?.get(placementIndex) || null
+  }
+
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
   const GPU_KEY = process.env.GPU_INTERNAL_KEY
   if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')

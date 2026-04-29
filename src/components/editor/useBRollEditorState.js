@@ -395,7 +395,8 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
     try {
       const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
-        chapterIndex: placement.chapterIndex,
+        placementUuid: placement.uuid,
+        chapterIndex: placement.chapterIndex,   // kept for legacy server fallback
         placementIndex: placement.placementIndex,
       })
       dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
@@ -419,7 +420,8 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
     try {
       const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
-        chapterIndex: placement.chapterIndex,
+        placementUuid: placement.uuid,
+        chapterIndex: placement.chapterIndex,   // kept for legacy server fallback
         placementIndex: placement.placementIndex,
         ...overrides,
       })
