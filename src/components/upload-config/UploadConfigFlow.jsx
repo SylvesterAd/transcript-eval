@@ -70,7 +70,11 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
 
   // Persist on step-forward. No-op without a valid groupId so navigation
   // never gets blocked by a doomed PUT (e.g. when the URL has no ?group=).
-  async function persistCurrent() {
+  // `overrides` lets callers pass values that haven't flushed through
+  // setState yet (e.g. the rough-cut footer buttons set autoRoughCut and
+  // immediately advance — without an override the PUT would read the
+  // stale render-time closure).
+  async function persistCurrent(overrides = {}) {
     if (!Number.isFinite(groupId)) return
     const stepId = CONFIG_STEPS[current].id
     const body = {}
@@ -82,7 +86,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
     } else if (stepId === 'path') {
       body.path_id = state.pathId
     } else if (stepId === 'roughcut') {
-      body.auto_rough_cut = state.autoRoughCut
+      body.auto_rough_cut = overrides.autoRoughCut ?? state.autoRoughCut
     }
     // references has no batched persistence — it hits its own API per-add
     if (Object.keys(body).length) {
@@ -90,8 +94,8 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
     }
   }
 
-  const next = async () => {
-    try { await persistCurrent() } catch {}
+  const next = async (overrides) => {
+    try { await persistCurrent(overrides) } catch {}
     if (current < CONFIG_STEPS.length - 1) setCurrent(current + 1)
     else setSubmitted(true)
   }
@@ -170,13 +174,13 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
               {currentStepId === 'roughcut' ? (
                 <div className="flex items-center gap-2.5">
                   <button
-                    onClick={async () => { setState.autoRoughCut(false); await next() }}
+                    onClick={async () => { setState.autoRoughCut(false); await next({ autoRoughCut: false }) }}
                     className="text-on-surface-variant font-bold uppercase tracking-widest text-xs hover:text-on-surface transition-colors px-5 py-3"
                   >
                     No, thanks
                   </button>
                   <button
-                    onClick={async () => { setState.autoRoughCut(true); await next() }}
+                    onClick={async () => { setState.autoRoughCut(true); await next({ autoRoughCut: true }) }}
                     disabled={!roughCutValid}
                     title={!roughCutValid ? 'Not enough tokens for AI Rough Cut' : undefined}
                     className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-7 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100 inline-flex items-center gap-2"
