@@ -17,6 +17,67 @@ import { analyzeMulticam, runClassification } from './multicam-sync.js'
 import { pathToFlags } from '../routes/broll.js'
 import * as emailNotifier from './email-notifier.js'
 
+// Find pipelineIds belonging to a video_group whose expected stages exceed the
+// completed-main-stages count (i.e., interrupted by a server crash). Skips
+// alt-/kw-/bs- pipelines (they have dedicated re-trigger endpoints). When
+// substage='refs', also scans pipelines for the group's reference videos.
+//
+// Returns an array of pipelineId strings.
+export async function findInterruptedPipelinesForGroup(groupId, substage) {
+  // Gather video IDs that belong to this group
+  const groupVideoRows = await db.prepare('SELECT id FROM videos WHERE group_id = ?').all(groupId)
+  const videoIds = groupVideoRows.map(r => r.id)
+
+  // For 'refs' substage, also include reference videos.
+  // broll_example_sources stores videoId inside meta_json (TEXT), not a column —
+  // see loadExampleVideos in broll.js for the canonical pattern. We fetch the
+  // rows and parse JSON in JS rather than try a JSON extract in SQL.
+  if (substage === 'refs') {
+    const refSources = await db.prepare(`
+      SELECT s.meta_json
+      FROM broll_example_sources s
+      JOIN broll_example_sets es ON es.id = s.example_set_id
+      WHERE es.group_id = ? AND s.status = 'ready'
+    `).all(groupId)
+    for (const row of refSources) {
+      try {
+        const meta = JSON.parse(row.meta_json || '{}')
+        if (meta.videoId && !videoIds.includes(meta.videoId)) videoIds.push(meta.videoId)
+      } catch {}
+    }
+  }
+
+  if (!videoIds.length) return []
+
+  // Fetch broll_runs for these videos. The pg adapter uses '?' placeholders
+  // (see existing query at server/services/broll.js:806-810).
+  const placeholders = videoIds.map(() => '?').join(',')
+  const runs = await db.prepare(
+    `SELECT id, metadata_json, status FROM broll_runs WHERE video_id IN (${placeholders}) AND status = 'complete'`
+  ).all(...videoIds)
+
+  // Group by pipelineId, count completed main stages, compare to expectedStages
+  // (taken from any row's totalStages metadata).
+  const byPid = new Map()
+  for (const row of runs) {
+    let meta
+    try { meta = JSON.parse(row.metadata_json || '{}') } catch { continue }
+    const pid = meta.pipelineId
+    if (!pid) continue
+    if (pid.startsWith('alt-') || pid.startsWith('kw-') || pid.startsWith('bs-')) continue
+    if (!byPid.has(pid)) byPid.set(pid, { mainStages: new Set(), expected: 0 })
+    const entry = byPid.get(pid)
+    if (meta.totalStages != null && meta.totalStages > entry.expected) entry.expected = meta.totalStages
+    if (!meta.isSubRun && meta.stageIndex != null) entry.mainStages.add(meta.stageIndex)
+  }
+
+  const interrupted = []
+  for (const [pid, { mainStages, expected }] of byPid) {
+    if (expected > 0 && mainStages.size < expected) interrupted.push(pid)
+  }
+  return interrupted
+}
+
 // Cooperative cancel signal. The DELETE handler sets assembly_status='deleting'
 // on the sub-group (and the parent) before purging. We poll this between
 // chain stages and bail — no more executePipeline calls, no more email
