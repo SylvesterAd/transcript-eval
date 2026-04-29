@@ -14,6 +14,19 @@
 
 ---
 
+> ## ⚠️ Verification Protocol — Read Before Implementing Any Task
+>
+> **DO NOT run `npm run dev:server` (or any full-server-boot equivalent) as a verification step.** The boot path runs `auto-orchestrator.js`'s resume-stuck-chains logic, which finds any `video_groups` row with `broll_chain_status='running'` and re-fires its reference-analysis / strategy / plan / search pipelines. Those pipelines call real LLMs and search APIs, **costing money** and polluting `broll_runs`.
+>
+> **Use these substitutes:**
+>
+> 1. **Migration / startup verification:** direct module import — `node --env-file=.env -e "import('./server/db.js').then(async ({default: db}) => { ... })"`. Importing `db.js` runs the schema migrations and the deferred backfill via `setImmediate`, but does NOT run the auto-orchestrator.
+> 2. **Backend code path verification:** import the function directly (e.g., `getBRollEditorData`, `_getPendingGpuPlacements`) and call it with real data via the `node --env-file=.env -e ...` harness above.
+> 3. **UI smoke tests** (clicking buttons, watching network requests): **defer to the human partner**. The implementer reports what to verify; the human partner exercises the UI in their already-running editor.
+> 4. **Never call `executeSearchBatch`, `executeCreateStrategy`, `executeCreatePlan`, or any `execute*` function from a unit harness** — those fire real production-grade pipelines.
+
+---
+
 ## File Structure
 
 - **Modify:** `server/schema-pg.sql` (around line 112-131) — add `placement_uuid TEXT` to `broll_searches`; create new `broll_placement_uuids` table.
@@ -754,19 +767,28 @@ Replace with:
       if (!match) continue
 ```
 
-- [ ] **Step 3: Quick smoke check via the API**
+- [ ] **Step 3: Direct smoke check (no server boot — see below)**
+
+> **DO NOT run `npm run dev:server`.** Booting the full server triggers `auto-orchestrator.js`'s resume-stuck-chains logic, which fires real LLM/search pipelines on any `video_groups` row with `broll_chain_status='running'`. Costs API credits and pollutes `broll_runs`. Use the direct-import harness below instead.
 
 ```bash
-cd "/Users/laurynas/Desktop/one last /transcript-eval"
-npm run dev:server &
-SERVER_PID=$!
-sleep 5
-# Replace 225 with a real video id from your local DB if 225 doesn't exist
-curl -s "http://localhost:3000/api/broll/editor-data?videoId=225&pipelineId=$(curl -s 'http://localhost:3000/api/broll/pipelines?videoId=225' | jq -r '.pipelines[] | select(.id | startswith(\"plan-\")) | .id' | head -1)" | jq '.placements[0] | {index, uuid, chapterIndex, placementIndex, description}'
-kill $SERVER_PID
+cd "/Users/laurynas/Desktop/one last /transcript-eval/.worktrees/broll-placement-uuid"
+node --env-file=.env -e "
+import('./server/services/broll.js').then(async ({ getBRollEditorData }) => {
+  // Find any plan_pipeline_id from an existing plan run
+  const dbm = await import('./server/db.js')
+  const row = await dbm.default.prepare(\"SELECT (metadata_json::jsonb->>'pipelineId') AS pid, (metadata_json::jsonb->>'videoId')::int AS vid FROM broll_runs WHERE (metadata_json::jsonb->>'pipelineId') LIKE 'plan-%' AND status = 'complete' AND (metadata_json::jsonb->>'isSubRun') IS NULL ORDER BY id DESC LIMIT 1\").get()
+  if (!row) { console.log('no plan_pipeline found'); process.exit(0) }
+  console.log('using pid:', row.pid, 'videoId:', row.vid)
+  const data = await getBRollEditorData(row.vid, row.pid)
+  console.log('first placement:', { index: data.placements[0]?.index, uuid: data.placements[0]?.uuid, chapterIndex: data.placements[0]?.chapterIndex, placementIndex: data.placements[0]?.placementIndex, description: data.placements[0]?.description?.slice(0, 60) })
+  console.log('placements with uuid:', data.placements.filter(p => p.uuid).length, '/', data.placements.length)
+  process.exit(0)
+})
+" 2>&1 | tail -5
 ```
 
-Expected: `uuid` field present and starts with `p_`. (If the URL/auth shape doesn't match, just hit the running app in a browser at `/admin/broll?id=...` and inspect the editor-data network response — verify `placements[0].uuid` is set.)
+Expected: `placements with uuid: N / N` (every placement has a uuid). First placement's `uuid` field starts with `p_`.
 
 - [ ] **Step 4: Run all server tests**
 
@@ -919,20 +941,21 @@ Replace with:
 
 > The first three lines of the replacement (extracting `brief, keywords, description` from `_buildSearchParams`) replace whatever was already there at line 2125 — verify when editing.
 
-- [ ] **Step 4: Smoke test the search-next-batch endpoint end-to-end**
+- [ ] **Step 4: Smoke test (DO NOT boot the server — defer UI to the human partner)**
+
+> Same hazard as Task 4: full server boot fires auto-resume of stuck chains, costing real API credits. Implementer should NOT run `npm run dev:server`.
+
+The implementer's job here is unit-level: confirm the new `broll_searches` INSERT writes `placement_uuid`. Do that with a direct `_getPendingGpuPlacements` call against a real plan, OR by reading the INSERT site and verifying the column ordering matches. **Do NOT actually run `executeSearchBatch` from the unit harness — it fires real GPU search pipelines.** If you must verify end-to-end, leave a note in the report saying "human partner should click 'Search next 10' in their already-running editor and verify a fresh `broll_searches` row has `placement_uuid` populated":
 
 ```bash
-cd "/Users/laurynas/Desktop/one last /transcript-eval"
-npm run dev:server &
-SERVER_PID=$!
-sleep 5
-```
-
-In a browser, open the editor for an existing video, click "Search next 10". Then:
-
-```bash
-node -e "import('./server/db.js').then(async m => { const rows = await m.db.prepare(\"SELECT id, chapter_index, placement_index, placement_uuid FROM broll_searches WHERE batch_id LIKE 'search-batch-%' ORDER BY id DESC LIMIT 10\").all(); console.log(rows); process.exit(0) })"
-kill $SERVER_PID
+cd "/Users/laurynas/Desktop/one last /transcript-eval/.worktrees/broll-placement-uuid"
+node --env-file=.env -e "
+import('./server/db.js').then(async ({default: db}) => {
+  const rows = await db.prepare(\"SELECT id, chapter_index, placement_index, placement_uuid, status, created_at FROM broll_searches WHERE batch_id LIKE 'search-batch-%' ORDER BY id DESC LIMIT 10\").all()
+  console.log(rows)
+  process.exit(0)
+})
+"
 ```
 
 Expected: every recent row has `placement_uuid` populated (not null).
