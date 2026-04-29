@@ -121,6 +121,25 @@ describe('loadPriorChapterStrategies', () => {
     const blocks = out.split('=== Source:')
     expect(blocks).toHaveLength(3) // header + 2 source blocks
   })
+
+  it('uses comma boundary on subIndex to prevent matching subIndex:10 when looking for subIndex:1', async () => {
+    // The query must call db.prepare with a LIKE param containing the trailing
+    // comma boundary, so chapter 1 doesn't accidentally pull chapter 10's row.
+    const captured = []
+    db.prepare.mockImplementation((sql) => ({
+      get: vi.fn((...params) => {
+        captured.push({ sql, params })
+        return {
+          output_text: '{"strategy":null,"beat_strategies":[]}',
+          video_id: 1,
+          title: 'Ref',
+        }
+      }),
+    }))
+    await loadPriorChapterStrategies(['p1'], 1)
+    const subIndexParam = captured[0].params.find(p => typeof p === 'string' && p.includes('subIndex'))
+    expect(subIndexParam).toBe('%"subIndex":1,%')
+  })
 })
 
 import { assertNoSelfReference, assertPriorsComplete } from '../broll-prior-strategies.js'

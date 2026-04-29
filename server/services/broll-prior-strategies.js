@@ -44,7 +44,7 @@ export async function loadPriorChapterStrategies(priorPids, chapterIndex) {
          AND br.metadata_json LIKE '%"isSubRun":true%'
          AND br.status = 'complete'
        ORDER BY br.id DESC LIMIT 1`
-    ).get(`%"pipelineId":"${pid}"%`, `%"subIndex":${chapterIndex}%`)
+    ).get(`%"pipelineId":"${pid}"%`, `%"subIndex":${chapterIndex},%`)
     if (!subRun) {
       throw new Error(`[broll-chain] missing sub-run: pid=${pid} chapter=${chapterIndex}`)
     }
