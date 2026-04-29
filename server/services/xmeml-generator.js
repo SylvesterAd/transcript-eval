@@ -189,12 +189,34 @@ function padSeq(seq) {
   return s.length >= 3 ? s : ('000' + s).slice(-3)
 }
 
+// Build a Premiere-conformant <pathurl> body. Per Apple FCP7 XML spec
+// (the format Premiere imports), pathurl MUST be absolute and start with
+// either `file://localhost` or `file:///`. Each path segment is URL-
+// encoded so spaces / special chars survive Premiere's URL parser.
+//
+// When `mediaFolderAbsolute` is unknown (older extension that doesn't
+// emit it, fallback browser-Blob download path), we fall back to the
+// bare filename — Premiere relinks via Match File Properties → File Name
+// when the XML sits next to the media. That's lossy (forces a Locate
+// dialog every import) but it works; the historical `file://./` form
+// did not — Premiere parsed the `.` as a host and silently failed.
+export function buildPathUrl(mediaFolderAbsolute, filename) {
+  const safeName = String(filename || '')
+  if (!mediaFolderAbsolute) {
+    return safeName  // bare filename; Premiere relinks via filename match
+  }
+  const folder = String(mediaFolderAbsolute).replace(/^\/+/, '').replace(/\/+$/, '')
+  const segs = folder.split('/').map(encodeURIComponent)
+  return `file:///${segs.join('/')}/${encodeURIComponent(safeName)}`
+}
+
 export function generateXmeml({
   sequenceName,
   placements,
   frameRate = 30,
   sequenceSize = { w: 1920, h: 1080 },
-  aroll = null,  // optional: { filename, frameRate, width, height } — emits a V1 track spanning the entire timeline
+  aroll = null,  // optional: { filename, frameRate, width, height, sourceDurationSeconds } — emits a V1 track spanning the entire timeline
+  mediaFolderAbsolute = null,  // absolute filesystem folder, e.g. "/Users/laurynas/Downloads/transcript-eval/export-370-a"; when null we emit bare filenames (Premiere relinks via Match File Properties → File Name when the XML sits next to the media)
 }) {
   if (typeof sequenceName !== 'string' || !sequenceName) {
     throw new Error('generateXmeml: sequenceName must be a non-empty string')
@@ -232,6 +254,13 @@ export function generateXmeml({
     const height = Number.isFinite(p.height) && p.height > 0 ? p.height : seqH
     const sourceFrameRate = Number.isFinite(p.sourceFrameRate) && p.sourceFrameRate > 0
       ? p.sourceFrameRate : frameRate
+    // Source media's full duration in frames (in the file's own framerate).
+    // When unknown, fall back to the timeline duration so the clip plays —
+    // the cost is no trim handles past the cut, but at least the import
+    // succeeds and the clip is the right length.
+    const sourceDurationFrames = Number.isFinite(p.sourceDurationSeconds) && p.sourceDurationSeconds > 0
+      ? Math.round(p.sourceDurationSeconds * sourceFrameRate)
+      : duration
     const cleanName = sanitizeFilename(p.filename)
     return {
       seq: p.seq,
@@ -241,6 +270,7 @@ export function generateXmeml({
       _startFrame: startFrame,
       _endFrame: endFrame,
       _duration: duration,
+      _sourceDurationFrames: sourceDurationFrames,
       _width: width,
       _height: height,
       _sourceFrameRate: sourceFrameRate,
@@ -293,19 +323,26 @@ export function generateXmeml({
     const arollFrameRate = Number.isFinite(aroll.frameRate) && aroll.frameRate > 0 ? aroll.frameRate : frameRate
     const arollWidth = Number.isFinite(aroll.width) && aroll.width > 0 ? aroll.width : seqW
     const arollHeight = Number.isFinite(aroll.height) && aroll.height > 0 ? aroll.height : seqH
+    // A-roll source length: prefer the explicit value; default to the
+    // sequence length (matches the historical behavior where aroll covers
+    // the whole timeline).
+    const arollSourceFrames = Number.isFinite(aroll.sourceDurationSeconds) && aroll.sourceDurationSeconds > 0
+      ? Math.round(aroll.sourceDurationSeconds * arollFrameRate)
+      : sequenceDuration
     const arollClipId = `clip-${seqSlug}-aroll`
     const arollFileId = `file-aroll`
     lines.push(`        <track>`)
     lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
     lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
+    lines.push(`            <duration>${arollSourceFrames}</duration>`)
     lines.push(`            <start>0</start>`)
     lines.push(`            <end>${sequenceDuration}</end>`)
     lines.push(`            <in>0</in>`)
     lines.push(`            <out>${sequenceDuration}</out>`)
     lines.push(`            <file id="${escapeXml(arollFileId)}">`)
     lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
-    lines.push(`              <pathurl>file://./${escapeXml(arollFilename)}</pathurl>`)
-    lines.push(`              <duration>${sequenceDuration}</duration>`)
+    lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
+    lines.push(`              <duration>${arollSourceFrames}</duration>`)
     lines.push(`              <rate><timebase>${arollFrameRate}</timebase></rate>`)
     lines.push(`              <media>`)
     lines.push(`                <video><samplecharacteristics>`)
@@ -320,22 +357,37 @@ export function generateXmeml({
   // Emit tracks in V1, V2, V3 order. If placements is empty, emit zero
   // tracks inside <video> — valid xmeml, opens in Premiere as an empty
   // video layer.
+  //
+  // For each clipitem we model two distinct durations per the FCP7
+  // XMEML spec:
+  //   <clipitem><duration> + <file><duration> = the SOURCE media's full
+  //     length (so Premiere shows trim handles past the cut).
+  //   <in>/<out> = the slice OF the source we're using (sequence frames).
+  //     out − in = (timeline end − timeline start).
+  //   <start>/<end> = where on the sequence timeline this slice lands.
+  //
+  // Today every cut starts at source frame 0; if/when the b-roll editor
+  // exposes a per-placement source-IN, plumb it through and adjust the
+  // `in`/`out` calc here.
   const trackIndices = Array.from(tracksByIndex.keys()).sort((a, b) => a - b)
   for (const trackIdx of trackIndices) {
     lines.push(`        <track>`)
     for (const p of tracksByIndex.get(trackIdx)) {
       const clipId = `clip-${seqSlug}-${padSeq(p.seq)}`
       const fileId = `file-${slugifyForId(p.source)}-${slugifyForId(p.sourceItemId) || padSeq(p.seq)}`
+      const inFrame = 0
+      const outFrame = inFrame + p._duration
       lines.push(`          <clipitem id="${escapeXml(clipId)}">`)
       lines.push(`            <name>${escapeXml(p.filename)}</name>`)
+      lines.push(`            <duration>${p._sourceDurationFrames}</duration>`)
       lines.push(`            <start>${p._startFrame}</start>`)
       lines.push(`            <end>${p._endFrame}</end>`)
-      lines.push(`            <in>0</in>`)
-      lines.push(`            <out>${p._duration}</out>`)
+      lines.push(`            <in>${inFrame}</in>`)
+      lines.push(`            <out>${outFrame}</out>`)
       lines.push(`            <file id="${escapeXml(fileId)}">`)
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
-      lines.push(`              <pathurl>file://./${escapeXml(p.filename)}</pathurl>`)
-      lines.push(`              <duration>${p._duration}</duration>`)
+      lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
+      lines.push(`              <duration>${p._sourceDurationFrames}</duration>`)
       lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
       lines.push(`              <media>`)
       lines.push(`                <video><samplecharacteristics>`)

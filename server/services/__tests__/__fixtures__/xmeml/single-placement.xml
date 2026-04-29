@@ -16,13 +16,14 @@
         <track>
           <clipitem id="clip-variant-c-001">
             <name>001_envato_NX9WYGQ.mov</name>
+            <duration>120</duration>
             <start>762</start>
             <end>882</end>
             <in>0</in>
             <out>120</out>
             <file id="file-envato-NX9WYGQ">
               <name>001_envato_NX9WYGQ.mov</name>
-              <pathurl>file://./001_envato_NX9WYGQ.mov</pathurl>
+              <pathurl>001_envato_NX9WYGQ.mov</pathurl>
               <duration>120</duration>
               <rate><timebase>30</timebase></rate>
               <media>

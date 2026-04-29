@@ -23,6 +23,31 @@ beforeEach(() => {
   vi.resetModules()
 })
 
+describe('pickAbsoluteFolder', () => {
+  it('extracts the parent folder from any item with final_path', async () => {
+    const { pickAbsoluteFolder } = await import('../queue.js')
+    const items = [
+      { source_item_id: 'a', final_path: null },
+      { source_item_id: 'b', final_path: '/Users/laurynas/Downloads/transcript-eval/export-370-a/002_pexels_x.mp4' },
+      { source_item_id: 'c', final_path: '/Users/laurynas/Downloads/transcript-eval/export-370-a/003_envato_y.mov' },
+    ]
+    expect(pickAbsoluteFolder(items)).toBe('/Users/laurynas/Downloads/transcript-eval/export-370-a')
+  })
+
+  it('returns null when no item carries final_path', async () => {
+    const { pickAbsoluteFolder } = await import('../queue.js')
+    expect(pickAbsoluteFolder([{ final_path: null }, { final_path: '' }])).toBe(null)
+    expect(pickAbsoluteFolder([])).toBe(null)
+    expect(pickAbsoluteFolder(null)).toBe(null)
+  })
+
+  it('handles Windows-style backslash paths', async () => {
+    const { pickAbsoluteFolder } = await import('../queue.js')
+    const items = [{ final_path: 'C:\\Users\\jane\\Downloads\\export-1\\001_x.mp4' }]
+    expect(pickAbsoluteFolder(items)).toBe('C:\\Users\\jane\\Downloads\\export-1')
+  })
+})
+
 describe('buildInitialRunState', () => {
   it('preserves manifest items[].signed_url (A-roll Cloudflare URL passthrough)', async () => {
     const { buildInitialRunState } = await import('../queue.js')

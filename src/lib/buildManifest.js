@@ -99,6 +99,13 @@ export function buildManifest({ manifests, options = {} }) {
         resolution: raw.resolution || { width: 1920, height: 1080 },
         frame_rate: raw.frame_rate || 30,
         est_size_bytes: typeof raw.est_size_bytes === 'number' ? raw.est_size_bytes : 0,
+        // Source media's full length. Forwarded to xmeml-generator so
+        // <file><duration> reports the source's real length, giving
+        // Premiere proper trim handles past the cut. Distinct from each
+        // placement's timeline_duration_s.
+        duration_seconds: typeof raw.duration_seconds === 'number' && raw.duration_seconds > 0
+          ? raw.duration_seconds
+          : null,
         // Preserve signed_url when the manifest endpoint pre-populated
         // it (today: A-roll items carry the Cloudflare Stream URL so
         // the extension queue skips the mint phase). Without this the
