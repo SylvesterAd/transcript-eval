@@ -77,6 +77,11 @@ export default function AssetsView() {
   }
 
   const groups = [...(data?.classification?.groups || [])].sort((a, b) => (b.videoIds?.length || 0) - (a.videoIds?.length || 0))
+  // Sub-groups never own classification themselves — Re-classify and the
+  // auto-confirm hook are disabled at this level. The user has to navigate
+  // to the parent project to re-classify (where progress can be preserved
+  // when the new partitioning matches the existing sub-group structure).
+  const isSubGroup = !!data?.group?.parent_group_id
 
   // Derive confirmedGroups from API when project is already confirmed
   const effectiveConfirmedGroups = confirmedGroups || (
@@ -137,9 +142,12 @@ export default function AssetsView() {
   // Auto-confirm + advance for single-video projects (no multi-cam means there's nothing
   // to sync, and surfacing an extra Confirm button is just friction). Fires only once
   // per mount via autoConfirmRef so we don't loop on re-renders.
+  // Sub-groups are explicitly skipped — confirming a sub-group would create a
+  // recursive sub-sub-group (the 239→240→241 bug pattern).
   const autoConfirmRef = useRef(false)
   useEffect(() => {
     if (autoConfirmRef.current) return
+    if (isSubGroup) return
     if (data?.group?.assembly_status !== 'classified') return
     if (groups.length !== 1 || (groups[0].videoIds?.length || 0) !== 1) return
     autoConfirmRef.current = true
@@ -155,7 +163,7 @@ export default function AssetsView() {
         }
       } catch {}
     })()
-  }, [id, data?.group?.assembly_status, groups])
+  }, [id, data?.group?.assembly_status, groups, isSubGroup])
 
   // After auto-confirm completes, jump straight to the editor — skipping the
   // "Proceed to Editor" click. Only fires for the auto-confirm path; users who
@@ -167,11 +175,31 @@ export default function AssetsView() {
   }, [effectiveConfirmedGroups, navigate])
 
   const handleReclassify = async () => {
+    // Server enforces this too, but bail early on the client to avoid even
+    // showing a confirmation prompt on a sub-group (where the action would
+    // 403 anyway).
+    if (isSubGroup) return
+    const proceed = window.confirm(
+      'Re-classify will check whether your videos still group the same way. ' +
+      'If they do, your rough cut and b-roll progress are preserved. ' +
+      'If the grouping changes, that progress will be discarded.\n\nContinue?'
+    )
+    if (!proceed) return
+
     setReclassifying(true)
     setConfirmedGroups(null)
     setSelectedIds(new Set())
-    await apiPost(`/videos/groups/${id}/reclassify`)
-    // Poll will pick up the status change
+    try {
+      const json = await apiPost(`/videos/groups/${id}/reclassify`)
+      if (json?.unchanged) {
+        // Same structure: parent stays at 'confirmed'; refetching wouldn't show
+        // the re-classify spinner go away because status didn't flip. Stop the
+        // spinner manually and surface a brief note.
+        setReclassifying(false)
+        window.alert('Videos still group the same way — your progress was preserved.')
+      }
+    } catch {}
+    // Poll will pick up the status change for the "different" path
     refetchClassification()
   }
 
@@ -236,13 +264,15 @@ export default function AssetsView() {
           <p className="text-on-surface-variant text-sm">{effectiveConfirmedGroups ? 'Organize and sync your raw footage for the kinetic editor.' : (data?.group?.name || '')}</p>
         </div>
         <div className="flex gap-3">
-          <button
-            onClick={handleReclassify}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-on-surface-variant hover:bg-surface-container-highest/50 transition-colors"
-          >
-            <span className="material-symbols-outlined text-lg">refresh</span>
-            Re-classify
-          </button>
+          {!isSubGroup && (
+            <button
+              onClick={handleReclassify}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-on-surface-variant hover:bg-surface-container-highest/50 transition-colors"
+            >
+              <span className="material-symbols-outlined text-lg">refresh</span>
+              Re-classify
+            </button>
+          )}
           {!effectiveConfirmedGroups && groups.length > 0 && data?.group?.assembly_status === 'classified' && (
             <button
               onClick={handleConfirm}

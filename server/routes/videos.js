@@ -672,7 +672,7 @@ router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
 
 // Get classification data + videos with media info
 router.get('/groups/:id/classification', requireAuth, async (req, res) => {
-  const group = await db.prepare(`SELECT id, name, assembly_status, assembly_error, classification_json FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  const group = await db.prepare(`SELECT id, name, assembly_status, assembly_error, classification_json, parent_group_id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
   // If confirmed, videos live in sub-groups — gather them all
@@ -717,31 +717,46 @@ router.get('/groups/:id/classification', requireAuth, async (req, res) => {
   }
 
   res.json({
-    group: { id: group.id, name: group.name, assembly_status: group.assembly_status, assembly_error: group.assembly_error },
+    group: {
+      id: group.id,
+      name: group.name,
+      assembly_status: group.assembly_status,
+      assembly_error: group.assembly_error,
+      parent_group_id: group.parent_group_id || null,
+    },
     classification,
     videos: videosWithInfo,
     subGroups,
   })
 })
 
-// Re-run Gemini classification (gathers split videos back from sub-groups first)
+// Re-run Gemini classification on a top-level project. Smart-diff: if the new
+// classification produces the same per-sub-group videoId partitioning, the
+// existing sub-groups (and their rough_cut + b-roll progress) are preserved;
+// otherwise sub-groups are deleted and the user re-confirms. Sub-groups
+// themselves can't be re-classified — that path created the 239→240→241
+// recursive-split bug.
 router.post('/groups/:id/reclassify', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
-  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  const group = await db.prepare(
+    `SELECT id, parent_group_id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
+  ).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
-
-  // Gather videos back from child sub-groups
-  const subGroups = await db.prepare('SELECT id FROM video_groups WHERE parent_group_id = ?').all(groupId)
-  for (const sg of subGroups) {
-    await db.prepare('UPDATE videos SET group_id = ? WHERE group_id = ?').run(groupId, sg.id)
-    await db.prepare('DELETE FROM video_groups WHERE id = ?').run(sg.id)
-  }
-  if (subGroups.length > 0) {
-    console.log(`[reclassify] Gathered videos back from ${subGroups.length} sub-groups into project ${groupId}`)
+  if (group.parent_group_id) {
+    return res.status(403).json({
+      error: 'Cannot re-classify a sub-group. Re-classify the top-level project instead.',
+      parent_group_id: group.parent_group_id,
+    })
   }
 
-  res.json({ ok: true, message: 'Reclassification started' })
-  classifyVideosForReview(groupId)
+  try {
+    const { reclassifyGroup } = await import('../services/auto-orchestrator.js')
+    const result = await reclassifyGroup(groupId)
+    res.json({ ok: true, unchanged: result.unchanged, classification: result.classification })
+  } catch (err) {
+    console.error(`[reclassify] Group ${groupId} failed:`, err.message)
+    res.status(500).json({ error: err.message || 'Reclassification failed' })
+  }
 })
 
 // Save modified grouping from user
@@ -765,11 +780,19 @@ router.post('/groups/:id/update-classification', requireAuth, async (req, res) =
   res.json({ ok: true, classification })
 })
 
-// Confirm classification → split groups + start sync
+// Confirm classification → split groups + start sync. Sub-groups can't be
+// confirmed (would create a recursive sub-sub-group); only top-level projects
+// are valid targets.
 router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) => {
   const groupId = parseInt(req.params.id)
   const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
+  if (group.parent_group_id) {
+    return res.status(403).json({
+      error: 'Cannot confirm classification on a sub-group.',
+      parent_group_id: group.parent_group_id,
+    })
+  }
 
   const { groups } = req.body
   if (!Array.isArray(groups) || groups.length === 0) return res.status(400).json({ error: 'groups array required' })
@@ -777,13 +800,17 @@ router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) 
   // Splitting + propagation lives in auto-orchestrator so Full Auto's
   // chainAfterClassify and the manual click path execute identical logic.
   const { confirmClassificationGroup } = await import('../services/auto-orchestrator.js')
-  const r = await confirmClassificationGroup(groupId, groups, {
-    propagateAutoRoughCut: !!group.auto_rough_cut,
-    propagatePathId: group.path_id,
-    userId: req.auth.userId,
-  })
-
-  res.json({ ok: true, groupIds: r.subGroupIds })
+  try {
+    const r = await confirmClassificationGroup(groupId, groups, {
+      propagateAutoRoughCut: !!group.auto_rough_cut,
+      propagatePathId: group.path_id,
+      userId: req.auth.userId,
+    })
+    res.json({ ok: true, groupIds: r.subGroupIds })
+  } catch (err) {
+    console.error(`[confirm-classification] Group ${groupId} failed:`, err.message)
+    res.status(500).json({ error: err.message })
+  }
 })
 
 // Save editor state for a group
