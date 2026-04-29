@@ -55,14 +55,22 @@ function LibraryTile({ lib, checked, onToggle }) {
 export default function StepLibraries({ state, setState }) {
   const selected = state.libraries
   const none = selected.length === 0
-  const toggle = id => setState.libraries(
-    selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]
-  )
+  const toggle = id => {
+    const wasEmpty = selected.length === 0
+    const next = selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]
+    setState.libraries(next)
+    // First paid lib selected: drop the default Freepik fallback. The user
+    // can re-enable it explicitly via the toggle below.
+    if (wasEmpty && next.length > 0 && state.freepikOptIn) setState.freepikOptIn(false)
+  }
   const clearAll = () => setState.libraries([])
 
-  const sourcesLine = none
-    ? `Pexels${state.freepikOptIn ? ' + Freepik (paid, confirm each)' : ' only'}`
-    : selected.map(id => LIBRARIES.find(l => l.id === id)?.name).filter(Boolean).join(' · ')
+  const paidNames = selected.map(id => LIBRARIES.find(l => l.id === id)?.name).filter(Boolean)
+  const sourcesLine = [
+    ...paidNames,
+    'Pexels',
+    state.freepikOptIn ? 'Freepik (paid, confirm each)' : null,
+  ].filter(Boolean).join(' · ')
 
   return (
     <div>
@@ -125,25 +133,26 @@ export default function StepLibraries({ state, setState }) {
               <span className="font-mono text-lime">$0.05 / clip</span>.{' '}
               <span className="text-on-surface font-semibold">Nothing is charged until you confirm each download.</span>
             </p>
-
-            {none && (
-              <div className="mt-4 p-3.5 rounded-[10px] bg-surface-container-highest ring-1 ring-inset ring-border-subtle/12 flex items-center justify-between gap-4">
-                <div className="flex items-center gap-4">
-                  <div className="px-2.5 py-1.5 rounded bg-black/25 flex items-center">
-                    <span className="text-sm font-extrabold text-on-surface font-['Inter']">Freepik</span>
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-on-surface font-['Inter']">Allow paid Freepik fallback</div>
-                    <div className="text-[11px] text-on-surface-variant mt-[3px] font-['Inter']">
-                      Surfaces clips for shots Pexels misses — you approve every charge before download.
-                    </div>
-                  </div>
-                </div>
-                <Toggle checked={state.freepikOptIn} onChange={setState.freepikOptIn} tone="secondary" />
-              </div>
-            )}
           </div>
         </div>
+      </div>
+
+      <div
+        onClick={(e) => { e.stopPropagation(); setState.freepikOptIn(!state.freepikOptIn) }}
+        className="mt-3 p-3.5 rounded-[10px] bg-surface-container-highest ring-1 ring-inset ring-border-subtle/12 flex items-center justify-between gap-4 cursor-pointer"
+      >
+        <div className="flex items-center gap-4">
+          <div className="px-2.5 py-1.5 rounded bg-black/25 flex items-center">
+            <span className="text-sm font-extrabold text-on-surface font-['Inter']">Freepik</span>
+          </div>
+          <div>
+            <div className="text-xs font-bold text-on-surface font-['Inter']">Allow paid Freepik fallback</div>
+            <div className="text-[11px] text-on-surface-variant mt-[3px] font-['Inter']">
+              Surfaces clips for shots Pexels misses — you approve every charge before download.
+            </div>
+          </div>
+        </div>
+        <Toggle checked={state.freepikOptIn} onChange={setState.freepikOptIn} tone="secondary" />
       </div>
 
       <div className="mt-4 px-[18px] py-3.5 rounded-[10px] bg-surface-container-low ring-1 ring-inset ring-border-subtle/8 flex items-center gap-3">
