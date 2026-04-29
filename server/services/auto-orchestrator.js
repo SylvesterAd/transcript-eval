@@ -320,10 +320,51 @@ export async function chainAfterClassify(groupId) {
   })
 }
 
+// True if the group already has at least one completed broll_runs row whose
+// strategy belongs to the named phase ('refs' = main_analysis/plan_prep,
+// 'strategy' = create_strategy/create_combined_strategy, 'plan' = plan).
+// 'search' always returns false — re-running search is idempotent and safer
+// than skipping (per spec).
+async function phaseHasOutputs(groupId, phase) {
+  const groupVideoRows = await db.prepare('SELECT id FROM videos WHERE group_id = ?').all(groupId)
+  const videoIds = groupVideoRows.map(r => r.id)
+  if (!videoIds.length) return false
+
+  // Map phase → strategy_kind list
+  const kinds = {
+    refs: ['main_analysis', 'plan_prep'],
+    strategy: ['create_strategy', 'create_combined_strategy'],
+    plan: ['plan'],
+    search: [], // search has its own table / pipeline shape — handled below
+  }[phase] || []
+
+  if (kinds.length) {
+    const placeholders = videoIds.map(() => '?').join(',')
+    const kindPlaceholders = kinds.map(() => '?').join(',')
+    const row = await db.prepare(
+      `SELECT 1 FROM broll_runs r
+       JOIN broll_strategies s ON s.id = r.strategy_id
+       WHERE r.video_id IN (${placeholders}) AND r.status = 'complete'
+         AND s.strategy_kind IN (${kindPlaceholders})
+       LIMIT 1`
+    ).get(...videoIds, ...kinds)
+    return !!row
+  }
+
+  // For 'search', never skip — idempotent re-run is safer than missing the substage.
+  return false
+}
+
 // runFullAutoBrollChain — fires the b-roll pipeline chain (references analyzed
 // → strategy → plan → first-10 search) for sub-groups whose parent picked
 // hands-off / strategy-only / guided. Respects pathToFlags pauses.
-export async function runFullAutoBrollChain(subGroupId) {
+//
+// Options:
+//   resumeFromSubstage — when set (boot-time auto-resume), skips phases whose
+//     outputs already exist in broll_runs. Existing callers omit this and get
+//     unchanged behavior. The skipped phase's pipelineIds are recovered from
+//     the latest completed runs so downstream phases still get their inputs.
+export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = null } = {}) {
   if (!subGroupId) return
   await db.prepare(
     "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = 'refs' WHERE id = ?"
@@ -347,16 +388,69 @@ export async function runFullAutoBrollChain(subGroupId) {
     `).get(subGroupId)
     if (!mainVideo) throw new Error('No video with transcript in sub-group')
 
-    const refs = await runner.runAllReferences({ subGroupId, mainVideoId: mainVideo.id })
-    await runner.waitForPipelinesComplete([refs.prepPipelineId, ...refs.analysisPipelineIds].filter(Boolean))
+    // Phase 1: refs
+    let refs = { prepPipelineId: null, analysisPipelineIds: [] }
+    const skipRefs = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'refs')
+    if (skipRefs) {
+      console.log(`[orchestrator] Skipping refs phase for group ${subGroupId} — outputs already exist`)
+      // Recover prep + analysis pipeline IDs from the latest completed runs so
+      // strategy phase still has its inputs.
+      const prepRow = await db.prepare(`
+        SELECT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind = 'plan_prep' AND r.status = 'complete'
+        ORDER BY r.id DESC LIMIT 1
+      `).get(mainVideo.id)
+      if (prepRow) {
+        try { refs.prepPipelineId = JSON.parse(prepRow.metadata_json || '{}').pipelineId || null } catch {}
+      }
+      const analysisRows = await db.prepare(`
+        SELECT DISTINCT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind = 'main_analysis' AND r.status = 'complete'
+        ORDER BY r.id DESC
+      `).all(mainVideo.id)
+      const pids = new Set()
+      for (const a of analysisRows) {
+        try {
+          const m = JSON.parse(a.metadata_json || '{}')
+          if (m.pipelineId) pids.add(m.pipelineId)
+        } catch {}
+      }
+      refs.analysisPipelineIds = [...pids]
+    } else {
+      refs = await runner.runAllReferences({ subGroupId, mainVideoId: mainVideo.id })
+      await runner.waitForPipelinesComplete([refs.prepPipelineId, ...refs.analysisPipelineIds].filter(Boolean))
+    }
     if (await isCancelled(subGroupId)) return
 
+    // Phase 2: strategy
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'strategy' WHERE id = ?").run(subGroupId)
-    const strats = await runner.runStrategies({
-      subGroupId, mainVideoId: mainVideo.id,
-      prepPipelineId: refs.prepPipelineId, analysisPipelineIds: refs.analysisPipelineIds,
-    })
-    await runner.waitForPipelinesComplete(strats.strategyPipelineIds)
+    let strats = { strategyPipelineIds: [] }
+    const skipStrategy = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'strategy')
+    if (skipStrategy) {
+      console.log(`[orchestrator] Skipping strategy phase for group ${subGroupId} — outputs already exist`)
+      const stratRows = await db.prepare(`
+        SELECT DISTINCT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind IN ('create_strategy', 'create_combined_strategy') AND r.status = 'complete'
+        ORDER BY r.id DESC
+      `).all(mainVideo.id)
+      const pids = new Set()
+      for (const r of stratRows) {
+        try {
+          const m = JSON.parse(r.metadata_json || '{}')
+          if (m.pipelineId) pids.add(m.pipelineId)
+        } catch {}
+      }
+      strats.strategyPipelineIds = [...pids]
+    } else {
+      strats = await runner.runStrategies({
+        subGroupId, mainVideoId: mainVideo.id,
+        prepPipelineId: refs.prepPipelineId, analysisPipelineIds: refs.analysisPipelineIds,
+      })
+      await runner.waitForPipelinesComplete(strats.strategyPipelineIds)
+    }
     if (await isCancelled(subGroupId)) return
 
     if (flags.stopAfterStrategy) {
@@ -365,13 +459,34 @@ export async function runFullAutoBrollChain(subGroupId) {
       return
     }
 
+    // Phase 3: plan
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'plan' WHERE id = ?").run(subGroupId)
-    const plans = await runner.runPlanForEachVariant({
-      subGroupId, mainVideoId: mainVideo.id,
-      prepPipelineId: refs.prepPipelineId,
-      strategyPipelineIds: strats.strategyPipelineIds,
-    })
-    await runner.waitForPipelinesComplete(plans.planPipelineIds)
+    let plans = { planPipelineIds: [] }
+    const skipPlan = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'plan')
+    if (skipPlan) {
+      console.log(`[orchestrator] Skipping plan phase for group ${subGroupId} — outputs already exist`)
+      const planRows = await db.prepare(`
+        SELECT DISTINCT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind = 'plan' AND r.status = 'complete'
+        ORDER BY r.id DESC
+      `).all(mainVideo.id)
+      const pids = new Set()
+      for (const r of planRows) {
+        try {
+          const m = JSON.parse(r.metadata_json || '{}')
+          if (m.pipelineId) pids.add(m.pipelineId)
+        } catch {}
+      }
+      plans.planPipelineIds = [...pids]
+    } else {
+      plans = await runner.runPlanForEachVariant({
+        subGroupId, mainVideoId: mainVideo.id,
+        prepPipelineId: refs.prepPipelineId,
+        strategyPipelineIds: strats.strategyPipelineIds,
+      })
+      await runner.waitForPipelinesComplete(plans.planPipelineIds)
+    }
     if (await isCancelled(subGroupId)) return
 
     if (flags.stopAfterPlan) {
@@ -380,6 +495,7 @@ export async function runFullAutoBrollChain(subGroupId) {
       return
     }
 
+    // Phase 4: search — always runs (idempotent re-run is safer than skipping)
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
     await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: plans.planPipelineIds })
 
