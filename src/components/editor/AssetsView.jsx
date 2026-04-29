@@ -35,6 +35,19 @@ export default function AssetsView() {
 
   const loading = initialLoading || reclassifying
 
+  // /editor/<sub-group-id>/assets should never render the assets UI — the
+  // assets-management surface (Re-classify, move videos between groups,
+  // confirm) is meaningless on a sub-group and was the trigger that produced
+  // the recursive 239→240→241 split. Redirect to the parent project's
+  // assets view, which shows the same videos with the correct sub-group
+  // "Proceed to Editor" UX.
+  useEffect(() => {
+    const parentId = data?.group?.parent_group_id
+    if (parentId) {
+      navigate(`/editor/${parentId}/assets`, { replace: true })
+    }
+  }, [data?.group?.parent_group_id, navigate])
+
   // Poll while classifying
   useEffect(() => {
     if (!data || data.group?.assembly_status !== 'classifying') return
@@ -203,7 +216,10 @@ export default function AssetsView() {
     refetchClassification()
   }
 
-  if (loading || data?.group?.assembly_status === 'classifying') {
+  // Loading, classifying, or about-to-redirect to the parent project's assets
+  // view (sub-groups don't get an assets-management surface — see the redirect
+  // useEffect above). Render a spinner to avoid a flash of the wrong UI.
+  if (loading || data?.group?.assembly_status === 'classifying' || data?.group?.parent_group_id) {
     return (
       <main className="flex-1 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
