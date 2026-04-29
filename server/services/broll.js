@@ -3927,7 +3927,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subStatus })
     } : undefined
 
-    const result = await callLLM({
+    const result = await withRetry(() => callLLM({
       model: stage.model || 'gemini-3-flash-preview',
       systemInstruction,
       prompt: finalPrompt,
@@ -3936,7 +3936,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       videoFile: videoFile || undefined,
       onProgress,
       abortSignal: pipelineAbort.signal,
-    })
+    }), { pipelineId, label: `runLLMCall: ${stage.name || stage.type}` })
     result._resolvedPrompt = finalPrompt
     result._resolvedSystem = systemInstruction
     return result
@@ -4221,7 +4221,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                   updateSegStatus('Uploading segment...')
                 }
 
-                const result = await callLLM({
+                const result = await withRetry(() => callLLM({
                   model: stage.model || 'gemini-3-flash-preview',
                   systemInstruction: winSystem,
                   prompt: winPrompt,
@@ -4230,7 +4230,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                   videoFile: windowVideoFile || undefined,
                   onProgress: (status) => updateSegStatus(status),
                   abortSignal: pipelineAbort.signal,
-                })
+                }), { pipelineId, label: `window ${win.start_tc}-${win.end_tc} (${ex.title || `Video #${ex.id}`})` })
 
                 // Convert relative timestamps to absolute by adding window offset
                 let outputText = result.text
@@ -4429,14 +4429,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
           const chSystem = replacePlaceholders(stage.system_instruction || '')
 
-          const result = await callLLM({
+          const result = await withRetry(() => callLLM({
             model: stage.model || 'gemini-3.1-pro-preview',
             systemInstruction: chSystem,
             prompt: chPrompt,
             params: stage.params || { temperature: 0.3 },
             experimentId: null,
             abortSignal: pipelineAbort.signal,
-          })
+          }), { pipelineId, label: `chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
           chapterResults[c] = result.text
           totalTokensIn += result.tokensIn || 0
@@ -4496,14 +4496,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             .replace(/\{\{segment_number\}\}/g, String(s + 1))
             .replace(/\{\{total_segments\}\}/g, String(segments.length))
           const systemInstruction = replacePlaceholders(stage.system_instruction || '')
-          const result = await callLLM({
+          const result = await withRetry(() => callLLM({
             model: stage.model || 'gemini-3-flash-preview',
             systemInstruction,
             prompt: segPrompt.includes('{{transcript}}') ? segPrompt : `${segPrompt}\n\n${seg.mainText || seg}`,
             params: stage.params || { temperature: 0.2 },
             experimentId: null,
             abortSignal: pipelineAbort.signal,
-          })
+          }), { pipelineId, label: `segment ${s + 1}/${segments.length}` })
           results.push(result.text)
           totalTokensIn += result.tokensIn || 0
           totalTokensOut += result.tokensOut || 0
