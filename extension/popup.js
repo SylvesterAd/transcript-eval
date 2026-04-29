@@ -230,29 +230,11 @@ async function renderDiskErrorIfAny() {
   }
 }
 
-// Ext.8 — "Export diagnostic bundle" button. Kicks off
-// diagnostics.buildBundle() (which invokes chrome.downloads.download
-// with saveAs: true) and surfaces the result in the row-detail text.
-async function renderDiagRow() {
-  const btn = document.getElementById('btn-build-bundle')
-  const detail = document.getElementById('detail-diag')
-  if (!btn || btn._wired) return
-  btn._wired = true
-  btn.addEventListener('click', async () => {
-    btn.disabled = true
-    detail.textContent = 'Building bundle…'
-    try {
-      const res = await buildBundle()
-      detail.textContent = res?.ok
-        ? `Saved ${res.filename} (${Math.round((res.bytes || 0) / 1024)} KB)`
-        : 'Bundle failed'
-    } catch (err) {
-      detail.textContent = `Error: ${String(err?.message || err)}`
-    } finally {
-      btn.disabled = false
-    }
-  })
-}
+// Ext.8 — diag button row. Wiring is done at module-load (see
+// wireDiagButtonEarly at end of file) so the button works even if
+// every other render step throws. This function exists only to keep
+// the render() chain symmetrical; it's a no-op now.
+async function renderDiagRow() { /* wired at module-load */ }
 
 // Ext.8 — "Send diagnostic events" toggle. The persisted flag is
 // `telemetry_opt_out`; the checkbox represents "send" (checked = ON
@@ -307,5 +289,43 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     render()
   }
 })
+
+// Wire the diagnostic-bundle button as a TOP-LEVEL side effect — not
+// nested inside render(). This makes the button work even if every
+// other render step throws (corrupt JWT, missing config row, broken
+// envato cookie probe, etc.). Diagnostics is the user's escape hatch
+// when the popup is broken; it must never depend on the popup's
+// state-rendering succeeding. Logs to console at every step so the
+// next failure mode (if any) is observable instead of silent.
+;(function wireDiagButtonEarly() {
+  const btn = document.getElementById('btn-build-bundle')
+  const detail = document.getElementById('detail-diag')
+  if (!btn) {
+    console.error('[popup] diag button not found in DOM at module-load — popup.html mismatch')
+    return
+  }
+  if (btn._wired) return
+  btn._wired = true
+  console.log('[popup] diag button wired (early)')
+  btn.addEventListener('click', async () => {
+    console.log('[popup] diag click fired')
+    btn.disabled = true
+    if (detail) detail.textContent = 'Building bundle…'
+    try {
+      const res = await buildBundle()
+      console.log('[popup] diag buildBundle result:', res)
+      if (detail) {
+        detail.textContent = res?.ok
+          ? `Saved ${res.filename} (${Math.round((res.bytes || 0) / 1024)} KB)`
+          : 'Bundle failed'
+      }
+    } catch (err) {
+      console.error('[popup] diag buildBundle threw:', err)
+      if (detail) detail.textContent = `Error: ${String(err?.message || err)}`
+    } finally {
+      btn.disabled = false
+    }
+  })
+})()
 
 render()
