@@ -49,3 +49,76 @@ describe('slimChapterStrategy', () => {
     expect(out.startsWith('no json here')).toBe(true)
   })
 })
+
+import { vi, beforeEach } from 'vitest'
+import { loadPriorChapterStrategies } from '../broll-prior-strategies.js'
+
+vi.mock('../../db.js', () => ({
+  default: { prepare: vi.fn() },
+}))
+import db from '../../db.js'
+
+describe('loadPriorChapterStrategies', () => {
+  beforeEach(() => { db.prepare.mockReset() })
+
+  it('returns empty string when priors array is empty/undefined/null', async () => {
+    expect(await loadPriorChapterStrategies([], 0)).toBe('')
+    expect(await loadPriorChapterStrategies(undefined, 0)).toBe('')
+    expect(await loadPriorChapterStrategies(null, 0)).toBe('')
+    expect(db.prepare).not.toHaveBeenCalled()
+  })
+
+  it('throws when sub-run is missing for a prior pipeline + chapter', async () => {
+    db.prepare.mockReturnValue({ get: vi.fn().mockReturnValue(undefined) })
+    await expect(loadPriorChapterStrategies(['pid-x'], 2))
+      .rejects.toThrow('missing sub-run: pid=pid-x chapter=2')
+  })
+
+  it('formats single prior with directive header + reference title', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: JSON.stringify({
+          strategy: { commonalities: 'X' },
+          beat_strategies: [{ beat_name: 'Hook' }],
+        }),
+        video_id: 5,
+        title: 'My Reference Video',
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['pid-1'], 0)
+    expect(out).toContain('## Prior strategies for this chapter (do NOT produce a similar strategy):')
+    expect(out).toContain('=== Source: Reference: My Reference Video ===')
+    expect(out).toContain('"beat_name": "Hook"')
+    expect(out).toContain('"commonalities": "X"')
+  })
+
+  it('uses pid as fallback label when video has no title', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: '{"strategy":null,"beat_strategies":[]}',
+        video_id: 5,
+        title: null,
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['pid-fallback'], 0)
+    expect(out).toContain('=== Source: pid-fallback ===')
+  })
+
+  it('two priors → two blocks in pipeline-id order separated by blank line', async () => {
+    let callCount = 0
+    db.prepare.mockReturnValue({
+      get: vi.fn(() => {
+        callCount++
+        return {
+          output_text: JSON.stringify({ strategy: `s${callCount}`, beat_strategies: [] }),
+          video_id: callCount,
+          title: `Ref ${callCount}`,
+        }
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1', 'p2'], 0)
+    expect(out.indexOf('Ref 1')).toBeLessThan(out.indexOf('Ref 2'))
+    const blocks = out.split('=== Source:')
+    expect(blocks).toHaveLength(3) // header + 2 source blocks
+  })
+})
