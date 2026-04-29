@@ -131,6 +131,20 @@ try {
     )`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id)`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id)`)
+    await pool.query(`ALTER TABLE broll_searches ADD COLUMN IF NOT EXISTS placement_uuid TEXT`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_uuid ON broll_searches(plan_pipeline_id, placement_uuid)`)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS broll_placement_uuids (
+        id SERIAL PRIMARY KEY,
+        plan_pipeline_id TEXT NOT NULL,
+        chapter_index INTEGER NOT NULL,
+        placement_index INTEGER NOT NULL,
+        uuid TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (plan_pipeline_id, chapter_index, placement_index)
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_placement_uuids_plan ON broll_placement_uuids(plan_pipeline_id)`)
     await pool.query(`CREATE TABLE IF NOT EXISTS broll_editor_state (
       plan_pipeline_id TEXT PRIMARY KEY,
       state_json       TEXT    NOT NULL DEFAULT '{}',

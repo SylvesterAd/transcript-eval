@@ -291,6 +291,7 @@ CREATE TABLE IF NOT EXISTS broll_searches (
   batch_id TEXT NOT NULL,
   chapter_index INTEGER NOT NULL,
   placement_index INTEGER NOT NULL,
+  placement_uuid TEXT,
   variant_label TEXT,
   description TEXT,
   brief TEXT,
@@ -307,6 +308,21 @@ CREATE TABLE IF NOT EXISTS broll_searches (
 );
 CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id);
 CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id);
+
+-- Stable per-placement identity. Keyed by the LLM's positional location
+-- (plan_pipeline_id, chapter_index, placement_index); UUID is never reused.
+-- The LLM's broll_runs.output_text is intentionally NOT mutated — this is
+-- the side-table approach so the run record stays a faithful copy of what
+-- the model emitted.
+CREATE TABLE IF NOT EXISTS broll_placement_uuids (
+  id SERIAL PRIMARY KEY,
+  plan_pipeline_id TEXT NOT NULL,
+  chapter_index INTEGER NOT NULL,
+  placement_index INTEGER NOT NULL,
+  uuid TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (plan_pipeline_id, chapter_index, placement_index)
+);
 
 -- B-Roll Example Sets (per video group)
 CREATE TABLE IF NOT EXISTS broll_example_sets (
@@ -373,3 +389,9 @@ CREATE TABLE IF NOT EXISTS export_events (
 CREATE INDEX IF NOT EXISTS idx_export_events_export   ON export_events(export_id, t);
 CREATE INDEX IF NOT EXISTS idx_export_events_failures ON export_events(event, received_at)
   WHERE event IN ('item_failed','rate_limit_hit','session_expired');
+
+-- idx_broll_searches_uuid is created via the inline migration in db.js so
+-- it can run AFTER the placement_uuid ALTER TABLE on existing DBs (schema
+-- runs as one atomic batch — referencing the column here would roll back
+-- the whole schema on first deploy before the migration adds it).
+CREATE INDEX IF NOT EXISTS idx_broll_placement_uuids_plan ON broll_placement_uuids(plan_pipeline_id);
