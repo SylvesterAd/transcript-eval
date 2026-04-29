@@ -29,16 +29,34 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
   const examples = await loadExampleVideos(subGroupId)
   const readyVideos = examples.filter(v => v.id)
 
-  const existingPrep = await db.prepare(
-    `SELECT metadata_json FROM broll_runs WHERE video_id = ? AND status = 'complete' AND metadata_json LIKE '%"phase":"plan_prep"%' AND metadata_json NOT LIKE '%"isSubRun":true%' LIMIT 1`
-  ).get(mainVideoId)
-  const existingPrepId = existingPrep ? JSON.parse(existingPrep.metadata_json || '{}').pipelineId : null
+  // Reuse a previously-completed plan_prep run if one exists for this
+  // video. Match by broll_runs.strategy_id (the dedicated column),
+  // NOT by JSON-pattern on metadata_json — executePipeline writes
+  // `"phase":"plan"` for these rows (defaulted in broll.js), never
+  // `"plan_prep"`, so the old LIKE check never matched and every
+  // server boot's resumeStuckFullAutoChains kicked off a fresh
+  // plan-prep pipeline.
+  const planPrepStrategy = await db.prepare(
+    "SELECT id FROM broll_strategies WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1"
+  ).get()
+  const planPrepStrategyId = planPrepStrategy?.id
+
+  let existingPrepId = null
+  if (planPrepStrategyId) {
+    const existingPrep = await db.prepare(
+      `SELECT metadata_json FROM broll_runs
+       WHERE video_id = ? AND strategy_id = ? AND status = 'complete'
+         AND metadata_json NOT LIKE '%"isSubRun":true%'
+       ORDER BY id DESC LIMIT 1`
+    ).get(mainVideoId, planPrepStrategyId)
+    existingPrepId = existingPrep ? JSON.parse(existingPrep.metadata_json || '{}').pipelineId : null
+  }
 
   let prepPipelineId = existingPrepId
   if (!existingPrepId) {
-    prepPipelineId = `7-${mainVideoId}-${Date.now()}`
+    prepPipelineId = `${planPrepStrategyId || 7}-${mainVideoId}-${Date.now()}`
     brollPipelineProgress.set(prepPipelineId, {
-      strategyId: 7, videoId: mainVideoId, groupId: subGroupId,
+      strategyId: planPrepStrategyId || 7, videoId: mainVideoId, groupId: subGroupId,
       status: 'running', stageName: 'Loading data...', stageIndex: 0, totalStages: 5,
       phase: 'plan_prep', strategyName: 'Plan Prep',
     })
@@ -113,10 +131,19 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
   const { executeCreateStrategy, executeCreateCombinedStrategy, brollPipelineProgress } =
     await import('./broll.js')
 
-  // Skip analysis pipelines that already have a completed strategy
-  const existingStratRuns = await db.prepare(
-    `SELECT metadata_json FROM broll_runs WHERE video_id = ? AND status = 'complete' AND metadata_json LIKE '%"phase":"create_strategy"%' AND metadata_json NOT LIKE '%"isSubRun":true%'`
-  ).all(mainVideoId)
+  // Skip analysis pipelines that already have a completed strategy.
+  // Match by strategy_id (column) — old LIKE on metadata_json's "phase"
+  // never matched, see plan-prep dedup above for the same fix pattern.
+  const createStrategy = await db.prepare(
+    "SELECT id FROM broll_strategies WHERE strategy_kind = 'create_strategy' ORDER BY id LIMIT 1"
+  ).get()
+  const existingStratRuns = createStrategy
+    ? await db.prepare(
+        `SELECT metadata_json FROM broll_runs
+         WHERE video_id = ? AND strategy_id = ? AND status = 'complete'
+           AND metadata_json NOT LIKE '%"isSubRun":true%'`
+      ).all(mainVideoId, createStrategy.id)
+    : []
   const alreadyDoneAnalysisIds = new Set()
   for (const r of existingStratRuns) {
     try {
@@ -141,11 +168,22 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
       .catch(err => console.error(`[broll-runner] Create strategy failed for analysis ${analysisPipelineId}: ${err.message}`))
   }
 
-  // Combined "best of all" strategy if 2+ refs AND (no existing combined OR new analyses)
+  // Combined "best of all" strategy if 2+ refs AND (no existing combined OR new analyses).
+  // Detect via strategy_id (column) — phase JSON-match never worked,
+  // and existingStratRuns above only contains create_strategy rows now,
+  // not create_combined_strategy ones, so we need a separate query.
   let combinedPipelineId = null
-  const existingCombined = existingStratRuns.some(r => {
-    try { return JSON.parse(r.metadata_json || '{}').phase === 'create_combined_strategy' } catch { return false }
-  })
+  const combinedStrategy = await db.prepare(
+    "SELECT id FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy' ORDER BY id LIMIT 1"
+  ).get()
+  const existingCombined = combinedStrategy
+    ? !!(await db.prepare(
+        `SELECT 1 FROM broll_runs
+         WHERE video_id = ? AND strategy_id = ? AND status = 'complete'
+           AND metadata_json NOT LIKE '%"isSubRun":true%'
+         LIMIT 1`
+      ).get(mainVideoId, combinedStrategy.id))
+    : false
   const shouldFireCombined = analysisPipelineIds.length >= 2 && (!existingCombined || newAnalysisIds.length > 0)
   if (shouldFireCombined) {
     combinedPipelineId = `cstrat-${mainVideoId}-${Date.now()}`
