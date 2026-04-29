@@ -142,23 +142,25 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
           const words = (await getTimelineWordTimestamps(groupId)) || []
           const refined = matchPlacementsToTranscript(placements, words)
           // matchPlacementsToTranscript returns NEW objects keyed by
-          // (chapterIndex, placementIndex) for plan placements, or by
-          // userPlacementId for manual ones. Push the refined timing
-          // back onto the original `placements` array (in place) so
-          // buildManifestFromPlacements sees it via p.start/p.end as
-          // numeric seconds. coerceTimingToSeconds passes numbers
-          // through unchanged.
+          // placement.uuid (preferred — stable across reorders/edits) for
+          // plan placements with backfilled uuids, falling back to
+          // (chapterIndex, placementIndex) for legacy rows that pre-date
+          // the uuid backfill, or by userPlacementId for manual ones.
+          // Push the refined timing back onto the original `placements`
+          // array (in place) so buildManifestFromPlacements sees it via
+          // p.start/p.end as numeric seconds. coerceTimingToSeconds
+          // passes numbers through unchanged.
           const byKey = new Map()
           for (const r of refined) {
             const key = r.isUserPlacement
               ? `user:${r.userPlacementId}`
-              : `${r.chapterIndex}:${r.placementIndex}`
+              : (r.uuid || `${r.chapterIndex}:${r.placementIndex}`)
             byKey.set(key, r)
           }
           for (const p of placements) {
             const key = p.isUserPlacement
               ? `user:${p.userPlacementId}`
-              : `${p.chapterIndex}:${p.placementIndex}`
+              : (p.uuid || `${p.chapterIndex}:${p.placementIndex}`)
             const r = byKey.get(key)
             if (r && typeof r.timelineStart === 'number' && typeof r.timelineEnd === 'number') {
               p.start = r.timelineStart
@@ -1015,15 +1017,15 @@ router.put('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) =
 router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
-    const { chapterIndex, placementIndex, description, style, sources } = req.body
-    if (chapterIndex == null || placementIndex == null) {
-      return res.status(400).json({ error: 'chapterIndex and placementIndex required' })
+    const { placementUuid, chapterIndex, placementIndex, description, style, sources } = req.body
+    if (!placementUuid && (chapterIndex == null || placementIndex == null)) {
+      return res.status(400).json({ error: 'placementUuid OR (chapterIndex, placementIndex) required' })
     }
     const overrides = {}
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchSinglePlacement(pipelineId, chapterIndex, placementIndex, overrides)
+    const result = await searchSinglePlacement(pipelineId, { placementUuid, chapterIndex, placementIndex }, overrides)
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })

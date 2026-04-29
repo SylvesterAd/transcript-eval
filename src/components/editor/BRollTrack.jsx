@@ -92,9 +92,12 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     if (!isActive) {
       // Pass stable identity so the new variant can resolve THIS placement post-switch.
       // Bare numeric `index` is per-variant — the same number means a different placement
-      // (or no placement) in the activated variant. chapterIndex+placementIndex identify
-      // chapter-derived placements; userPlacementId identifies pastes/cross-drag results.
+      // (or no placement) in the activated variant. uuid is the strongest identity when
+      // available (chapter-derived placements only); chapterIndex+placementIndex identify
+      // chapter-derived placements positionally across variants; userPlacementId
+      // identifies pastes/cross-drag results.
       onActivate?.({
+        uuid: placement.uuid ?? null,
         chapterIndex: placement.chapterIndex ?? null,
         placementIndex: placement.placementIndex ?? null,
         userPlacementId: placement.userPlacementId ?? null,
@@ -270,7 +273,12 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
   const buildMenuItems = (menu) => {
     const p = menu.placement
     const hasClipboard = !!getClipboard()
-    const hasEditOverride = p && broll?.edits?.[`${p.chapterIndex}:${p.placementIndex}`]
+    // During the migration window edits may be uuid-keyed OR legacy "${ch}:${pl}".
+    // Check both so the "Reset to original" item shows up correctly either way.
+    const hasEditOverride = p && (
+      (p.uuid && broll?.edits?.[p.uuid]) ||
+      (p.chapterIndex != null && p.placementIndex != null && broll?.edits?.[`${p.chapterIndex}:${p.placementIndex}`])
+    )
     const items = []
     if (p) {
       items.push({ label: 'Copy',   shortcut: '⌘C', onClick: () => broll.copyPlacement(p.index) })

@@ -2129,7 +2129,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       const maxLen = Math.max(...variantQueues.map(q => q.items.length), 0)
       for (let i = 0; i < maxLen; i++) {
         for (const { pid, items } of variantQueues) {
-          if (i < items.length) interleaved.push({ pid, chapterIndex: items[i].chapterIndex, placementIndex: items[i].placementIndex })
+          if (i < items.length) interleaved.push({ pid, uuid: items[i].uuid, chapterIndex: items[i].chapterIndex, placementIndex: items[i].placementIndex })
         }
       }
       const sliced = interleaved
@@ -2138,14 +2138,15 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       // Phase 2.5: Create queue entries in broll_searches (validated keywords)
       for (const item of sliced) {
         const variantLabel = `Variant ${String.fromCharCode(65 + planPipelineIds.indexOf(item.pid))}`
-        const { brief, keywords, description } = await _buildSearchParams(item.pid, item.chapterIndex, item.placementIndex)
+        const { brief, keywords, description, uuid: builtUuid } = await _buildSearchParams(item.pid, item.chapterIndex, item.placementIndex, item.uuid)
         if (!keywords.length) {
           throw new Error(`No keywords for ${variantLabel} ch${item.chapterIndex} p${item.placementIndex} after generation — refusing to send empty payload to GPU`)
         }
+        const placementUuid = item.uuid || builtUuid || null
         const ins = await db.prepare(`
-          INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, variant_label, description, brief, keywords_json, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
-        `).run(item.pid, pipelineId, item.chapterIndex, item.placementIndex, variantLabel, description, brief, JSON.stringify(keywords))
+          INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, placement_uuid, variant_label, description, brief, keywords_json, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+        `).run(item.pid, pipelineId, item.chapterIndex, item.placementIndex, placementUuid, variantLabel, description, brief, JSON.stringify(keywords))
         item.brollSearchId = ins.lastInsertRowid
         item.variantLabel = variantLabel
       }
@@ -2183,7 +2184,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       await db.prepare(`UPDATE broll_searches SET status = 'running', started_at = NOW() WHERE id = ?`).run(item.brollSearchId)
 
       try {
-        const result = await searchSinglePlacement(item.pid, item.chapterIndex, item.placementIndex)
+        const result = await searchSinglePlacement(item.pid, { placementUuid: item.uuid, chapterIndex: item.chapterIndex, placementIndex: item.placementIndex })
         // If we got zero results because the GPU job is still running or failed, surface that
         // in the row status — don't lie by marking 'complete'. UI can then show a real state.
         const rowStatus = result.gpuJobStatus === 'running' ? 'timeout'
@@ -2233,7 +2234,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
 }
 
 // Helper: build brief, keywords, and description for a placement (shared by executeSearchBatch + searchSinglePlacement)
-async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex) {
+async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex, uuid = null) {
   // Load plan sub-runs to find the placement
   const planRuns = await db.prepare(
     `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
@@ -2292,11 +2293,15 @@ async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex) 
     styleParts.length ? `## Style: ${styleParts.join('; ')}` : '',
   ].filter(Boolean).join('\n')
 
-  return { brief, keywords, description: p.description || '' }
+  return { brief, keywords, description: p.description || '', uuid: p.uuid || uuid }
 }
 
 // Helper: find placements with keywords but no GPU results for a variant
 async function _getPendingGpuPlacements(planPipelineId) {
+  // Ensure side-table uuids exist before we read placement identity.
+  const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+  const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+
   // Load plan placements
   const planRuns = await db.prepare(
     `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
@@ -2313,8 +2318,11 @@ async function _getPendingGpuPlacements(planPipelineId) {
       const items = parsed.placements || parsed
       if (!Array.isArray(items)) continue
       const brollOnly = items.filter(p => !p.category || p.category === 'broll')
+      const m = JSON.parse(chapterRuns[chIdx].metadata_json || '{}')
+      const realChIdx = typeof m.subIndex === 'number' ? m.subIndex : chIdx
       for (let pIdx = 0; pIdx < brollOnly.length; pIdx++) {
-        allPlacements.push({ pid: planPipelineId, chapterIndex: chIdx, placementIndex: pIdx })
+        const uuid = uuidsByChapter.get(realChIdx)?.get(pIdx) || null
+        allPlacements.push({ pid: planPipelineId, uuid, chapterIndex: realChIdx, placementIndex: pIdx })
       }
     } catch {}
   }
@@ -2323,7 +2331,8 @@ async function _getPendingGpuPlacements(planPipelineId) {
   const searchRuns = await db.prepare(
     `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
   ).all(`%"pipelineId":"bs-${planPipelineId}-%`)
-  const searched = new Set()
+  const searched = new Set()       // legacy index-based exclusions
+  const searchedUuids = new Set()  // uuid-based exclusions
   for (const r of searchRuns) {
     try {
       const m = JSON.parse(r.metadata_json || '{}')
@@ -2331,15 +2340,21 @@ async function _getPendingGpuPlacements(planPipelineId) {
     } catch {}
   }
 
-  // Also exclude placements already in broll_searches queue
+  // Also exclude placements already in broll_searches queue (prefer uuid, fall back to indices)
   const queuedRows = await db.prepare(
-    `SELECT chapter_index, placement_index FROM broll_searches WHERE plan_pipeline_id = ? AND status IN ('waiting', 'running', 'complete')`
+    `SELECT chapter_index, placement_index, placement_uuid FROM broll_searches
+     WHERE plan_pipeline_id = ? AND status IN ('waiting', 'running', 'complete')`
   ).all(planPipelineId)
   for (const row of queuedRows) {
-    searched.add(`${row.chapter_index}:${row.placement_index}`)
+    if (row.placement_uuid) searchedUuids.add(row.placement_uuid)
+    else searched.add(`${row.chapter_index}:${row.placement_index}`)
   }
 
-  return allPlacements.filter(p => !searched.has(`${p.chapterIndex}:${p.placementIndex}`))
+  return allPlacements.filter(p => {
+    if (p.uuid && searchedUuids.has(p.uuid)) return false
+    if (searched.has(`${p.chapterIndex}:${p.placementIndex}`)) return false
+    return true
+  })
 }
 
 /**
@@ -5113,6 +5128,12 @@ export async function getBRollEditorData(planPipelineId) {
     return (ma.subIndex || 0) - (mb.subIndex || 0)
   })
 
+  // Ensure side-table uuids exist for every placement in this plan (idempotent).
+  // Returns Map<chapterIndex, Map<placementIndex, uuid>>. Reads broll_runs.output_text
+  // but does NOT mutate it.
+  const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+  const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+
   // Flatten placements from all chapters
   const placements = []
   for (let chIdx = 0; chIdx < chapterRuns.length; chIdx++) {
@@ -5137,6 +5158,7 @@ export async function getBRollEditorData(planPipelineId) {
       if (p.category && p.category !== 'broll') continue
       placements.push({
         index: placements.length,
+        uuid: uuidsByChapter.get(chIdx)?.get(brollIdx) || null, // ← stable identity from side table
         chapterIndex: chIdx,
         placementIndex: brollIdx++,
         start: p.start,
@@ -5190,7 +5212,14 @@ export async function getBRollEditorData(planPipelineId) {
     }
 
     for (const row of queueRows) {
-      const match = placements.find(p => p.chapterIndex === row.chapter_index && p.placementIndex === row.placement_index)
+      // Prefer uuid match (stable across reorders/edits); fall back to indices for legacy rows.
+      let match = null
+      if (row.placement_uuid) {
+        match = placements.find(p => p.uuid === row.placement_uuid)
+      }
+      if (!match) {
+        match = placements.find(p => p.chapterIndex === row.chapter_index && p.placementIndex === row.placement_index)
+      }
       if (!match) continue
 
       match.brollSearchId = row.id
@@ -5349,8 +5378,9 @@ export async function getBRollEditorData(planPipelineId) {
 
   const editedPlacements = []
   for (const p of placements) {
-    const key = `${p.chapterIndex}:${p.placementIndex}`
-    const e = edits[key]
+    // Prefer uuid (post-migration); fall back to legacy "${chIdx}:${pIdx}" key
+    // for entries on broll_editor_state rows that predate Task 9's migration.
+    const e = (p.uuid && edits[p.uuid]) || edits[`${p.chapterIndex}:${p.placementIndex}`]
     if (e?.hidden) continue
     if (e?.timelineStart != null && e?.timelineEnd != null) {
       p.userTimelineStart = e.timelineStart
@@ -5552,7 +5582,31 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
  * Search a single B-Roll placement by its chapterIndex + placementIndex.
  * Reuses the same brief/keyword building as executeBrollSearch but for one item.
  */
-export async function searchSinglePlacement(planPipelineId, chapterIndex, placementIndex, overrides = {}) {
+export async function searchSinglePlacement(planPipelineId, identity, overrides = {}) {
+  // identity = { placementUuid?, chapterIndex?, placementIndex? }
+  let { placementUuid, chapterIndex, placementIndex } = identity || {}
+
+  // If only uuid was given, resolve to (chapterIndex, placementIndex) using ensurePlanUuids.
+  if (placementUuid && (chapterIndex == null || placementIndex == null)) {
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    outer: for (const [chIdx, m] of uuidsByChapter.entries()) {
+      for (const [pIdx, u] of m.entries()) {
+        if (u === placementUuid) { chapterIndex = chIdx; placementIndex = pIdx; break outer }
+      }
+    }
+    if (chapterIndex == null || placementIndex == null) {
+      throw new Error(`searchSinglePlacement: uuid ${placementUuid} not found in plan ${planPipelineId}`)
+    }
+  }
+
+  // If only indices were given, resolve uuid for the INSERT.
+  if (!placementUuid) {
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    placementUuid = uuidsByChapter.get(chapterIndex)?.get(placementIndex) || null
+  }
+
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
   const GPU_KEY = process.env.GPU_INTERNAL_KEY
   if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')

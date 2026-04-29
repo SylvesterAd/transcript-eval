@@ -131,6 +131,20 @@ try {
     )`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id)`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id)`)
+    await pool.query(`ALTER TABLE broll_searches ADD COLUMN IF NOT EXISTS placement_uuid TEXT`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_uuid ON broll_searches(plan_pipeline_id, placement_uuid)`)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS broll_placement_uuids (
+        id SERIAL PRIMARY KEY,
+        plan_pipeline_id TEXT NOT NULL,
+        chapter_index INTEGER NOT NULL,
+        placement_index INTEGER NOT NULL,
+        uuid TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (plan_pipeline_id, chapter_index, placement_index)
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_placement_uuids_plan ON broll_placement_uuids(plan_pipeline_id)`)
     await pool.query(`CREATE TABLE IF NOT EXISTS broll_editor_state (
       plan_pipeline_id TEXT PRIMARY KEY,
       state_json       TEXT    NOT NULL DEFAULT '{}',
@@ -290,3 +304,22 @@ async function transaction(fn) {
 function save() {}
 
 export default { prepare, exec, save, pool, transaction }
+
+// Backfill placement UUIDs (idempotent — safe to run on every boot).
+// Deferred via setImmediate so it executes AFTER this module's top-level
+// await chain settles and the default export binding is live — otherwise
+// the helper's `import db from '../db.js'` resolves to an undefined
+// default (circular dependency: db.js → helper → db.js).
+// Skipped in vitest because the test process imports this module solely to
+// exercise the helper directly; running a full-DB backfill in parallel
+// with the test starves the connection pool and causes 30s+ stalls.
+if (!process.env.VITEST) {
+  setImmediate(async () => {
+    try {
+      const { backfillPlacementUuids } = await import('./services/broll-placement-uuid.js')
+      await backfillPlacementUuids()
+    } catch (err) {
+      console.error('[db.js] placement uuid backfill failed:', err.message)
+    }
+  })
+}

@@ -214,6 +214,28 @@ export function useBRollEditorState(planPipelineId) {
     return () => { cancelled = true }
   }, [planPipelineId])
 
+  // Migrate legacy "${chIdx}:${pIdx}" edit keys to placement.uuid once both
+  // rawPlacements and editor-state have loaded. LOAD_EDITOR_STATE may arrive
+  // before rawPlacements (parallel fetches), in which case the in-reducer
+  // migration is a no-op and this effect fires the second pass.
+  useEffect(() => {
+    if (!state.editorStateLoaded) return
+    if (!state.rawPlacements.length) return
+    const editKeys = Object.keys(state.edits || {})
+    const hasLegacy = editKeys.some(k => !k.startsWith('p_') && !k.startsWith('u_') && k.includes(':'))
+    const undoLegacy = (state.undoStack || []).some(e => {
+      const k = e?.placementKey
+      return k && !k.startsWith('p_') && !k.startsWith('u_') && k.includes(':')
+    })
+    const redoLegacy = (state.redoStack || []).some(e => {
+      const k = e?.placementKey
+      return k && !k.startsWith('p_') && !k.startsWith('u_') && k.includes(':')
+    })
+    if (hasLegacy || undoLegacy || redoLegacy) {
+      dispatch({ type: 'MIGRATE_EDIT_KEYS' })
+    }
+  }, [state.editorStateLoaded, state.rawPlacements, state.edits, state.undoStack, state.redoStack])
+
   // Re-resolve when transcript words, edits, userPlacements, or editor-state-loaded flag change.
   // The editorStateLoaded dep is critical: when it flips true (LOAD_EDITOR_STATE arrives),
   // resolution switches from server-as-is to local-authoritative — without this dep, a brief
@@ -355,7 +377,9 @@ export function useBRollEditorState(planPipelineId) {
     }
 
     if (placement.chapterIndex != null && placement.placementIndex != null) {
-      const placementKey = `${placement.chapterIndex}:${placement.placementIndex}`
+      // Prefer placement.uuid (stable identity) over chapter/placement indices —
+      // see brollReducer.migrateEditsToUuid for the migration story.
+      const placementKey = placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`
       const prev = state.edits[placementKey] || {}
       if (prev.selectedResult === resultIndex) return
       const entry = {
@@ -395,7 +419,8 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
     try {
       const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
-        chapterIndex: placement.chapterIndex,
+        placementUuid: placement.uuid,
+        chapterIndex: placement.chapterIndex,   // kept for legacy server fallback
         placementIndex: placement.placementIndex,
       })
       dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
@@ -419,7 +444,8 @@ export function useBRollEditorState(planPipelineId) {
     dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
     try {
       const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
-        chapterIndex: placement.chapterIndex,
+        placementUuid: placement.uuid,
+        chapterIndex: placement.chapterIndex,   // kept for legacy server fallback
         placementIndex: placement.placementIndex,
         ...overrides,
       })
@@ -463,7 +489,7 @@ export function useBRollEditorState(planPipelineId) {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
     const placementKey = placement.chapterIndex != null && placement.placementIndex != null
-      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      ? (placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`)
       : null
     const userPlacementId = placement.userPlacementId || null
 
@@ -766,7 +792,7 @@ export function useBRollEditorState(planPipelineId) {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
     const placementKey = placement.chapterIndex != null && placement.placementIndex != null
-      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      ? (placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`)
       : null
     if (!placementKey) return
     const prev = state.edits[placementKey]
@@ -793,7 +819,7 @@ export function useBRollEditorState(planPipelineId) {
       targetUserPlacementSnapshot: provisionalSnapshot,
     }
     const placementKey = placement.chapterIndex != null && placement.placementIndex != null
-      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      ? (placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`)
       : null
     let sourceAction = null
     if (placementKey) {
@@ -871,7 +897,7 @@ export function useBRollEditorState(planPipelineId) {
         targetUserPlacementSnapshot: up,
       }
       const placementKey = placement.chapterIndex != null && placement.placementIndex != null
-        ? `${placement.chapterIndex}:${placement.placementIndex}`
+        ? (placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`)
         : null
       if (placementKey) {
         const prev = state.edits[placementKey] || {}
@@ -898,7 +924,7 @@ export function useBRollEditorState(planPipelineId) {
     // un-hide / restore the source on this pipeline (otherwise undoing from B
     // only deletes the userPlacement on B, leaving source hidden on A).
     const sourcePlacementKey = placement.chapterIndex != null && placement.placementIndex != null
-      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      ? (placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`)
       : null
     const sourceUserPlacementSnapshot = placement.userPlacementId
       ? state.userPlacements.find(u => u.id === placement.userPlacementId) || null
@@ -955,7 +981,7 @@ export function useBRollEditorState(planPipelineId) {
     const placement = state.placements.find(p => p.index === index)
     if (!placement) return
     const placementKey = placement.chapterIndex != null && placement.placementIndex != null
-      ? `${placement.chapterIndex}:${placement.placementIndex}`
+      ? (placement.uuid || `${placement.chapterIndex}:${placement.placementIndex}`)
       : null
     const userPlacementId = placement.userPlacementId || null
 
