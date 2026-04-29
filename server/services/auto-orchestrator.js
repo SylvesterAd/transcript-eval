@@ -13,12 +13,52 @@
 // classification so the user doesn't have to click anything.
 
 import db from '../db.js'
-import { analyzeMulticam } from './multicam-sync.js'
+import { analyzeMulticam, runClassification } from './multicam-sync.js'
 import { pathToFlags } from '../routes/broll.js'
 import * as emailNotifier from './email-notifier.js'
 
+// Pure helper. Returns true iff `snapshot` (existing sub-groups with their
+// videoIds) and `newGroups` (a fresh classification's groups[]) cover the
+// same videos in the same partitioning. Group names are ignored — only the
+// per-group set of videoIds matters. Used by reclassifyGroup to decide
+// whether a re-classification produces an identical structure (in which
+// case rough_cut and broll progress is preserved) or a different one (in
+// which case sub-groups are deleted and the user re-confirms).
+export function videoIdSetsMatch(snapshot, newGroups) {
+  if (snapshot.length !== newGroups.length) return false
+  const matched = new Set()
+  for (const ng of newGroups) {
+    const ngSet = new Set(ng.videoIds || [])
+    let found = false
+    for (let i = 0; i < snapshot.length; i++) {
+      if (matched.has(i)) continue
+      const sg = snapshot[i]
+      const sgIds = sg.videoIds || []
+      if (sgIds.length === ngSet.size && sgIds.every(id => ngSet.has(id))) {
+        matched.add(i)
+        found = true
+        break
+      }
+    }
+    if (!found) return false
+  }
+  return true
+}
+
 export async function confirmClassificationGroup(parentGroupId, groups, opts) {
   const { propagateAutoRoughCut, propagatePathId, userId } = opts
+
+  // Guard against recursive split: if `parentGroupId` is itself a sub-group,
+  // splitting it again creates the 239→240→241-style chain that orphans
+  // references on the original parent. The route layer also rejects this,
+  // but the service guard makes it impossible to bypass via direct calls.
+  const parentRow = await db.prepare(
+    'SELECT parent_group_id FROM video_groups WHERE id = ?'
+  ).get(parentGroupId)
+  if (parentRow?.parent_group_id) {
+    throw new Error(`Cannot split group ${parentGroupId}: it is already a sub-group of ${parentRow.parent_group_id}`)
+  }
+
   const subGroupIds = []
 
   // Pull example_set rows once; sources are linked via example_set_id, not
@@ -74,6 +114,117 @@ export async function confirmClassificationGroup(parentGroupId, groups, opts) {
   }
 
   return { subGroupIds }
+}
+
+// reclassifyGroup — re-runs classification on a parent project, preserving
+// rough_cut + b-roll progress when the new classification produces the same
+// videoId-per-sub-group partitioning as the existing structure. Replaces
+// the brute-force "delete sub-groups, re-classify" flow that destroyed
+// progress on every Re-classify click.
+//
+// Behavior:
+//   1. Reject if `parentId` is itself a sub-group.
+//   2. Snapshot existing sub-groups + their videoIds.
+//   3. Run classification on the videos currently in those sub-groups.
+//   4. If the new partitioning matches the snapshot (videoId-set per group),
+//      write the new classification_json on the parent and stop — sub-groups
+//      and their downstream rough_cut / broll progress are preserved.
+//   5. If the partitioning differs, delete the sub-groups, move their videos
+//      back to the parent, write classification_json + assembly_status =
+//      'classified' on the parent, and let the user re-confirm.
+//
+// Returns { unchanged: boolean, classification }.
+export async function reclassifyGroup(parentId) {
+  const parentRow = await db.prepare(
+    'SELECT parent_group_id FROM video_groups WHERE id = ?'
+  ).get(parentId)
+  if (parentRow?.parent_group_id) {
+    throw new Error(`Cannot re-classify group ${parentId}: it is a sub-group of ${parentRow.parent_group_id}. Re-classify the top-level project instead.`)
+  }
+
+  // Snapshot existing sub-groups + their video IDs so we can compare new
+  // classification against the current partitioning, and restore on a no-op.
+  const subGroups = await db.prepare(
+    'SELECT id, name FROM video_groups WHERE parent_group_id = ? ORDER BY id'
+  ).all(parentId)
+
+  const snapshot = []
+  for (const sg of subGroups) {
+    const vids = await db.prepare(
+      "SELECT id FROM videos WHERE group_id = ? AND video_type = 'raw' ORDER BY id"
+    ).all(sg.id)
+    snapshot.push({ id: sg.id, name: sg.name, videoIds: vids.map(v => v.id) })
+  }
+
+  // Read videos currently across the parent + sub-groups (we don't move them
+  // until we've decided the new partitioning warrants destructive action).
+  const subGroupIds = subGroups.map(sg => sg.id)
+  const ids = [parentId, ...subGroupIds]
+  const placeholders = ids.map(() => '?').join(',')
+  const videos = await db.prepare(`
+    SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
+    FROM videos v
+    LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+    WHERE v.group_id IN (${placeholders}) AND v.video_type = 'raw'
+    ORDER BY v.id
+  `).all(...ids)
+
+  if (videos.length === 0) {
+    throw new Error(`No raw videos found under group ${parentId} or its sub-groups`)
+  }
+
+  // Run classification (calls Gemini for >1 video; trivial for 1).
+  const classification = await runClassification(videos)
+  const sameStructure = videoIdSetsMatch(snapshot, classification.groups)
+
+  if (sameStructure) {
+    // Refresh classification_json on the parent (idempotent — no destructive
+    // change to sub-groups, no status flip; rough_cut + broll progress kept).
+    await db.prepare(
+      'UPDATE video_groups SET classification_json = ? WHERE id = ?'
+    ).run(JSON.stringify(classification), parentId)
+    return { unchanged: true, classification }
+  }
+
+  // Different structure: in a transaction, move videos back to parent, delete
+  // sub-groups, write the new classification + status='classified' so the user
+  // can review and confirm.
+  await runInTransaction(async (tx) => {
+    // Move ALL videos that were in any sub-group back to the parent in one shot.
+    const allVideoIds = snapshot.flatMap(sg => sg.videoIds)
+    if (allVideoIds.length > 0) {
+      const placeholders = allVideoIds.map(() => '?').join(',')
+      await tx.prepare(
+        `UPDATE videos SET group_id = ? WHERE id IN (${placeholders})`
+      ).run(parentId, ...allVideoIds)
+    }
+    // Delete the now-empty sub-groups (FKs cascade to their progress rows).
+    for (const sg of subGroups) {
+      await tx.prepare('DELETE FROM video_groups WHERE id = ?').run(sg.id)
+    }
+    // Write new classification + flip status so AssetsView re-renders for review.
+    await tx.prepare(
+      'UPDATE video_groups SET classification_json = ? WHERE id = ?'
+    ).run(JSON.stringify(classification), parentId)
+    await tx.prepare(
+      'UPDATE video_groups SET assembly_status = ? WHERE id = ?'
+    ).run('classified', parentId)
+  })
+
+  return { unchanged: false, classification }
+}
+
+// runInTransaction — wraps a callback in a Postgres BEGIN/COMMIT (rolls back
+// on throw). Falls back to non-transactional execution when db.transaction
+// isn't available (vitest mocks of db.js often only stub `prepare`). The
+// fallback runs each statement sequentially via the regular pool — same
+// observable behavior in tests, no atomicity in production unless db.js
+// exposes the helper.
+async function runInTransaction(fn) {
+  if (typeof db.transaction === 'function') {
+    return db.transaction(fn)
+  }
+  return fn(db)
 }
 
 export async function chainAfterClassify(groupId) {
