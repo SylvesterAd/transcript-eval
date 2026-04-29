@@ -122,3 +122,46 @@ describe('loadPriorChapterStrategies', () => {
     expect(blocks).toHaveLength(3) // header + 2 source blocks
   })
 })
+
+import { assertNoSelfReference, assertPriorsComplete } from '../broll-prior-strategies.js'
+
+describe('assertNoSelfReference', () => {
+  it('returns nothing when pipelineId is not in priors', () => {
+    expect(() => assertNoSelfReference('pid-current', ['pid-favorite', 'pid-other'])).not.toThrow()
+  })
+
+  it('returns nothing when priors is empty/undefined', () => {
+    expect(() => assertNoSelfReference('pid-current', [])).not.toThrow()
+    expect(() => assertNoSelfReference('pid-current', undefined)).not.toThrow()
+  })
+
+  it('throws when pipelineId appears in priors', () => {
+    expect(() => assertNoSelfReference('pid-x', ['pid-favorite', 'pid-x']))
+      .toThrow('self-reference: pid-x cannot have itself as prior')
+  })
+})
+
+describe('assertPriorsComplete', () => {
+  beforeEach(() => { db.prepare.mockReset() })
+
+  it('returns nothing when priors is empty/undefined', async () => {
+    await expect(assertPriorsComplete([])).resolves.toBeUndefined()
+    await expect(assertPriorsComplete(undefined)).resolves.toBeUndefined()
+    expect(db.prepare).not.toHaveBeenCalled()
+  })
+
+  it('returns nothing when every prior has a complete row in broll_runs', async () => {
+    db.prepare.mockReturnValue({ get: vi.fn().mockReturnValue({ '1': 1 }) })
+    await expect(assertPriorsComplete(['pid-a', 'pid-b'])).resolves.toBeUndefined()
+  })
+
+  it('throws when any prior has zero complete rows', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn()
+        .mockReturnValueOnce({ '1': 1 })
+        .mockReturnValueOnce(undefined),
+    })
+    await expect(assertPriorsComplete(['pid-a', 'pid-missing']))
+      .rejects.toThrow('prior pipeline not complete: pid-missing')
+  })
+})

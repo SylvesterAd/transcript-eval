@@ -54,3 +54,19 @@ export async function loadPriorChapterStrategies(priorPids, chapterIndex) {
   }
   return `## Prior strategies for this chapter (do NOT produce a similar strategy):\n${blocks.join('\n\n')}`
 }
+
+export function assertNoSelfReference(pipelineId, priorPids) {
+  if (priorPids?.includes(pipelineId)) {
+    throw new Error(`[broll-chain] self-reference: ${pipelineId} cannot have itself as prior`)
+  }
+}
+
+export async function assertPriorsComplete(priorPids) {
+  if (!priorPids?.length) return
+  for (const pid of priorPids) {
+    const ok = await db.prepare(
+      `SELECT 1 FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' LIMIT 1`
+    ).get(`%"pipelineId":"${pid}"%`)
+    if (!ok) throw new Error(`[broll-chain] prior pipeline not complete: ${pid}`)
+  }
+}
