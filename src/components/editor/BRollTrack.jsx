@@ -273,8 +273,12 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
   const buildMenuItems = (menu) => {
     const p = menu.placement
     const hasClipboard = !!getClipboard()
-    const editKey = p ? (p.uuid || `${p.chapterIndex}:${p.placementIndex}`) : null
-    const hasEditOverride = p && editKey && broll?.edits?.[editKey]
+    // During the migration window edits may be uuid-keyed OR legacy "${ch}:${pl}".
+    // Check both so the "Reset to original" item shows up correctly either way.
+    const hasEditOverride = p && (
+      (p.uuid && broll?.edits?.[p.uuid]) ||
+      (p.chapterIndex != null && p.placementIndex != null && broll?.edits?.[`${p.chapterIndex}:${p.placementIndex}`])
+    )
     const items = []
     if (p) {
       items.push({ label: 'Copy',   shortcut: '⌘C', onClick: () => broll.copyPlacement(p.index) })

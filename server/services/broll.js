@@ -5362,8 +5362,9 @@ export async function getBRollEditorData(planPipelineId) {
 
   const editedPlacements = []
   for (const p of placements) {
-    const key = `${p.chapterIndex}:${p.placementIndex}`
-    const e = edits[key]
+    // Prefer uuid (post-migration); fall back to legacy "${chIdx}:${pIdx}" key
+    // for entries on broll_editor_state rows that predate Task 9's migration.
+    const e = (p.uuid && edits[p.uuid]) || edits[`${p.chapterIndex}:${p.placementIndex}`]
     if (e?.hidden) continue
     if (e?.timelineStart != null && e?.timelineEnd != null) {
       p.userTimelineStart = e.timelineStart

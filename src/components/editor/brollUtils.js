@@ -37,11 +37,23 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
   // placements out (they lack timelineStart) and silently allow overlapping drops.
   const wordsList = words || []
 
-  // Step 0: Filter out placements hidden via local user-edits
+  // Step 0: Filter out placements hidden via local user-edits.
+  // Look up edits by uuid first (post-migration), then fall back to legacy
+  // "${chIdx}:${pIdx}" key — necessary during the migration window when
+  // rawPlacements arrive with uuids but the edits dict hasn't been re-keyed
+  // yet (LOAD_EDITOR_STATE may have raced ahead with empty rawPlacements).
+  const lookupEdit = (p) => {
+    if (!editsByKey) return null
+    if (p.uuid && editsByKey[p.uuid]) return editsByKey[p.uuid]
+    if (p.chapterIndex != null && p.placementIndex != null) {
+      return editsByKey[`${p.chapterIndex}:${p.placementIndex}`] || null
+    }
+    return null
+  }
   const filtered = editsByKey
     ? placements.filter(p => {
         if (p.chapterIndex == null || p.placementIndex == null) return true // userPlacements are deleted by removal from state.userPlacements, not via edits[key].hidden
-        const e = editsByKey[`${p.chapterIndex}:${p.placementIndex}`]
+        const e = lookupEdit(p)
         return !e?.hidden
       })
     : placements
@@ -49,10 +61,7 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
   // Step 1: Position each placement independently based on audio_anchor
   const resolved = filtered.map(p => {
     // Prefer editsByKey lookup if provided; fall back to inline userTimelineStart/End
-    const editKey = p.chapterIndex != null && p.placementIndex != null
-      ? `${p.chapterIndex}:${p.placementIndex}`
-      : null
-    const edit = editKey && editsByKey ? editsByKey[editKey] : null
+    const edit = lookupEdit(p)
     const uStart = edit?.timelineStart ?? p.userTimelineStart
     const uEnd   = edit?.timelineEnd   ?? p.userTimelineEnd
     if (uStart != null && uEnd != null) {

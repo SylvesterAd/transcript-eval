@@ -123,15 +123,25 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     if (currentPid && brollState.rawPlacements?.length) {
       const edits = brollState.edits || {}
       const localUps = brollState.userPlacements || []
+      // During the migration window the dict may still be legacy-keyed even
+      // though the placement carries a uuid — so look up uuid first, then fall
+      // back to the legacy "${chIdx}:${pIdx}" key.
+      const lookupEdit = (p) => {
+        if (p.uuid && edits[p.uuid]) return edits[p.uuid]
+        if (p.chapterIndex != null && p.placementIndex != null) {
+          return edits[`${p.chapterIndex}:${p.placementIndex}`] || null
+        }
+        return null
+      }
       const originals = brollState.rawPlacements
         .filter(p => {
           if (p.isUserPlacement) return false
           if (p.chapterIndex == null || p.placementIndex == null) return true
-          return !edits[`${p.chapterIndex}:${p.placementIndex}`]?.hidden
+          return !lookupEdit(p)?.hidden
         })
         .map(p => {
           if (p.chapterIndex == null || p.placementIndex == null) return p
-          const e = edits[`${p.chapterIndex}:${p.placementIndex}`]
+          const e = lookupEdit(p)
           if (!e) return p
           let next = p
           if (e.timelineStart != null && e.timelineEnd != null) {
