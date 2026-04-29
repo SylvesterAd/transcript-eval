@@ -8,7 +8,12 @@
 //   2. Still processing (assembly / rough-cut / broll chain in flight)
 //   3. Ready for editor
 
-const ASSEMBLY_DONE_VALUES = new Set(['done'])
+// 'done' = single-group flow (no classification split needed).
+// 'confirmed' = parent project where the user has confirmed the
+// classification and sub-groups now exist; this is the terminal state
+// for parent groups. Both should route into the editor — only mid-
+// flight states ('classifying', 'classified', 'transcribing') gate.
+const ASSEMBLY_DONE_VALUES = new Set(['done', 'confirmed'])
 const CHAIN_IN_PROGRESS = new Set(['pending', 'running'])
 
 export function resolveProjectRoute(project) {
