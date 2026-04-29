@@ -214,7 +214,7 @@ export default function StepPath({ state, setState, groupId, onValidityChange })
   return (
     <div>
       <div className="mb-6">
-        <Eyebrow icon="fork_right" tone="secondary">Automation · Step 5 of 6</Eyebrow>
+        <Eyebrow icon="fork_right" tone="secondary">Automation · Step 6 of 7</Eyebrow>
         <div className="mt-3.5">
           <PageTitle line1="How hands-on" line2="do you want to be?" accentTone="primary" size={26} />
         </div>

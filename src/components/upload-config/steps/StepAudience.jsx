@@ -140,7 +140,7 @@ export default function StepAudience({ state, setState }) {
   return (
     <div>
       <div className="mb-7">
-        <Eyebrow icon="groups" tone="secondary">Audience Signal · Step 3 of 6</Eyebrow>
+        <Eyebrow icon="groups" tone="secondary">Audience Signal · Step 3 of 7</Eyebrow>
         <div className="mt-3.5">
           <PageTitle line1="Who is this video" line2="speaking to?" accentTone="primary" size={26} />
         </div>

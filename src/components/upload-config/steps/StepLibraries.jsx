@@ -75,7 +75,7 @@ export default function StepLibraries({ state, setState }) {
   return (
     <div>
       <div className="mb-7">
-        <Eyebrow icon="inventory_2" tone="secondary">B-Roll Sources · Step 2 of 6</Eyebrow>
+        <Eyebrow icon="inventory_2" tone="secondary">B-Roll Sources · Step 2 of 7</Eyebrow>
         <div className="mt-3.5">
           <PageTitle line1="Which stock libraries" line2="do you subscribe to?" accentTone="primary" size={26} />
         </div>

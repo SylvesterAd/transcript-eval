@@ -216,7 +216,7 @@ export default function StepReferences({ groupId, onValidityChange }) {
   return (
     <div>
       <div className="mb-7">
-        <Eyebrow icon="auto_awesome" tone="secondary">Reference Videos · Step 4 of 6</Eyebrow>
+        <Eyebrow icon="auto_awesome" tone="secondary">Reference Videos · Step 4 of 7</Eyebrow>
         <div className="mt-3.5">
           <PageTitle line1="AI Context:" line2="Add Reference Videos" accentTone="primary" size={26} />
         </div>

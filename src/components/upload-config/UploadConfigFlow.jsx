@@ -64,6 +64,9 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   const [referencesValid, setReferencesValid] = useState(false)
   const [roughCutValid, setRoughCutValid] = useState(true)
   const [pathValid, setPathValid] = useState(true)
+  // Latest rough-cut token estimate, lifted up so the footer's Run CTA can
+  // show "~N tokens". Null until StepRoughCut polls successfully.
+  const [roughCutEstimate, setRoughCutEstimate] = useState(null)
 
   // Persist on step-forward. No-op without a valid groupId so navigation
   // never gets blocked by a doomed PUT (e.g. when the URL has no ?group=).
@@ -119,7 +122,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   else if (current === 0) body = <StepLibraries state={state} setState={setState} />
   else if (current === 1) body = <StepAudience state={state} setState={setState} />
   else if (current === 2) body = <StepReferences groupId={groupId} onValidityChange={setReferencesValid} />
-  else if (current === 3) body = <StepRoughCut groupId={groupId} state={state} setState={setState} onValidityChange={setRoughCutValid} />
+  else if (current === 3) body = <StepRoughCut groupId={groupId} state={state} setState={setState} onValidityChange={setRoughCutValid} onEstimate={setRoughCutEstimate} />
   else if (current === 4) body = <StepPath state={state} setState={setState} groupId={groupId} onValidityChange={setPathValid} />
 
   return (
@@ -164,19 +167,39 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
                   {isLast ? 'Est. analysis · 2m 45s' : `Next: ${CONFIG_STEPS[current + 1]?.label || ''}`}
                 </span>
               </div>
-              <button
-                onClick={next}
-                disabled={continueDisabled}
-                title={
-                  continueDisabled && currentStepId === 'references' ? 'Add at least 2 reference videos and pick a favorite' :
-                  continueDisabled && currentStepId === 'roughcut'   ? 'Not enough tokens for AI Rough Cut' :
-                  continueDisabled && currentStepId === 'path'       ? 'Full Auto requires ≥1 reference video and enough tokens for the chain' :
-                  undefined
-                }
-                className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-8 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100"
-              >
-                {isLast ? 'Review & Continue' : 'Continue'}
-              </button>
+              {currentStepId === 'roughcut' ? (
+                <div className="flex items-center gap-2.5">
+                  <button
+                    onClick={async () => { setState.autoRoughCut(false); await next() }}
+                    className="text-on-surface-variant font-bold uppercase tracking-widest text-xs hover:text-on-surface transition-colors px-5 py-3"
+                  >
+                    No, thanks
+                  </button>
+                  <button
+                    onClick={async () => { setState.autoRoughCut(true); await next() }}
+                    disabled={!roughCutValid}
+                    title={!roughCutValid ? 'Not enough tokens for AI Rough Cut' : undefined}
+                    className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-7 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100 inline-flex items-center gap-2"
+                  >
+                    <span className="material-symbols-outlined text-base">auto_fix_high</span>
+                    <span>Run Rough Cut{roughCutEstimate?.tokenCost ? ` · ~${roughCutEstimate.tokenCost.toLocaleString()} tokens` : ''}</span>
+                    <span className="material-symbols-outlined text-base">arrow_forward</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={next}
+                  disabled={continueDisabled}
+                  title={
+                    continueDisabled && currentStepId === 'references' ? 'Add at least 2 reference videos and pick a favorite' :
+                    continueDisabled && currentStepId === 'path'       ? 'Full Auto requires ≥1 reference video and enough tokens for the chain' :
+                    undefined
+                  }
+                  className="bg-gradient-to-br from-lime to-primary-dim text-on-primary-container font-extrabold text-xs uppercase tracking-[0.15em] px-8 py-4 rounded-md shadow-[0_0_32px_rgba(206,252,0,0.25)] hover:shadow-[0_0_48px_rgba(206,252,0,0.45)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:active:scale-100"
+                >
+                  {isLast ? 'Review & Continue' : 'Continue'}
+                </button>
+              )}
             </div>
           </div>
         )}
