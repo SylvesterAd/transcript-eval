@@ -14,7 +14,17 @@ function ytThumbnail(url) {
   return m ? `https://img.youtube.com/vi/${m[1]}/mqdefault.jpg` : null
 }
 
-function StatusBadge({ status }) {
+// Legacy errors stored verbatim from yt-dlp stderr. Pull the ERROR: line
+// so the tooltip is readable. Newer errors are pre-parsed server-side.
+function cleanError(raw) {
+  if (!raw) return raw
+  const m = raw.match(/ERROR:\s*(?:\[[^\]]+\]\s*[\w-]+:\s*)?([^\n]+)/)
+  if (m) return m[1].trim()
+  const firstReal = raw.split('\n').find(l => l.trim() && !l.startsWith('Command failed:'))
+  return firstReal || raw
+}
+
+function StatusBadge({ status, error }) {
   const styles = {
     ready:      { bg: 'bg-lime/12',          fg: 'text-lime',          label: 'Ready',       pulse: false },
     processing: { bg: 'bg-purple-accent/12', fg: 'text-purple-accent', label: 'Downloading', pulse: true },
@@ -22,11 +32,16 @@ function StatusBadge({ status }) {
     pending:    { bg: 'bg-white/4',          fg: 'text-on-surface-variant', label: 'Pending', pulse: false },
   }
   const s = styles[status] || styles.pending
+  const tooltip = status === 'failed' && error ? cleanError(error) : undefined
   return (
-    <span className={[
-      'text-[9px] px-[7px] py-[3px] rounded uppercase font-extrabold tracking-[0.12em] font-["Inter"] shrink-0',
-      s.bg, s.fg, s.pulse ? 'animate-pulse' : '',
-    ].join(' ')}>
+    <span
+      title={tooltip}
+      className={[
+        'text-[9px] px-[7px] py-[3px] rounded uppercase font-extrabold tracking-[0.12em] font-["Inter"] shrink-0',
+        s.bg, s.fg, s.pulse ? 'animate-pulse' : '',
+        tooltip ? 'cursor-help' : '',
+      ].join(' ')}
+    >
       {s.label}
     </span>
   )
@@ -94,7 +109,7 @@ function RefCard({ item, onRemove, onFavorite }) {
         <span className="text-[10px] text-on-surface-variant font-['Inter'] truncate flex-1 font-medium">
           {item.label || item.source_url || `Video #${item.id}`}
         </span>
-        <StatusBadge status={item.status} />
+        <StatusBadge status={item.status} error={item.error} />
       </div>
     </div>
   )
@@ -246,6 +261,23 @@ export default function StepReferences({ groupId, onValidityChange }) {
             : <EmptySlot key={`empty-${i}`} />
           )}
         </div>
+
+        {hasSources && needsMore && (
+          <div className="mt-4 flex items-center gap-3 px-[18px] py-3 rounded-[10px] bg-red-500/10 ring-1 ring-inset ring-red-400/40">
+            <span className="material-symbols-outlined text-[18px] text-red-400">add_circle</span>
+            <span className="text-xs text-red-300 font-['Inter'] font-bold leading-[1.5] tracking-wide">
+              Fetch {2 - list.length} more YouTube video{2 - list.length === 1 ? '' : 's'} to continue
+            </span>
+          </div>
+        )}
+        {hasSources && !needsMore && !hasFavorite && (
+          <div className="mt-4 flex items-center gap-3 px-[18px] py-3 rounded-[10px] bg-red-500/10 ring-1 ring-inset ring-red-400/40">
+            <span className="material-symbols-outlined text-[18px] text-red-400" style={{ fontVariationSettings: '"FILL" 1' }}>star</span>
+            <span className="text-xs text-red-300 font-['Inter'] font-bold leading-[1.5] tracking-wide">
+              Select 1 Favorite Video To Continue — click the star on a video
+            </span>
+          </div>
+        )}
       </div>
 
       <div
@@ -270,23 +302,6 @@ export default function StepReferences({ groupId, onValidityChange }) {
         </div>
         <input ref={fileRef} type="file" accept=".mp4,.mov" multiple className="hidden" onChange={handleFileUpload} />
       </div>
-
-      {hasSources && needsMore && (
-        <div className="mt-4 flex items-center gap-3 px-[18px] py-3 rounded-[10px] bg-purple-accent/5 ring-1 ring-inset ring-purple-accent/25">
-          <span className="material-symbols-outlined text-[18px] text-purple-accent">add_circle</span>
-          <span className="text-xs text-purple-accent/80 font-['Inter'] leading-[1.5]">
-            Add at least 2 reference videos — the AI needs multiple examples to learn your b-roll style.
-          </span>
-        </div>
-      )}
-      {hasSources && !needsMore && !hasFavorite && (
-        <div className="mt-4 flex items-center gap-3 px-[18px] py-3 rounded-[10px] bg-lime/5 ring-1 ring-inset ring-lime/25">
-          <span className="material-symbols-outlined text-[18px] text-lime" style={{ fontVariationSettings: '"FILL" 1' }}>star</span>
-          <span className="text-xs text-on-surface font-['Inter'] leading-[1.5]">
-            Pick a favorite reference — it will drive the main B-Roll plan. Hover a video and click the star.
-          </span>
-        </div>
-      )}
 
       <div className="mt-[18px] px-4 py-3 rounded-lg bg-surface-container-low ring-1 ring-inset ring-border-subtle/8 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
