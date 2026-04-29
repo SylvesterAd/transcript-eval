@@ -17,6 +17,29 @@ const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(TEMP_DIR, { recursive: true })
 const execFileAsync = promisify(execFile)
 
+// Common yt-dlp args that help bypass YouTube's "sign in to confirm you're
+// not a bot" block on datacenter IPs (Railway, etc.). Tries multiple player
+// clients in order — android/tv often work when web is blocked. Optional
+// cookies file via env var as a fallback for harder-blocked videos.
+function ytDlpCommonArgs() {
+  const args = [
+    '--extractor-args', 'youtube:player_client=web_safari,android,tv,mweb',
+    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+  ]
+  const cookiesPath = process.env.YT_DLP_COOKIES_FILE
+  if (cookiesPath && existsSync(cookiesPath)) args.push('--cookies', cookiesPath)
+  return args
+}
+
+// yt-dlp dumps stderr with command + warnings on failure. Pull the first
+// ERROR: line (without the [extractor] videoId: prefix) so the UI shows
+// something readable instead of the whole stderr.
+function parseYtDlpError(raw) {
+  if (!raw) return raw
+  const m = raw.match(/ERROR:\s*(?:\[[^\]]+\]\s*[\w-]+:\s*)?([^\n]+)/)
+  return m ? m[1].trim() : raw.split('\n').find(l => l.trim() && !l.startsWith('Command failed:')) || raw
+}
+
 function cleanupTempFiles(files) {
   if (!files?.length) return
   // Fire-and-forget cleanup of temp storage files
@@ -528,10 +551,14 @@ export async function downloadYouTubeVideo(exampleSourceId) {
     // Verify yt-dlp is available
     await execFileAsync('yt-dlp', ['--version'], { timeout: 5000 })
 
+    const commonArgs = ytDlpCommonArgs()
+
     // Get video info
     console.log(`[broll-dl] Fetching info: ${url}`)
     const { stdout: infoJson } = await execFileAsync('yt-dlp', [
-      '--dump-json', '--no-download', url
+      '--dump-json', '--no-download',
+      ...commonArgs,
+      url
     ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 })
     const info = JSON.parse(infoJson)
     const videoTitle = source.label || info.title || 'YouTube Reference'
@@ -544,6 +571,7 @@ export async function downloadYouTubeVideo(exampleSourceId) {
       '-f', 'best[height<=360]',
       '-o', mp4Path,
       '--no-post-overwrites',
+      ...commonArgs,
       url
     ], { timeout: 600000 })
 
@@ -568,8 +596,9 @@ export async function downloadYouTubeVideo(exampleSourceId) {
     console.log(`[broll-dl] Example source ${exampleSourceId} ready with videoId=${videoId}`)
 
   } catch (err) {
-    console.error(`[broll-dl] Error downloading ${url}:`, err.message)
-    await updateExampleSourceStatus(exampleSourceId, 'failed', err.message)
+    const cleanError = parseYtDlpError(err.stderr || err.message)
+    console.error(`[broll-dl] Error downloading ${url}:`, cleanError)
+    await updateExampleSourceStatus(exampleSourceId, 'failed', cleanError)
   } finally {
     if (mp4Path) try { unlinkSync(mp4Path) } catch {}
   }
@@ -1752,7 +1781,7 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
  * This is a plain LLM call — no GPU, no stock footage search.
  * Takes the next `batchSize` placements from a plan pipeline that don't have keywords yet.
  */
-export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGeneratedPipelineId = null) {
+export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGeneratedPipelineId = null, forItems = null) {
   // Load plan pipeline data
   const planRuns = await db.prepare(
     `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
@@ -1799,25 +1828,39 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
   }
   if (!workItems.length) throw new Error('No broll placements found')
 
-  // Skip items that already have keywords
-  const existingKwRuns = await db.prepare(
-    `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
-  ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
-  const kwDone = new Set()
-  for (const r of existingKwRuns) {
-    try {
-      const m = JSON.parse(r.metadata_json || '{}')
-      if (m.isSubRun && m.processedIndices) {
-        for (const idx of m.processedIndices) kwDone.add(idx)
-      }
-    } catch {}
+  // Pick items to process: either caller-supplied list (forItems) or auto-pick next batch
+  let itemsToProcess
+  let pendingCount = 0
+  if (forItems?.length) {
+    // Caller specified exact (chapterIndex, placementIndex) pairs — use those, ignore kwDone
+    itemsToProcess = []
+    for (const ref of forItems) {
+      const wi = workItems.find(w => w.chapterIndex === ref.chapterIndex && w.placementIndex === ref.placementIndex)
+      if (wi) itemsToProcess.push(wi)
+    }
+    pendingCount = itemsToProcess.length
+  } else {
+    // Default: skip items that already have keywords, take next batch from kwDone tracker
+    const existingKwRuns = await db.prepare(
+      `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
+    ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
+    const kwDone = new Set()
+    for (const r of existingKwRuns) {
+      try {
+        const m = JSON.parse(r.metadata_json || '{}')
+        if (m.isSubRun && m.processedIndices) {
+          for (const idx of m.processedIndices) kwDone.add(idx)
+        }
+      } catch {}
+    }
+    const pendingItems = workItems.filter((_, i) => !kwDone.has(i))
+    itemsToProcess = pendingItems.slice(0, batchSize)
+    pendingCount = pendingItems.length
   }
-  const pendingItems = workItems.filter((_, i) => !kwDone.has(i))
-  const itemsToProcess = pendingItems.slice(0, batchSize)
 
   if (!itemsToProcess.length) {
     console.log(`[broll-keywords] All ${workItems.length} items already have keywords`)
-    return { pipelineId: null, status: 'complete', totalProcessed: 0, totalElements: workItems.length }
+    return { pipelineId: null, status: 'complete', totalProcessed: 0, totalElements: workItems.length, processedItems: [] }
   }
 
   const pipelineId = preGeneratedPipelineId || `kw-${planPipelineId}-${Date.now()}`
@@ -1896,7 +1939,8 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
       pipelineId, status: 'complete',
       totalProcessed: itemsToProcess.length,
       totalElements: workItems.length,
-      remaining: pendingItems.length - itemsToProcess.length,
+      remaining: Math.max(0, pendingCount - itemsToProcess.length),
+      processedItems: itemsToProcess.map(i => ({ chapterIndex: i.chapterIndex, placementIndex: i.placementIndex })),
     }
 
   } catch (err) {
@@ -1953,49 +1997,79 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
     } else {
       // No existing queue — full flow: keywords + create new entries
 
-      // Phase 1: Generate keywords for all variants in parallel
+      // Phase 1: Determine pending search items per variant (search tracker is source of truth)
       brollPipelineProgress.set(pipelineId, {
         ...brollPipelineProgress.get(pipelineId),
-        stageName: 'Generating keywords...',
+        stageName: 'Loading queue...',
+      })
+      const variantQueues = []
+      for (const pid of planPipelineIds) {
+        const pending = await _getPendingGpuPlacements(pid)
+        variantQueues.push({ pid, items: pending.slice(0, batchSize) })
+      }
+      const totalPending = variantQueues.reduce((s, v) => s + v.items.length, 0)
+      console.log(`[search-batch] Pending items per variant: ${variantQueues.map(v => `${v.pid.slice(-13)}=${v.items.length}`).join(', ')} (total ${totalPending})`)
+
+      // Phase 1.5: Generate keywords for items missing them (couples kw to the same items we'll search)
+      brollPipelineProgress.set(pipelineId, {
+        ...brollPipelineProgress.get(pipelineId),
+        stageName: 'Checking keywords...',
       })
       const kwResults = await Promise.allSettled(
-        planPipelineIds.map(async (pid) => {
-          const result = await executeKeywordsBatch(pid, batchSize)
+        variantQueues.map(async ({ pid, items }) => {
+          if (!items.length) return { pid, generated: 0, alreadyHad: 0 }
+          const itemsNeedingKw = []
+          let alreadyHad = 0
+          for (const item of items) {
+            const { keywords } = await _buildSearchParams(pid, item.chapterIndex, item.placementIndex)
+            if (keywords.length) alreadyHad++
+            else itemsNeedingKw.push(item)
+          }
+          if (itemsNeedingKw.length) {
+            const prog = brollPipelineProgress.get(pipelineId)
+            if (prog) {
+              prog.stageName = `Generating keywords for ${itemsNeedingKw.length} placement(s)...`
+              brollPipelineProgress.set(pipelineId, { ...prog })
+            }
+            await executeKeywordsBatch(pid, itemsNeedingKw.length, null, itemsNeedingKw)
+          }
           const prog = brollPipelineProgress.get(pipelineId)
           if (prog) {
             prog.keywordsDone = (prog.keywordsDone || 0) + 1
-            prog.stageName = `Keywords: ${prog.keywordsDone}/${prog.keywordsTotal} variants`
+            prog.stageName = `Keywords ready: ${prog.keywordsDone}/${prog.keywordsTotal} variants`
             brollPipelineProgress.set(pipelineId, { ...prog })
           }
-          return { pid, result }
+          return { pid, generated: itemsNeedingKw.length, alreadyHad }
         })
       )
-      console.log(`[search-batch] Keywords done for ${kwResults.filter(r => r.status === 'fulfilled').length}/${planPipelineIds.length} variants`)
+      const kwSucceeded = kwResults.filter(r => r.status === 'fulfilled')
+      const kwFailed = kwResults.filter(r => r.status === 'rejected')
+      console.log(`[search-batch] Keywords ready for ${kwSucceeded.length}/${planPipelineIds.length} variants (generated: ${kwSucceeded.reduce((s, r) => s + r.value.generated, 0)}, already had: ${kwSucceeded.reduce((s, r) => s + r.value.alreadyHad, 0)})`)
+      if (kwFailed.length) {
+        const reasons = kwFailed.map(r => r.reason?.message || String(r.reason)).join('; ')
+        throw new Error(`Keyword generation failed for ${kwFailed.length}/${planPipelineIds.length} variants: ${reasons}`)
+      }
 
       if (abortedBrollPipelines.has(pipelineId)) throw new Error('Aborted')
 
-      // Phase 2: Build interleaved queue from all variants
-      const variantQueues = []
-      for (const pid of planPipelineIds) {
-        const queue = await _getPendingGpuPlacements(pid)
-        variantQueues.push(queue)
-      }
-
+      // Phase 2: Build interleaved queue from THE SAME items we just keyworded
       const interleaved = []
-      const maxLen = Math.max(...variantQueues.map(q => q.length), 0)
+      const maxLen = Math.max(...variantQueues.map(q => q.items.length), 0)
       for (let i = 0; i < maxLen; i++) {
-        for (const queue of variantQueues) {
-          if (i < queue.length) interleaved.push(queue[i])
+        for (const { pid, items } of variantQueues) {
+          if (i < items.length) interleaved.push({ pid, chapterIndex: items[i].chapterIndex, placementIndex: items[i].placementIndex })
         }
       }
-      const gpuBatchSize = batchSize * planPipelineIds.length
-      const sliced = interleaved.slice(0, gpuBatchSize)
-      console.log(`[search-batch] GPU queue: ${sliced.length} placements (from ${interleaved.length} total pending, ${batchSize}/variant × ${planPipelineIds.length} variants)`)
+      const sliced = interleaved
+      console.log(`[search-batch] GPU queue: ${sliced.length} placements`)
 
-      // Phase 2.5: Create queue entries in broll_searches
+      // Phase 2.5: Create queue entries in broll_searches (validated keywords)
       for (const item of sliced) {
         const variantLabel = `Variant ${String.fromCharCode(65 + planPipelineIds.indexOf(item.pid))}`
         const { brief, keywords, description } = await _buildSearchParams(item.pid, item.chapterIndex, item.placementIndex)
+        if (!keywords.length) {
+          throw new Error(`No keywords for ${variantLabel} ch${item.chapterIndex} p${item.placementIndex} after generation — refusing to send empty payload to GPU`)
+        }
         const ins = await db.prepare(`
           INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, variant_label, description, brief, keywords_json, status)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
@@ -5428,6 +5502,10 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
 
   const searchKeywords = keywords.length ? keywords : (p.search_keywords || [])
   const sources = await resolveBrollSources(planPipelineId, overrides)
+
+  if (!searchKeywords.length && !brief) {
+    throw new Error(`No keywords AND no brief for ch${chapterIndex} p${placementIndex} — re-run keyword generation before searching`)
+  }
 
   const requestBody = {
     keywords: searchKeywords,
