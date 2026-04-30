@@ -2144,32 +2144,14 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
   })
 
   try {
-    // Phase 0: Check for existing waiting/running entries from a previous interrupted batch
-    const existingResumable = await db.prepare(
-      `SELECT * FROM broll_searches WHERE plan_pipeline_id IN (${planPipelineIds.map(() => '?').join(',')}) AND status IN ('waiting', 'running', 'failed', 'stopped') ORDER BY id`
-    ).all(...planPipelineIds)
-
     let toSearch = []
 
-    if (existingResumable.length) {
-      // Resume existing queue — skip keywords, go straight to GPU search
-      console.log(`[search-batch] Resuming ${existingResumable.length} existing queue entries (${existingResumable.map(r => r.status).join(', ')})`)
-      // Reset stuck/failed/stopped entries back to 'waiting'
-      for (const row of existingResumable) {
-        if (row.status !== 'waiting') {
-          await db.prepare(`UPDATE broll_searches SET status = 'waiting', started_at = NULL, completed_at = NULL, error = NULL WHERE id = ?`).run(row.id)
-        }
-      }
-      toSearch = existingResumable.map(row => ({
-        pid: row.plan_pipeline_id,
-        uuid: row.placement_uuid || null,
-        chapterIndex: row.chapter_index,
-        placementIndex: row.placement_index,
-        brollSearchId: row.id,
-        variantLabel: row.variant_label || 'Variant',
-      }))
-    } else {
-      // No existing queue — full flow: keywords + create new entries
+    // Phase 0 removed — the worker (server/services/broll-search-worker.js)
+    // and reclaimer now own resumption. Re-running this batch with the same
+    // planPipelineIds simply enqueues new rows; if old 'waiting' rows still
+    // exist for the plan, the worker will drain them in id order.
+    {
+      // Full flow: keywords + create new entries
 
       // Phase 1: Determine pending search items per variant (search tracker is source of truth)
       brollPipelineProgress.set(pipelineId, {
@@ -2256,70 +2238,19 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       console.log(`[search-batch] Created ${toSearch.length} queue entries in broll_searches`)
     }
 
-    // Phase 3: Sequential GPU search
+    // Phase 3 removed — rows have been enqueued. The worker drains them
+    // sequentially. The route returned the pipelineId before this function
+    // even started, so the UI is already polling progress / per-row status.
     brollPipelineProgress.set(pipelineId, {
       ...brollPipelineProgress.get(pipelineId),
-      phase: 'gpu_search',
-      stageName: 'Searching B-Roll...',
+      status: 'enqueued', stageName: `Enqueued ${toSearch.length} searches`,
       subDone: 0, subTotal: toSearch.length,
-    })
-
-    for (let i = 0; i < toSearch.length; i++) {
-      if (abortedBrollPipelines.has(pipelineId)) {
-        // Mark remaining entries as stopped (not failed — user intentionally stopped)
-        for (const remaining of toSearch.slice(i)) {
-          await db.prepare(
-            `UPDATE broll_searches SET status = 'stopped', error = 'Stopped by user', completed_at = NOW() WHERE id = ? AND status IN ('waiting', 'running')`
-          ).run(remaining.brollSearchId)
-        }
-        throw new Error('Aborted')
-      }
-      const item = toSearch[i]
-      brollPipelineProgress.set(pipelineId, {
-        ...brollPipelineProgress.get(pipelineId),
-        stageName: `${item.variantLabel} Ch${item.chapterIndex + 1} #${item.placementIndex + 1}`,
-        subDone: i, subTotal: toSearch.length,
-        currentVariant: item.variantLabel,
-      })
-
-      // Mark as running in queue
-      await db.prepare(`UPDATE broll_searches SET status = 'running', started_at = NOW() WHERE id = ?`).run(item.brollSearchId)
-
-      try {
-        const result = await searchSinglePlacement(item.pid, { placementUuid: item.uuid, chapterIndex: item.chapterIndex, placementIndex: item.placementIndex })
-        // If we got zero results because the GPU job is still running or failed, surface that
-        // in the row status — don't lie by marking 'complete'. UI can then show a real state.
-        const rowStatus = result.gpuJobStatus === 'running' ? 'timeout'
-          : result.gpuJobStatus === 'failed' ? 'failed'
-          : 'complete'
-        await db.prepare(`
-          UPDATE broll_searches SET status = ?, results_json = ?, num_results = ?, duration_ms = ?, api_log_id = ?, error = ?, completed_at = NOW()
-          WHERE id = ?
-        `).run(
-          rowStatus,
-          JSON.stringify(result.results || []),
-          (result.results || []).length,
-          result.duration || null,
-          result.apiLogId || null,
-          result.error || null,
-          item.brollSearchId
-        )
-      } catch (err) {
-        console.error(`[search-batch] GPU search failed for ${item.variantLabel} Ch${item.chapterIndex + 1} #${item.placementIndex + 1}: ${err.message}`)
-        await db.prepare(`UPDATE broll_searches SET status = 'failed', error = ?, completed_at = NOW() WHERE id = ?`).run(err.message, item.brollSearchId)
-      }
-    }
-
-    brollPipelineProgress.set(pipelineId, {
-      ...brollPipelineProgress.get(pipelineId),
-      status: 'complete', stageName: 'Done',
-      subDone: toSearch.length, subTotal: toSearch.length,
     })
     setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
     pipelineAbortControllers.delete(pipelineId)
-    console.log(`[search-batch] Complete: ${toSearch.length} searches (${((Date.now() - pipelineStart) / 1000).toFixed(0)}s)`)
+    console.log(`[search-batch] Enqueued ${toSearch.length} placements (${((Date.now() - pipelineStart) / 1000).toFixed(0)}s)`)
 
-    return { pipelineId, searched: toSearch.length, total: toSearch.length }
+    return { pipelineId, enqueued: toSearch.length, total: toSearch.length }
 
   } catch (err) {
     pipelineAbortControllers.delete(pipelineId)
@@ -5905,6 +5836,44 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
   }
 }
 
+// Enqueue a single placement search instead of executing it inline. Used by
+// the /pipeline/:pipelineId/search-placement route after the queue cutover.
+// The worker (server/services/broll-search-worker.js) is the sole executor.
+export async function enqueueSearchPlacement(planPipelineId, identity, overrides = {}) {
+  const { placementUuid, chapterIndex, placementIndex } = identity || {}
+  if (chapterIndex == null || placementIndex == null) {
+    // Resolve indices from uuid if needed (mirrors searchSinglePlacement's contract)
+    if (!placementUuid) throw new Error('enqueueSearchPlacement: needs uuid OR (chapterIndex, placementIndex)')
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    let resolved = null
+    outer: for (const [chIdx, m] of uuidsByChapter.entries()) {
+      for (const [pIdx, u] of m.entries()) {
+        if (u === placementUuid) { resolved = { chapterIndex: chIdx, placementIndex: pIdx }; break outer }
+      }
+    }
+    if (!resolved) throw new Error(`enqueueSearchPlacement: uuid ${placementUuid} not found in plan ${planPipelineId}`)
+    identity = { ...identity, ...resolved }
+  }
+
+  // Build brief/keywords/description so the row carries the same payload as a batch row.
+  const { brief, keywords, description, uuid: builtUuid } = await _buildSearchParams(
+    planPipelineId, identity.chapterIndex, identity.placementIndex, placementUuid,
+  )
+  if (!keywords.length) {
+    throw new Error(`enqueueSearchPlacement: no keywords for ch${identity.chapterIndex} p${identity.placementIndex} — generate keywords first`)
+  }
+
+  const batchId = `single-${Date.now()}`
+  const variantLabel = overrides.variantLabel || 'Variant'
+  const ins = await db.prepare(`
+    INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, placement_uuid, variant_label, description, brief, keywords_json, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+  `).run(planPipelineId, batchId, identity.chapterIndex, identity.placementIndex, placementUuid || builtUuid || null, variantLabel, description, brief, JSON.stringify(keywords))
+
+  return { brollSearchId: ins.lastInsertRowid, batchId }
+}
+
 /**
  * Search a single B-Roll placement by its chapterIndex + placementIndex.
  * Reuses the same brief/keyword building as executeBrollSearch but for one item.
@@ -6158,6 +6127,28 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
   // No need to duplicate in broll_runs
 
   return { results, ...searchMeta, duration: searchDuration, apiLogId, gpuJobStatus, jobId: gpuJobId }
+}
+
+// Enqueue a user-placement search. Mirrors enqueueSearchPlacement but identifies
+// the placement by userPlacementId and resolves brief/keywords from the loaded
+// editor state. The worker reads this row and calls searchUserPlacement.
+export async function enqueueSearchUserPlacement(planPipelineId, userPlacementId, overrides = {}) {
+  const loaded = await loadBrollEditorState(planPipelineId)
+  const up = (loaded.state.userPlacements || []).find(u => u.id === userPlacementId)
+  if (!up) throw new Error(`enqueueSearchUserPlacement: userPlacementId ${userPlacementId} not found`)
+
+  const desc = overrides.description || up.snapshot?.description || ''
+  const brief = desc ? `# ${desc}` : ''
+  const keywords = up.snapshot?.search_keywords || []
+
+  const batchId = `single-up-${Date.now()}`
+  const variantLabel = overrides.variantLabel || 'Variant'
+  const ins = await db.prepare(`
+    INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, placement_uuid, variant_label, description, brief, keywords_json, status)
+    VALUES (?, ?, -1, -1, ?, ?, ?, ?, ?, 'waiting')
+  `).run(planPipelineId, batchId, `up-${userPlacementId}`, variantLabel, desc, brief, JSON.stringify(keywords))
+
+  return { brollSearchId: ins.lastInsertRowid, batchId }
 }
 
 export async function searchUserPlacement(planPipelineId, userPlacementId, overrides = {}) {

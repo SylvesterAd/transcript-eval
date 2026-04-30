@@ -152,6 +152,17 @@ try {
     await pool.query(`ALTER TABLE broll_searches ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_status_waiting ON broll_searches(id) WHERE status = 'waiting'`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_status_running ON broll_searches(started_at) WHERE status = 'running'`)
+    // 2026-04-30: PR 2 cutover — fail any rows currently stuck under the old code path.
+    // The new worker handles future stuck rows via the reclaimer, but pre-existing ones
+    // never had a retry_count, so we just mark them failed once.
+    await pool.query(`
+      UPDATE broll_searches
+      SET status='failed',
+          error='reclaimed during queue migration',
+          completed_at=NOW()
+      WHERE status = 'running'
+        AND started_at < NOW() - INTERVAL '20 minutes'
+    `)
     // api_logs.placement_uuid lets us link log rows back to a specific b-roll
     // placement via uuid (instead of relying on broll_searches.api_log_id, which
     // is only written on completion). Filter API logs by uuid in /admin/api-logs.

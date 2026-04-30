@@ -42,8 +42,8 @@ import {
   executeKeywordsBatch,
   getBRollEditorData,
   buildManifestFromPlacements,
-  searchSinglePlacement,
-  searchUserPlacement,
+  enqueueSearchPlacement,
+  enqueueSearchUserPlacement,
   executePlanPrep,
   executeCreateStrategy,
   executeCreatePlan,
@@ -813,6 +813,25 @@ router.post('/pipeline/:pipelineId/resume', requireAuth, async (req, res) => {
   }
 })
 
+// Returns the state of one b-roll search row by its primary key.
+// UI polls this for completion when it has a brollSearchId from an enqueue.
+router.get('/pipeline/search-status/:brollSearchId', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.brollSearchId, 10)
+  if (!id) return res.status(400).json({ error: 'invalid brollSearchId' })
+  const row = await db.prepare(`
+    SELECT id, status, plan_pipeline_id, placement_uuid, chapter_index, placement_index,
+           num_results, results_json, error, api_log_id, retry_count,
+           created_at, started_at, completed_at, duration_ms
+    FROM broll_searches WHERE id = ?
+  `).get(id)
+  if (!row) return res.status(404).json({ error: 'brollSearchId not found' })
+  let results = null
+  if (row.results_json) {
+    try { results = JSON.parse(row.results_json) } catch {}
+  }
+  res.json({ ...row, results, results_json: undefined })
+})
+
 router.get('/pipeline/:pipelineId/snapshot', requireAuth, async (req, res) => {
   const data = getPipelineSnapshot(req.params.pipelineId)
   if (!data) return res.status(404).json({ error: 'No snapshot found for this pipeline' })
@@ -895,8 +914,13 @@ router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, r
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchSinglePlacement(pipelineId, { placementUuid, chapterIndex, placementIndex }, overrides)
-    res.json(result)
+    const { brollSearchId, batchId } = await enqueueSearchPlacement(
+      pipelineId,
+      { placementUuid, chapterIndex, placementIndex },
+      overrides,
+    )
+    // Async semantics: poll GET /pipeline/search-status/:brollSearchId for completion.
+    res.json({ brollSearchId, batchId })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -910,8 +934,8 @@ router.post('/pipeline/:pipelineId/search-user-placement', requireAuth, async (r
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchUserPlacement(req.params.pipelineId, userPlacementId, overrides)
-    res.json(result)
+    const { brollSearchId, batchId } = await enqueueSearchUserPlacement(req.params.pipelineId, userPlacementId, overrides)
+    res.json({ brollSearchId, batchId })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

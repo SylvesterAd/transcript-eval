@@ -17,12 +17,13 @@ vi.mock('../../db.js', () => ({
 }))
 vi.mock('../broll.js', () => ({
   searchSinglePlacement: vi.fn(),
+  searchUserPlacement: vi.fn(),
   abortedBrollPipelines: new Set(),
 }))
 
 import { startWorker, stopWorker, _resetForTest, reclaimerSweep as _reclaimerSweep } from '../broll-search-worker.js'
 import db from '../../db.js'
-import { searchSinglePlacement, abortedBrollPipelines } from '../broll.js'
+import { searchSinglePlacement, searchUserPlacement, abortedBrollPipelines } from '../broll.js'
 
 const mockPool = db.pool
 
@@ -367,5 +368,52 @@ describe('broll-search-worker — reclaimer (max retries)', () => {
 
     expect(updates.length).toBe(1)
     expect(updates[0].params).toEqual([600])
+  })
+})
+
+describe('broll-search-worker — user-placement dispatch', () => {
+  beforeEach(() => {
+    searchSinglePlacement.mockReset()
+    searchUserPlacement.mockReset()
+    _resetForTest()
+    vi.useFakeTimers()
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+  })
+
+  afterEach(async () => {
+    await stopWorker()
+    vi.useRealTimers()
+  })
+
+  it('dispatches user-placement rows to searchUserPlacement', async () => {
+    state.queryImpl = async (sql, params) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ got: true }] }
+      if (sql.includes('SELECT id, plan_pipeline_id')) {
+        return {
+          rows: [{
+            id: 700,
+            plan_pipeline_id: 'plan-1',
+            placement_uuid: 'up-abc',
+            chapter_index: -1,
+            placement_index: -1,
+            batch_id: 'single-up-1',
+          }],
+        }
+      }
+      if (sql.includes("SET status='running'")) return { rowCount: 1 }
+      if (sql.includes('SET status=$1')) return { rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+
+    searchUserPlacement.mockResolvedValue({ results: [], duration: 100, apiLogId: null })
+
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(searchUserPlacement).toHaveBeenCalledWith('plan-1', 'abc')
+    expect(searchSinglePlacement).not.toHaveBeenCalled()
   })
 })

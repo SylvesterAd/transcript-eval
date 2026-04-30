@@ -25,6 +25,45 @@ function filterToSession(entries) {
   return entries.filter(e => (e?.ts || 0) >= PAGE_LOAD_TS)
 }
 
+const POLL_INTERVAL_MS = 1500
+const MAX_POLL_DURATION_MS = 25 * 60 * 1000  // 25 minutes
+
+// Polls GET /broll/pipeline/search-status/:brollSearchId until the row reaches
+// a terminal status. Returns { status, results, num_results, error } from the
+// final status payload. Throws on AbortError or if max duration is exceeded.
+async function pollBrollSearch(brollSearchId, { signal } = {}) {
+  const start = Date.now()
+  while (true) {
+    if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+    if (Date.now() - start > MAX_POLL_DURATION_MS) {
+      throw new Error(`pollBrollSearch: timeout after ${MAX_POLL_DURATION_MS / 60000} min for brollSearchId ${brollSearchId}`)
+    }
+
+    let row
+    try {
+      row = await authFetch(`/broll/pipeline/search-status/${brollSearchId}`, signal)
+    } catch (err) {
+      if (err.name === 'AbortError') throw err
+      throw new Error(`pollBrollSearch: status fetch failed for ${brollSearchId}: ${err.message}`)
+    }
+
+    if (row.status !== 'waiting' && row.status !== 'running') {
+      return row
+    }
+
+    // Wait POLL_INTERVAL_MS, but interruptible via signal
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, POLL_INTERVAL_MS)
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(new DOMException('aborted', 'AbortError'))
+        }, { once: true })
+      }
+    })
+  }
+}
+
 export const BRollContext = createContext(null)
 
 export async function authFetchBRollData(planPipelineId, signal) {
@@ -70,6 +109,9 @@ export function useBRollEditorState(planPipelineId) {
   // detect a pipeline switch and dispatch RESET_PIPELINE_STATE so the outgoing pipeline's
   // userPlacements/edits don't bleed into the new view.
   const lastLoadedPipelineIdRef = useRef(null)
+  // Tracks the in-flight poll AbortController per placement index. Lets a
+  // re-search on the same placement cancel the prior poll cleanly.
+  const placementPollControllers = useRef(new Map())
 
   // Fetch editor data on mount or when pipeline changes (variant switch)
   const refetchEditorData = useCallback(() => {
@@ -416,24 +458,42 @@ export function useBRollEditorState(planPipelineId) {
   const searchPlacement = useCallback(async (index) => {
     const placement = state.rawPlacements[index]
     if (!placement || !planPipelineId) return
+
+    // Cancel any prior poll for this placement
+    const prior = placementPollControllers.current.get(index)
+    if (prior) prior.abort()
+    const controller = new AbortController()
+    placementPollControllers.current.set(index, controller)
+
     dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
     try {
-      const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
+      const enq = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
         placementUuid: placement.uuid,
-        chapterIndex: placement.chapterIndex,   // kept for legacy server fallback
+        chapterIndex: placement.chapterIndex,
         placementIndex: placement.placementIndex,
       })
+      const row = await pollBrollSearch(enq.brollSearchId, { signal: controller.signal })
+      const results = row.results || []
+      const isOk = row.status === 'complete' && results.length > 0
+      const isEmpty = row.status === 'complete' && results.length === 0
       dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
         index,
-        results: result.results || [],
-        searchStatus: result.results?.length ? 'complete' : 'no_results',
+        results,
+        searchStatus: isOk ? 'complete' : (isEmpty ? 'no_results' : 'failed'),
       }})
     } catch (err) {
+      if (err.name === 'AbortError') return  // intentional cancellation
+      console.error('[broll] searchPlacement failed:', err.message)
       dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
         index,
         results: [],
         searchStatus: 'failed',
       }})
+    } finally {
+      // Only clear the controller if it's still ours (a newer search may have replaced it)
+      if (placementPollControllers.current.get(index) === controller) {
+        placementPollControllers.current.delete(index)
+      }
     }
   }, [state.rawPlacements, planPipelineId])
 
@@ -441,34 +501,60 @@ export function useBRollEditorState(planPipelineId) {
   const searchPlacementCustom = useCallback(async (index, overrides) => {
     const placement = state.rawPlacements[index]
     if (!placement || !planPipelineId) return
+
+    const prior = placementPollControllers.current.get(index)
+    if (prior) prior.abort()
+    const controller = new AbortController()
+    placementPollControllers.current.set(index, controller)
+
     dispatch({ type: 'SET_PLACEMENT_SEARCHING', payload: index })
     try {
-      const result = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
+      const enq = await apiPost(`/broll/pipeline/${planPipelineId}/search-placement`, {
         placementUuid: placement.uuid,
-        chapterIndex: placement.chapterIndex,   // kept for legacy server fallback
+        chapterIndex: placement.chapterIndex,
         placementIndex: placement.placementIndex,
         ...overrides,
       })
+      const row = await pollBrollSearch(enq.brollSearchId, { signal: controller.signal })
+      const results = row.results || []
+      const isOk = row.status === 'complete' && results.length > 0
+      const isEmpty = row.status === 'complete' && results.length === 0
       dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
         index,
-        results: result.results || [],
-        searchStatus: result.results?.length ? 'complete' : 'no_results',
+        results,
+        searchStatus: isOk ? 'complete' : (isEmpty ? 'no_results' : 'failed'),
       }})
     } catch (err) {
+      if (err.name === 'AbortError') return
+      console.error('[broll] searchPlacementCustom failed:', err.message)
       dispatch({ type: 'SET_PLACEMENT_RESULTS', payload: {
         index,
         results: [],
         searchStatus: 'failed',
       }})
+    } finally {
+      if (placementPollControllers.current.get(index) === controller) {
+        placementPollControllers.current.delete(index)
+      }
     }
   }, [state.rawPlacements, planPipelineId])
 
   const searchUserPlacement = useCallback(async (userPlacementId, overrides = {}) => {
     if (!planPipelineId) return
+
+    const key = `up-${userPlacementId}`
+    const prior = placementPollControllers.current.get(key)
+    if (prior) prior.abort()
+    const controller = new AbortController()
+    placementPollControllers.current.set(key, controller)
+
     try {
-      await apiPost(`/broll/pipeline/${planPipelineId}/search-user-placement`, {
+      const enq = await apiPost(`/broll/pipeline/${planPipelineId}/search-user-placement`, {
         userPlacementId, ...overrides,
       })
+      // Wait for the worker to drain this row before reloading editor-state.
+      await pollBrollSearch(enq.brollSearchId, { signal: controller.signal })
+
       // Reload editor-state to pick up new results on the userPlacement
       const data = await authFetch(`/broll/pipeline/${planPipelineId}/editor-state`)
       const sessionScoped = {
@@ -481,7 +567,12 @@ export function useBRollEditorState(planPipelineId) {
       }
       dispatch({ type: 'LOAD_EDITOR_STATE', payload: sessionScoped })
     } catch (err) {
+      if (err.name === 'AbortError') return
       console.error('[broll] user placement search failed:', err.message)
+    } finally {
+      if (placementPollControllers.current.get(key) === controller) {
+        placementPollControllers.current.delete(key)
+      }
     }
   }, [planPipelineId])
 
