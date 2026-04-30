@@ -194,6 +194,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   const currentTimeRef = useRef(state.currentTime)
   currentTimeRef.current = state.currentTime
   useEffect(() => {
+    if (isBroll) return
     if (!state.isPlaying || !scrollRef.current) return
     let raf
     let following = false
@@ -217,7 +218,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [state.isPlaying])
+  }, [isBroll, state.isPlaying])
 
   // Scroll timeline into view on seek (word click, etc.) when not playing.
   // Disabled in b-roll editor — user wants the viewport to stay where they put it.
