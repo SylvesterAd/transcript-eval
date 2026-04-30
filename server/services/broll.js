@@ -5836,6 +5836,44 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
   }
 }
 
+// Enqueue a single placement search instead of executing it inline. Used by
+// the /pipeline/:pipelineId/search-placement route after the queue cutover.
+// The worker (server/services/broll-search-worker.js) is the sole executor.
+export async function enqueueSearchPlacement(planPipelineId, identity, overrides = {}) {
+  const { placementUuid, chapterIndex, placementIndex } = identity || {}
+  if (chapterIndex == null || placementIndex == null) {
+    // Resolve indices from uuid if needed (mirrors searchSinglePlacement's contract)
+    if (!placementUuid) throw new Error('enqueueSearchPlacement: needs uuid OR (chapterIndex, placementIndex)')
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    let resolved = null
+    outer: for (const [chIdx, m] of uuidsByChapter.entries()) {
+      for (const [pIdx, u] of m.entries()) {
+        if (u === placementUuid) { resolved = { chapterIndex: chIdx, placementIndex: pIdx }; break outer }
+      }
+    }
+    if (!resolved) throw new Error(`enqueueSearchPlacement: uuid ${placementUuid} not found in plan ${planPipelineId}`)
+    identity = { ...identity, ...resolved }
+  }
+
+  // Build brief/keywords/description so the row carries the same payload as a batch row.
+  const { brief, keywords, description, uuid: builtUuid } = await _buildSearchParams(
+    planPipelineId, identity.chapterIndex, identity.placementIndex, placementUuid,
+  )
+  if (!keywords.length) {
+    throw new Error(`enqueueSearchPlacement: no keywords for ch${identity.chapterIndex} p${identity.placementIndex} — generate keywords first`)
+  }
+
+  const batchId = `single-${Date.now()}`
+  const variantLabel = overrides.variantLabel || 'Variant'
+  const ins = await db.prepare(`
+    INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, placement_uuid, variant_label, description, brief, keywords_json, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+  `).run(planPipelineId, batchId, identity.chapterIndex, identity.placementIndex, placementUuid || builtUuid || null, variantLabel, description, brief, JSON.stringify(keywords))
+
+  return { brollSearchId: ins.lastInsertRowid, batchId }
+}
+
 /**
  * Search a single B-Roll placement by its chapterIndex + placementIndex.
  * Reuses the same brief/keyword building as executeBrollSearch but for one item.

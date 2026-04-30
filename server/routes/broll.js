@@ -43,6 +43,7 @@ import {
   getBRollEditorData,
   buildManifestFromPlacements,
   searchSinglePlacement,
+  enqueueSearchPlacement,
   searchUserPlacement,
   executePlanPrep,
   executeCreateStrategy,
@@ -914,8 +915,13 @@ router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, r
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchSinglePlacement(pipelineId, { placementUuid, chapterIndex, placementIndex }, overrides)
-    res.json(result)
+    const { brollSearchId, batchId } = await enqueueSearchPlacement(
+      pipelineId,
+      { placementUuid, chapterIndex, placementIndex },
+      overrides,
+    )
+    // Async semantics: poll GET /pipeline/search-status/:brollSearchId for completion.
+    res.json({ brollSearchId, batchId })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
