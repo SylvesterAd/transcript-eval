@@ -710,6 +710,35 @@ export async function resumeStuckFullAutoChains() {
   console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interrupted.length} chains; advanced ${advancedChainsCount} chains from substage`)
 }
 
+// Boot-time recovery for YouTube reference downloads. downloadYouTubeVideo
+// is fire-and-forget from POST /groups/:id/examples — a server kill between
+// the INSERT (status='pending') and the success/failure write leaves the
+// row stuck (status='pending' or 'processing'). The frontend just spins.
+// We refire the download for any row whose heartbeat is null/stale; the
+// staleness check leaves a still-live driver in a parallel container alone
+// (rolling deploy / dev hot-reload) so we don't double-fire yt-dlp.
+export async function resumeStuckYouTubeDownloads() {
+  const heartbeatTtlSeconds = Math.ceil(HEARTBEAT_TTL_MS / 1000)
+  const stuck = await db.prepare(
+    `SELECT id FROM broll_example_sources
+     WHERE kind = 'yt_video'
+       AND status IN ('pending', 'processing')
+       AND (heartbeat_at IS NULL OR heartbeat_at < NOW() - (? || ' seconds')::interval)`
+  ).all(String(heartbeatTtlSeconds))
+
+  if (!stuck.length) return
+
+  const { downloadYouTubeVideo } = await import('./broll.js')
+  for (const row of stuck) {
+    setTimeout(() => {
+      downloadYouTubeVideo(row.id).catch(err =>
+        console.error(`[startup] yt resume ${row.id} failed: ${err.message}`)
+      )
+    }, 3000)
+  }
+  console.log(`[startup] resumed ${stuck.length} stuck YouTube downloads`)
+}
+
 // Populate the indirection holder now that all helper functions are declared.
 // Tests can override these fields to swap in mocks (see resume-stuck-chains-v2.test.js).
 __orchestratorDeps.findInterruptedPipelinesForGroup = findInterruptedPipelinesForGroup

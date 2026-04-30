@@ -581,6 +581,12 @@ export async function deleteExampleSource(id) {
   await db.prepare('DELETE FROM broll_example_sources WHERE id = ?').run(id)
 }
 
+// Heartbeat cadence for downloadYouTubeVideo. The boot-time
+// resumeStuckYouTubeDownloads (see auto-orchestrator.js) only refires rows
+// whose heartbeat is older than HEARTBEAT_TTL_MS, so this interval must
+// keep updating the column while yt-dlp runs.
+const YT_HEARTBEAT_INTERVAL_MS = 30 * 1000
+
 /**
  * Download a YouTube video at 360p, upload to Supabase, create a videos record,
  * and link it to the example source. Runs in the background after addExampleSource.
@@ -598,8 +604,20 @@ export async function downloadYouTubeVideo(exampleSourceId) {
   const groupId = source.group_id
   let mp4Path = null
 
+  // Heartbeat keeps boot-time auto-resume aware that this row has a live
+  // driver. Cleared in finally — once status flips to 'ready'/'failed' the
+  // resume query no longer matches anyway, but stopping the timer prevents
+  // a stray UPDATE racing with the next request that touches this row.
+  const heartbeat = setInterval(() => {
+    db.prepare('UPDATE broll_example_sources SET heartbeat_at = NOW() WHERE id = ?')
+      .run(exampleSourceId)
+      .catch(() => {})
+  }, YT_HEARTBEAT_INTERVAL_MS)
+
   try {
-    await updateExampleSourceStatus(exampleSourceId, 'processing')
+    await db.prepare(
+      "UPDATE broll_example_sources SET status = 'processing', heartbeat_at = NOW() WHERE id = ?"
+    ).run(exampleSourceId)
 
     // Reuse any prior download of the same YouTube video (across all
     // groups/users). Match by canonical 11-char video ID, not by raw
@@ -672,6 +690,7 @@ export async function downloadYouTubeVideo(exampleSourceId) {
     console.error(`[broll-dl] Error downloading ${url}:`, cleanError)
     await updateExampleSourceStatus(exampleSourceId, 'failed', cleanError)
   } finally {
+    clearInterval(heartbeat)
     if (mp4Path) try { unlinkSync(mp4Path) } catch {}
   }
 }

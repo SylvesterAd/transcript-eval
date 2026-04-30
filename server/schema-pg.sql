@@ -343,6 +343,7 @@ CREATE TABLE IF NOT EXISTS broll_example_sources (
   error TEXT,
   meta_json TEXT NOT NULL DEFAULT '{}',
   is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
+  heartbeat_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
