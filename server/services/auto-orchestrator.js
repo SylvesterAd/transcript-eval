@@ -17,6 +17,85 @@ import { analyzeMulticam, runClassification } from './multicam-sync.js'
 import { pathToFlags } from '../routes/broll.js'
 import * as emailNotifier from './email-notifier.js'
 
+// Note: resumePipeline is dynamically imported from './broll.js' inside
+// resumeStuckFullAutoChains to avoid pulling broll.js (which has heavy
+// transitive deps including llm-runner.js side-effects) into the module
+// graph at orchestrator load time. The dynamic import still respects
+// vi.mock('../broll.js', ...) in tests.
+
+// Indirection holder for orchestrator-internal helpers that
+// resumeStuckFullAutoChains delegates to. Tests stub these by reassigning
+// fields on the holder (see resume-stuck-chains-v2.test.js). The pattern
+// mirrors __pipelineRunner in broll.js — ESM live bindings make vi.spyOn
+// on the named exports unreliable, so we route through a mutable object.
+// Populated below the function declarations.
+export const __orchestratorDeps = {
+  findInterruptedPipelinesForGroup: null,
+  resumeChain: null,
+  runFullAutoBrollChain: null,
+}
+
+// Find pipelineIds belonging to a video_group whose expected stages exceed the
+// completed-main-stages count (i.e., interrupted by a server crash). Skips
+// alt-/kw-/bs- pipelines (they have dedicated re-trigger endpoints). When
+// substage='refs', also scans pipelines for the group's reference videos.
+//
+// Returns an array of pipelineId strings.
+export async function findInterruptedPipelinesForGroup(groupId, substage) {
+  // Gather video IDs that belong to this group
+  const groupVideoRows = await db.prepare('SELECT id FROM videos WHERE group_id = ?').all(groupId)
+  const videoIds = groupVideoRows.map(r => r.id)
+
+  // For 'refs' substage, also include reference videos.
+  // broll_example_sources stores videoId inside meta_json (TEXT), not a column —
+  // see loadExampleVideos in broll.js for the canonical pattern. We fetch the
+  // rows and parse JSON in JS rather than try a JSON extract in SQL.
+  if (substage === 'refs') {
+    const refSources = await db.prepare(`
+      SELECT s.meta_json
+      FROM broll_example_sources s
+      JOIN broll_example_sets es ON es.id = s.example_set_id
+      WHERE es.group_id = ? AND s.status = 'ready'
+    `).all(groupId)
+    for (const row of refSources) {
+      try {
+        const meta = JSON.parse(row.meta_json || '{}')
+        if (meta.videoId && !videoIds.includes(meta.videoId)) videoIds.push(meta.videoId)
+      } catch {}
+    }
+  }
+
+  if (!videoIds.length) return []
+
+  // Fetch broll_runs for these videos. The pg adapter uses '?' placeholders
+  // (see existing query at server/services/broll.js:806-810).
+  const placeholders = videoIds.map(() => '?').join(',')
+  const runs = await db.prepare(
+    `SELECT id, metadata_json, status FROM broll_runs WHERE video_id IN (${placeholders}) AND status = 'complete'`
+  ).all(...videoIds)
+
+  // Group by pipelineId, count completed main stages, compare to expectedStages
+  // (taken from any row's totalStages metadata).
+  const byPid = new Map()
+  for (const row of runs) {
+    let meta
+    try { meta = JSON.parse(row.metadata_json || '{}') } catch { continue }
+    const pid = meta.pipelineId
+    if (!pid) continue
+    if (pid.startsWith('alt-') || pid.startsWith('kw-') || pid.startsWith('bs-')) continue
+    if (!byPid.has(pid)) byPid.set(pid, { mainStages: new Set(), expected: 0 })
+    const entry = byPid.get(pid)
+    if (meta.totalStages != null && meta.totalStages > entry.expected) entry.expected = meta.totalStages
+    if (!meta.isSubRun && meta.stageIndex != null) entry.mainStages.add(meta.stageIndex)
+  }
+
+  const interrupted = []
+  for (const [pid, { mainStages, expected }] of byPid) {
+    if (expected > 0 && mainStages.size < expected) interrupted.push(pid)
+  }
+  return interrupted
+}
+
 // Cooperative cancel signal. The DELETE handler sets assembly_status='deleting'
 // on the sub-group (and the parent) before purging. We poll this between
 // chain stages and bail — no more executePipeline calls, no more email
@@ -259,10 +338,56 @@ export async function chainAfterClassify(groupId) {
   })
 }
 
+// True if the group already has the broll_runs outputs needed to skip a phase.
+// - 'refs' requires BOTH 'plan_prep' (main video) AND 'main_analysis' (ref videos)
+//   because the next phase (runStrategies) fails without prepPipelineId AND
+//   analysisPipelineIds. If only one exists, return false so refs re-runs;
+//   runAllReferences is idempotent and will fill the missing piece without
+//   re-doing completed work.
+// - 'strategy' is satisfied by EITHER 'create_strategy' OR 'create_combined_strategy'
+//   (which one applies depends on the number of reference videos).
+// - 'plan' is satisfied by 'plan'.
+// - 'search' always returns false — idempotent re-run is safer than skipping.
+async function phaseHasOutputs(groupId, phase) {
+  const groupVideoRows = await db.prepare('SELECT id FROM videos WHERE group_id = ?').all(groupId)
+  const videoIds = groupVideoRows.map(r => r.id)
+  if (!videoIds.length) return false
+
+  if (phase === 'search') return false
+
+  const phaseConfig = {
+    refs: { kinds: ['main_analysis', 'plan_prep'], requireAll: true },
+    strategy: { kinds: ['create_strategy', 'create_combined_strategy'], requireAll: false },
+    plan: { kinds: ['plan'], requireAll: false },
+  }[phase]
+  if (!phaseConfig) return false
+
+  const placeholders = videoIds.map(() => '?').join(',')
+  for (const kind of phaseConfig.kinds) {
+    const row = await db.prepare(
+      `SELECT 1 FROM broll_runs r
+       JOIN broll_strategies s ON s.id = r.strategy_id
+       WHERE r.video_id IN (${placeholders}) AND r.status = 'complete'
+         AND s.strategy_kind = ?
+       LIMIT 1`
+    ).get(...videoIds, kind)
+    if (phaseConfig.requireAll && !row) return false  // missing a required kind
+    if (!phaseConfig.requireAll && row) return true   // any kind found
+  }
+  // requireAll: all kinds existed (no early false). requireAny: nothing matched.
+  return phaseConfig.requireAll
+}
+
 // runFullAutoBrollChain — fires the b-roll pipeline chain (references analyzed
 // → strategy → plan → first-10 search) for sub-groups whose parent picked
 // hands-off / strategy-only / guided. Respects pathToFlags pauses.
-export async function runFullAutoBrollChain(subGroupId) {
+//
+// Options:
+//   resumeFromSubstage — when set (boot-time auto-resume), skips phases whose
+//     outputs already exist in broll_runs. Existing callers omit this and get
+//     unchanged behavior. The skipped phase's pipelineIds are recovered from
+//     the latest completed runs so downstream phases still get their inputs.
+export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = null } = {}) {
   if (!subGroupId) return
   await db.prepare(
     "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = 'refs' WHERE id = ?"
@@ -286,16 +411,69 @@ export async function runFullAutoBrollChain(subGroupId) {
     `).get(subGroupId)
     if (!mainVideo) throw new Error('No video with transcript in sub-group')
 
-    const refs = await runner.runAllReferences({ subGroupId, mainVideoId: mainVideo.id })
-    await runner.waitForPipelinesComplete([refs.prepPipelineId, ...refs.analysisPipelineIds].filter(Boolean))
+    // Phase 1: refs
+    let refs = { prepPipelineId: null, analysisPipelineIds: [] }
+    const skipRefs = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'refs')
+    if (skipRefs) {
+      console.log(`[orchestrator] Skipping refs phase for group ${subGroupId} — outputs already exist`)
+      // Recover prep + analysis pipeline IDs from the latest completed runs so
+      // strategy phase still has its inputs.
+      const prepRow = await db.prepare(`
+        SELECT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind = 'plan_prep' AND r.status = 'complete'
+        ORDER BY r.id DESC LIMIT 1
+      `).get(mainVideo.id)
+      if (prepRow) {
+        try { refs.prepPipelineId = JSON.parse(prepRow.metadata_json || '{}').pipelineId || null } catch {}
+      }
+      const analysisRows = await db.prepare(`
+        SELECT DISTINCT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind = 'main_analysis' AND r.status = 'complete'
+        ORDER BY r.id DESC
+      `).all(mainVideo.id)
+      const pids = new Set()
+      for (const a of analysisRows) {
+        try {
+          const m = JSON.parse(a.metadata_json || '{}')
+          if (m.pipelineId) pids.add(m.pipelineId)
+        } catch {}
+      }
+      refs.analysisPipelineIds = [...pids]
+    } else {
+      refs = await runner.runAllReferences({ subGroupId, mainVideoId: mainVideo.id })
+      await runner.waitForPipelinesComplete([refs.prepPipelineId, ...refs.analysisPipelineIds].filter(Boolean))
+    }
     if (await isCancelled(subGroupId)) return
 
+    // Phase 2: strategy
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'strategy' WHERE id = ?").run(subGroupId)
-    const strats = await runner.runStrategies({
-      subGroupId, mainVideoId: mainVideo.id,
-      prepPipelineId: refs.prepPipelineId, analysisPipelineIds: refs.analysisPipelineIds,
-    })
-    await runner.waitForPipelinesComplete(strats.strategyPipelineIds)
+    let strats = { strategyPipelineIds: [] }
+    const skipStrategy = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'strategy')
+    if (skipStrategy) {
+      console.log(`[orchestrator] Skipping strategy phase for group ${subGroupId} — outputs already exist`)
+      const stratRows = await db.prepare(`
+        SELECT DISTINCT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind IN ('create_strategy', 'create_combined_strategy') AND r.status = 'complete'
+        ORDER BY r.id DESC
+      `).all(mainVideo.id)
+      const pids = new Set()
+      for (const r of stratRows) {
+        try {
+          const m = JSON.parse(r.metadata_json || '{}')
+          if (m.pipelineId) pids.add(m.pipelineId)
+        } catch {}
+      }
+      strats.strategyPipelineIds = [...pids]
+    } else {
+      strats = await runner.runStrategies({
+        subGroupId, mainVideoId: mainVideo.id,
+        prepPipelineId: refs.prepPipelineId, analysisPipelineIds: refs.analysisPipelineIds,
+      })
+      await runner.waitForPipelinesComplete(strats.strategyPipelineIds)
+    }
     if (await isCancelled(subGroupId)) return
 
     if (flags.stopAfterStrategy) {
@@ -304,13 +482,34 @@ export async function runFullAutoBrollChain(subGroupId) {
       return
     }
 
+    // Phase 3: plan
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'plan' WHERE id = ?").run(subGroupId)
-    const plans = await runner.runPlanForEachVariant({
-      subGroupId, mainVideoId: mainVideo.id,
-      prepPipelineId: refs.prepPipelineId,
-      strategyPipelineIds: strats.strategyPipelineIds,
-    })
-    await runner.waitForPipelinesComplete(plans.planPipelineIds)
+    let plans = { planPipelineIds: [] }
+    const skipPlan = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'plan')
+    if (skipPlan) {
+      console.log(`[orchestrator] Skipping plan phase for group ${subGroupId} — outputs already exist`)
+      const planRows = await db.prepare(`
+        SELECT DISTINCT metadata_json FROM broll_runs r
+        JOIN broll_strategies s ON s.id = r.strategy_id
+        WHERE r.video_id = ? AND s.strategy_kind = 'plan' AND r.status = 'complete'
+        ORDER BY r.id DESC
+      `).all(mainVideo.id)
+      const pids = new Set()
+      for (const r of planRows) {
+        try {
+          const m = JSON.parse(r.metadata_json || '{}')
+          if (m.pipelineId) pids.add(m.pipelineId)
+        } catch {}
+      }
+      plans.planPipelineIds = [...pids]
+    } else {
+      plans = await runner.runPlanForEachVariant({
+        subGroupId, mainVideoId: mainVideo.id,
+        prepPipelineId: refs.prepPipelineId,
+        strategyPipelineIds: strats.strategyPipelineIds,
+      })
+      await runner.waitForPipelinesComplete(plans.planPipelineIds)
+    }
     if (await isCancelled(subGroupId)) return
 
     if (flags.stopAfterPlan) {
@@ -319,6 +518,7 @@ export async function runFullAutoBrollChain(subGroupId) {
       return
     }
 
+    // Phase 4: search — always runs (idempotent re-run is safer than skipping)
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
     await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: plans.planPipelineIds })
 
@@ -391,8 +591,12 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
   }
 }
 
-// Called from server boot. Re-fires chains for sub-groups that should be running
-// but aren't (interrupted by server restart, etc.).
+// Called from server boot. Resumes b-roll work that the previous server
+// process left in flight: stuck chains (status IS NULL but ought to start) and
+// interrupted chains (status='running' when the process died). For interrupted
+// chains, uses smart per-pipeline resume + advance-from-substage rather than
+// re-firing the whole chain (which previously caused 50+ spurious analysis runs).
+// See spec docs/superpowers/specs/2026-04-29-broll-auto-resume-design.md.
 export async function resumeStuckFullAutoChains() {
   const stuck = await db.prepare(`
     SELECT id FROM video_groups
@@ -403,15 +607,65 @@ export async function resumeStuckFullAutoChains() {
       AND broll_chain_status IS NULL
   `).all()
   for (const sg of stuck) {
-    setTimeout(() => runFullAutoBrollChain(sg.id), 3000)
+    setTimeout(() => __orchestratorDeps.runFullAutoBrollChain(sg.id), 3000)
   }
 
   const interrupted = await db.prepare(
     "SELECT id FROM video_groups WHERE broll_chain_status = 'running'"
   ).all()
+
+  // Lazy-import resumePipeline so broll.js (and its transitive llm-runner deps)
+  // isn't pulled into the module graph at orchestrator load time. vi.mock in
+  // tests still intercepts this dynamic import.
+  const { resumePipeline } = await import('./broll.js')
+
+  let resumedPipelinesCount = 0
+  let advancedChainsCount = 0
   for (const sg of interrupted) {
-    await db.prepare("UPDATE video_groups SET broll_chain_status = NULL WHERE id = ?").run(sg.id)
-    setTimeout(() => runFullAutoBrollChain(sg.id), 3000)
+    try {
+      const row = await db.prepare(
+        'SELECT broll_chain_substage FROM video_groups WHERE id = ?'
+      ).get(sg.id)
+      const substage = row?.broll_chain_substage || null
+
+      // Step 1: resume interrupted pipelines for this group.
+      // Per Task 3.5 contract, resumePipeline returns { pipelineId, completedStages,
+      // executePromise }. We MUST await executePromise so the chain doesn't advance
+      // (Step 2) until the resumed pipeline has actually finished its work.
+      const pids = await __orchestratorDeps.findInterruptedPipelinesForGroup(sg.id, substage)
+      for (const pid of pids) {
+        try {
+          const { executePromise } = await resumePipeline(pid)
+          await executePromise
+          resumedPipelinesCount++
+        } catch (err) {
+          console.error(`[startup] resumePipeline(${pid}) failed for group ${sg.id}: ${err.message}`)
+        }
+      }
+
+      // Step 2: advance the chain. Use setTimeout(... 3000) to mirror the
+      // first loop's startup delay — gives the rest of the boot path a moment
+      // to settle before kicking off chain advancement.
+      if (substage === 'plan' || substage === 'search') {
+        setTimeout(() => __orchestratorDeps.resumeChain(sg.id, substage), 3000)
+      } else {
+        // 'refs', 'strategy', or NULL → use runFullAutoBrollChain with the new option
+        setTimeout(
+          () => __orchestratorDeps.runFullAutoBrollChain(sg.id, { resumeFromSubstage: substage || 'refs' }),
+          3000,
+        )
+      }
+      advancedChainsCount++
+    } catch (err) {
+      console.error(`[startup] resume failed for group ${sg.id}: ${err.message}`)
+    }
   }
-  console.log(`[startup] resumed ${stuck.length} stuck + ${interrupted.length} interrupted chains`)
+
+  console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interrupted.length} chains; advanced ${advancedChainsCount} chains from substage`)
 }
+
+// Populate the indirection holder now that all helper functions are declared.
+// Tests can override these fields to swap in mocks (see resume-stuck-chains-v2.test.js).
+__orchestratorDeps.findInterruptedPipelinesForGroup = findInterruptedPipelinesForGroup
+__orchestratorDeps.resumeChain = resumeChain
+__orchestratorDeps.runFullAutoBrollChain = runFullAutoBrollChain

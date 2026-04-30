@@ -18,6 +18,22 @@ const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(TEMP_DIR, { recursive: true })
 const execFileAsync = promisify(execFile)
 
+// Retry helper for transient LLM failures inside executePipeline.
+// 2 retries (tries=3 total) with exponential backoff. Aborts immediately if the
+// pipeline was stopped by the user. See spec 2026-04-29-broll-auto-resume-design.md.
+export async function withRetry(fn, { tries = 3, backoff = [5_000, 30_000], pipelineId, label } = {}) {
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    if (pipelineId && abortedBrollPipelines.has(pipelineId)) throw new Error('Aborted')
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt === tries) throw err
+      console.log(`[broll-retry] ${label || '(unnamed)'} attempt ${attempt}/${tries} failed: ${err.message}, retrying in ${backoff[attempt - 1]}ms`)
+      await new Promise(r => setTimeout(r, backoff[attempt - 1]))
+    }
+  }
+}
+
 // Common yt-dlp args that help bypass YouTube's "sign in to confirm you're
 // not a bot" block on datacenter IPs (Railway, etc.). Tries multiple player
 // clients in order — android/tv often work when web is blocked. Optional
@@ -1030,13 +1046,21 @@ export async function loadExampleVideos(groupId) {
   `).all(...groupIds)
 
   const videos = []
+  const seen = new Set()
   for (const src of sources) {
     try {
       const meta = JSON.parse(src.meta_json || '{}')
-      if (meta.videoId) {
-        const v = await db.prepare('SELECT id, title, file_path, cf_stream_uid FROM videos WHERE id = ?').get(meta.videoId)
-        if (v) videos.push({ ...v, isFavorite: !!src.is_favorite })
+      if (!meta.videoId || seen.has(meta.videoId)) {
+        // If this duplicate has isFavorite=true and the existing entry doesn't, promote it.
+        if (meta.videoId && src.is_favorite) {
+          const existing = videos.find(v => v.id === meta.videoId)
+          if (existing && !existing.isFavorite) existing.isFavorite = true
+        }
+        continue
       }
+      seen.add(meta.videoId)
+      const v = await db.prepare('SELECT id, title, file_path, cf_stream_uid FROM videos WHERE id = ?').get(meta.videoId)
+      if (v) videos.push({ ...v, isFavorite: !!src.is_favorite })
     } catch {}
   }
   return videos
@@ -3957,7 +3981,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subStatus })
     } : undefined
 
-    const result = await callLLM({
+    const result = await withRetry(() => callLLM({
       model: stage.model || 'gemini-3-flash-preview',
       systemInstruction,
       prompt: finalPrompt,
@@ -3966,7 +3990,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       videoFile: videoFile || undefined,
       onProgress,
       abortSignal: pipelineAbort.signal,
-    })
+    }), { pipelineId, label: `runLLMCall: ${stage.name || stage.type}` })
     result._resolvedPrompt = finalPrompt
     result._resolvedSystem = systemInstruction
     return result
@@ -4251,7 +4275,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                   updateSegStatus('Uploading segment...')
                 }
 
-                const result = await callLLM({
+                const result = await withRetry(() => callLLM({
                   model: stage.model || 'gemini-3-flash-preview',
                   systemInstruction: winSystem,
                   prompt: winPrompt,
@@ -4260,7 +4284,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                   videoFile: windowVideoFile || undefined,
                   onProgress: (status) => updateSegStatus(status),
                   abortSignal: pipelineAbort.signal,
-                })
+                }), { pipelineId, label: `window ${win.start_tc}-${win.end_tc} (${ex.title || `Video #${ex.id}`})` })
 
                 // Convert relative timestamps to absolute by adding window offset
                 let outputText = result.text
@@ -4459,14 +4483,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
           const chSystem = replacePlaceholders(stage.system_instruction || '')
 
-          const result = await callLLM({
+          const result = await withRetry(() => callLLM({
             model: stage.model || 'gemini-3.1-pro-preview',
             systemInstruction: chSystem,
             prompt: chPrompt,
             params: stage.params || { temperature: 0.3 },
             experimentId: null,
             abortSignal: pipelineAbort.signal,
-          })
+          }), { pipelineId, label: `chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
           chapterResults[c] = result.text
           totalTokensIn += result.tokensIn || 0
@@ -4526,14 +4550,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             .replace(/\{\{segment_number\}\}/g, String(s + 1))
             .replace(/\{\{total_segments\}\}/g, String(segments.length))
           const systemInstruction = replacePlaceholders(stage.system_instruction || '')
-          const result = await callLLM({
+          const result = await withRetry(() => callLLM({
             model: stage.model || 'gemini-3-flash-preview',
             systemInstruction,
             prompt: segPrompt.includes('{{transcript}}') ? segPrompt : `${segPrompt}\n\n${seg.mainText || seg}`,
             params: stage.params || { temperature: 0.2 },
             experimentId: null,
             abortSignal: pipelineAbort.signal,
-          })
+          }), { pipelineId, label: `segment ${s + 1}/${segments.length}` })
           results.push(result.text)
           totalTokensIn += result.tokensIn || 0
           totalTokensOut += result.tokensOut || 0
@@ -5020,7 +5044,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           `).run(
             strategyId, videoId, 'analysis', 'complete',
             '', output, '', '', 'programmatic', 0, 0, 0, stageRuntime,
-            JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, analysisStageCount, transcriptSource: resolvedSource, groupId }),
+            JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, videoId: stage._videoId || null, analysisStageCount, transcriptSource: resolvedSource, groupId }),
           )
           console.log(`[broll-pipeline] Resume: re-inserted programmatic stage ${i + 1} to DB`)
         }
@@ -5036,7 +5060,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           resolvedPrompt || stage.prompt || '', resolvedSystem || stage.system_instruction || '',
           stage.model || 'gemini-3-flash-preview',
           stageTokensIn, stageTokensOut, stageCost, stageRuntime,
-          JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, analysisStageCount, transcriptSource: resolvedSource, groupId }),
+          JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, videoId: stage._videoId || null, analysisStageCount, transcriptSource: resolvedSource, groupId }),
         )
 
         // Persist spending to spending_log — survives run deletion
@@ -5091,6 +5115,189 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       `).run(strategyId, videoId, 'analysis', 'failed', err.message, JSON.stringify({ pipelineId, stageIndex: stageOutputs.length, totalStages: stages.length }))
     }
     throw err
+  }
+}
+
+// Indirection holder so tests can stub executePipeline without driving the
+// real (very large) pipeline. resumePipeline calls through this object;
+// production code path is identical to a direct call.
+// Also holds loadExampleVideos for the same reason — Task 3.7's mismatch
+// check needs to substitute the example-video set in tests.
+export const __pipelineRunner = { executePipeline, loadExampleVideos }
+
+// Callable resume — same logic as POST /broll/pipeline/:id/resume.
+// Lifted from the route so the boot-time auto-resume can call it directly.
+// Throws on validation failures; the route translates them to HTTP errors.
+export async function resumePipeline(pipelineId, opts = {}) {
+  const { fromStage } = opts
+
+  if (pipelineId.startsWith('alt-')) throw new Error('Alt plan pipelines must be re-run via "Generate Alt Plans" button, not resumed')
+  if (pipelineId.startsWith('kw-')) throw new Error('Keywords pipelines must be re-run via "Generate Keywords" button, not resumed')
+  if (pipelineId.startsWith('bs-')) throw new Error('B-Roll search pipelines must be re-run via "Search B-Roll" button, not resumed')
+
+  const allRuns = await db.prepare(`
+    SELECT * FROM broll_runs
+    WHERE metadata_json LIKE ? AND status = 'complete'
+    ORDER BY id
+  `).all(`%"pipelineId":"${pipelineId}"%`)
+
+  if (!allRuns.length) throw new Error('No completed stages found for this pipeline')
+
+  const mainRuns = []
+  const subRunsByStage = {}
+  for (const run of allRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.isSubRun) {
+      const si = meta.stageIndex
+      if (si != null) {
+        if (!subRunsByStage[si]) subRunsByStage[si] = []
+        subRunsByStage[si].push({ ...run, _meta: meta })
+      }
+    } else {
+      mainRuns.push(run)
+    }
+  }
+
+  if (!mainRuns.length) throw new Error('No completed stages found for this pipeline')
+
+  const firstMeta = JSON.parse(mainRuns[0].metadata_json || '{}')
+  const strategyId = mainRuns[0].strategy_id
+  const videoId = mainRuns[0].video_id
+  let groupId = firstMeta.groupId || null
+  if (!groupId && videoId) {
+    const video = await db.prepare('SELECT group_id FROM videos WHERE id = ?').get(videoId)
+    groupId = video?.group_id || null
+  }
+
+  const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategyId)
+  if (!version) throw new Error('No strategy version found')
+  const newTemplateStages = JSON.parse(version.stages_json || '[]')
+
+  const videoGroups = {}
+  for (const run of mainRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.stageIndex == null) continue
+    const vl = meta.videoLabel || ''
+    if (!videoGroups[vl]) videoGroups[vl] = []
+    videoGroups[vl].push({ stageIndex: meta.stageIndex, stageName: meta.stageName, output: run.output_text || '' })
+  }
+  const videoLabelOrder = Object.keys(videoGroups)
+
+  // Sanity check: old runs' video set must align with current example videos.
+  // Mismatch (e.g., reference video added/removed since the original run) would
+  // cause the offset math below to slot outputs into wrong stage positions.
+  // Conservatively drop completedStages and start fresh in that case.
+  //
+  // Prefer videoId-based comparison (stable across renames). Fall back to
+  // videoLabel for runs stored before videoId was persisted.
+  const currentExampleVideos = groupId ? await __pipelineRunner.loadExampleVideos(groupId) : []
+  const currentVideoIds = new Set(currentExampleVideos.map(v => v.id))
+  const currentLabels = new Set(currentExampleVideos.map(v => v.title || `Video #${v.id}`))
+
+  // Collect old videoIds (preferred) and old labels (fallback) from mainRuns metadata
+  const oldVideoIds = new Set()
+  const oldLabels = new Set()
+  for (const run of mainRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.videoId != null) oldVideoIds.add(meta.videoId)
+    if (meta.videoLabel) oldLabels.add(meta.videoLabel)
+  }
+
+  let mismatch = false
+  if (oldVideoIds.size > 0) {
+    // Prefer videoId comparison
+    mismatch = oldVideoIds.size !== currentVideoIds.size ||
+               [...oldVideoIds].some(id => !currentVideoIds.has(id))
+  } else if (oldLabels.size > 0) {
+    // Fall back to label comparison for legacy runs without videoId in metadata
+    mismatch = oldLabels.size !== currentLabels.size ||
+               [...oldLabels].some(l => !currentLabels.has(l))
+  }
+  if (mismatch) {
+    console.warn(`[broll-resume] ${pipelineId}: video set mismatch (oldIds=${[...oldVideoIds].join(',') || 'none'} oldLabels=${[...oldLabels].join(',') || 'none'} currentIds=${[...currentVideoIds].join(',')}). Starting fresh.`)
+  }
+
+  const completedStages = {}
+  if (!mismatch) {
+    for (let v = 0; v < videoLabelOrder.length; v++) {
+      const vl = videoLabelOrder[v]
+      const offset = v * newTemplateStages.length
+      for (const run of videoGroups[vl]) {
+        const newTemplateIdx = newTemplateStages.findIndex(s => s.name === run.stageName)
+        if (newTemplateIdx >= 0) {
+          const newIndex = newTemplateIdx + offset
+          completedStages[newIndex] = run.output
+          console.log(`[broll-resume] "${run.stageName}" [${vl || 'default'}] old:${run.stageIndex} → new:${newIndex}`)
+        } else {
+          console.log(`[broll-resume] Skipping "${run.stageName}" — not in new strategy`)
+        }
+      }
+    }
+  }
+
+  if (!mismatch && fromStage != null) {
+    const keptStages = new Set()
+    for (const key of Object.keys(completedStages)) {
+      if (Number(key) >= fromStage) {
+        delete completedStages[key]
+      } else {
+        keptStages.add(Number(key))
+      }
+    }
+    console.log(`[broll-resume] Re-running from stage ${fromStage}, keeping ${keptStages.size} completed stages`)
+    for (const run of allRuns) {
+      const meta = JSON.parse(run.metadata_json || '{}')
+      if (meta.stageIndex == null || keptStages.has(meta.stageIndex)) continue
+      if (meta.stageIndex >= fromStage) {
+        await db.prepare('DELETE FROM broll_runs WHERE id = ?').run(run.id)
+      }
+    }
+  }
+
+  let editorCuts = null
+  if (groupId) {
+    const group = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
+    if (group?.editor_state_json) {
+      try {
+        const stateObj = JSON.parse(group.editor_state_json)
+        if (stateObj.cuts?.length) editorCuts = { cuts: stateObj.cuts, cutExclusions: stateObj.cutExclusions || [] }
+      } catch {}
+    }
+  }
+
+  const completedSubRuns = {}
+  if (!mismatch) {
+    for (const [si, subs] of Object.entries(subRunsByStage)) {
+      completedSubRuns[si] = new Set(subs.map(s => s._meta.subIndex).filter(i => i != null))
+    }
+  }
+
+  abortedBrollPipelines.delete(pipelineId)
+
+  // Recover exampleVideoId from the pipelineId suffix. The runner embeds
+  // -ex<N> for per-reference-video analysis pipelines (broll-runner.js:103).
+  // Without this, resume re-runs without the filter and triggers the
+  // analysis-expansion branch at line ~3777, producing phantom duplicate
+  // stages across multiple reference videos.
+  const exMatch = pipelineId.match(/-ex(\d+)$/)
+  const exampleVideoId = exMatch ? Number(exMatch[1]) : null
+
+  // Fire executePipeline but DO NOT await — return the promise so callers can
+  // decide. The HTTP route fires-and-forgets; the boot-time auto-resume awaits
+  // each pipeline before advancing the chain.
+  // Call via the holder so tests can stub executePipeline.
+  const executePromise = __pipelineRunner.executePipeline(
+    strategyId, version.id, videoId, groupId,
+    firstMeta.transcriptSource || 'raw',
+    editorCuts, null,
+    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0 },
+    { exampleVideoId },
+  )
+
+  return {
+    pipelineId,
+    completedStages: Object.keys(completedStages).length,
+    executePromise,
   }
 }
 
