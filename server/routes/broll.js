@@ -813,6 +813,25 @@ router.post('/pipeline/:pipelineId/resume', requireAuth, async (req, res) => {
   }
 })
 
+// Returns the state of one b-roll search row by its primary key.
+// UI polls this for completion when it has a brollSearchId from an enqueue.
+router.get('/pipeline/search-status/:brollSearchId', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.brollSearchId, 10)
+  if (!id) return res.status(400).json({ error: 'invalid brollSearchId' })
+  const row = await db.prepare(`
+    SELECT id, status, plan_pipeline_id, placement_uuid, chapter_index, placement_index,
+           num_results, results_json, error, api_log_id, retry_count,
+           created_at, started_at, completed_at, duration_ms
+    FROM broll_searches WHERE id = ?
+  `).get(id)
+  if (!row) return res.status(404).json({ error: 'brollSearchId not found' })
+  let results = null
+  if (row.results_json) {
+    try { results = JSON.parse(row.results_json) } catch {}
+  }
+  res.json({ ...row, results, results_json: undefined })
+})
+
 router.get('/pipeline/:pipelineId/snapshot', requireAuth, async (req, res) => {
   const data = getPipelineSnapshot(req.params.pipelineId)
   if (!data) return res.status(404).json({ error: 'No snapshot found for this pipeline' })
