@@ -3,6 +3,27 @@ import { useSearchParams, Link } from 'react-router-dom'
 import { useApi, apiGet, apiDelete, apiPost } from '../../hooks/useApi.js'
 import { ChevronDown, ChevronRight, Trash2, Copy, Check, Square, RotateCcw, ExternalLink, Play, Loader2 } from 'lucide-react'
 
+// How long after the last broll_runs.created_at we keep a not-yet-finished
+// pipeline labeled 'running' rather than 'interrupted'. Long LLM stages in
+// the analysis/plan strategies routinely span several minutes between row
+// writes; without this window the admin list flips to 'interrupted' during
+// every active stage. 5 min comfortably covers the slowest known stage and
+// also masks the brief in-memory map gap right after a server restart.
+const RECENT_ACTIVITY_TTL_MS = 5 * 60 * 1000
+
+// Pure helper exported for unit tests in __tests__/BRollRunsView-classifier.test.js.
+// `p` shape: { status, expectedStages, stages: [...], createdAt: ISO string }.
+// `now` is injectable so tests can pin the clock.
+export function classifyPipelineStatus(p, { now = Date.now() } = {}) {
+  if (p.status === 'failed') return 'failed'
+  if (p.status !== 'complete') return p.status
+  if (!p.expectedStages) return p.status
+  if (p.stages.length >= p.expectedStages) return 'complete'
+  const lastWriteMs = p.createdAt ? new Date(p.createdAt).getTime() : 0
+  if (lastWriteMs && (now - lastWriteMs) < RECENT_ACTIVITY_TTL_MS) return 'running'
+  return 'interrupted'
+}
+
 function StatusBadge({ status }) {
   const styles = {
     pending: 'bg-zinc-800 text-zinc-400 border-zinc-700',
@@ -178,11 +199,8 @@ export default function BRollRunsView() {
     // Filter out pipelines that are still active (shown separately)
     const activePids = new Set(activePipelines.filter(p => p.status === 'running').map(p => p.pipelineId))
     const result = Object.values(map).filter(p => !activePids.has(p.pipelineId))
-    // Detect interrupted pipelines: have expectedStages but fewer completed
     for (const p of result) {
-      if (p.status === 'complete' && p.expectedStages && p.stages.length < p.expectedStages) {
-        p.status = 'interrupted'
-      }
+      p.status = classifyPipelineStatus(p)
     }
     return result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
   }, [runs, activePipelines])

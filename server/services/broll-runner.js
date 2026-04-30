@@ -247,8 +247,22 @@ export async function runPlanForEachVariant({
   return { planPipelineIds }
 }
 
-// waitForPipelinesComplete — polls brollPipelineProgress until all IDs reach
-// 'complete', or rejects on the first 'failed', or after maxWaitMs.
+// waitForPipelinesComplete — waits for every pipelineId to reach a terminal
+// state. Source of truth is the DB (broll_runs), with the in-memory progress
+// map as a fast path for liveness and 'failed' detection.
+//
+// History: earlier this polled brollPipelineProgress only. That race-d twice:
+//   1. The map evicted 'complete' entries 5 min after success. A fast pid's
+//      entry would disappear before a slow sibling finished, leaving the
+//      poll seeing `undefined` forever (chain stuck mid-refs).
+//   2. After a process restart, in-memory state was empty even when the DB
+//      already had every stage complete — the chain would never advance.
+//
+// Now: a local Set caches pids we've already observed complete (in-memory or
+// DB), so re-polling can't unsee them. For pids whose in-memory entry is
+// absent or non-terminal, we fall back to the DB: a pipeline is complete
+// when the count of distinct main-stage broll_runs rows >= totalStages from
+// metadata. The fallback survives map eviction and process restarts.
 export async function waitForPipelinesComplete(
   pipelineIds,
   { pollIntervalMs = 2000, maxWaitMs = 60 * 60 * 1000 } = {},
@@ -256,16 +270,41 @@ export async function waitForPipelinesComplete(
   if (!pipelineIds?.length) return
   const { brollPipelineProgress } = await import('./broll.js')
   const start = Date.now()
+  const completed = new Set()
+
   while (Date.now() - start < maxWaitMs) {
     let allComplete = true
     for (const id of pipelineIds) {
-      const p = brollPipelineProgress.get(id) || {}
-      if (p.status === 'failed') {
+      if (completed.has(id)) continue
+
+      const p = brollPipelineProgress.get(id)
+      if (p?.status === 'failed') {
         throw new Error(`pipeline ${id} failed: ${p.error || 'unknown'}`)
       }
-      if (p.status !== 'complete') { allComplete = false; break }
+      if (p?.status === 'complete') { completed.add(id); continue }
+
+      // DB fallback. Count distinct main-stage rows for this pipelineId; if
+      // it matches the totalStages metadata recorded on those rows, the
+      // pipeline finished even though the in-memory marker is gone.
+      const row = await db.prepare(
+        `SELECT
+           COUNT(DISTINCT (((metadata_json::jsonb)->>'stageIndex')::int)) FILTER (
+             WHERE COALESCE((metadata_json::jsonb)->>'isSubRun', 'false') != 'true'
+           ) AS main_stages,
+           MAX(((metadata_json::jsonb)->>'totalStages')::int) AS total_stages
+         FROM broll_runs
+         WHERE (metadata_json::jsonb)->>'pipelineId' = ?
+           AND status = 'complete'`
+      ).get(id)
+      if (row && row.total_stages != null && Number(row.main_stages) >= Number(row.total_stages)) {
+        completed.add(id)
+        continue
+      }
+
+      allComplete = false
+      break
     }
-    if (allComplete) return
+    if (allComplete && completed.size === pipelineIds.length) return
     await new Promise(r => setTimeout(r, pollIntervalMs))
   }
   throw new Error(`waitForPipelinesComplete: timed out after ${maxWaitMs}ms`)
