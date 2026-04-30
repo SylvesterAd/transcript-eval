@@ -62,3 +62,34 @@ describe('broll-search-worker — lock acquisition', () => {
     expect(pollCalls.length).toBe(0)
   })
 })
+
+describe('broll-search-worker — empty queue', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    _resetForTest()
+    state.queryImpl = async (sql) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ got: true }] }
+      if (sql.includes('SELECT id, plan_pipeline_id')) return { rows: [] }
+      return { rows: [], rowCount: 0 }
+    }
+  })
+  afterEach(async () => {
+    await stopWorker()
+    vi.useRealTimers()
+  })
+
+  it('polls the queue and reschedules after 1s when empty', async () => {
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const pollsBefore = mockPool.query.mock.calls.filter(c => c[0].includes('SELECT id, plan_pipeline_id')).length
+    expect(pollsBefore).toBeGreaterThanOrEqual(1)
+
+    await vi.advanceTimersByTimeAsync(1100)
+
+    const pollsAfter = mockPool.query.mock.calls.filter(c => c[0].includes('SELECT id, plan_pipeline_id')).length
+    expect(pollsAfter).toBeGreaterThan(pollsBefore)
+  })
+})

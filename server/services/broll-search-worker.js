@@ -9,6 +9,7 @@ import db from '../db.js'
 
 const WORKER_KEY = '4774063583137677164'  // arbitrary stable 64-bit constant
 const EMPTY_QUEUE_POLL_MS = 1000
+const ERROR_RETRY_MS = 5000
 const LOCK_RETRY_MS = 30_000
 const RECLAIMER_INTERVAL_MS = 120_000
 const STUCK_THRESHOLD_MIN = 20
@@ -48,7 +49,24 @@ export async function stopWorker() {
 }
 
 async function drainLoop() {
-  // Implemented in Task 3.
+  if (stopping) return
+  try {
+    const { rows } = await db.pool.query(`
+      SELECT id, plan_pipeline_id, placement_uuid, chapter_index, placement_index, batch_id
+      FROM broll_searches
+      WHERE status = 'waiting'
+      ORDER BY id
+      LIMIT 1
+    `)
+    if (!rows.length) {
+      drainTimer = setTimeout(drainLoop, EMPTY_QUEUE_POLL_MS)
+      return
+    }
+    // Row processing — implemented in Task 4.
+  } catch (err) {
+    console.error('[broll-worker] drainLoop error:', err.message)
+    drainTimer = setTimeout(drainLoop, ERROR_RETRY_MS)
+  }
 }
 
 async function reclaimerSweep() {
