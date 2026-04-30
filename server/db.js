@@ -52,6 +52,14 @@ try {
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS audience_json TEXT`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS path_id TEXT`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS broll_chain_substage TEXT`)
+    // Liveness signal for the b-roll chain runner. Updated every
+    // HEARTBEAT_INTERVAL_MS while runFullAutoBrollChain is active. The
+    // duplicate-fire guard (auto-orchestrator.js:runFullAutoBrollChain) and
+    // the boot resume query (resumeStuckFullAutoChains) both compare against
+    // HEARTBEAT_TTL_MS to distinguish a live driver from a crashed one —
+    // without this, a hot-reload race spawned parallel runAllReferences
+    // pipelines that burned tokens analyzing the same reference twice.
+    await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS broll_chain_heartbeat_at TIMESTAMPTZ`)
     // Audit columns on videos for tracking transcription_status flips. Added
     // 2026-04-28 after a 'done' status mysteriously regressed to NULL with no
     // discoverable cause — without these we have no way to attribute future

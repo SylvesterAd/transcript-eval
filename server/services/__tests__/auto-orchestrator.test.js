@@ -46,6 +46,15 @@ vi.mock('../../db.js', () => ({
           if (/SELECT v\.id FROM videos v/.test(sql)) {
             return state.mainVideo
           }
+          // Duplicate-fire heartbeat probe — these tests exercise fresh starts,
+          // so return null to skip the lock branch.
+          if (/SELECT broll_chain_status, broll_chain_heartbeat_at FROM video_groups WHERE id/.test(sql)) {
+            return null
+          }
+          // isCancelled probe — never cancelled in these tests.
+          if (/SELECT assembly_status FROM video_groups WHERE id/.test(sql)) {
+            return { assembly_status: 'done' }
+          }
           throw new Error(`unexpected get: ${sql}`)
         },
         async all(...args) {
@@ -93,6 +102,15 @@ vi.mock('../../db.js', () => ({
           }
           if (/UPDATE video_groups SET broll_chain_status/.test(sql)) {
             state.brollChainUpdates.push({ sql, args })
+            return { changes: 1 }
+          }
+          // Phase advancement (substage = 'strategy' / 'plan' / 'search')
+          // and the periodic heartbeat updater. Both are no-ops for these
+          // tests; just acknowledge them so the chain doesn't abort.
+          if (/UPDATE video_groups SET broll_chain_substage/.test(sql)) {
+            return { changes: 1 }
+          }
+          if (/UPDATE video_groups SET broll_chain_heartbeat_at/.test(sql)) {
             return { changes: 1 }
           }
           if (/UPDATE video_groups SET classification_json/.test(sql)) {

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS video_groups (
   broll_chain_status TEXT,
   broll_chain_substage TEXT,
   broll_chain_error TEXT,
+  broll_chain_heartbeat_at TIMESTAMPTZ,
   notified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );

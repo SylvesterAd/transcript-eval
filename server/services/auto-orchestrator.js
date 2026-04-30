@@ -378,6 +378,14 @@ async function phaseHasOutputs(groupId, phase) {
   return phaseConfig.requireAll
 }
 
+// Heartbeat TTL: how long we trust an existing 'running' chain before
+// considering its driver process dead. Set comfortably above the in-chain
+// heartbeat interval (HEARTBEAT_INTERVAL_MS) so a brief LLM call or DB
+// hiccup doesn't trip the lock, but small enough that a crashed worker
+// is recovered within a couple of minutes by boot resume / re-trigger.
+const HEARTBEAT_TTL_MS = 90 * 1000
+const HEARTBEAT_INTERVAL_MS = 30 * 1000
+
 // runFullAutoBrollChain — fires the b-roll pipeline chain (references analyzed
 // → strategy → plan → first-10 search) for sub-groups whose parent picked
 // hands-off / strategy-only / guided. Respects pathToFlags pauses.
@@ -387,12 +395,39 @@ async function phaseHasOutputs(groupId, phase) {
 //     outputs already exist in broll_runs. Existing callers omit this and get
 //     unchanged behavior. The skipped phase's pipelineIds are recovered from
 //     the latest completed runs so downstream phases still get their inputs.
+//     Also bypasses the duplicate-fire heartbeat guard since the boot resume
+//     query has already filtered to chains whose heartbeat is stale.
 export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = null } = {}) {
   if (!subGroupId) return
+
+  // Duplicate-fire guard. If status is 'running' AND the in-chain heartbeat
+  // updater fired recently, another worker still owns this chain — bail
+  // rather than spawn a parallel runAllReferences (the failure mode that
+  // burned tokens with two main_analysis pipelines for the same reference
+  // video). Resume callers skip this since their query already filtered.
+  if (!resumeFromSubstage) {
+    const lock = await db.prepare(
+      'SELECT broll_chain_status, broll_chain_heartbeat_at FROM video_groups WHERE id = ?'
+    ).get(subGroupId)
+    if (lock?.broll_chain_status === 'running' && lock.broll_chain_heartbeat_at) {
+      const ageMs = Date.now() - new Date(lock.broll_chain_heartbeat_at).getTime()
+      if (ageMs < HEARTBEAT_TTL_MS) {
+        console.log(`[orchestrator] Skipping duplicate chain fire for group ${subGroupId} — heartbeat is ${Math.round(ageMs / 1000)}s old`)
+        return
+      }
+    }
+  }
+
   await db.prepare(
-    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = 'refs' WHERE id = ?"
+    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = 'refs', broll_chain_heartbeat_at = NOW() WHERE id = ?"
   ).run(subGroupId)
   if (await isCancelled(subGroupId)) return
+
+  const heartbeat = setInterval(() => {
+    db.prepare('UPDATE video_groups SET broll_chain_heartbeat_at = NOW() WHERE id = ?')
+      .run(subGroupId)
+      .catch(() => {})
+  }, HEARTBEAT_INTERVAL_MS)
 
   const sg = await db.prepare(
     'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
@@ -531,6 +566,8 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
       "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_substage = NULL, broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
+  } finally {
+    clearInterval(heartbeat)
   }
 }
 
@@ -610,9 +647,18 @@ export async function resumeStuckFullAutoChains() {
     setTimeout(() => __orchestratorDeps.runFullAutoBrollChain(sg.id), 3000)
   }
 
+  // Skip chains whose heartbeat was updated within HEARTBEAT_TTL_MS — those
+  // belong to a still-live driver process (e.g., a previous container that
+  // overlaps with this boot during a rolling Vercel/Railway deploy, or a
+  // dev nodemon hot-reload race). Resuming a live chain spawns parallel
+  // runAllReferences calls and double-billed token usage.
+  const heartbeatTtlSeconds = Math.ceil(HEARTBEAT_TTL_MS / 1000)
   const interrupted = await db.prepare(
-    "SELECT id FROM video_groups WHERE broll_chain_status = 'running'"
-  ).all()
+    `SELECT id FROM video_groups
+     WHERE broll_chain_status = 'running'
+       AND (broll_chain_heartbeat_at IS NULL
+            OR broll_chain_heartbeat_at < NOW() - (? || ' seconds')::interval)`
+  ).all(String(heartbeatTtlSeconds))
 
   // Lazy-import resumePipeline so broll.js (and its transitive llm-runner deps)
   // isn't pulled into the module graph at orchestrator load time. vi.mock in
