@@ -303,12 +303,15 @@ CREATE TABLE IF NOT EXISTS broll_searches (
   error TEXT,
   api_log_id INTEGER,
   duration_ms INTEGER,
+  retry_count INT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_broll_searches_pipeline ON broll_searches(plan_pipeline_id);
 CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id);
+CREATE INDEX IF NOT EXISTS idx_broll_searches_status_waiting ON broll_searches(id) WHERE status = 'waiting';
+CREATE INDEX IF NOT EXISTS idx_broll_searches_status_running ON broll_searches(started_at) WHERE status = 'running';
 
 -- Stable per-placement identity. Keyed by the LLM's positional location
 -- (plan_pipeline_id, chapter_index, placement_index); UUID is never reused.
