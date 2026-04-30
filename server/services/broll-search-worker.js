@@ -95,8 +95,12 @@ async function drainLoop() {
         row.id,
       ])
     } catch (err) {
-      // Catch path — implemented in Task 5.
-      console.error('[broll-worker] (catch path TODO):', err.message)
+      console.error(`[broll-worker] search failed for row ${row.id}: ${err.message}`)
+      await db.pool.query(`
+      UPDATE broll_searches
+      SET status='failed', error=$1, api_log_id=$2, completed_at=NOW()
+      WHERE id=$3
+    `, [err.message, err.apiLogId || null, row.id])
     }
     setImmediate(drainLoop)
   } catch (err) {
