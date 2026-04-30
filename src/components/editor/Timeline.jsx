@@ -11,6 +11,7 @@ const COMPOSITE_AUDIO_H = 56
 
 export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop, onCrossPaste }) {
   const { state, dispatch, totalDuration, playbackEngine, playheadRef } = useContext(EditorContext)
+  const isBroll = state.activeTab === 'brolls'
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
   const [scrollX, setScrollX] = useState(0)
@@ -171,8 +172,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       // Wheel zoom: keep cursor point stable
       el.scrollLeft = anchor.time * state.zoom - anchor.screenX + labelW
       zoomAnchorRef.current = null
-    } else {
-      // +/- buttons: keep playhead at the CENTER of viewport
+    } else if (!isBroll) {
+      // +/- buttons (rough cut only): keep playhead at the CENTER of viewport.
+      // B-roll editor leaves scrollLeft alone — user explicitly does not want recentering.
       const viewW = el.clientWidth
       el.scrollLeft = state.currentTime * state.zoom - viewW / 2 + labelW
     }
@@ -192,6 +194,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   const currentTimeRef = useRef(state.currentTime)
   currentTimeRef.current = state.currentTime
   useEffect(() => {
+    if (isBroll) return
     if (!state.isPlaying || !scrollRef.current) return
     let raf
     let following = false
@@ -215,10 +218,12 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [state.isPlaying])
+  }, [isBroll, state.isPlaying])
 
-  // Scroll timeline into view on seek (word click, etc.) when not playing
+  // Scroll timeline into view on seek (word click, etc.) when not playing.
+  // Disabled in b-roll editor — user wants the viewport to stay where they put it.
   useEffect(() => {
+    if (isBroll) return
     if (state.isPlaying || !scrollRef.current) return
     const el = scrollRef.current
     const playheadX = state.currentTime * state.zoom
@@ -226,7 +231,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     if (playheadX < scrollLeft + 100 || playheadX > scrollLeft + clientWidth - 100) {
       el.scrollLeft = playheadX - clientWidth / 3
     }
-  }, [state.isPlaying, state.currentTime, state.zoom])
+  }, [isBroll, state.isPlaying, state.currentTime, state.zoom])
 
   // Stable numbering: based on original load order, never changes on reorder
   const trackNumber = useCallback((track) => {
