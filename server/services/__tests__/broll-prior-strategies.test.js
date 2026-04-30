@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest'
-import { slimChapterStrategy } from '../broll-prior-strategies.js'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { slimChapterStrategy, loadPriorChapterStrategies, assertNoSelfReference, assertPriorsComplete } from '../broll-prior-strategies.js'
+
+vi.mock('../../db.js', () => ({
+  default: { prepare: vi.fn() },
+}))
+import db from '../../db.js'
 
 describe('slimChapterStrategy', () => {
   it('returns empty string for null/undefined/non-string input', () => {
@@ -9,7 +14,7 @@ describe('slimChapterStrategy', () => {
     expect(slimChapterStrategy(42)).toBe('')
   })
 
-  it('keeps strategy + beat_strategies, drops bookkeeping fields', () => {
+  it('keeps only beat_strategies, drops strategy + matched_reference_chapter + frequency_targets', () => {
     const input = JSON.stringify({
       matched_reference_chapter: { chapter_name: 'X', match_reason: 'Y' },
       frequency_targets: { broll: { target_per_minute: 13 } },
@@ -17,29 +22,29 @@ describe('slimChapterStrategy', () => {
       beat_strategies: [{ beat_name: 'Hook', strategy_points: ['close-up'] }],
     })
     const parsed = JSON.parse(slimChapterStrategy(input))
-    expect(parsed.strategy).toEqual({ commonalities: 'pacing X', broll: { sources: 'mixed' } })
+    expect(Object.keys(parsed)).toEqual(['beat_strategies'])
     expect(parsed.beat_strategies).toHaveLength(1)
     expect(parsed.beat_strategies[0].beat_name).toBe('Hook')
+    expect(parsed.strategy).toBeUndefined()
     expect(parsed.matched_reference_chapter).toBeUndefined()
     expect(parsed.frequency_targets).toBeUndefined()
   })
 
-  it('handles missing strategy or beat_strategies fields with safe defaults', () => {
+  it('handles missing beat_strategies field with safe default', () => {
     const out = JSON.parse(slimChapterStrategy(JSON.stringify({ frequency_targets: {} })))
-    expect(out.strategy).toBeNull()
     expect(out.beat_strategies).toEqual([])
   })
 
   it('parses JSON wrapped in markdown fence', () => {
-    const input = '```json\n{"strategy":"X","beat_strategies":[]}\n```'
+    const input = '```json\n{"beat_strategies":[{"beat_name":"X"}]}\n```'
     const out = JSON.parse(slimChapterStrategy(input))
-    expect(out.strategy).toBe('X')
+    expect(out.beat_strategies[0].beat_name).toBe('X')
   })
 
   it('parses JSON wrapped in extra prose (forgiving)', () => {
-    const input = 'Here is the JSON: {"strategy":"X","beat_strategies":[]} thanks'
+    const input = 'Here is the JSON: {"beat_strategies":[{"beat_name":"X"}]} thanks'
     const out = JSON.parse(slimChapterStrategy(input))
-    expect(out.strategy).toBe('X')
+    expect(out.beat_strategies[0].beat_name).toBe('X')
   })
 
   it('falls back to truncated raw text on totally unparseable input', () => {
@@ -50,99 +55,215 @@ describe('slimChapterStrategy', () => {
   })
 })
 
-import { vi, beforeEach } from 'vitest'
-import { loadPriorChapterStrategies } from '../broll-prior-strategies.js'
-
-vi.mock('../../db.js', () => ({
-  default: { prepare: vi.fn() },
-}))
-import db from '../../db.js'
-
 describe('loadPriorChapterStrategies', () => {
   beforeEach(() => { db.prepare.mockReset() })
 
   it('returns empty string when priors array is empty/undefined/null', async () => {
-    expect(await loadPriorChapterStrategies([], 0)).toBe('')
-    expect(await loadPriorChapterStrategies(undefined, 0)).toBe('')
-    expect(await loadPriorChapterStrategies(null, 0)).toBe('')
+    expect(await loadPriorChapterStrategies([], 0, ['Hook'])).toBe('')
+    expect(await loadPriorChapterStrategies(undefined, 0, ['Hook'])).toBe('')
+    expect(await loadPriorChapterStrategies(null, 0, ['Hook'])).toBe('')
     expect(db.prepare).not.toHaveBeenCalled()
   })
 
   it('throws when sub-run is missing for a prior pipeline + chapter', async () => {
     db.prepare.mockReturnValue({ get: vi.fn().mockReturnValue(undefined) })
-    await expect(loadPriorChapterStrategies(['pid-x'], 2))
+    await expect(loadPriorChapterStrategies(['pid-x'], 2, ['Hook']))
       .rejects.toThrow('missing sub-run: pid=pid-x chapter=2')
   })
 
-  it('formats single prior with directive header + reference title', async () => {
+  it('formats single prior as per-beat array with directive header + ordinal source label + video title', async () => {
     db.prepare.mockReturnValue({
       get: vi.fn().mockReturnValue({
         output_text: JSON.stringify({
-          strategy: { commonalities: 'X' },
-          beat_strategies: [{ beat_name: 'Hook' }],
+          beat_strategies: [
+            { beat_name: 'Hook', beat_emotion: 'urgent', strategy_points: ['close-up faces'] },
+          ],
         }),
         video_id: 5,
         title: 'My Reference Video',
       }),
     })
-    const out = await loadPriorChapterStrategies(['pid-1'], 0)
-    expect(out).toContain('## Prior strategies for this chapter (do NOT produce a similar strategy):')
-    expect(out).toContain('=== Source: Reference: My Reference Video ===')
-    expect(out).toContain('"beat_name": "Hook"')
-    expect(out).toContain('"commonalities": "X"')
+    const out = await loadPriorChapterStrategies(['pid-1'], 0, ['Hook'])
+    expect(out).toContain('## Prior strategies for this chapter (do NOT repeat strategy_points):')
+    // Parse the JSON portion (after the header line)
+    const jsonStart = out.indexOf('[')
+    const beats = JSON.parse(out.slice(jsonStart))
+    expect(beats).toHaveLength(1)
+    expect(beats[0].beat_name).toBe('Hook')
+    expect(beats[0].beat_emotion).toBe('urgent')
+    expect(beats[0].prior_strategy_points).toHaveLength(1)
+    expect(beats[0].prior_strategy_points[0].source).toBe('First Strategy (from "My Reference Video")')
+    expect(beats[0].prior_strategy_points[0].strategy_points).toEqual(['close-up faces'])
   })
 
-  it('uses pid as fallback label when video has no title', async () => {
+  it('source label has no title parenthetical when video has no title', async () => {
     db.prepare.mockReturnValue({
       get: vi.fn().mockReturnValue({
-        output_text: '{"strategy":null,"beat_strategies":[]}',
+        output_text: JSON.stringify({
+          beat_strategies: [{ beat_name: 'Hook', strategy_points: ['x'] }],
+        }),
         video_id: 5,
         title: null,
       }),
     })
-    const out = await loadPriorChapterStrategies(['pid-fallback'], 0)
-    expect(out).toContain('=== Source: pid-fallback ===')
+    const out = await loadPriorChapterStrategies(['pid-fallback'], 0, ['Hook'])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats[0].prior_strategy_points[0].source).toBe('First Strategy')
   })
 
-  it('two priors → two blocks in pipeline-id order separated by blank line', async () => {
+  it('two priors → per-beat array with both priors in order, ordinal labels are First/Second', async () => {
     let callCount = 0
     db.prepare.mockReturnValue({
       get: vi.fn(() => {
         callCount++
         return {
-          output_text: JSON.stringify({ strategy: `s${callCount}`, beat_strategies: [] }),
+          output_text: JSON.stringify({
+            beat_strategies: [
+              { beat_name: 'Hook', strategy_points: [`points from prior ${callCount}`] },
+            ],
+          }),
           video_id: callCount,
           title: `Ref ${callCount}`,
         }
       }),
     })
-    const out = await loadPriorChapterStrategies(['p1', 'p2'], 0)
-    expect(out.indexOf('Ref 1')).toBeLessThan(out.indexOf('Ref 2'))
-    const blocks = out.split('=== Source:')
-    expect(blocks).toHaveLength(3) // header + 2 source blocks
+    const out = await loadPriorChapterStrategies(['p1', 'p2'], 0, ['Hook'])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats).toHaveLength(1)
+    expect(beats[0].prior_strategy_points).toHaveLength(2)
+    expect(beats[0].prior_strategy_points[0].source).toBe('First Strategy (from "Ref 1")')
+    expect(beats[0].prior_strategy_points[1].source).toBe('Second Strategy (from "Ref 2")')
+    expect(beats[0].prior_strategy_points[0].strategy_points).toEqual(['points from prior 1'])
+    expect(beats[0].prior_strategy_points[1].strategy_points).toEqual(['points from prior 2'])
+  })
+
+  it('beat ordering follows canonicalBeatNames when provided', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: JSON.stringify({
+          // priors emit beats in REVERSE order to prove canonical order wins
+          beat_strategies: [
+            { beat_name: 'Conclusion', strategy_points: ['c'] },
+            { beat_name: 'Body', strategy_points: ['b'] },
+            { beat_name: 'Hook', strategy_points: ['h'] },
+          ],
+        }),
+        video_id: 1,
+        title: 'Ref',
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1'], 0, ['Hook', 'Body', 'Conclusion'])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats.map(b => b.beat_name)).toEqual(['Hook', 'Body', 'Conclusion'])
+  })
+
+  it('drops beats present in priors but missing from canonicalBeatNames', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: JSON.stringify({
+          beat_strategies: [
+            { beat_name: 'Hook', strategy_points: ['h'] },
+            { beat_name: 'HallucinatedBeat', strategy_points: ['x'] },
+          ],
+        }),
+        video_id: 1,
+        title: 'Ref',
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1'], 0, ['Hook'])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats.map(b => b.beat_name)).toEqual(['Hook'])
+  })
+
+  it('falls back to union of beats when canonicalBeatNames is empty', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: JSON.stringify({
+          beat_strategies: [
+            { beat_name: 'A', strategy_points: ['a'] },
+            { beat_name: 'B', strategy_points: ['b'] },
+          ],
+        }),
+        video_id: 1,
+        title: 'Ref',
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1'], 0, [])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats.map(b => b.beat_name)).toEqual(['A', 'B'])
+  })
+
+  it('skips a prior silently when its strategy_points for a beat is empty', async () => {
+    let callCount = 0
+    db.prepare.mockReturnValue({
+      get: vi.fn(() => {
+        callCount++
+        return {
+          output_text: JSON.stringify({
+            beat_strategies: [
+              { beat_name: 'Hook', strategy_points: callCount === 1 ? ['real'] : [] },
+            ],
+          }),
+          video_id: callCount,
+          title: `Ref ${callCount}`,
+        }
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1', 'p2'], 0, ['Hook'])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats[0].prior_strategy_points).toHaveLength(1)
+    expect(beats[0].prior_strategy_points[0].source).toBe('First Strategy (from "Ref 1")')
+  })
+
+  it('drops a beat entirely when every prior is empty/missing for it', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: JSON.stringify({
+          beat_strategies: [
+            { beat_name: 'Hook', strategy_points: ['h'] },
+            // 'Body' has no strategy_points anywhere
+          ],
+        }),
+        video_id: 1,
+        title: 'Ref',
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1'], 0, ['Hook', 'Body'])
+    const beats = JSON.parse(out.slice(out.indexOf('[')))
+    expect(beats.map(b => b.beat_name)).toEqual(['Hook'])
+  })
+
+  it('returns empty string when no prior produced any non-empty strategy_points', async () => {
+    db.prepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_text: JSON.stringify({
+          beat_strategies: [{ beat_name: 'Hook', strategy_points: [] }],
+        }),
+        video_id: 1,
+        title: 'Ref',
+      }),
+    })
+    const out = await loadPriorChapterStrategies(['p1'], 0, ['Hook'])
+    expect(out).toBe('')
   })
 
   it('uses comma boundary on subIndex to prevent matching subIndex:10 when looking for subIndex:1', async () => {
-    // The query must call db.prepare with a LIKE param containing the trailing
-    // comma boundary, so chapter 1 doesn't accidentally pull chapter 10's row.
     const captured = []
     db.prepare.mockImplementation((sql) => ({
       get: vi.fn((...params) => {
         captured.push({ sql, params })
         return {
-          output_text: '{"strategy":null,"beat_strategies":[]}',
+          output_text: JSON.stringify({ beat_strategies: [{ beat_name: 'Hook', strategy_points: ['x'] }] }),
           video_id: 1,
           title: 'Ref',
         }
       }),
     }))
-    await loadPriorChapterStrategies(['p1'], 1)
+    await loadPriorChapterStrategies(['p1'], 1, ['Hook'])
     const subIndexParam = captured[0].params.find(p => typeof p === 'string' && p.includes('subIndex'))
     expect(subIndexParam).toBe('%"subIndex":1,%')
   })
 })
-
-import { assertNoSelfReference, assertPriorsComplete } from '../broll-prior-strategies.js'
 
 describe('assertNoSelfReference', () => {
   it('returns nothing when pipelineId is not in priors', () => {

@@ -65,7 +65,7 @@ From the dominant reference chapter's pattern_analysis, ADAPT the following:
 
 {{prior_chapter_strategies}}
 
-If prior strategies for this chapter are shown above, your strategy MUST be meaningfully different. Do not produce the same or a similar approach. Choose different visual angles, different beat strategies, different style/motion choices. The goal is genuine variety across reference videos — not minor re-wordings.
+Prior strategies for this chapter are shown above (First Strategy, Second Strategy, ...). For each beat, your \`strategy_points\` MUST be different from every prior strategy's \`strategy_points\` for the same beat. Use different visual angles, different colors, different motion, different visual approaches — the goal is genuine visual variety, not paraphrased re-wordings. Other fields (beat_name, beat_emotion, matched_reference_beat, matched_from_chapter, match_reason) can stay the same — \`strategy_points\` are what must vary.
 
 This is the most important part. For each beat in THIS chapter:
 
