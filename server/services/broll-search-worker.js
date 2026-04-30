@@ -62,7 +62,43 @@ async function drainLoop() {
       drainTimer = setTimeout(drainLoop, EMPTY_QUEUE_POLL_MS)
       return
     }
-    // Row processing — implemented in Task 4.
+    const row = rows[0]
+    const claim = await db.pool.query(`
+      UPDATE broll_searches
+      SET status='running', started_at=NOW()
+      WHERE id=$1 AND status='waiting'
+    `, [row.id])
+    if (claim.rowCount === 0) { setImmediate(drainLoop); return }
+
+    const { searchSinglePlacement } = await import('./broll.js')
+    try {
+      const result = await searchSinglePlacement(row.plan_pipeline_id, {
+        placementUuid: row.placement_uuid,
+        chapterIndex: row.chapter_index,
+        placementIndex: row.placement_index,
+      })
+      const status = result.gpuJobStatus === 'running' ? 'timeout'
+                   : result.gpuJobStatus === 'failed'  ? 'failed'
+                   : 'complete'
+      await db.pool.query(`
+      UPDATE broll_searches
+      SET status=$1, results_json=$2, num_results=$3, duration_ms=$4,
+          api_log_id=$5, error=$6, completed_at=NOW()
+      WHERE id=$7
+    `, [
+        status,
+        JSON.stringify(result.results || []),
+        (result.results || []).length,
+        result.duration || null,
+        result.apiLogId || null,
+        result.error || null,
+        row.id,
+      ])
+    } catch (err) {
+      // Catch path — implemented in Task 5.
+      console.error('[broll-worker] (catch path TODO):', err.message)
+    }
+    setImmediate(drainLoop)
   } catch (err) {
     console.error('[broll-worker] drainLoop error:', err.message)
     drainTimer = setTimeout(drainLoop, ERROR_RETRY_MS)
