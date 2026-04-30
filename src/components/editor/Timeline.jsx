@@ -11,6 +11,7 @@ const COMPOSITE_AUDIO_H = 56
 
 export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop, onCrossPaste }) {
   const { state, dispatch, totalDuration, playbackEngine, playheadRef } = useContext(EditorContext)
+  const isBroll = state.activeTab === 'brolls'
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
   const [scrollX, setScrollX] = useState(0)
