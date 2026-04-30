@@ -24,6 +24,22 @@ const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
 mkdirSync(TEMP_DIR, { recursive: true })
 const execFileAsync = promisify(execFile)
 
+// Retry helper for transient LLM failures inside executePipeline.
+// 2 retries (tries=3 total) with exponential backoff. Aborts immediately if the
+// pipeline was stopped by the user. See spec 2026-04-29-broll-auto-resume-design.md.
+export async function withRetry(fn, { tries = 3, backoff = [5_000, 30_000], pipelineId, label } = {}) {
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    if (pipelineId && abortedBrollPipelines.has(pipelineId)) throw new Error('Aborted')
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt === tries) throw err
+      console.log(`[broll-retry] ${label || '(unnamed)'} attempt ${attempt}/${tries} failed: ${err.message}, retrying in ${backoff[attempt - 1]}ms`)
+      await new Promise(r => setTimeout(r, backoff[attempt - 1]))
+    }
+  }
+}
+
 // Common yt-dlp args that help bypass YouTube's "sign in to confirm you're
 // not a bot" block on datacenter IPs (Railway, etc.). Tries multiple player
 // clients in order — android/tv often work when web is blocked. Optional
@@ -679,24 +695,40 @@ export async function setExampleFavorite(id) {
 
 /**
  * Get a local video file path for a video. Downloads from CF Stream if needed.
+ *
+ * Retries transient 5xx / network errors. CF Stream's MP4 endpoint occasionally
+ * returns 502 under bursty concurrent downloads (e.g. when runAllReferences
+ * fires N reference-analysis pipelines + 1 plan-prep + 1 main-video fetch in
+ * the same tick). Mirrors the retry pattern in runTranscription
+ * (server/routes/videos.js around the downloadToTemp loop).
  */
 async function getVideoFilePath(videoId) {
   const video = await db.prepare('SELECT file_path, cf_stream_uid FROM videos WHERE id = ?').get(videoId)
   if (!video) throw new Error(`Video ${videoId} not found`)
 
-  // If we have a CF Stream UID, download the MP4
+  const url = video.cf_stream_uid ? mp4Url(video.cf_stream_uid) : video.file_path
+  if (!url) throw new Error(`Video ${videoId} has no file_path or cf_stream_uid`)
+
+  const dest = `broll-analysis-${videoId}.mp4`
   if (video.cf_stream_uid) {
-    const url = mp4Url(video.cf_stream_uid)
     console.log(`[broll] Downloading video ${videoId} from CF Stream for analysis...`)
-    return downloadToTemp(url, `broll-analysis-${videoId}.mp4`)
   }
 
-  // Otherwise use local/Supabase file_path
-  if (video.file_path) {
-    return downloadToTemp(video.file_path, `broll-analysis-${videoId}.mp4`)
+  let lastErr
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      return await downloadToTemp(url, dest)
+    } catch (err) {
+      lastErr = err
+      const msg = err?.message || ''
+      const transient = /\b50[0-9]\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|fetch failed/i.test(msg)
+      if (!transient || attempt === 5) throw err
+      const wait = attempt * 3000
+      console.log(`[broll-dl] video ${videoId} attempt ${attempt}/5 failed (${msg}) — retry in ${wait / 1000}s`)
+      await new Promise(r => setTimeout(r, wait))
+    }
   }
-
-  throw new Error(`Video ${videoId} has no file_path or cf_stream_uid`)
+  throw lastErr
 }
 
 export async function analyzeVideo(strategyId, videoId, stage = 'main') {
@@ -1020,13 +1052,21 @@ export async function loadExampleVideos(groupId) {
   `).all(...groupIds)
 
   const videos = []
+  const seen = new Set()
   for (const src of sources) {
     try {
       const meta = JSON.parse(src.meta_json || '{}')
-      if (meta.videoId) {
-        const v = await db.prepare('SELECT id, title, file_path, cf_stream_uid FROM videos WHERE id = ?').get(meta.videoId)
-        if (v) videos.push({ ...v, isFavorite: !!src.is_favorite })
+      if (!meta.videoId || seen.has(meta.videoId)) {
+        // If this duplicate has isFavorite=true and the existing entry doesn't, promote it.
+        if (meta.videoId && src.is_favorite) {
+          const existing = videos.find(v => v.id === meta.videoId)
+          if (existing && !existing.isFavorite) existing.isFavorite = true
+        }
+        continue
       }
+      seen.add(meta.videoId)
+      const v = await db.prepare('SELECT id, title, file_path, cf_stream_uid FROM videos WHERE id = ?').get(meta.videoId)
+      if (v) videos.push({ ...v, isFavorite: !!src.is_favorite })
     } catch {}
   }
   return videos
@@ -1911,9 +1951,13 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
   }
   if (!workItems.length) throw new Error('No broll placements found')
 
-  // Pick items to process: either caller-supplied list (forItems) or auto-pick next batch
+  // Pick items to process: either caller-supplied list (forItems) or auto-pick next batch.
+  // kwDone is hoisted out of the else branch so the trailing console.log below
+  // (which references kwDone.size) is always in scope. In the forItems path it stays
+  // empty — accurate, since forItems explicitly chose its own placements.
   let itemsToProcess
   let pendingCount = 0
+  const kwDone = new Set()
   if (forItems?.length) {
     // Caller specified exact (chapterIndex, placementIndex) pairs — use those, ignore kwDone
     itemsToProcess = []
@@ -1927,7 +1971,6 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
     const existingKwRuns = await db.prepare(
       `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
     ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
-    const kwDone = new Set()
     for (const r of existingKwRuns) {
       try {
         const m = JSON.parse(r.metadata_json || '{}')
@@ -1995,10 +2038,38 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
     // Track which global indices were processed
     const processedIndices = itemsToProcess.map((item) => workItems.indexOf(item))
 
+    // Override the LLM's `placement_index` with the original input values, and
+    // attach `chapter_index` per entry. Gemini occasionally renumbers its output
+    // 0..N-1 (anchoring on the prompt's example) instead of preserving the
+    // input's `placement_index` — when that happens, _buildSearchParams's lookup
+    // returns no keywords for any placement whose chapter-relative index is
+    // larger than the batch size, and Phase 2.5 throws "No keywords for ...".
+    // We own the truth here: itemsToProcess[i] has the canonical chapterIndex
+    // / placementIndex, so we remap deterministically before storing.
+    let kwOutputText = kwResult.text
+    try {
+      const cleaned = (kwResult.text || '').replace(/^```json\n?/, '').replace(/\n?```$/, '')
+      const kwData = JSON.parse(cleaned)
+      if (Array.isArray(kwData)) {
+        const remapped = kwData.map((entry, i) => {
+          const item = itemsToProcess[i]
+          if (!item) return entry
+          return {
+            ...entry,
+            chapter_index: item.chapterIndex,
+            placement_index: item.placementIndex,
+          }
+        })
+        kwOutputText = JSON.stringify(remapped, null, 2)
+      }
+    } catch (err) {
+      console.warn(`[broll-keywords] Could not remap kw output (storing raw): ${err.message}`)
+    }
+
     // Store keyword run
     await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       keywordsStrategy.id, videoId, 'analysis', 'complete',
-      filteredPlacements.slice(0, 500), kwResult.text, prompt, kwSystemTemplate, kwModel,
+      filteredPlacements.slice(0, 500), kwOutputText, prompt, kwSystemTemplate, kwModel,
       kwResult.tokensIn || 0, kwResult.tokensOut || 0, kwResult.cost || 0, Date.now() - pipelineStart,
       JSON.stringify({
         pipelineId, stageIndex: 0, stageName: 'Generate Keywords',
@@ -2072,6 +2143,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       }
       toSearch = existingResumable.map(row => ({
         pid: row.plan_pipeline_id,
+        uuid: row.placement_uuid || null,
         chapterIndex: row.chapter_index,
         placementIndex: row.placement_index,
         brollSearchId: row.id,
@@ -2140,7 +2212,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       const maxLen = Math.max(...variantQueues.map(q => q.items.length), 0)
       for (let i = 0; i < maxLen; i++) {
         for (const { pid, items } of variantQueues) {
-          if (i < items.length) interleaved.push({ pid, chapterIndex: items[i].chapterIndex, placementIndex: items[i].placementIndex })
+          if (i < items.length) interleaved.push({ pid, uuid: items[i].uuid, chapterIndex: items[i].chapterIndex, placementIndex: items[i].placementIndex })
         }
       }
       const sliced = interleaved
@@ -2149,14 +2221,15 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       // Phase 2.5: Create queue entries in broll_searches (validated keywords)
       for (const item of sliced) {
         const variantLabel = `Variant ${String.fromCharCode(65 + planPipelineIds.indexOf(item.pid))}`
-        const { brief, keywords, description } = await _buildSearchParams(item.pid, item.chapterIndex, item.placementIndex)
+        const { brief, keywords, description, uuid: builtUuid } = await _buildSearchParams(item.pid, item.chapterIndex, item.placementIndex, item.uuid)
         if (!keywords.length) {
           throw new Error(`No keywords for ${variantLabel} ch${item.chapterIndex} p${item.placementIndex} after generation — refusing to send empty payload to GPU`)
         }
+        const placementUuid = item.uuid || builtUuid || null
         const ins = await db.prepare(`
-          INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, variant_label, description, brief, keywords_json, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
-        `).run(item.pid, pipelineId, item.chapterIndex, item.placementIndex, variantLabel, description, brief, JSON.stringify(keywords))
+          INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, placement_uuid, variant_label, description, brief, keywords_json, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+        `).run(item.pid, pipelineId, item.chapterIndex, item.placementIndex, placementUuid, variantLabel, description, brief, JSON.stringify(keywords))
         item.brollSearchId = ins.lastInsertRowid
         item.variantLabel = variantLabel
       }
@@ -2194,7 +2267,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       await db.prepare(`UPDATE broll_searches SET status = 'running', started_at = NOW() WHERE id = ?`).run(item.brollSearchId)
 
       try {
-        const result = await searchSinglePlacement(item.pid, item.chapterIndex, item.placementIndex)
+        const result = await searchSinglePlacement(item.pid, { placementUuid: item.uuid, chapterIndex: item.chapterIndex, placementIndex: item.placementIndex })
         // If we got zero results because the GPU job is still running or failed, surface that
         // in the row status — don't lie by marking 'complete'. UI can then show a real state.
         const rowStatus = result.gpuJobStatus === 'running' ? 'timeout'
@@ -2244,7 +2317,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
 }
 
 // Helper: build brief, keywords, and description for a placement (shared by executeSearchBatch + searchSinglePlacement)
-async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex) {
+async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex, uuid = null) {
   // Load plan sub-runs to find the placement
   const planRuns = await db.prepare(
     `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
@@ -2275,17 +2348,31 @@ async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex) 
   ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
   const kwSubRuns = kwRuns.filter(r => JSON.parse(r.metadata_json || '{}').isSubRun)
 
+  // Lookup strategy across kw sub-runs (newest first):
+  //   Method 1 — new format: entry has explicit `chapter_index` + `placement_index`
+  //              (added by the post-LLM remap in executeKeywordsBatch). Match both.
+  //   Method 2 — legacy per-chapter format: kw sub-run's `metadata.subIndex`
+  //              equals the chapter, and entries are positionally aligned to the
+  //              chapter's broll-only placements. Fall back to find-by-pi or [pi].
+  // Iterate ALL matching sub-runs (no early break) so a partial newer batch
+  // doesn't shadow a complete older one.
   let keywords = []
   for (const r of kwSubRuns) {
     const m = JSON.parse(r.metadata_json || '{}')
-    if (m.subIndex === chapterIndex) {
-      try {
-        const kwData = extractJSON(r.output_text || '')
-        const kwEntry = (Array.isArray(kwData) ? kwData : []).find(k => k.placement_index === placementIndex) || kwData[placementIndex]
-        if (kwEntry?.keywords) {
-          keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
-        }
-      } catch {}
+    let kwData
+    try { kwData = extractJSON(r.output_text || '') } catch { continue }
+    if (!Array.isArray(kwData)) continue
+
+    // Method 1: explicit (chapter_index, placement_index) match
+    let kwEntry = kwData.find(k => k.chapter_index === chapterIndex && k.placement_index === placementIndex)
+
+    // Method 2: legacy per-chapter (only if this sub-run was emitted for this chapter)
+    if (!kwEntry && m.subIndex === chapterIndex) {
+      kwEntry = kwData.find(k => k.placement_index === placementIndex && k.chapter_index == null) || (kwData[placementIndex]?.chapter_index == null ? kwData[placementIndex] : null)
+    }
+
+    if (kwEntry?.keywords) {
+      keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
       break
     }
   }
@@ -2303,11 +2390,15 @@ async function _buildSearchParams(planPipelineId, chapterIndex, placementIndex) 
     styleParts.length ? `## Style: ${styleParts.join('; ')}` : '',
   ].filter(Boolean).join('\n')
 
-  return { brief, keywords, description: p.description || '' }
+  return { brief, keywords, description: p.description || '', uuid: p.uuid || uuid }
 }
 
 // Helper: find placements with keywords but no GPU results for a variant
 async function _getPendingGpuPlacements(planPipelineId) {
+  // Ensure side-table uuids exist before we read placement identity.
+  const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+  const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+
   // Load plan placements
   const planRuns = await db.prepare(
     `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
@@ -2324,8 +2415,11 @@ async function _getPendingGpuPlacements(planPipelineId) {
       const items = parsed.placements || parsed
       if (!Array.isArray(items)) continue
       const brollOnly = items.filter(p => !p.category || p.category === 'broll')
+      const m = JSON.parse(chapterRuns[chIdx].metadata_json || '{}')
+      const realChIdx = typeof m.subIndex === 'number' ? m.subIndex : chIdx
       for (let pIdx = 0; pIdx < brollOnly.length; pIdx++) {
-        allPlacements.push({ pid: planPipelineId, chapterIndex: chIdx, placementIndex: pIdx })
+        const uuid = uuidsByChapter.get(realChIdx)?.get(pIdx) || null
+        allPlacements.push({ pid: planPipelineId, uuid, chapterIndex: realChIdx, placementIndex: pIdx })
       }
     } catch {}
   }
@@ -2334,7 +2428,8 @@ async function _getPendingGpuPlacements(planPipelineId) {
   const searchRuns = await db.prepare(
     `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
   ).all(`%"pipelineId":"bs-${planPipelineId}-%`)
-  const searched = new Set()
+  const searched = new Set()       // legacy index-based exclusions
+  const searchedUuids = new Set()  // uuid-based exclusions
   for (const r of searchRuns) {
     try {
       const m = JSON.parse(r.metadata_json || '{}')
@@ -2342,15 +2437,21 @@ async function _getPendingGpuPlacements(planPipelineId) {
     } catch {}
   }
 
-  // Also exclude placements already in broll_searches queue
+  // Also exclude placements already in broll_searches queue (prefer uuid, fall back to indices)
   const queuedRows = await db.prepare(
-    `SELECT chapter_index, placement_index FROM broll_searches WHERE plan_pipeline_id = ? AND status IN ('waiting', 'running', 'complete')`
+    `SELECT chapter_index, placement_index, placement_uuid FROM broll_searches
+     WHERE plan_pipeline_id = ? AND status IN ('waiting', 'running', 'complete')`
   ).all(planPipelineId)
   for (const row of queuedRows) {
-    searched.add(`${row.chapter_index}:${row.placement_index}`)
+    if (row.placement_uuid) searchedUuids.add(row.placement_uuid)
+    else searched.add(`${row.chapter_index}:${row.placement_index}`)
   }
 
-  return allPlacements.filter(p => !searched.has(`${p.chapterIndex}:${p.placementIndex}`))
+  return allPlacements.filter(p => {
+    if (p.uuid && searchedUuids.has(p.uuid)) return false
+    if (searched.has(`${p.chapterIndex}:${p.placementIndex}`)) return false
+    return true
+  })
 }
 
 /**
@@ -3930,7 +4031,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subStatus })
     } : undefined
 
-    const result = await callLLM({
+    const result = await withRetry(() => callLLM({
       model: stage.model || 'gemini-3-flash-preview',
       systemInstruction,
       prompt: finalPrompt,
@@ -3939,7 +4040,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       videoFile: videoFile || undefined,
       onProgress,
       abortSignal: pipelineAbort.signal,
-    })
+    }), { pipelineId, label: `runLLMCall: ${stage.name || stage.type}` })
     result._resolvedPrompt = finalPrompt
     result._resolvedSystem = systemInstruction
     return result
@@ -4224,7 +4325,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                   updateSegStatus('Uploading segment...')
                 }
 
-                const result = await callLLM({
+                const result = await withRetry(() => callLLM({
                   model: stage.model || 'gemini-3-flash-preview',
                   systemInstruction: winSystem,
                   prompt: winPrompt,
@@ -4233,7 +4334,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                   videoFile: windowVideoFile || undefined,
                   onProgress: (status) => updateSegStatus(status),
                   abortSignal: pipelineAbort.signal,
-                })
+                }), { pipelineId, label: `window ${win.start_tc}-${win.end_tc} (${ex.title || `Video #${ex.id}`})` })
 
                 // Convert relative timestamps to absolute by adding window offset
                 let outputText = result.text
@@ -4432,14 +4533,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
           const chSystem = replacePlaceholders(stage.system_instruction || '')
 
-          const result = await callLLM({
+          const result = await withRetry(() => callLLM({
             model: stage.model || 'gemini-3.1-pro-preview',
             systemInstruction: chSystem,
             prompt: chPrompt,
             params: stage.params || { temperature: 0.3 },
             experimentId: null,
             abortSignal: pipelineAbort.signal,
-          })
+          }), { pipelineId, label: `chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
           chapterResults[c] = result.text
           totalTokensIn += result.tokensIn || 0
@@ -4499,14 +4600,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             .replace(/\{\{segment_number\}\}/g, String(s + 1))
             .replace(/\{\{total_segments\}\}/g, String(segments.length))
           const systemInstruction = replacePlaceholders(stage.system_instruction || '')
-          const result = await callLLM({
+          const result = await withRetry(() => callLLM({
             model: stage.model || 'gemini-3-flash-preview',
             systemInstruction,
             prompt: segPrompt.includes('{{transcript}}') ? segPrompt : `${segPrompt}\n\n${seg.mainText || seg}`,
             params: stage.params || { temperature: 0.2 },
             experimentId: null,
             abortSignal: pipelineAbort.signal,
-          })
+          }), { pipelineId, label: `segment ${s + 1}/${segments.length}` })
           results.push(result.text)
           totalTokensIn += result.tokensIn || 0
           totalTokensOut += result.tokensOut || 0
@@ -4993,7 +5094,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           `).run(
             strategyId, videoId, 'analysis', 'complete',
             '', output, '', '', 'programmatic', 0, 0, 0, stageRuntime,
-            JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, analysisStageCount, transcriptSource: resolvedSource, groupId }),
+            JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, videoId: stage._videoId || null, analysisStageCount, transcriptSource: resolvedSource, groupId }),
           )
           console.log(`[broll-pipeline] Resume: re-inserted programmatic stage ${i + 1} to DB`)
         }
@@ -5009,7 +5110,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           resolvedPrompt || stage.prompt || '', resolvedSystem || stage.system_instruction || '',
           stage.model || 'gemini-3-flash-preview',
           stageTokensIn, stageTokensOut, stageCost, stageRuntime,
-          JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, analysisStageCount, transcriptSource: resolvedSource, groupId }),
+          JSON.stringify({ pipelineId, stageIndex: i, totalStages: stages.length, stageName, stageType: stage.type, target, phase, videoLabel, videoId: stage._videoId || null, analysisStageCount, transcriptSource: resolvedSource, groupId }),
         )
 
         // Persist spending to spending_log — survives run deletion
@@ -5064,6 +5165,189 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       `).run(strategyId, videoId, 'analysis', 'failed', err.message, JSON.stringify({ pipelineId, stageIndex: stageOutputs.length, totalStages: stages.length }))
     }
     throw err
+  }
+}
+
+// Indirection holder so tests can stub executePipeline without driving the
+// real (very large) pipeline. resumePipeline calls through this object;
+// production code path is identical to a direct call.
+// Also holds loadExampleVideos for the same reason — Task 3.7's mismatch
+// check needs to substitute the example-video set in tests.
+export const __pipelineRunner = { executePipeline, loadExampleVideos }
+
+// Callable resume — same logic as POST /broll/pipeline/:id/resume.
+// Lifted from the route so the boot-time auto-resume can call it directly.
+// Throws on validation failures; the route translates them to HTTP errors.
+export async function resumePipeline(pipelineId, opts = {}) {
+  const { fromStage } = opts
+
+  if (pipelineId.startsWith('alt-')) throw new Error('Alt plan pipelines must be re-run via "Generate Alt Plans" button, not resumed')
+  if (pipelineId.startsWith('kw-')) throw new Error('Keywords pipelines must be re-run via "Generate Keywords" button, not resumed')
+  if (pipelineId.startsWith('bs-')) throw new Error('B-Roll search pipelines must be re-run via "Search B-Roll" button, not resumed')
+
+  const allRuns = await db.prepare(`
+    SELECT * FROM broll_runs
+    WHERE metadata_json LIKE ? AND status = 'complete'
+    ORDER BY id
+  `).all(`%"pipelineId":"${pipelineId}"%`)
+
+  if (!allRuns.length) throw new Error('No completed stages found for this pipeline')
+
+  const mainRuns = []
+  const subRunsByStage = {}
+  for (const run of allRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.isSubRun) {
+      const si = meta.stageIndex
+      if (si != null) {
+        if (!subRunsByStage[si]) subRunsByStage[si] = []
+        subRunsByStage[si].push({ ...run, _meta: meta })
+      }
+    } else {
+      mainRuns.push(run)
+    }
+  }
+
+  if (!mainRuns.length) throw new Error('No completed stages found for this pipeline')
+
+  const firstMeta = JSON.parse(mainRuns[0].metadata_json || '{}')
+  const strategyId = mainRuns[0].strategy_id
+  const videoId = mainRuns[0].video_id
+  let groupId = firstMeta.groupId || null
+  if (!groupId && videoId) {
+    const video = await db.prepare('SELECT group_id FROM videos WHERE id = ?').get(videoId)
+    groupId = video?.group_id || null
+  }
+
+  const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategyId)
+  if (!version) throw new Error('No strategy version found')
+  const newTemplateStages = JSON.parse(version.stages_json || '[]')
+
+  const videoGroups = {}
+  for (const run of mainRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.stageIndex == null) continue
+    const vl = meta.videoLabel || ''
+    if (!videoGroups[vl]) videoGroups[vl] = []
+    videoGroups[vl].push({ stageIndex: meta.stageIndex, stageName: meta.stageName, output: run.output_text || '' })
+  }
+  const videoLabelOrder = Object.keys(videoGroups)
+
+  // Sanity check: old runs' video set must align with current example videos.
+  // Mismatch (e.g., reference video added/removed since the original run) would
+  // cause the offset math below to slot outputs into wrong stage positions.
+  // Conservatively drop completedStages and start fresh in that case.
+  //
+  // Prefer videoId-based comparison (stable across renames). Fall back to
+  // videoLabel for runs stored before videoId was persisted.
+  const currentExampleVideos = groupId ? await __pipelineRunner.loadExampleVideos(groupId) : []
+  const currentVideoIds = new Set(currentExampleVideos.map(v => v.id))
+  const currentLabels = new Set(currentExampleVideos.map(v => v.title || `Video #${v.id}`))
+
+  // Collect old videoIds (preferred) and old labels (fallback) from mainRuns metadata
+  const oldVideoIds = new Set()
+  const oldLabels = new Set()
+  for (const run of mainRuns) {
+    const meta = JSON.parse(run.metadata_json || '{}')
+    if (meta.videoId != null) oldVideoIds.add(meta.videoId)
+    if (meta.videoLabel) oldLabels.add(meta.videoLabel)
+  }
+
+  let mismatch = false
+  if (oldVideoIds.size > 0) {
+    // Prefer videoId comparison
+    mismatch = oldVideoIds.size !== currentVideoIds.size ||
+               [...oldVideoIds].some(id => !currentVideoIds.has(id))
+  } else if (oldLabels.size > 0) {
+    // Fall back to label comparison for legacy runs without videoId in metadata
+    mismatch = oldLabels.size !== currentLabels.size ||
+               [...oldLabels].some(l => !currentLabels.has(l))
+  }
+  if (mismatch) {
+    console.warn(`[broll-resume] ${pipelineId}: video set mismatch (oldIds=${[...oldVideoIds].join(',') || 'none'} oldLabels=${[...oldLabels].join(',') || 'none'} currentIds=${[...currentVideoIds].join(',')}). Starting fresh.`)
+  }
+
+  const completedStages = {}
+  if (!mismatch) {
+    for (let v = 0; v < videoLabelOrder.length; v++) {
+      const vl = videoLabelOrder[v]
+      const offset = v * newTemplateStages.length
+      for (const run of videoGroups[vl]) {
+        const newTemplateIdx = newTemplateStages.findIndex(s => s.name === run.stageName)
+        if (newTemplateIdx >= 0) {
+          const newIndex = newTemplateIdx + offset
+          completedStages[newIndex] = run.output
+          console.log(`[broll-resume] "${run.stageName}" [${vl || 'default'}] old:${run.stageIndex} → new:${newIndex}`)
+        } else {
+          console.log(`[broll-resume] Skipping "${run.stageName}" — not in new strategy`)
+        }
+      }
+    }
+  }
+
+  if (!mismatch && fromStage != null) {
+    const keptStages = new Set()
+    for (const key of Object.keys(completedStages)) {
+      if (Number(key) >= fromStage) {
+        delete completedStages[key]
+      } else {
+        keptStages.add(Number(key))
+      }
+    }
+    console.log(`[broll-resume] Re-running from stage ${fromStage}, keeping ${keptStages.size} completed stages`)
+    for (const run of allRuns) {
+      const meta = JSON.parse(run.metadata_json || '{}')
+      if (meta.stageIndex == null || keptStages.has(meta.stageIndex)) continue
+      if (meta.stageIndex >= fromStage) {
+        await db.prepare('DELETE FROM broll_runs WHERE id = ?').run(run.id)
+      }
+    }
+  }
+
+  let editorCuts = null
+  if (groupId) {
+    const group = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
+    if (group?.editor_state_json) {
+      try {
+        const stateObj = JSON.parse(group.editor_state_json)
+        if (stateObj.cuts?.length) editorCuts = { cuts: stateObj.cuts, cutExclusions: stateObj.cutExclusions || [] }
+      } catch {}
+    }
+  }
+
+  const completedSubRuns = {}
+  if (!mismatch) {
+    for (const [si, subs] of Object.entries(subRunsByStage)) {
+      completedSubRuns[si] = new Set(subs.map(s => s._meta.subIndex).filter(i => i != null))
+    }
+  }
+
+  abortedBrollPipelines.delete(pipelineId)
+
+  // Recover exampleVideoId from the pipelineId suffix. The runner embeds
+  // -ex<N> for per-reference-video analysis pipelines (broll-runner.js:103).
+  // Without this, resume re-runs without the filter and triggers the
+  // analysis-expansion branch at line ~3777, producing phantom duplicate
+  // stages across multiple reference videos.
+  const exMatch = pipelineId.match(/-ex(\d+)$/)
+  const exampleVideoId = exMatch ? Number(exMatch[1]) : null
+
+  // Fire executePipeline but DO NOT await — return the promise so callers can
+  // decide. The HTTP route fires-and-forgets; the boot-time auto-resume awaits
+  // each pipeline before advancing the chain.
+  // Call via the holder so tests can stub executePipeline.
+  const executePromise = __pipelineRunner.executePipeline(
+    strategyId, version.id, videoId, groupId,
+    firstMeta.transcriptSource || 'raw',
+    editorCuts, null,
+    { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0 },
+    { exampleVideoId },
+  )
+
+  return {
+    pipelineId,
+    completedStages: Object.keys(completedStages).length,
+    executePromise,
   }
 }
 
@@ -5147,6 +5431,12 @@ export async function getBRollEditorData(planPipelineId) {
     return (ma.subIndex || 0) - (mb.subIndex || 0)
   })
 
+  // Ensure side-table uuids exist for every placement in this plan (idempotent).
+  // Returns Map<chapterIndex, Map<placementIndex, uuid>>. Reads broll_runs.output_text
+  // but does NOT mutate it.
+  const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+  const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+
   // Flatten placements from all chapters
   const placements = []
   for (let chIdx = 0; chIdx < chapterRuns.length; chIdx++) {
@@ -5171,6 +5461,7 @@ export async function getBRollEditorData(planPipelineId) {
       if (p.category && p.category !== 'broll') continue
       placements.push({
         index: placements.length,
+        uuid: uuidsByChapter.get(chIdx)?.get(brollIdx) || null, // ← stable identity from side table
         chapterIndex: chIdx,
         placementIndex: brollIdx++,
         start: p.start,
@@ -5224,7 +5515,14 @@ export async function getBRollEditorData(planPipelineId) {
     }
 
     for (const row of queueRows) {
-      const match = placements.find(p => p.chapterIndex === row.chapter_index && p.placementIndex === row.placement_index)
+      // Prefer uuid match (stable across reorders/edits); fall back to indices for legacy rows.
+      let match = null
+      if (row.placement_uuid) {
+        match = placements.find(p => p.uuid === row.placement_uuid)
+      }
+      if (!match) {
+        match = placements.find(p => p.chapterIndex === row.chapter_index && p.placementIndex === row.placement_index)
+      }
       if (!match) continue
 
       match.brollSearchId = row.id
@@ -5383,8 +5681,9 @@ export async function getBRollEditorData(planPipelineId) {
 
   const editedPlacements = []
   for (const p of placements) {
-    const key = `${p.chapterIndex}:${p.placementIndex}`
-    const e = edits[key]
+    // Prefer uuid (post-migration); fall back to legacy "${chIdx}:${pIdx}" key
+    // for entries on broll_editor_state rows that predate Task 9's migration.
+    const e = (p.uuid && edits[p.uuid]) || edits[`${p.chapterIndex}:${p.placementIndex}`]
     if (e?.hidden) continue
     if (e?.timelineStart != null && e?.timelineEnd != null) {
       p.userTimelineStart = e.timelineStart
@@ -5586,7 +5885,31 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
  * Search a single B-Roll placement by its chapterIndex + placementIndex.
  * Reuses the same brief/keyword building as executeBrollSearch but for one item.
  */
-export async function searchSinglePlacement(planPipelineId, chapterIndex, placementIndex, overrides = {}) {
+export async function searchSinglePlacement(planPipelineId, identity, overrides = {}) {
+  // identity = { placementUuid?, chapterIndex?, placementIndex? }
+  let { placementUuid, chapterIndex, placementIndex } = identity || {}
+
+  // If only uuid was given, resolve to (chapterIndex, placementIndex) using ensurePlanUuids.
+  if (placementUuid && (chapterIndex == null || placementIndex == null)) {
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    outer: for (const [chIdx, m] of uuidsByChapter.entries()) {
+      for (const [pIdx, u] of m.entries()) {
+        if (u === placementUuid) { chapterIndex = chIdx; placementIndex = pIdx; break outer }
+      }
+    }
+    if (chapterIndex == null || placementIndex == null) {
+      throw new Error(`searchSinglePlacement: uuid ${placementUuid} not found in plan ${planPipelineId}`)
+    }
+  }
+
+  // If only indices were given, resolve uuid for the INSERT.
+  if (!placementUuid) {
+    const { ensurePlanUuids } = await import('./broll-placement-uuid.js')
+    const uuidsByChapter = await ensurePlanUuids(planPipelineId)
+    placementUuid = uuidsByChapter.get(chapterIndex)?.get(placementIndex) || null
+  }
+
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
   const GPU_KEY = process.env.GPU_INTERNAL_KEY
   if (!GPU_KEY) throw new Error('GPU_INTERNAL_KEY not set')
@@ -5629,17 +5952,23 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
   ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
   const kwSubRuns = kwRuns.filter(r => JSON.parse(r.metadata_json || '{}').isSubRun)
 
+  // Same widened lookup as _buildSearchParams: prefer (chapter_index, placement_index)
+  // match (new format), fall back to legacy positional within a sub-run whose
+  // metadata.subIndex matches the chapter. Iterate all sub-runs (no early break)
+  // so a partial newer batch doesn't shadow a complete older one.
   let keywords = []
   for (const r of kwSubRuns) {
     const m = JSON.parse(r.metadata_json || '{}')
-    if (m.subIndex === chapterIndex) {
-      try {
-        const kwData = extractJSON(r.output_text || '')
-        const kwEntry = (Array.isArray(kwData) ? kwData : []).find(k => k.placement_index === placementIndex) || kwData[placementIndex]
-        if (kwEntry?.keywords) {
-          keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
-        }
-      } catch {}
+    let kwData
+    try { kwData = extractJSON(r.output_text || '') } catch { continue }
+    if (!Array.isArray(kwData)) continue
+
+    let kwEntry = kwData.find(k => k.chapter_index === chapterIndex && k.placement_index === placementIndex)
+    if (!kwEntry && m.subIndex === chapterIndex) {
+      kwEntry = kwData.find(k => k.placement_index === placementIndex && k.chapter_index == null) || (kwData[placementIndex]?.chapter_index == null ? kwData[placementIndex] : null)
+    }
+    if (kwEntry?.keywords) {
+      keywords = kwEntry.keywords.flatMap(k => [k.query_2w, k.query_3w].filter(Boolean))
       break
     }
   }
@@ -5701,7 +6030,10 @@ export async function searchSinglePlacement(planPipelineId, chapterIndex, placem
     const data = await streamingFetch(GPU_URL, {
       body: requestBody,
       headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
-      logSource: `broll-search-single:ch${chapterIndex}-p${placementIndex}`,
+      // Prefer uuid in source for traceability — falls back to indices for legacy
+      // plans without uuids. The placement_uuid column is the authoritative link.
+      logSource: `broll-search-single:${placementUuid || `ch${chapterIndex}-p${placementIndex}`}`,
+      placementUuid: placementUuid || null,
       onProgress: (evt) => {
         if (evt.stage === 'job' && evt.job_id) gpuJobId = evt.job_id
         brollPipelineProgress.set(progressId, {

@@ -9,10 +9,11 @@ export const activeStreams = new Map()
  * Drop-in replacement for fetch() — same signature, same return value.
  *
  * @param {string} url
- * @param {RequestInit & { logSource?: string }} opts - standard fetch options + optional logSource tag
+ * @param {RequestInit & { logSource?: string, placementUuid?: string }} opts
+ *   - standard fetch options + optional logSource tag + optional placement uuid
  */
 export async function loggedFetch(url, opts = {}) {
-  const { logSource, ...fetchOpts } = opts
+  const { logSource, placementUuid, ...fetchOpts } = opts
   const method = (fetchOpts.method || 'GET').toUpperCase()
 
   // Redact auth headers for storage
@@ -47,8 +48,8 @@ export async function loggedFetch(url, opts = {}) {
 
   // Fire-and-forget DB insert
   db.prepare(
-    `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
+    `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, placement_uuid, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
   ).run(
     method,
     url,
@@ -59,6 +60,7 @@ export async function loggedFetch(url, opts = {}) {
     error,
     duration,
     logSource || null,
+    placementUuid || null,
   ).catch(err => console.warn('[api-logger] Failed to log:', err.message))
 
   if ((responseStatus && responseStatus >= 400) || error) {
@@ -93,11 +95,12 @@ export async function loggedFetch(url, opts = {}) {
  * @param {object} opts.headers - request headers
  * @param {AbortSignal} [opts.signal] - abort signal
  * @param {string} [opts.logSource] - tag for api_logs
+ * @param {string} [opts.placementUuid] - b-roll placement uuid to attach to api_logs row
  * @param {(event: {stage: string, status: string}) => void} [opts.onProgress] - called for each progress event
  * @returns {Promise<{results: any[], search_count: number, filtered_count: number, model_used: string, events: object[]}>}
  */
 export async function streamingFetch(url, opts = {}) {
-  const { body, headers, signal, logSource, onProgress } = opts
+  const { body, headers, signal, logSource, placementUuid, onProgress } = opts
   const method = 'POST'
 
   const requestBody = { ...body, stream: true }
@@ -233,8 +236,8 @@ export async function streamingFetch(url, opts = {}) {
   let apiLogId = null
   try {
     const logResult = await db.prepare(
-      `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
+      `INSERT INTO api_logs (method, url, request_headers, request_body, response_status, response_body, error, duration_ms, source, placement_uuid, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
     ).run(
       method,
       url,
@@ -245,6 +248,7 @@ export async function streamingFetch(url, opts = {}) {
       errorEvent ? (errorEvent.error || JSON.stringify(errorEvent)) : null,
       duration,
       logSource || null,
+      placementUuid || null,
     )
     apiLogId = logResult.lastInsertRowid
   } catch (err) {

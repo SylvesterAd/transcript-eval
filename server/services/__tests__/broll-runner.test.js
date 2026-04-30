@@ -8,8 +8,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const state = {
   videos: [{ id: 387, group_id: 1 }, { id: 388, group_id: 1 }],
   examples: [{ id: 901 }, { id: 902 }],
+  planPrepStrategy: { id: 7 },
+  createStrategy: { id: 8 },
+  combinedStrategy: { id: 9 },
   analysisStrategy: { id: 5 },
   analysisVersion: { id: 50 },
+  existingPrepRun: null,
+  existingCombinedRun: null,
   completedAnalysis: [],
   group: { id: 1, editor_state_json: null },
   existingStratRuns: [],
@@ -21,14 +26,21 @@ vi.mock('../../db.js', () => ({
       return {
         async get(...args) {
           if (/SELECT editor_state_json FROM video_groups WHERE id = \?/.test(sql)) return state.group
+          if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'plan_prep'/.test(sql)) return state.planPrepStrategy
+          if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_strategy'/.test(sql)) return state.createStrategy
+          if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy'/.test(sql)) return state.combinedStrategy
           if (/SELECT \* FROM broll_strategies WHERE strategy_kind = 'main_analysis'/.test(sql)) return state.analysisStrategy
           if (/SELECT \* FROM broll_strategy_versions/.test(sql)) return state.analysisVersion
-          if (/metadata_json LIKE.*plan_prep/.test(sql)) return null
+          // existingPrep lookup (post-e229184): finds latest non-subRun complete plan_prep run
+          if (/SELECT metadata_json FROM broll_runs[\s\S]*WHERE video_id = \? AND strategy_id = \?[\s\S]*ORDER BY id DESC LIMIT 1/.test(sql)) return state.existingPrepRun
+          // existingCombined lookup (post-e229184): SELECT 1 ... LIMIT 1
+          if (/SELECT 1 FROM broll_runs[\s\S]*LIMIT 1/.test(sql)) return state.existingCombinedRun
           throw new Error(`unexpected get: ${sql}`)
         },
         async all(...args) {
           if (/FROM broll_runs WHERE strategy_id = \? AND video_id = \?/.test(sql)) return state.completedAnalysis
-          if (/FROM broll_runs WHERE video_id = \? AND status = 'complete' AND metadata_json LIKE '%"phase":"create_strategy"%'/.test(sql)) return state.existingStratRuns
+          // existingStratRuns (post-e229184): WHERE video_id = ? AND strategy_id = ?
+          if (/FROM broll_runs[\s\S]*WHERE video_id = \? AND strategy_id = \?/.test(sql)) return state.existingStratRuns
           throw new Error(`unexpected all: ${sql}`)
         },
       }
@@ -52,6 +64,8 @@ import { runAllReferences } from '../broll-runner.js'
 beforeEach(() => {
   state.completedAnalysis = []
   state.existingStratRuns = []
+  state.existingPrepRun = null
+  state.existingCombinedRun = null
 })
 
 describe('runAllReferences', () => {

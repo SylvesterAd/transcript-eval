@@ -9,6 +9,79 @@ export function generateActionId() {
   return 'act_' + (crypto.randomUUID?.() || (Math.random().toString(36).slice(2) + Date.now().toString(36))).slice(0, 12)
 }
 
+// Migrate legacy edit keys "${chIdx}:${pIdx}" → "${uuid}" using the freshly-loaded
+// rawPlacements list. Keys already starting with `p_` (chapter-derived uuid) or `u_`
+// (user-injected uuid) pass through unchanged. Keys whose chIdx:pIdx pair has no
+// matching placement also pass through (graceful degradation — preserves the entry
+// for a later migration pass once the placement appears).
+//
+// Idempotent: applying twice is a no-op (uuid keys are detected by prefix).
+export function migrateEditsToUuid(edits, rawPlacements) {
+  if (!edits || typeof edits !== 'object') return edits || {}
+  if (!rawPlacements?.length) return edits
+  const out = {}
+  // Pass 1: copy uuid-keyed entries first. If a legacy "${ch}:${pl}" entry maps
+  // to the same uuid (because a writer landed at the new key while migration
+  // was queued), the uuid value is the freshest — pass 2 won't overwrite it.
+  for (const [key, value] of Object.entries(edits)) {
+    if (key.startsWith('p_') || key.startsWith('u_')) {
+      out[key] = value
+    }
+  }
+  // Pass 2: legacy keys → uuid (or pass through if no match).
+  for (const [key, value] of Object.entries(edits)) {
+    if (key.startsWith('p_') || key.startsWith('u_')) continue
+    const colonIdx = key.indexOf(':')
+    if (colonIdx === -1) {
+      if (!(key in out)) out[key] = value
+      continue
+    }
+    const chIdx = Number(key.slice(0, colonIdx))
+    const pIdx = Number(key.slice(colonIdx + 1))
+    if (!Number.isFinite(chIdx) || !Number.isFinite(pIdx)) {
+      if (!(key in out)) out[key] = value
+      continue
+    }
+    const match = rawPlacements.find(p => p.chapterIndex === chIdx && p.placementIndex === pIdx)
+    const newKey = match?.uuid || key
+    // Don't clobber: a uuid-keyed entry is fresher than its legacy counterpart.
+    if (!(newKey in out)) out[newKey] = value
+  }
+  return out
+}
+
+// Migrate the `placementKey` field on a single undo/redo entry. Used when re-loading
+// state from the server: action entries reference edits by key, so they need to be
+// rekeyed alongside the dict itself. Returns the entry unchanged if its placementKey
+// is already uuid-shaped or if no matching placement is found.
+export function migrateActionPlacementKey(entry, rawPlacements) {
+  if (!entry || typeof entry !== 'object') return entry
+  const key = entry.placementKey
+  if (!key) return entry
+  if (key.startsWith('p_') || key.startsWith('u_')) return entry
+  const colonIdx = key.indexOf(':')
+  if (colonIdx === -1) return entry
+  const chIdx = Number(key.slice(0, colonIdx))
+  const pIdx = Number(key.slice(colonIdx + 1))
+  if (!Number.isFinite(chIdx) || !Number.isFinite(pIdx)) return entry
+  if (!rawPlacements?.length) return entry
+  const match = rawPlacements.find(p => p.chapterIndex === chIdx && p.placementIndex === pIdx)
+  if (!match?.uuid) return entry
+  return { ...entry, placementKey: match.uuid }
+}
+
+function migrateActionStack(stack, rawPlacements) {
+  if (!Array.isArray(stack) || !stack.length) return stack
+  if (!rawPlacements?.length) return stack
+  let changed = false
+  const out = stack.map(e => {
+    const next = migrateActionPlacementKey(e, rawPlacements)
+    if (next !== e) changed = true
+    return next
+  })
+  return changed ? out : stack
+}
+
 // Applies just the mutation side of an action to the reducer's editor-state slots.
 // Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
 export function applyMutation(state, entry, side /* 'before' | 'after' */) {
@@ -174,16 +247,44 @@ export function reducer(state, action) {
     }
     case 'LOAD_EDITOR_STATE': {
       const { state: loaded, version } = action.payload
+      // Migrate legacy edit keys "${chIdx}:${pIdx}" → "${uuid}" if rawPlacements
+      // are already loaded. If they're not yet, the MIGRATE_EDIT_KEYS effect runs
+      // a second pass once they arrive (load-order is non-deterministic).
+      const rawForMigration = state.rawPlacements || []
+      const loadedEdits = loaded.edits || {}
+      const migratedEdits = migrateEditsToUuid(loadedEdits, rawForMigration)
+      const loadedUndo = Array.isArray(loaded.undoStack) ? loaded.undoStack : []
+      const loadedRedo = Array.isArray(loaded.redoStack) ? loaded.redoStack : []
       return {
         ...state,
-        edits: loaded.edits || {},
+        edits: migratedEdits,
         userPlacements: Array.isArray(loaded.userPlacements) ? loaded.userPlacements : [],
-        undoStack: Array.isArray(loaded.undoStack) ? loaded.undoStack : [],
-        redoStack: Array.isArray(loaded.redoStack) ? loaded.redoStack : [],
+        undoStack: migrateActionStack(loadedUndo, rawForMigration),
+        redoStack: migrateActionStack(loadedRedo, rawForMigration),
         editorStateVersion: version || 0,
         dirty: false,
         editorStateLoaded: true,
       }
+    }
+    case 'MIGRATE_EDIT_KEYS': {
+      // Second-pass migration once rawPlacements have arrived. No-op if every
+      // edits key is already uuid-shaped.
+      const raw = state.rawPlacements
+      if (!raw?.length) return state
+      const migratedEdits = migrateEditsToUuid(state.edits, raw)
+      const migratedUndo = migrateActionStack(state.undoStack, raw)
+      const migratedRedo = migrateActionStack(state.redoStack, raw)
+      if (
+        migratedEdits === state.edits &&
+        migratedUndo === state.undoStack &&
+        migratedRedo === state.redoStack
+      ) {
+        return state
+      }
+      // dirty=true so the next debounced save persists the migrated shape back
+      // to the server. Without this, a pure migration (no other edits) wouldn't
+      // get written and the server would keep returning legacy keys.
+      return { ...state, edits: migratedEdits, undoStack: migratedUndo, redoStack: migratedRedo, dirty: true }
     }
     case 'APPLY_ACTION': {
       const entry = action.payload
@@ -277,7 +378,13 @@ export function reducer(state, action) {
       // Used after a 409: replace base with remote state, then replay any pending
       // local actions (undoStack entries whose ids are NOT in the remote stack).
       const { state: remoteState, version } = action.payload
-      const remoteUndo = Array.isArray(remoteState.undoStack) ? remoteState.undoStack : []
+      // Migrate remote edits/stacks the same way LOAD_EDITOR_STATE does — server
+      // may still be returning legacy "${chIdx}:${pIdx}" keys for a pipeline whose
+      // editor-state predates this migration.
+      const rawForMigration = state.rawPlacements || []
+      const remoteEditsMigrated = migrateEditsToUuid(remoteState.edits || {}, rawForMigration)
+      const remoteUndoSrc = Array.isArray(remoteState.undoStack) ? remoteState.undoStack : []
+      const remoteUndo = migrateActionStack(remoteUndoSrc, rawForMigration)
       const remoteIds = new Set(remoteUndo.map(e => e.id))
       // Collect targets the remote has also mutated — we'll skip any local pending
       // entry that targets the same key/userPlacement to avoid corrupting shared state
@@ -297,12 +404,14 @@ export function reducer(state, action) {
         }
         return true
       })
+      const remoteRedoSrc = Array.isArray(remoteState.redoStack) ? remoteState.redoStack : []
+      const remoteRedo = migrateActionStack(remoteRedoSrc, rawForMigration)
       let next = {
         ...state,
-        edits: remoteState.edits || {},
+        edits: remoteEditsMigrated,
         userPlacements: Array.isArray(remoteState.userPlacements) ? remoteState.userPlacements : [],
         undoStack: remoteUndo,
-        redoStack: Array.isArray(remoteState.redoStack) ? remoteState.redoStack : [],
+        redoStack: remoteRedo,
         editorStateVersion: version,
         dirty: pending.length > 0,
         editorStateLoaded: true,

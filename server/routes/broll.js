@@ -54,6 +54,7 @@ import {
   resetBrollSearches,
   loadBrollEditorState,
   saveBrollEditorState,
+  resumePipeline,
 } from '../services/broll.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -142,23 +143,25 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
           const words = (await getTimelineWordTimestamps(groupId)) || []
           const refined = matchPlacementsToTranscript(placements, words)
           // matchPlacementsToTranscript returns NEW objects keyed by
-          // (chapterIndex, placementIndex) for plan placements, or by
-          // userPlacementId for manual ones. Push the refined timing
-          // back onto the original `placements` array (in place) so
-          // buildManifestFromPlacements sees it via p.start/p.end as
-          // numeric seconds. coerceTimingToSeconds passes numbers
-          // through unchanged.
+          // placement.uuid (preferred — stable across reorders/edits) for
+          // plan placements with backfilled uuids, falling back to
+          // (chapterIndex, placementIndex) for legacy rows that pre-date
+          // the uuid backfill, or by userPlacementId for manual ones.
+          // Push the refined timing back onto the original `placements`
+          // array (in place) so buildManifestFromPlacements sees it via
+          // p.start/p.end as numeric seconds. coerceTimingToSeconds
+          // passes numbers through unchanged.
           const byKey = new Map()
           for (const r of refined) {
             const key = r.isUserPlacement
               ? `user:${r.userPlacementId}`
-              : `${r.chapterIndex}:${r.placementIndex}`
+              : (r.uuid || `${r.chapterIndex}:${r.placementIndex}`)
             byKey.set(key, r)
           }
           for (const p of placements) {
             const key = p.isUserPlacement
               ? `user:${p.userPlacementId}`
-              : `${p.chapterIndex}:${p.placementIndex}`
+              : (p.uuid || `${p.chapterIndex}:${p.placementIndex}`)
             const r = byKey.get(key)
             if (r && typeof r.timelineStart === 'number' && typeof r.timelineEnd === 'number') {
               p.start = r.timelineStart
@@ -791,153 +794,22 @@ router.post('/pipeline/:pipelineId/stop', requireAuth, (req, res) => {
   res.json({ success: true })
 })
 
-// Resume an interrupted/failed pipeline, or re-run from a specific stage
+// Resume an interrupted/failed pipeline, or re-run from a specific stage.
+// Thin wrapper over services/broll.js#resumePipeline. The same callable is
+// used by boot-time auto-resume — see spec 2026-04-29-broll-auto-resume-design.md.
 router.post('/pipeline/:pipelineId/resume', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
-    const { fromStage } = req.body || {} // optional: re-run from this stage index onwards
-
-    // Alt plan and keywords pipelines can't be resumed — they must be re-triggered from their dedicated endpoints
-    if (pipelineId.startsWith('alt-')) return res.status(400).json({ error: 'Alt plan pipelines must be re-run via "Generate Alt Plans" button, not resumed' })
-    if (pipelineId.startsWith('kw-')) return res.status(400).json({ error: 'Keywords pipelines must be re-run via "Generate Keywords" button, not resumed' })
-    if (pipelineId.startsWith('bs-')) return res.status(400).json({ error: 'B-Roll search pipelines must be re-run via "Search B-Roll" button, not resumed' })
-
-    // Load ALL runs for this pipeline (main stages + sub-runs)
-    const allRuns = await db.prepare(`
-      SELECT * FROM broll_runs
-      WHERE metadata_json LIKE ? AND status = 'complete'
-      ORDER BY id
-    `).all(`%"pipelineId":"${pipelineId}"%`)
-
-    if (!allRuns.length) return res.status(404).json({ error: 'No completed stages found for this pipeline' })
-
-    // Separate main stages and sub-runs
-    const mainRuns = []
-    const subRunsByStage = {} // stageIndex → [sub-runs sorted by subIndex]
-    for (const run of allRuns) {
-      const meta = JSON.parse(run.metadata_json || '{}')
-      if (meta.isSubRun) {
-        const si = meta.stageIndex
-        if (si != null) {
-          if (!subRunsByStage[si]) subRunsByStage[si] = []
-          subRunsByStage[si].push({ ...run, _meta: meta })
-        }
-      } else {
-        mainRuns.push(run)
-      }
-    }
-
-    if (!mainRuns.length) return res.status(404).json({ error: 'No completed stages found for this pipeline' })
-
-    // Extract pipeline info from first run's metadata
-    const firstMeta = JSON.parse(mainRuns[0].metadata_json || '{}')
-    const strategyId = mainRuns[0].strategy_id
-    const videoId = mainRuns[0].video_id
-    // groupId may be missing from old metadata — fall back to video's group
-    let groupId = firstMeta.groupId || null
-    if (!groupId && videoId) {
-      const video = await db.prepare('SELECT group_id FROM videos WHERE id = ?').get(videoId)
-      groupId = video?.group_id || null
-    }
-
-    // Get latest version
-    const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategyId)
-    if (!version) return res.status(400).json({ error: 'No strategy version found' })
-    const newTemplateStages = JSON.parse(version.stages_json || '[]')
-
-    // Build completed stages map
-    // Group old runs by videoLabel to identify per-video groups
-    const videoGroups = {}
-    for (const run of mainRuns) {
-      const meta = JSON.parse(run.metadata_json || '{}')
-      if (meta.stageIndex == null) continue
-      const vl = meta.videoLabel || ''
-      if (!videoGroups[vl]) videoGroups[vl] = []
-      videoGroups[vl].push({ stageIndex: meta.stageIndex, stageName: meta.stageName, output: run.output_text || '' })
-    }
-    const videoLabelOrder = Object.keys(videoGroups)
-
-    const completedStages = {}
-    for (let v = 0; v < videoLabelOrder.length; v++) {
-      const vl = videoLabelOrder[v]
-      const offset = v * newTemplateStages.length
-      for (const run of videoGroups[vl]) {
-        // Find this stage's position in the new template by name
-        const newTemplateIdx = newTemplateStages.findIndex(s => s.name === run.stageName)
-        if (newTemplateIdx >= 0) {
-          const newIndex = newTemplateIdx + offset
-          completedStages[newIndex] = run.output
-          console.log(`[broll-resume] "${run.stageName}" [${vl || 'default'}] old:${run.stageIndex} → new:${newIndex}`)
-        } else {
-          // Stage name doesn't exist in new template — skip it (strategy changed this stage)
-          console.log(`[broll-resume] Skipping "${run.stageName}" — not in new strategy`)
-        }
-      }
-    }
-
-    // NOTE: Do NOT reconstruct stages from partial sub-runs into completedStages.
-    // Partial sub-runs are handled by completedSubRuns inside executePipeline —
-    // it loads existing sub-runs and only re-runs the missing ones.
-
-    // If re-running from a specific stage, drop everything from that stage onwards
-    if (fromStage != null) {
-      // Remember which stages we're keeping vs dropping
-      const keptStages = new Set()
-      for (const key of Object.keys(completedStages)) {
-        if (Number(key) >= fromStage) {
-          delete completedStages[key]
-        } else {
-          keptStages.add(Number(key))
-        }
-      }
-      console.log(`[broll-resume] Re-running from stage ${fromStage}, keeping ${keptStages.size} completed stages`)
-
-      // Delete old DB entries for stages being re-run (fromStage and everything after)
-      for (const run of allRuns) {
-        const meta = JSON.parse(run.metadata_json || '{}')
-        if (meta.stageIndex == null || keptStages.has(meta.stageIndex)) continue
-        if (meta.stageIndex >= fromStage) {
-          await db.prepare('DELETE FROM broll_runs WHERE id = ?').run(run.id)
-        }
-      }
-    }
-    if (!version) return res.status(400).json({ error: 'No strategy version found' })
-
-    // Load editor cuts if available
-    let editorCuts = null
-    if (groupId) {
-      const group = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
-      if (group?.editor_state_json) {
-        try {
-          const state = JSON.parse(group.editor_state_json)
-          if (state.cuts?.length) editorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
-        } catch {}
-      }
-    }
-
-    // Build set of completed sub-run indices per stage (for partial recovery)
-    const completedSubRuns = {} // stageIndex → Set of subIndex
-    for (const [si, subs] of Object.entries(subRunsByStage)) {
-      completedSubRuns[si] = new Set(subs.map(s => s._meta.subIndex).filter(i => i != null))
-    }
-
-    // Clear any previous abort flag so the resumed pipeline doesn't immediately abort
-    abortedBrollPipelines.delete(pipelineId)
-
-    // Fire and forget — same pattern as the run endpoint
-    const result = executePipeline(
-      strategyId, version.id, videoId, groupId,
-      firstMeta.transcriptSource || 'raw',
-      editorCuts, null,
-      { completedStages, completedSubRuns, originalPipelineId: pipelineId, skipAnalysis: firstMeta.analysisStageCount === 0 },
-    )
-
-    res.json({ pipelineId, resumed: true, completedStages: Object.keys(completedStages).length })
-
-    // Await in background
-    result.catch(err => console.error(`[broll-pipeline] Resume failed for ${pipelineId}:`, err.message))
+    const { fromStage } = req.body || {}
+    const { completedStages, executePromise } = await resumePipeline(pipelineId, { fromStage })
+    res.json({ pipelineId, resumed: true, completedStages })
+    executePromise.catch(err => console.error(`[broll-pipeline] Resume failed for ${pipelineId}:`, err.message))
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    const msg = err.message || 'Resume failed'
+    if (/must be re-run via/.test(msg)) return res.status(400).json({ error: msg })
+    if (/No completed stages|No strategy version/.test(msg)) return res.status(404).json({ error: msg })
+    console.error('[broll-pipeline] Resume error:', err)
+    res.status(500).json({ error: msg })
   }
 })
 
@@ -1015,15 +887,15 @@ router.put('/pipeline/:pipelineId/editor-state', requireAuth, async (req, res) =
 router.post('/pipeline/:pipelineId/search-placement', requireAuth, async (req, res) => {
   try {
     const { pipelineId } = req.params
-    const { chapterIndex, placementIndex, description, style, sources } = req.body
-    if (chapterIndex == null || placementIndex == null) {
-      return res.status(400).json({ error: 'chapterIndex and placementIndex required' })
+    const { placementUuid, chapterIndex, placementIndex, description, style, sources } = req.body
+    if (!placementUuid && (chapterIndex == null || placementIndex == null)) {
+      return res.status(400).json({ error: 'placementUuid OR (chapterIndex, placementIndex) required' })
     }
     const overrides = {}
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchSinglePlacement(pipelineId, chapterIndex, placementIndex, overrides)
+    const result = await searchSinglePlacement(pipelineId, { placementUuid, chapterIndex, placementIndex }, overrides)
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })
