@@ -222,6 +222,9 @@ You are a senior video editor creating exact B-Roll placements for ONE chapter. 
 
 Create EXACT placements with precise [HH:MM:SS] timecodes that match the transcript. Each placement must have an audio anchor (the words being spoken), a trigger, and a detailed description.
 
+Audience: {{audience}}
+When a placement shows people, briefly contextualize them to fit the audience — one or two adjectives, never a paragraph (e.g. "older white American couple" instead of just "a couple"). Skip the audience hint when the placement does not show people.
+
 Output ONLY valid JSON.`,
     prompt: `Create detailed B-Roll / Graphic Package / Overlay placements for chapter {{chapter_number}} of {{total_chapters}}.
 

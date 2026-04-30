@@ -7,6 +7,12 @@ import { extractVideoSegment } from './video-processor.js'
 import { mp4Url } from './cloudflare-stream.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
 import { extractYouTubeId } from './youtube.js'
+import { formatAudience } from './audience-formatter.js'
+import {
+  loadPriorChapterStrategies,
+  assertNoSelfReference,
+  assertPriorsComplete,
+} from './broll-prior-strategies.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -1085,6 +1091,25 @@ export async function loadExampleVideos(groupId) {
   return videos
 }
 
+// Load + format the audience description for a group (with parent fallback,
+// matching the pattern in /api/videos). Returns a short prompt-ready string,
+// or '' when no audience is configured.
+async function loadAudienceText(groupId) {
+  if (!groupId) return ''
+  try {
+    const row = await db.prepare(`
+      SELECT COALESCE(parent.audience_json, vg.audience_json) AS audience_json
+      FROM video_groups vg
+      LEFT JOIN video_groups parent ON parent.id = vg.parent_group_id
+      WHERE vg.id = ?
+    `).get(groupId)
+    if (!row?.audience_json) return ''
+    return formatAudience(JSON.parse(row.audience_json))
+  } catch {
+    return ''
+  }
+}
+
 // Run alt plans for non-favorite reference videos using a completed plan pipeline's data
 export async function executeAltPlans(planPipelineId) {
   // Load the plan pipeline's completed stages
@@ -1115,6 +1140,7 @@ export async function executeAltPlans(planPipelineId) {
   // Load example videos and determine favorite vs alt
   const exampleVideos = groupId ? await loadExampleVideos(groupId) : []
   if (exampleVideos.length < 2) throw new Error('Need at least 2 reference videos for alternative plans')
+  const audienceText = await loadAudienceText(groupId)
   const favoriteVideo = exampleVideos.find(v => v.isFavorite) || exampleVideos[0]
   const altVideos = exampleVideos.filter(v => v !== favoriteVideo)
 
@@ -1260,6 +1286,7 @@ export async function executeAltPlans(planPipelineId) {
         .replace(/\{\{llm_answer\}\}/g, llmAnswer)
         .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
         .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
+        .replace(/\{\{audience\}\}/g, audienceText)
       for (const [num, ans] of Object.entries(llmAnswers)) {
         result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
       }
@@ -2483,7 +2510,7 @@ export async function executePlanPrep(videoId, groupId, editorCuts = null, pipel
 }
 
 // Run per-chapter B-Roll strategy for ONE reference video using completed prep + analysis pipelines
-export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, videoId, groupId, pipelineIdOverride) {
+export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, videoId, groupId, pipelineIdOverride, priorStrategyPipelineIds = []) {
   // 1. Load create_strategy strategy and version
   const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_strategy' ORDER BY id LIMIT 1").get()
   if (!strategy) throw new Error('No create_strategy strategy found')
@@ -2491,6 +2518,13 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   if (!version) throw new Error('No create_strategy version found')
   const stages = JSON.parse(version.stages_json || '[]')
   if (!stages.length) throw new Error('create_strategy strategy has no stages')
+
+  // Chain integrity: variant cannot reference itself, and every prior must
+  // have completed before we run. Logs upfront so a paste-able trail exists
+  // for production debugging.
+  assertNoSelfReference(pipelineIdOverride, priorStrategyPipelineIds)
+  await assertPriorsComplete(priorStrategyPipelineIds)
+  console.log(`[broll-chain] executeCreateStrategy ${pipelineIdOverride || '(no-override)'} priors=[${priorStrategyPipelineIds.join(',')}]`)
 
   // 2. Load prep pipeline data from DB
   const prepRuns = await db.prepare(
@@ -2630,6 +2664,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   const pipelineId = pipelineIdOverride || `strat-${videoId}-${Date.now()}`
   const pipelineStart = Date.now()
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
+  const audienceText = await loadAudienceText(groupId)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_strategy' })
 
@@ -2645,6 +2680,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{reference_analysis_slim\}\}/g, slimReferenceAnalysis)
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
+      .replace(/\{\{audience\}\}/g, audienceText)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -2705,7 +2741,15 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
             .replace(/\{\{a_rolls\}\}/g, allChaptersCtx.split('## Chapters')[0] || '')
             .replace(/\{\{prev_chapter_output\}\}/g, prevChapterOutput)
 
-          const chSystem = replacePlaceholders(stage.system_instruction || '')
+          let chSystem = replacePlaceholders(stage.system_instruction || '')
+
+          const priorChapterText = await loadPriorChapterStrategies(priorStrategyPipelineIds, c)
+          if (priorStrategyPipelineIds.length > 0 && !priorChapterText) {
+            throw new Error(`[broll-chain] expected non-empty priors text for chapter ${c}, got empty`)
+          }
+          chPrompt = chPrompt.replace(/\{\{prior_chapter_strategies\}\}/g, priorChapterText)
+          chSystem = chSystem.replace(/\{\{prior_chapter_strategies\}\}/g, priorChapterText)
+          console.log(`[broll-chain] variant ${pipelineIdOverride || '(no-override)'} chapter ${c} injecting priors n=${priorStrategyPipelineIds.length} bytes=${priorChapterText.length}`)
 
           const { callLLM } = await import('./llm-runner.js')
           const result = await callLLM({
@@ -3047,6 +3091,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   const pipelineId = pipelineIdOverride || `cstrat-${videoId}-${Date.now()}`
   const pipelineStart = Date.now()
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
+  const audienceText = await loadAudienceText(groupId)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_combined_strategy' })
 
@@ -3063,6 +3108,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
       .replace(/\{\{all_reference_analyses_slim\}\}/g, slimReferenceAnalyses)
       .replace(/\{\{all_reference_analyses\}\}/g, allReferenceAnalyses)
       .replace(/\{\{reference_analysis\}\}/g, allReferenceAnalyses) // fallback
+      .replace(/\{\{audience\}\}/g, audienceText)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3587,6 +3633,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   const pipelineId = `plan-${videoId}-${Date.now()}`
   const pipelineStart = Date.now()
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
+  const audienceText = await loadAudienceText(groupId)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Plan', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_plan' })
 
@@ -3600,6 +3647,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
+      .replace(/\{\{audience\}\}/g, audienceText)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3955,6 +4003,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const mainVideo = await db.prepare('SELECT title FROM videos WHERE id = ?').get(videoId)
   const videoTitle = mainVideo?.title || `Video #${videoId}`
+  const audienceText = await loadAudienceText(groupId)
   const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now(), exampleVideoId: exampleVideoId || null }
 
   if (resumeData) {
@@ -3979,6 +4028,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
       .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
       .replace(/\{\{all_chapter_analyses\}\}/g, allChapters)
+      .replace(/\{\{audience\}\}/g, audienceText)
     for (const [num, ans] of Object.entries(llmAnswers)) {
       result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
     }
