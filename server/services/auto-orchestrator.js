@@ -338,39 +338,44 @@ export async function chainAfterClassify(groupId) {
   })
 }
 
-// True if the group already has at least one completed broll_runs row whose
-// strategy belongs to the named phase ('refs' = main_analysis/plan_prep,
-// 'strategy' = create_strategy/create_combined_strategy, 'plan' = plan).
-// 'search' always returns false — re-running search is idempotent and safer
-// than skipping (per spec).
+// True if the group already has the broll_runs outputs needed to skip a phase.
+// - 'refs' requires BOTH 'plan_prep' (main video) AND 'main_analysis' (ref videos)
+//   because the next phase (runStrategies) fails without prepPipelineId AND
+//   analysisPipelineIds. If only one exists, return false so refs re-runs;
+//   runAllReferences is idempotent and will fill the missing piece without
+//   re-doing completed work.
+// - 'strategy' is satisfied by EITHER 'create_strategy' OR 'create_combined_strategy'
+//   (which one applies depends on the number of reference videos).
+// - 'plan' is satisfied by 'plan'.
+// - 'search' always returns false — idempotent re-run is safer than skipping.
 async function phaseHasOutputs(groupId, phase) {
   const groupVideoRows = await db.prepare('SELECT id FROM videos WHERE group_id = ?').all(groupId)
   const videoIds = groupVideoRows.map(r => r.id)
   if (!videoIds.length) return false
 
-  // Map phase → strategy_kind list
-  const kinds = {
-    refs: ['main_analysis', 'plan_prep'],
-    strategy: ['create_strategy', 'create_combined_strategy'],
-    plan: ['plan'],
-    search: [], // search has its own table / pipeline shape — handled below
-  }[phase] || []
+  if (phase === 'search') return false
 
-  if (kinds.length) {
-    const placeholders = videoIds.map(() => '?').join(',')
-    const kindPlaceholders = kinds.map(() => '?').join(',')
+  const phaseConfig = {
+    refs: { kinds: ['main_analysis', 'plan_prep'], requireAll: true },
+    strategy: { kinds: ['create_strategy', 'create_combined_strategy'], requireAll: false },
+    plan: { kinds: ['plan'], requireAll: false },
+  }[phase]
+  if (!phaseConfig) return false
+
+  const placeholders = videoIds.map(() => '?').join(',')
+  for (const kind of phaseConfig.kinds) {
     const row = await db.prepare(
       `SELECT 1 FROM broll_runs r
        JOIN broll_strategies s ON s.id = r.strategy_id
        WHERE r.video_id IN (${placeholders}) AND r.status = 'complete'
-         AND s.strategy_kind IN (${kindPlaceholders})
+         AND s.strategy_kind = ?
        LIMIT 1`
-    ).get(...videoIds, ...kinds)
-    return !!row
+    ).get(...videoIds, kind)
+    if (phaseConfig.requireAll && !row) return false  // missing a required kind
+    if (!phaseConfig.requireAll && row) return true   // any kind found
   }
-
-  // For 'search', never skip — idempotent re-run is safer than missing the substage.
-  return false
+  // requireAll: all kinds existed (no early false). requireAny: nothing matched.
+  return phaseConfig.requireAll
 }
 
 // runFullAutoBrollChain — fires the b-roll pipeline chain (references analyzed

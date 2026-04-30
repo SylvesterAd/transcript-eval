@@ -14,9 +14,10 @@ const state = {
   brollChainUpdates: [],
   // Track runner method call ordering
   runnerCalls: [],
-  // What phaseHasOutputs returns per phase. The mocked db.get below inspects
-  // the strategy_kind args to decide which phase the probe is asking about.
-  phaseOutputs: { refs: false, strategy: false, plan: false, search: false },
+  // What phaseHasOutputs returns per (phase, strategy_kind). The mocked db.get
+  // below inspects the kind arg to decide whether to return a row. Refs is now
+  // split into refsPrep + refsAnalysis because phaseHasOutputs requires BOTH.
+  phaseOutputs: { refsPrep: false, refsAnalysis: false, strategy: false, plan: false, search: false },
 }
 
 vi.mock('../../db.js', () => ({
@@ -34,20 +35,16 @@ vi.mock('../../db.js', () => ({
           if (/SELECT v\.id FROM videos v/.test(sql)) {
             return state.mainVideo
           }
-          // phaseHasOutputs probe — the SQL joins broll_runs to broll_strategies
-          // and the trailing args are the strategy_kind list. Decide truthy/falsy
-          // per the test's phaseOutputs table.
+          // phaseHasOutputs probe — phaseHasOutputs queries each strategy_kind
+          // separately now (one IN per call), so the LAST arg is the kind being
+          // asked about. Map it to the phaseOutputs table.
           if (/JOIN broll_strategies s ON s\.id = r\.strategy_id/.test(sql)) {
-            // Trailing kinds depend on phase: refs has 2 kinds, strategy has 2,
-            // plan has 1. Inspect the args' tail to figure out which phase.
-            const tail = args.slice(-3) // up to the last 3 args
-            if (tail.includes('main_analysis') && state.phaseOutputs.refs) return { '?column?': 1 }
-            if (tail.includes('create_strategy') && state.phaseOutputs.strategy) return { '?column?': 1 }
-            // 'plan' kind matches both 'plan_prep' (refs) and 'plan' (plan phase).
-            // Disambiguate by checking it's the singular 'plan' query (only 1 kind).
-            if (tail.includes('plan') && !tail.includes('main_analysis') && state.phaseOutputs.plan) {
-              return { '?column?': 1 }
-            }
+            const kind = args[args.length - 1]
+            if (kind === 'main_analysis' && state.phaseOutputs.refsAnalysis) return { '?column?': 1 }
+            if (kind === 'plan_prep' && state.phaseOutputs.refsPrep) return { '?column?': 1 }
+            if (kind === 'create_strategy' && state.phaseOutputs.strategy) return { '?column?': 1 }
+            if (kind === 'create_combined_strategy' && state.phaseOutputs.strategy) return { '?column?': 1 }
+            if (kind === 'plan' && state.phaseOutputs.plan) return { '?column?': 1 }
             return null
           }
           // Recovery queries (when skipping a phase, we look up the latest
@@ -110,7 +107,7 @@ const { runFullAutoBrollChain } = await import('../auto-orchestrator.js')
 beforeEach(() => {
   state.brollChainUpdates = []
   state.runnerCalls = []
-  state.phaseOutputs = { refs: false, strategy: false, plan: false, search: false }
+  state.phaseOutputs = { refsPrep: false, refsAnalysis: false, strategy: false, plan: false, search: false }
 })
 
 describe('runFullAutoBrollChain with resumeFromSubstage', () => {
@@ -119,15 +116,35 @@ describe('runFullAutoBrollChain with resumeFromSubstage', () => {
     expect(state.runnerCalls).toEqual(['runAllReferences', 'runStrategies', 'runPlanForEachVariant', 'runBrollSearchFirst10'])
   })
 
-  it('skips refs phase when phase outputs exist', async () => {
-    state.phaseOutputs.refs = true
+  it('skips refs phase when BOTH prep and analysis outputs exist', async () => {
+    state.phaseOutputs.refsPrep = true
+    state.phaseOutputs.refsAnalysis = true
     await runFullAutoBrollChain(7, { resumeFromSubstage: 'refs' })
     expect(state.runnerCalls).not.toContain('runAllReferences')
     expect(state.runnerCalls).toContain('runStrategies')
   })
 
-  it('skips refs and strategy when both have outputs (resumeFromSubstage=strategy)', async () => {
-    state.phaseOutputs.refs = true
+  it('does NOT skip refs when only main_analysis exists (plan_prep missing)', async () => {
+    // This is the bug surfaced live: analysis pipelines completed on resume but
+    // plan_prep was never run. With only one of the two, the next phase
+    // (runStrategies) needs prepPipelineId AND analysisPipelineIds — without the
+    // prep ID it would throw. Re-entering refs lets runAllReferences fill it in.
+    state.phaseOutputs.refsAnalysis = true
+    state.phaseOutputs.refsPrep = false
+    await runFullAutoBrollChain(7, { resumeFromSubstage: 'refs' })
+    expect(state.runnerCalls).toContain('runAllReferences')
+  })
+
+  it('does NOT skip refs when only plan_prep exists (main_analysis missing)', async () => {
+    state.phaseOutputs.refsPrep = true
+    state.phaseOutputs.refsAnalysis = false
+    await runFullAutoBrollChain(7, { resumeFromSubstage: 'refs' })
+    expect(state.runnerCalls).toContain('runAllReferences')
+  })
+
+  it('skips refs and strategy when refs(both) + strategy have outputs', async () => {
+    state.phaseOutputs.refsPrep = true
+    state.phaseOutputs.refsAnalysis = true
     state.phaseOutputs.strategy = true
     await runFullAutoBrollChain(7, { resumeFromSubstage: 'strategy' })
     expect(state.runnerCalls).not.toContain('runAllReferences')
@@ -136,13 +153,14 @@ describe('runFullAutoBrollChain with resumeFromSubstage', () => {
   })
 
   it('runs phase if outputs are missing even when resumeFromSubstage names that phase', async () => {
-    state.phaseOutputs.refs = false
+    // refsPrep=false, refsAnalysis=false → phaseHasOutputs returns false → don't skip
     await runFullAutoBrollChain(7, { resumeFromSubstage: 'refs' })
     expect(state.runnerCalls).toContain('runAllReferences')
   })
 
   it('always runs search phase (idempotent re-run is safer than skipping)', async () => {
-    state.phaseOutputs.refs = true
+    state.phaseOutputs.refsPrep = true
+    state.phaseOutputs.refsAnalysis = true
     state.phaseOutputs.strategy = true
     state.phaseOutputs.plan = true
     await runFullAutoBrollChain(7, { resumeFromSubstage: 'plan' })
