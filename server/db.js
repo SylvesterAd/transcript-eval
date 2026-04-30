@@ -47,11 +47,26 @@ try {
     await pool.query(`ALTER TABLE transcripts DROP CONSTRAINT IF EXISTS transcripts_type_check`)
     await pool.query(`ALTER TABLE transcripts ADD CONSTRAINT transcripts_type_check CHECK (type IN ('raw', 'human_edited', 'rough_cut_adjusted'))`)
     await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE`)
+    // Liveness signal for downloadYouTubeVideo. Refreshed every
+    // YT_HEARTBEAT_INTERVAL_MS while the yt-dlp + Supabase upload pipeline
+    // is in flight; resumeStuckYouTubeDownloads uses staleness to tell a
+    // crashed driver from a still-running one (rolling deploys, dev
+    // hot-reload). Without this, a kill mid-download leaves status =
+    // 'processing' forever — frontend spins, no retry.
+    await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS libraries_json TEXT`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS freepik_opt_in BOOLEAN DEFAULT TRUE`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS audience_json TEXT`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS path_id TEXT`)
     await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS broll_chain_substage TEXT`)
+    // Liveness signal for the b-roll chain runner. Updated every
+    // HEARTBEAT_INTERVAL_MS while runFullAutoBrollChain is active. The
+    // duplicate-fire guard (auto-orchestrator.js:runFullAutoBrollChain) and
+    // the boot resume query (resumeStuckFullAutoChains) both compare against
+    // HEARTBEAT_TTL_MS to distinguish a live driver from a crashed one —
+    // without this, a hot-reload race spawned parallel runAllReferences
+    // pipelines that burned tokens analyzing the same reference twice.
+    await pool.query(`ALTER TABLE video_groups ADD COLUMN IF NOT EXISTS broll_chain_heartbeat_at TIMESTAMPTZ`)
     // Audit columns on videos for tracking transcription_status flips. Added
     // 2026-04-28 after a 'done' status mysteriously regressed to NULL with no
     // discoverable cause — without these we have no way to attribute future

@@ -18,6 +18,10 @@ const state = {
   interruptedPipelinesByGroup: {},
   // group substage per groupId
   substageByGroup: {},
+  // Set true when the interrupted-chain query has a heartbeat filter
+  // (broll_chain_heartbeat_at). Used to assert the duplicate-fire fix
+  // hasn't been regressed.
+  interruptedQueryFiltersHeartbeat: false,
 }
 
 vi.mock('../../db.js', () => ({
@@ -26,7 +30,12 @@ vi.mock('../../db.js', () => ({
       return {
         async all() {
           if (/SELECT id FROM video_groups[\s\S]*broll_chain_status IS NULL/.test(sql)) return state.stuckRows
-          if (/SELECT id FROM video_groups WHERE broll_chain_status = 'running'/.test(sql)) return state.interruptedRows
+          if (/broll_chain_status = 'running'/.test(sql)) {
+            // Track that the interrupted query carries the heartbeat filter
+            // so the duplicate-fire fix can't be silently regressed.
+            if (/broll_chain_heartbeat_at/.test(sql)) state.interruptedQueryFiltersHeartbeat = true
+            return state.interruptedRows
+          }
           return []
         },
         async get(...args) {
@@ -72,6 +81,7 @@ beforeEach(async () => {
   state.runFullAutoBrollChainCalls = []
   state.interruptedPipelinesByGroup = {}
   state.substageByGroup = {}
+  state.interruptedQueryFiltersHeartbeat = false
 
   // Reset the broll.js mock between tests so mockImplementationOnce resets too.
   const { resumePipeline } = await import('../broll.js')
@@ -170,5 +180,16 @@ describe('resumeStuckFullAutoChains (rewritten second loop)', () => {
     expect(state.resumePipelineCalls).toContain('ok-pid')
     await vi.advanceTimersByTimeAsync(3000)
     expect(state.resumeChainCalls.find(c => c.gid === 700)).toBeTruthy()
+  })
+
+  it('interrupted query filters by heartbeat staleness so live drivers are not double-fired', async () => {
+    // Live chains with a recent heartbeat must be left alone — the only way
+    // to know "left alone" without DB-side filtering is to assert the SQL
+    // carries broll_chain_heartbeat_at. Without this filter, the boot path
+    // and the still-alive driver both call runAllReferences and CF Stream
+    // sees parallel main_analysis pipelines for the same reference.
+    state.interruptedRows = []
+    await resumeStuckFullAutoChains()
+    expect(state.interruptedQueryFiltersHeartbeat).toBe(true)
   })
 })

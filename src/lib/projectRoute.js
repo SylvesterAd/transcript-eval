@@ -23,6 +23,12 @@
 // flight states ('classifying', 'classified', 'transcribing') gate.
 const ASSEMBLY_DONE_VALUES = new Set(['done', 'confirmed'])
 const CHAIN_IN_PROGRESS = new Set(['pending', 'running'])
+// Auto-orchestration paths. For these projects, the b-roll chain MUST
+// progress from null → pending → running → done after assembly. A null
+// broll_chain_status post-assembly means the chain trigger never fired or
+// stalled before writing 'pending' — the processing page surfaces that
+// instead of dropping the user into an empty editor.
+const AUTO_PATHS = new Set(['hands-off', 'strategy-only', 'guided'])
 
 function isPreUpload(assemblyStatus) {
   return assemblyStatus == null
@@ -58,6 +64,9 @@ export function resolveProjectRoute(project) {
     return `/?step=processing&group=${id}`
   }
   if (CHAIN_IN_PROGRESS.has(project.broll_chain_status)) {
+    return `/?step=processing&group=${id}`
+  }
+  if (AUTO_PATHS.has(project.path_id) && project.broll_chain_status == null) {
     return `/?step=processing&group=${id}`
   }
   return `/editor/${id}/assets`
