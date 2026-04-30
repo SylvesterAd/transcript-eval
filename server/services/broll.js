@@ -2092,6 +2092,7 @@ export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipeli
       }
       toSearch = existingResumable.map(row => ({
         pid: row.plan_pipeline_id,
+        uuid: row.placement_uuid || null,
         chapterIndex: row.chapter_index,
         placementIndex: row.placement_index,
         brollSearchId: row.id,
@@ -5772,7 +5773,10 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
     const data = await streamingFetch(GPU_URL, {
       body: requestBody,
       headers: { 'Content-Type': 'application/json', 'X-Internal-Key': GPU_KEY },
-      logSource: `broll-search-single:ch${chapterIndex}-p${placementIndex}`,
+      // Prefer uuid in source for traceability — falls back to indices for legacy
+      // plans without uuids. The placement_uuid column is the authoritative link.
+      logSource: `broll-search-single:${placementUuid || `ch${chapterIndex}-p${placementIndex}`}`,
+      placementUuid: placementUuid || null,
       onProgress: (evt) => {
         if (evt.stage === 'job' && evt.job_id) gpuJobId = evt.job_id
         brollPipelineProgress.set(progressId, {

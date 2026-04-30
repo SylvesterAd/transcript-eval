@@ -133,6 +133,11 @@ try {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id)`)
     await pool.query(`ALTER TABLE broll_searches ADD COLUMN IF NOT EXISTS placement_uuid TEXT`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_uuid ON broll_searches(plan_pipeline_id, placement_uuid)`)
+    // api_logs.placement_uuid lets us link log rows back to a specific b-roll
+    // placement via uuid (instead of relying on broll_searches.api_log_id, which
+    // is only written on completion). Filter API logs by uuid in /admin/api-logs.
+    await pool.query(`ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS placement_uuid TEXT`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_logs_placement_uuid ON api_logs(placement_uuid) WHERE placement_uuid IS NOT NULL`)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS broll_placement_uuids (
         id SERIAL PRIMARY KEY,

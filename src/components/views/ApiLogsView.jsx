@@ -359,11 +359,14 @@ function ApiLogsTab() {
   const [page, setPage] = useState(0)
   const [sourceFilter, setSourceFilter] = useState('')
   const urlLogId = searchParams.get('log') ? parseInt(searchParams.get('log')) : null
+  // ?placementUuid=p_xxxx filters logs to a specific b-roll placement. Set
+  // by the b-roll editor's "view logs" link; cleared from URL on close.
+  const urlPlacementUuid = searchParams.get('placementUuid') || ''
   const [expandedId, setExpandedId] = useState(urlLogId)
   const [activeData, setActiveData] = useState(null)
   const limit = 30
-  const queryParams = `/admin/api-logs?limit=${limit}&offset=${page * limit}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}`
-  const { data, loading, error, refetch } = useApi(queryParams, [page, sourceFilter])
+  const queryParams = `/admin/api-logs?limit=${limit}&offset=${page * limit}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}${urlPlacementUuid ? `&placementUuid=${encodeURIComponent(urlPlacementUuid)}` : ''}`
+  const { data, loading, error, refetch } = useApi(queryParams, [page, sourceFilter, urlPlacementUuid])
   const { data: detail } = useApi(expandedId ? `/admin/api-logs/${expandedId}` : null, [expandedId])
 
   function toggleExpand(id) {
@@ -413,10 +416,20 @@ function ApiLogsTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-zinc-500">
           {total} logged request{total !== 1 ? 's' : ''}
           {activeStreams.length > 0 && <span className="text-blue-400 ml-2">({activeStreams.length} active)</span>}
+          {urlPlacementUuid && (
+            <span className="ml-2 inline-flex items-center gap-1 text-[11px] text-blue-300 bg-blue-900/30 border border-blue-800/50 px-1.5 py-0.5 rounded font-mono">
+              uuid: {urlPlacementUuid}
+              <button
+                onClick={() => setSearchParams(prev => { const p = new URLSearchParams(prev); p.delete('placementUuid'); return p }, { replace: true })}
+                className="text-blue-400 hover:text-blue-200 ml-1"
+                title="Clear placement filter"
+              >×</button>
+            </span>
+          )}
         </p>
         <input
           type="text"
@@ -453,6 +466,11 @@ function ApiLogsTab() {
                 {log.duration_ms}ms
               </span>
               {log.source && <span className="text-[10px] text-zinc-600 bg-zinc-800 px-1.5 py-0.5 rounded shrink-0">{log.source}</span>}
+              {log.placement_uuid && (
+                <span className="text-[10px] font-mono text-blue-300 bg-blue-900/30 border border-blue-800/50 px-1.5 py-0.5 rounded shrink-0" title={`Placement ${log.placement_uuid}`}>
+                  {log.placement_uuid}
+                </span>
+              )}
               <span className="text-xs text-zinc-600 shrink-0 w-36 text-right">
                 {new Date(log.created_at).toLocaleString()}
               </span>

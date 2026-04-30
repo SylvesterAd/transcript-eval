@@ -100,22 +100,26 @@ router.get('/api-logs', requireAuth, requireAdmin, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 200)
   const offset = parseInt(req.query.offset) || 0
   const source = req.query.source || null
+  const placementUuid = req.query.placementUuid || null
 
-  let query = 'SELECT id, method, url, request_body, response_status, error, duration_ms, source, created_at FROM api_logs'
-  const params = []
-
+  const conditions = []
+  const filterParams = []
   if (source) {
-    query += ' WHERE source LIKE ?'
-    params.push(`%${source}%`)
+    conditions.push('source LIKE ?')
+    filterParams.push(`%${source}%`)
   }
+  if (placementUuid) {
+    conditions.push('placement_uuid = ?')
+    filterParams.push(placementUuid)
+  }
+  const whereClause = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : ''
 
-  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
-  params.push(limit, offset)
-
-  const logs = await db.prepare(query).all(...params)
-  const countQuery = source
-    ? await db.prepare('SELECT COUNT(*) as total FROM api_logs WHERE source LIKE ?').get(`%${source}%`)
-    : await db.prepare('SELECT COUNT(*) as total FROM api_logs').get()
+  const logs = await db.prepare(
+    `SELECT id, method, url, request_body, response_status, error, duration_ms, source, placement_uuid, created_at FROM api_logs${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  ).all(...filterParams, limit, offset)
+  const countQuery = await db.prepare(
+    `SELECT COUNT(*) as total FROM api_logs${whereClause}`
+  ).get(...filterParams)
 
   res.json({ logs, total: parseInt(countQuery.total), limit, offset })
 })
