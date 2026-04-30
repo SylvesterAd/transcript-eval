@@ -148,6 +148,10 @@ try {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_batch ON broll_searches(batch_id)`)
     await pool.query(`ALTER TABLE broll_searches ADD COLUMN IF NOT EXISTS placement_uuid TEXT`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_uuid ON broll_searches(plan_pipeline_id, placement_uuid)`)
+    // ── 2026-04-30: B-roll search queue (worker + reclaimer) ────────────
+    await pool.query(`ALTER TABLE broll_searches ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_status_waiting ON broll_searches(id) WHERE status = 'waiting'`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_broll_searches_status_running ON broll_searches(started_at) WHERE status = 'running'`)
     // api_logs.placement_uuid lets us link log rows back to a specific b-roll
     // placement via uuid (instead of relying on broll_searches.api_log_id, which
     // is only written on completion). Filter API logs by uuid in /admin/api-logs.

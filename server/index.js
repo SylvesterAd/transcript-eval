@@ -20,6 +20,7 @@ import extConfigRouter from './routes/ext-config.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
 import { initBuckets, isEnabled as storageEnabled } from './services/storage.js'
 import { startGpuFailurePoller } from './services/gpu-failure-poller.js'
+import { startWorker as startBrollSearchWorker, stopWorker as stopBrollSearchWorker } from './services/broll-search-worker.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -111,7 +112,19 @@ app.listen(PORT, async () => {
     await initBuckets()
   }
   startGpuFailurePoller()
+  startBrollSearchWorker().catch(err => console.error('[startup] broll-search-worker failed:', err.message))
 })
+
+let isShuttingDown = false
+async function shutdown(signal) {
+  if (isShuttingDown) return
+  isShuttingDown = true
+  console.log(`[shutdown] received ${signal}, stopping broll-search-worker`)
+  try { await stopBrollSearchWorker() } catch (err) { console.warn('[shutdown] worker stop:', err.message) }
+  process.exit(0)
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 ;(async () => {
   try {
