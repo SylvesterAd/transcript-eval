@@ -115,9 +115,11 @@ app.listen(PORT, async () => {
 
 ;(async () => {
   try {
-    const { resumeStuckFullAutoChains } = await import('./services/auto-orchestrator.js')
+    const { resumeStuckFullAutoChains, resumeStuckYouTubeDownloads } =
+      await import('./services/auto-orchestrator.js')
     await resumeStuckFullAutoChains()
+    await resumeStuckYouTubeDownloads()
   } catch (err) {
-    console.error('[startup] resumeStuckFullAutoChains failed:', err.message)
+    console.error('[startup] resume failed:', err.message)
   }
 })()
