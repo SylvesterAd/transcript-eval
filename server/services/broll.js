@@ -6129,6 +6129,28 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
   return { results, ...searchMeta, duration: searchDuration, apiLogId, gpuJobStatus, jobId: gpuJobId }
 }
 
+// Enqueue a user-placement search. Mirrors enqueueSearchPlacement but identifies
+// the placement by userPlacementId and resolves brief/keywords from the loaded
+// editor state. The worker reads this row and calls searchUserPlacement.
+export async function enqueueSearchUserPlacement(planPipelineId, userPlacementId, overrides = {}) {
+  const loaded = await loadBrollEditorState(planPipelineId)
+  const up = (loaded.state.userPlacements || []).find(u => u.id === userPlacementId)
+  if (!up) throw new Error(`enqueueSearchUserPlacement: userPlacementId ${userPlacementId} not found`)
+
+  const desc = overrides.description || up.snapshot?.description || ''
+  const brief = desc ? `# ${desc}` : ''
+  const keywords = up.snapshot?.search_keywords || []
+
+  const batchId = `single-up-${Date.now()}`
+  const variantLabel = overrides.variantLabel || 'Variant'
+  const ins = await db.prepare(`
+    INSERT INTO broll_searches (plan_pipeline_id, batch_id, chapter_index, placement_index, placement_uuid, variant_label, description, brief, keywords_json, status)
+    VALUES (?, ?, -1, -1, ?, ?, ?, ?, ?, 'waiting')
+  `).run(planPipelineId, batchId, `up-${userPlacementId}`, variantLabel, desc, brief, JSON.stringify(keywords))
+
+  return { brollSearchId: ins.lastInsertRowid, batchId }
+}
+
 export async function searchUserPlacement(planPipelineId, userPlacementId, overrides = {}) {
   const GPU_URL = 'https://gpu-proxy-production.up.railway.app/broll/search'
   const GPU_KEY = process.env.GPU_INTERNAL_KEY

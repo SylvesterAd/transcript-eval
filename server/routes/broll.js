@@ -44,6 +44,7 @@ import {
   buildManifestFromPlacements,
   searchSinglePlacement,
   enqueueSearchPlacement,
+  enqueueSearchUserPlacement,
   searchUserPlacement,
   executePlanPrep,
   executeCreateStrategy,
@@ -935,8 +936,8 @@ router.post('/pipeline/:pipelineId/search-user-placement', requireAuth, async (r
     if (description) overrides.description = description
     if (style) overrides.style = style
     if (sources) overrides.sources = sources
-    const result = await searchUserPlacement(req.params.pipelineId, userPlacementId, overrides)
-    res.json(result)
+    const { brollSearchId, batchId } = await enqueueSearchUserPlacement(req.params.pipelineId, userPlacementId, overrides)
+    res.json({ brollSearchId, batchId })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

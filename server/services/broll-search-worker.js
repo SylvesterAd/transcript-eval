@@ -82,13 +82,19 @@ async function drainLoop() {
     `, [row.id])
     if (claim.rowCount === 0) { setImmediate(drainLoop); return }
 
-    const { searchSinglePlacement } = await import('./broll.js')
+    const { searchSinglePlacement, searchUserPlacement } = await import('./broll.js')
     try {
-      const result = await searchSinglePlacement(row.plan_pipeline_id, {
-        placementUuid: row.placement_uuid,
-        chapterIndex: row.chapter_index,
-        placementIndex: row.placement_index,
-      })
+      let result
+      if (row.placement_uuid && row.placement_uuid.startsWith('up-')) {
+        const userPlacementId = row.placement_uuid.slice(3)
+        result = await searchUserPlacement(row.plan_pipeline_id, userPlacementId)
+      } else {
+        result = await searchSinglePlacement(row.plan_pipeline_id, {
+          placementUuid: row.placement_uuid,
+          chapterIndex: row.chapter_index,
+          placementIndex: row.placement_index,
+        })
+      }
       const status = result.gpuJobStatus === 'running' ? 'timeout'
                    : result.gpuJobStatus === 'failed'  ? 'failed'
                    : 'complete'
