@@ -219,8 +219,10 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     return () => cancelAnimationFrame(raf)
   }, [state.isPlaying])
 
-  // Scroll timeline into view on seek (word click, etc.) when not playing
+  // Scroll timeline into view on seek (word click, etc.) when not playing.
+  // Disabled in b-roll editor — user wants the viewport to stay where they put it.
   useEffect(() => {
+    if (isBroll) return
     if (state.isPlaying || !scrollRef.current) return
     const el = scrollRef.current
     const playheadX = state.currentTime * state.zoom
@@ -228,7 +230,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     if (playheadX < scrollLeft + 100 || playheadX > scrollLeft + clientWidth - 100) {
       el.scrollLeft = playheadX - clientWidth / 3
     }
-  }, [state.isPlaying, state.currentTime, state.zoom])
+  }, [isBroll, state.isPlaying, state.currentTime, state.zoom])
 
   // Stable numbering: based on original load order, never changes on reorder
   const trackNumber = useCallback((track) => {
