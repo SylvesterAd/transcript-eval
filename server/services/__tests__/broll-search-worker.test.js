@@ -337,3 +337,35 @@ describe('broll-search-worker — reclaimer (requeue under max retries)', () => 
     expect(updates[0].sql).toContain('results_json=NULL')
   })
 })
+
+describe('broll-search-worker — reclaimer (max retries)', () => {
+  const updates = []
+
+  beforeEach(() => {
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    _resetForTest()
+    updates.length = 0
+  })
+
+  it('fails permanently when retry_count >= 3', async () => {
+    state.queryImpl = async (sql, params) => {
+      if (sql.includes("status='running'") && sql.includes('started_at')) {
+        return { rows: [{ id: 600, retry_count: 3 }] }
+      }
+      if (sql.includes("status='failed'") && sql.includes('reclaimed: stuck after')) {
+        updates.push({ sql, params })
+        return { rowCount: 1 }
+      }
+      if (sql.includes("status='waiting'") && sql.includes('retry_count=retry_count+1')) {
+        throw new Error('should not requeue at max retries')
+      }
+      return { rows: [], rowCount: 0 }
+    }
+
+    await _reclaimerSweep()
+
+    expect(updates.length).toBe(1)
+    expect(updates[0].params).toEqual([600])
+  })
+})

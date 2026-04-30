@@ -129,7 +129,12 @@ async function reclaimerSweep() {
   `)
   for (const r of stuck) {
     if (r.retry_count >= MAX_RETRIES) {
-      // Implemented in Task 8.
+      await db.pool.query(`
+        UPDATE broll_searches
+        SET status='failed', error='reclaimed: stuck after ${MAX_RETRIES} retries', completed_at=NOW()
+        WHERE id=$1
+      `, [r.id])
+      console.warn(`[broll-worker] row ${r.id} failed permanently after ${MAX_RETRIES} retries`)
       continue
     }
     await db.pool.query(`
