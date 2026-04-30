@@ -172,8 +172,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       // Wheel zoom: keep cursor point stable
       el.scrollLeft = anchor.time * state.zoom - anchor.screenX + labelW
       zoomAnchorRef.current = null
-    } else {
-      // +/- buttons: keep playhead at the CENTER of viewport
+    } else if (!isBroll) {
+      // +/- buttons (rough cut only): keep playhead at the CENTER of viewport.
+      // B-roll editor leaves scrollLeft alone — user explicitly does not want recentering.
       const viewW = el.clientWidth
       el.scrollLeft = state.currentTime * state.zoom - viewW / 2 + labelW
     }
