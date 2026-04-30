@@ -1639,9 +1639,19 @@ async function resolveBrollSources(planPipelineId, overrides = {}) {
 
   try {
     const planRuns = await db.prepare(
-      `SELECT metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id LIMIT 1`
+      `SELECT video_id, metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id LIMIT 1`
     ).all(`%"pipelineId":"${planPipelineId}"%`)
-    const groupId = planRuns[0] ? JSON.parse(planRuns[0].metadata_json || '{}').groupId : null
+    const firstRun = planRuns[0]
+    let groupId = firstRun ? JSON.parse(firstRun.metadata_json || '{}').groupId : null
+    // Fallback: many older plan runs were written without groupId in metadata
+    // (executePipeline never propagated the groupId arg into the metadata blob).
+    // The video_id IS persisted, so look up the group via videos.group_id.
+    // Without this fallback, group-level libraries_json (e.g. envato opt-in) is
+    // silently ignored for the affected plans and only pexels+freepik gets sent.
+    if (!groupId && firstRun?.video_id) {
+      const v = await db.prepare(`SELECT group_id FROM videos WHERE id = ?`).get(firstRun.video_id)
+      groupId = v?.group_id || null
+    }
 
     if (groupId) {
       const group = await db.prepare(
