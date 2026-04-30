@@ -86,20 +86,82 @@ describe('resolveProjectRoute', () => {
   })
 
   describe('ready for editor', () => {
-    it('routes to editor when assembly done + chains idle/done/null', () => {
-      expect(resolveProjectRoute({ ...READY, id: 42 }))
-        .toBe('/editor/42/assets')
+    it('routes to editor when assembly done + auto path + chain done', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 42, broll_chain_status: 'done',
+      })).toBe('/editor/42/assets')
     })
 
     it('routes to editor when assembly confirmed + chains done', () => {
       expect(resolveProjectRoute({
-        ...READY, id: 42, assembly_status: 'confirmed', rough_cut_status: 'done',
+        ...READY, id: 42, assembly_status: 'confirmed',
+        rough_cut_status: 'done', broll_chain_status: 'done',
       })).toBe('/editor/42/assets')
     })
 
     it('routes to editor when broll_chain_status is done', () => {
       expect(resolveProjectRoute({ ...READY, id: 42, broll_chain_status: 'done' }))
         .toBe('/editor/42/assets')
+    })
+
+    it('routes to editor when broll_chain_status is failed (auto path)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 42, broll_chain_status: 'failed',
+      })).toBe('/editor/42/assets')
+    })
+
+    it('routes to editor when broll_chain_status paused_at_strategy (auto path)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 42, path_id: 'strategy-only', broll_chain_status: 'paused_at_strategy',
+      })).toBe('/editor/42/assets')
+    })
+
+    it('routes to editor when path_id is null/legacy regardless of null chain', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 42, path_id: null, broll_chain_status: null,
+      })).toBe('/editor/42/assets')
+    })
+  })
+
+  // The auto-path chain (hands-off / strategy-only / guided) is expected to
+  // progress from null → pending → running → done. If the parent project's
+  // sub-group chain status is still null after assembly finished, the chain
+  // trigger never fired or stalled before writing 'pending'. The user expects
+  // to see the processing page (with stages pending) instead of being dropped
+  // into an editor for an unprocessed project. broll_chain_status on the
+  // project row already reflects the sub-group via COALESCE in the videos
+  // endpoint (server/routes/videos.js), so this check fires whenever the
+  // sub-group hasn't produced a chain status.
+  describe('auto path with chain not yet started', () => {
+    it('routes to processing when path=hands-off, assembly=confirmed, chain=null', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 256, assembly_status: 'confirmed',
+        path_id: 'hands-off', broll_chain_status: null,
+      })).toBe('/?step=processing&group=256')
+    })
+
+    it('routes to processing when path=strategy-only, assembly=confirmed, chain=null', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 256, assembly_status: 'confirmed',
+        path_id: 'strategy-only', broll_chain_status: null,
+      })).toBe('/?step=processing&group=256')
+    })
+
+    it('routes to processing when path=guided, assembly=confirmed, chain=null', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 256, assembly_status: 'confirmed',
+        path_id: 'guided', broll_chain_status: null,
+      })).toBe('/?step=processing&group=256')
+    })
+
+    it('routes to processing when path=hands-off, assembly=done (single-group), chain=null', () => {
+      // Single-group flow ('done' = no classification split): chain still
+      // fires on the same group after sync completes, so a null chain here
+      // is the same stuck/never-fired state as the multi-cam case.
+      expect(resolveProjectRoute({
+        ...READY, id: 256, assembly_status: 'done',
+        path_id: 'hands-off', broll_chain_status: null,
+      })).toBe('/?step=processing&group=256')
     })
   })
 })
