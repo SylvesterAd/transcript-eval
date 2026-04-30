@@ -18,6 +18,10 @@ const state = {
   completedAnalysis: [],
   group: { id: 1, editor_state_json: null },
   existingStratRuns: [],
+  // Per-pipelineId completion check used by waitForPipelinesComplete's DB
+  // fallback. Default null means "no rows yet" — tests can set per-pid
+  // shape to simulate "all main stages written" (main_stages >= total_stages).
+  completionRowsByPid: {},
 }
 
 vi.mock('../../db.js', () => ({
@@ -33,6 +37,10 @@ vi.mock('../../db.js', () => ({
           if (/SELECT \* FROM broll_strategy_versions/.test(sql)) return state.analysisVersion
           // existingPrep lookup (post-e229184): finds latest non-subRun complete plan_prep run
           if (/SELECT metadata_json FROM broll_runs[\s\S]*WHERE video_id = \? AND strategy_id = \?[\s\S]*ORDER BY id DESC LIMIT 1/.test(sql)) return state.existingPrepRun
+          // waitForPipelinesComplete DB-fallback: reads main_stages + total_stages per pipelineId.
+          if (/COUNT\(DISTINCT[\s\S]+stageIndex[\s\S]+FROM broll_runs/.test(sql)) {
+            return state.completionRowsByPid[args[0]] || null
+          }
           // existingCombined lookup (post-e229184): SELECT 1 ... LIMIT 1
           if (/SELECT 1 FROM broll_runs[\s\S]*LIMIT 1/.test(sql)) return state.existingCombinedRun
           throw new Error(`unexpected get: ${sql}`)
@@ -66,6 +74,7 @@ beforeEach(() => {
   state.existingStratRuns = []
   state.existingPrepRun = null
   state.existingCombinedRun = null
+  state.completionRowsByPid = {}
 })
 
 describe('runAllReferences', () => {
@@ -166,6 +175,48 @@ describe('waitForPipelinesComplete', () => {
     brollPipelineProgress.set('p3', { status: 'running' })
     setTimeout(() => brollPipelineProgress.set('p3', { status: 'failed', error: 'boom' }), 20)
     await expect(waitForPipelinesComplete(['p3'], { pollIntervalMs: 10 })).rejects.toThrow(/p3.*failed/)
+  })
+
+  it('resolves via DB fallback when in-memory entry is missing but all stages complete in DB', async () => {
+    // Simulates: pipeline finished, in-memory entry got GC'd (legacy 5-min
+    // delete OR process restart), DB has every main stage marked complete.
+    // The wait must not stall — DB is source of truth.
+    const { waitForPipelinesComplete } = await import('../broll-runner.js?dbpass=' + Date.now())
+    const { brollPipelineProgress } = await import('../broll.js')
+    brollPipelineProgress.delete('p-db-1')
+    state.completionRowsByPid['p-db-1'] = { main_stages: 7, total_stages: 7 }
+    await expect(
+      waitForPipelinesComplete(['p-db-1'], { pollIntervalMs: 10, maxWaitMs: 1000 })
+    ).resolves.toBeUndefined()
+  })
+
+  it('keeps polling when DB shows partial main_stages (pipeline still in flight)', async () => {
+    // 3 of 7 stages on disk → not done. Wait should NOT exit early.
+    // We surface "did not exit early" by giving a small maxWaitMs and
+    // expecting a timeout error rather than a clean resolve.
+    const { waitForPipelinesComplete } = await import('../broll-runner.js?dbwait=' + Date.now())
+    const { brollPipelineProgress } = await import('../broll.js')
+    brollPipelineProgress.delete('p-db-2')
+    state.completionRowsByPid['p-db-2'] = { main_stages: 3, total_stages: 7 }
+    await expect(
+      waitForPipelinesComplete(['p-db-2'], { pollIntervalMs: 10, maxWaitMs: 80 })
+    ).rejects.toThrow(/timed out/)
+  })
+
+  it('does not re-stall after a completed pid is GC\'d mid-wait (defensive cache)', async () => {
+    // Reproduces the exact race that stuck the chain at refs:
+    // p-fast finishes early, its in-memory entry is then deleted while
+    // p-slow is still running. Without a local "already-seen-complete"
+    // cache, the wait would re-poll p-fast, see undefined, and stall.
+    const { waitForPipelinesComplete } = await import('../broll-runner.js?gcrace=' + Date.now())
+    const { brollPipelineProgress } = await import('../broll.js')
+    brollPipelineProgress.set('p-fast', { status: 'running' })
+    brollPipelineProgress.set('p-slow', { status: 'running' })
+    const promise = waitForPipelinesComplete(['p-fast', 'p-slow'], { pollIntervalMs: 10, maxWaitMs: 1000 })
+    setTimeout(() => brollPipelineProgress.set('p-fast', { status: 'complete' }), 20)
+    setTimeout(() => brollPipelineProgress.delete('p-fast'), 50)  // simulate GC after we observed it
+    setTimeout(() => brollPipelineProgress.set('p-slow', { status: 'complete' }), 100)
+    await expect(promise).resolves.toBeUndefined()
   })
 })
 

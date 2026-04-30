@@ -5149,7 +5149,12 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
     // Clean up stale failed entries from previous aborted runs of this pipeline
     await db.prepare(`DELETE FROM broll_runs WHERE status = 'failed' AND metadata_json LIKE ?`).run(`%"pipelineId":"${pipelineId}"%`)
-    setTimeout(() => brollPipelineProgress.delete(pipelineId), 300_000)
+    // Keep the 'complete' entry alive for the process lifetime — earlier
+    // versions GC'd after 5 min, which raced waitForPipelinesComplete: a
+    // sibling pipeline finishing >5 min later would re-poll the gone entry,
+    // see status==='undefined', and treat the chain as still incomplete.
+    // Memory cost is negligible (a small object per pipeline) and the map
+    // dies with the process anyway.
 
     snapshot.outcome = { event: 'complete', at: new Date().toISOString() }
     writePipelineSnapshot(pipelineId, snapshot)
