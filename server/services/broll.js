@@ -1110,6 +1110,16 @@ async function loadAudienceText(groupId) {
   }
 }
 
+// Build the audience instruction block for {{audience_block}} substitution.
+// Returns the full preamble + Audience line when audienceText is non-empty,
+// or '' so the entire block is omitted (not left dangling as "Audience: ")
+// when the group has no audience configured. Single source of truth — keep
+// this in sync with what stage system_instructions expect.
+function buildAudienceBlock(audienceText) {
+  if (!audienceText) return ''
+  return `When beat_strategies describe people or lifestyle scenarios, briefly contextualize them to fit the audience (e.g., "older white American couple" instead of just "a couple") — one or two adjectives, never a paragraph. Skip the audience hint for beats that don't involve people.\n\nAudience: ${audienceText}`
+}
+
 // Run alt plans for non-favorite reference videos using a completed plan pipeline's data
 export async function executeAltPlans(planPipelineId) {
   // Load the plan pipeline's completed stages
@@ -1141,6 +1151,7 @@ export async function executeAltPlans(planPipelineId) {
   const exampleVideos = groupId ? await loadExampleVideos(groupId) : []
   if (exampleVideos.length < 2) throw new Error('Need at least 2 reference videos for alternative plans')
   const audienceText = await loadAudienceText(groupId)
+  const audienceBlock = buildAudienceBlock(audienceText)
   const favoriteVideo = exampleVideos.find(v => v.isFavorite) || exampleVideos[0]
   const altVideos = exampleVideos.filter(v => v !== favoriteVideo)
 
@@ -1287,6 +1298,7 @@ export async function executeAltPlans(planPipelineId) {
         .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
         .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
         .replace(/\{\{audience\}\}/g, audienceText)
+        .replace(/\{\{audience_block\}\}/g, audienceBlock)
       for (const [num, ans] of Object.entries(llmAnswers)) {
         result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
       }
@@ -2596,6 +2608,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   const pipelineStart = Date.now()
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const audienceText = await loadAudienceText(groupId)
+  const audienceBlock = buildAudienceBlock(audienceText)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_strategy' })
 
@@ -2612,6 +2625,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
       .replace(/\{\{reference_analysis_slim\}\}/g, slimReferenceAnalysis)
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
       .replace(/\{\{audience\}\}/g, audienceText)
+      .replace(/\{\{audience_block\}\}/g, audienceBlock)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3021,6 +3035,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   const pipelineStart = Date.now()
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const audienceText = await loadAudienceText(groupId)
+  const audienceBlock = buildAudienceBlock(audienceText)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_combined_strategy' })
 
@@ -3038,6 +3053,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
       .replace(/\{\{all_reference_analyses\}\}/g, allReferenceAnalyses)
       .replace(/\{\{reference_analysis\}\}/g, allReferenceAnalyses) // fallback
       .replace(/\{\{audience\}\}/g, audienceText)
+      .replace(/\{\{audience_block\}\}/g, audienceBlock)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3563,6 +3579,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   const pipelineStart = Date.now()
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const audienceText = await loadAudienceText(groupId)
+  const audienceBlock = buildAudienceBlock(audienceText)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Plan', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_plan' })
 
@@ -3577,6 +3594,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
       .replace(/\{\{transcript\}\}/g, currentTranscript)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{audience\}\}/g, audienceText)
+      .replace(/\{\{audience_block\}\}/g, audienceBlock)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3933,6 +3951,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   const mainVideo = await db.prepare('SELECT title FROM videos WHERE id = ?').get(videoId)
   const videoTitle = mainVideo?.title || `Video #${videoId}`
   const audienceText = await loadAudienceText(groupId)
+  const audienceBlock = buildAudienceBlock(audienceText)
   const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now(), exampleVideoId: exampleVideoId || null }
 
   if (resumeData) {
@@ -3958,6 +3977,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
       .replace(/\{\{all_chapter_analyses\}\}/g, allChapters)
       .replace(/\{\{audience\}\}/g, audienceText)
+      .replace(/\{\{audience_block\}\}/g, audienceBlock)
     for (const [num, ans] of Object.entries(llmAnswers)) {
       result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
     }
