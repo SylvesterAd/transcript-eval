@@ -2743,10 +2743,8 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
 
           let chSystem = replacePlaceholders(stage.system_instruction || '')
 
-          const priorChapterText = await loadPriorChapterStrategies(priorStrategyPipelineIds, c)
-          if (priorStrategyPipelineIds.length > 0 && !priorChapterText) {
-            throw new Error(`[broll-chain] expected non-empty priors text for chapter ${c}, got empty`)
-          }
+          const canonicalBeatNames = (ch.beats_raw || []).map(b => b?.name).filter(Boolean)
+          const priorChapterText = await loadPriorChapterStrategies(priorStrategyPipelineIds, c, canonicalBeatNames)
           chPrompt = chPrompt.replace(/\{\{prior_chapter_strategies\}\}/g, priorChapterText)
           chSystem = chSystem.replace(/\{\{prior_chapter_strategies\}\}/g, priorChapterText)
           console.log(`[broll-chain] variant ${pipelineIdOverride || '(no-override)'} chapter ${c} injecting priors n=${priorStrategyPipelineIds.length} bytes=${priorChapterText.length}`)
