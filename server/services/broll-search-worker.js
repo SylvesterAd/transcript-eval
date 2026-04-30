@@ -122,8 +122,30 @@ async function drainLoop() {
 }
 
 async function reclaimerSweep() {
-  // Implemented in Task 7.
+  if (stopping) return
+  const { rows: stuck } = await db.pool.query(`
+    SELECT id, retry_count FROM broll_searches
+    WHERE status='running' AND started_at < NOW() - INTERVAL '${STUCK_THRESHOLD_MIN} minutes'
+  `)
+  for (const r of stuck) {
+    if (r.retry_count >= MAX_RETRIES) {
+      // Implemented in Task 8.
+      continue
+    }
+    await db.pool.query(`
+      UPDATE broll_searches
+      SET status='waiting', retry_count=retry_count+1,
+          started_at=NULL,
+          api_log_id=NULL, error=NULL, results_json=NULL,
+          num_results=0, duration_ms=NULL
+      WHERE id=$1
+    `, [r.id])
+    console.log(`[broll-worker] reclaimed row ${r.id} (retry ${r.retry_count + 1}/${MAX_RETRIES})`)
+  }
 }
+
+// Test export — bypass module-level state for direct testing
+export { reclaimerSweep }
 
 // Test helper — resets module-level state so tests can re-init.
 export function _resetForTest() {

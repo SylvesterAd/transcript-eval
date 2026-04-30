@@ -20,7 +20,7 @@ vi.mock('../broll.js', () => ({
   abortedBrollPipelines: new Set(),
 }))
 
-import { startWorker, stopWorker, _resetForTest } from '../broll-search-worker.js'
+import { startWorker, stopWorker, _resetForTest, reclaimerSweep as _reclaimerSweep } from '../broll-search-worker.js'
 import db from '../../db.js'
 import { searchSinglePlacement, abortedBrollPipelines } from '../broll.js'
 
@@ -303,5 +303,37 @@ describe('broll-search-worker — abort honored', () => {
     expect(searchSinglePlacement).not.toHaveBeenCalled()
     expect(updates.length).toBe(1)
     expect(updates[0].params[0]).toBe(300)
+  })
+})
+
+describe('broll-search-worker — reclaimer (requeue under max retries)', () => {
+  const updates = []
+
+  beforeEach(() => {
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    _resetForTest()
+    updates.length = 0
+  })
+
+  it('requeues a stuck row, increments retry_count, clears data columns', async () => {
+    state.queryImpl = async (sql, params) => {
+      if (sql.includes("status='running'") && sql.includes('started_at')) {
+        return { rows: [{ id: 500, retry_count: 0 }] }
+      }
+      if (sql.includes("status='waiting'") && sql.includes('retry_count=retry_count+1')) {
+        updates.push({ sql, params })
+        return { rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+
+    await _reclaimerSweep()
+
+    expect(updates.length).toBe(1)
+    expect(updates[0].params).toEqual([500])
+    expect(updates[0].sql).toContain('api_log_id=NULL')
+    expect(updates[0].sql).toContain('error=NULL')
+    expect(updates[0].sql).toContain('results_json=NULL')
   })
 })
