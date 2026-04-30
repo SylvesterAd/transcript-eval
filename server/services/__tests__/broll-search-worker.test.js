@@ -22,7 +22,7 @@ vi.mock('../broll.js', () => ({
 
 import { startWorker, stopWorker, _resetForTest } from '../broll-search-worker.js'
 import db from '../../db.js'
-import { searchSinglePlacement } from '../broll.js'
+import { searchSinglePlacement, abortedBrollPipelines } from '../broll.js'
 
 const mockPool = db.pool
 
@@ -251,5 +251,57 @@ describe('broll-search-worker — catch path (Bug 1 regression)', () => {
 
     expect(updates.length).toBe(1)
     expect(updates[0]).toEqual(['no apiLogId on me', null, 201])
+  })
+})
+
+describe('broll-search-worker — abort honored', () => {
+  const updates = []
+
+  beforeEach(() => {
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    searchSinglePlacement.mockReset()
+    abortedBrollPipelines.clear()
+    _resetForTest()
+    vi.useFakeTimers()
+    updates.length = 0
+  })
+
+  afterEach(async () => {
+    await stopWorker()
+    vi.useRealTimers()
+  })
+
+  it('marks row stopped without calling searchSinglePlacement when batch aborted', async () => {
+    state.queryImpl = async (sql, params) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ got: true }] }
+      if (sql.includes('SELECT id, plan_pipeline_id')) {
+        return {
+          rows: [{
+            id: 300,
+            plan_pipeline_id: 'plan-1',
+            placement_uuid: 'p_abc',
+            chapter_index: 0,
+            placement_index: 0,
+            batch_id: 'aborted-batch',
+          }],
+        }
+      }
+      if (sql.includes("SET status='stopped'")) {
+        updates.push({ params })
+        return { rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+
+    abortedBrollPipelines.add('aborted-batch')
+
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+
+    expect(searchSinglePlacement).not.toHaveBeenCalled()
+    expect(updates.length).toBe(1)
+    expect(updates[0].params[0]).toBe(300)
   })
 })

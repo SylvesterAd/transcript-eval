@@ -63,6 +63,18 @@ async function drainLoop() {
       return
     }
     const row = rows[0]
+
+    const { abortedBrollPipelines } = await import('./broll.js')
+    if (abortedBrollPipelines.has(row.batch_id)) {
+      await db.pool.query(`
+      UPDATE broll_searches
+      SET status='stopped', error='Stopped by user', completed_at=NOW()
+      WHERE id=$1
+    `, [row.id])
+      setImmediate(drainLoop)
+      return
+    }
+
     const claim = await db.pool.query(`
       UPDATE broll_searches
       SET status='running', started_at=NOW()
