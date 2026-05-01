@@ -85,25 +85,30 @@ export function classifyLicenseError(err, item) {
   const body = err?.body || ''
   const attempts = item?.license_attempts || 0
 
-  // 401 — session expired.
+  // 401 / 403 — session-state failures (most common cause: stale/missing
+  // elements.session.5 cookie). Both ask the queue to pause the run, prompt
+  // the user to re-sign-in, and retry the item exactly once after the
+  // cookie comes back (or timeout). The queue enforces "only once per run":
+  // subsequent 401/403s after the first re-auth attempt fall through to
+  // skip + skip_whole_source: 'envato' so unrelated Pexels/Freepik items
+  // keep downloading.
   if (msg === 'envato_session_missing' || status === 401) {
-    // Ext.5 already pauses the queue + broadcasts refresh_session via
-    // handle401Envato. The classifier returns skip; queue calls
-    // failItem with envato_session_401 and the queue-level pause is
-    // the broader mechanism.
-    return { skip: { error_code: 'envato_session_401', detail: msg } }
+    return { pauseForReauth: { error_code: 'envato_session_401', detail: msg } }
   }
 
-  // 402 or 403-with-"upgrade" body → tier-restricted, skip.
+  // 402 or 403-with-"upgrade" body → tier-restricted, skip the single item.
   if (status === 402) {
     return { skip: { error_code: 'envato_402_tier', detail: msg } }
   }
   if (status === 403 && /upgrade/i.test(body)) {
     return { skip: { error_code: 'envato_402_tier', detail: 'http_403 body contains upgrade' } }
   }
-  // 403 generic → hard stop.
+  // Generic 403 — same re-auth path as 401. Envato returns 403 (not 401)
+  // when envato_client_id is set but elements.session.5 is missing/stale —
+  // the common partial-login case (signed in to app.envato.com but not
+  // elements.envato.com).
   if (status === 403) {
-    return { hardStop: { error_code: 'envato_403', detail: msg } }
+    return { pauseForReauth: { error_code: 'envato_403', detail: msg } }
   }
 
   // 429 escalation: first 429 → Retry-After + jitter, 1 retry.

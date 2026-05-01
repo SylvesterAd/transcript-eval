@@ -97,6 +97,13 @@ export function useExportPort({ exportId, expectedRunId } = {}) {
             xml_paths: msg.xml_paths,
           }})
           break
+        case 'envato_reauth_needed':
+          dispatch({ type: 'message_envato_reauth_needed', payload: {
+            signInUrl: msg.sign_in_url,
+            errorCode: msg.error_code,
+            maxWaitMs: msg.max_wait_ms,
+          }})
+          break
         default:
           // Unknown message type — forward-compat no-op.
           break
@@ -156,6 +163,7 @@ export function useExportPort({ exportId, expectedRunId } = {}) {
         case 'progress':  dispatch({ type: 'message_progress', payload: { item_id: msg.item_id, phase: msg.phase, bytes: msg.bytes, total_bytes: msg.total_bytes }}); break
         case 'item_done': dispatch({ type: 'message_item_done', payload: { item_id: msg.item_id, result: msg.result }}); break
         case 'complete':  dispatch({ type: 'message_complete', payload: { ok_count: msg.ok_count, fail_count: msg.fail_count, folder_path: msg.folder_path, xml_paths: msg.xml_paths }}); break
+        case 'envato_reauth_needed': dispatch({ type: 'message_envato_reauth_needed', payload: { signInUrl: msg.sign_in_url, errorCode: msg.error_code, maxWaitMs: msg.max_wait_ms }}); break
       }
     })
     h.onDisconnect((reason) => {
@@ -251,6 +259,7 @@ export function useExportPort({ exportId, expectedRunId } = {}) {
     portError: state.portError,
     pendingAction: state.pendingAction,
     complete: state.complete,
+    envatoReauth: state.envatoReauth,
     reconnect,
     sendControl,
     mismatched,

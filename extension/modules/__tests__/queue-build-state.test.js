@@ -81,4 +81,10 @@ describe('buildInitialRunState', () => {
     expect(state.items[0].signed_url).toBe(null)
     expect(state.items[1].signed_url).toBe(null)
   })
+
+  it('initializes envato_reauth_attempted=false (the once-per-run gate for the re-auth flow)', async () => {
+    const { buildInitialRunState } = await import('../queue.js')
+    const state = buildInitialRunState({ runId: 'r3', manifest: [], targetFolder: '', options: {}, userId: 'u' })
+    expect(state.envato_reauth_attempted).toBe(false)
+  })
 })

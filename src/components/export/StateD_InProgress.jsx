@@ -1,6 +1,6 @@
 import { useMemo, useState, useCallback } from 'react'
 import styled, { keyframes, css } from 'styled-components'
-import { Pause, Play, Square, AlertCircle, RefreshCw, CheckCircle2, XCircle, Clock } from 'lucide-react'
+import { Pause, Play, Square, AlertCircle, RefreshCw, CheckCircle2, XCircle, Clock, ExternalLink } from 'lucide-react'
 import { selectTotals, selectCurrentItem, selectSpeedAndEta } from './progressState.js'
 import { formatBytes } from '../../lib/buildManifest.js'
 
@@ -217,6 +217,32 @@ const ErrorBanner = styled(Banner)`
   color: #991b1b;
 `
 
+// Mid-run Envato re-auth prompt. Stronger visual than the warning banner
+// (blue, action-oriented) because it requires user action to proceed —
+// unlike the disconnect/error banners that are informational.
+const ReauthBanner = styled(Banner)`
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1e40af;
+  align-items: center;
+  flex-wrap: wrap;
+`
+
+const ReauthSignInLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 6px 12px;
+  background: #2563eb;
+  color: #fff;
+  border-radius: 6px;
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+  &:hover { background: #1d4ed8; }
+`
+
 // Phase → icon + glyph used in the per-item row.
 function phaseGlyph(phase) {
   switch (phase) {
@@ -254,7 +280,7 @@ function phaseLabel(phase) {
  * }} props
  */
 export default function StateD_InProgress({
-  variant, snapshot, portStatus, portError, pendingAction,
+  variant, snapshot, portStatus, portError, pendingAction, envatoReauth,
   reconnect, sendControl, mismatched, mismatchInfo,
 }) {
   const totals = useMemo(() => selectTotals(snapshot), [snapshot])
@@ -364,6 +390,22 @@ export default function StateD_InProgress({
           Run state: {runState}
           {snapshot.target_folder ? ` · ${snapshot.target_folder}` : ''}
         </SubHeader>
+
+        {envatoReauth && (
+          <ReauthBanner>
+            <AlertCircle size={16} style={{ flexShrink: 0 }} />
+            <span style={{ flex: '1 1 280px' }}>
+              Envato Elements session expired ({envatoReauth.errorCode}). The
+              queue is paused — sign back in to continue. We'll retry once
+              automatically when your cookie refreshes; otherwise the
+              remaining Envato items will be skipped.
+            </span>
+            <ReauthSignInLink href={envatoReauth.signInUrl} target="_blank" rel="noreferrer">
+              <ExternalLink size={12} />
+              Sign in to Envato
+            </ReauthSignInLink>
+          </ReauthBanner>
+        )}
 
         {(portStatus === 'reconnecting' || portStatus === 'disconnected') && (
           <Banner>

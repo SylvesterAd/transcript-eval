@@ -513,6 +513,7 @@ function ActiveRun({
       portStatus={port.portStatus}
       portError={port.portError}
       pendingAction={port.pendingAction}
+      envatoReauth={port.envatoReauth}
       reconnect={port.reconnect}
       sendControl={port.sendControl}
       mismatched={port.mismatched}

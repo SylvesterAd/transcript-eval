@@ -27,6 +27,7 @@ import {
 import { resolveOldIdToNewUuid, getSignedDownloadUrl } from './envato.js'
 import { fetchPexelsUrl, fetchFreepikUrl } from './sources.js'
 import { broadcastToPort } from './port.js'
+import { onEnvatoSessionChange, hasEnvatoSession } from './auth.js'
 import {
   saveRunState, loadRunState, deleteRunState,
   getActiveRunId, setActiveRunId, clearActiveRunId,
@@ -694,6 +695,11 @@ export function buildInitialRunState({ runId, manifest, targetFolder, options, u
     userId, // for storage.markCompleted wiring in Task 8
     // Ext.6: flag so we emit session_expired at most once per run.
     session_expired_emitted: false,
+    // Once-per-run gate for the Envato re-auth flow. The first 401/403
+    // mid-run pauses the queue and prompts the user to sign in to
+    // elements.envato.com. Subsequent 401/403s skip + skip_whole_source
+    // so we don't ask twice if the user can't / won't re-auth.
+    envato_reauth_attempted: false,
   }
 }
 
@@ -1040,6 +1046,63 @@ async function applyVerdict(item, verdict, context) {
     await hardStopQueue(verdict.hardStop.error_code)
     return
   }
+  if (verdict.pauseForReauth) {
+    // First Envato 401/403 in the run → pause and prompt the user to
+    // sign in. Subsequent 401/403s (concurrent licensers, or the next
+    // envato item after the retry fails) fall through to skip +
+    // skip_whole_source: 'envato' so the run doesn't keep prompting.
+    if (state.envato_reauth_attempted) {
+      const ssVerdict = {
+        skip: {
+          error_code: verdict.pauseForReauth.error_code,
+          detail: 'envato_reauth_already_attempted',
+          skip_whole_source: 'envato',
+        },
+      }
+      return applyVerdict(item, ssVerdict, context)
+    }
+    // Set the gate BEFORE awaiting anything so concurrent licensers
+    // racing through here see the flag and take the skip branch.
+    state.envato_reauth_attempted = true
+    state.run_state = 'paused'
+    state.pause_reason = 'envato_reauth_needed'
+    try {
+      await chrome.storage.local.set({ envato_session_status: 'missing' })
+    } catch {}
+    try {
+      chrome.action.setBadgeText({ text: '!' })
+      chrome.action.setBadgeBackgroundColor({ color: '#dc2626' })
+    } catch {}
+    broadcast({
+      type: 'envato_reauth_needed',
+      error_code: verdict.pauseForReauth.error_code,
+      sign_in_url: 'https://elements.envato.com/sign-in',
+      max_wait_ms: ENVATO_REAUTH_MAX_WAIT_MS,
+    })
+    broadcast({ type: 'state', envato_session: 'missing' })
+    await persistAndBroadcast()
+    emitTelemetry('queue_paused', {
+      export_id: state.runId,
+      t: Date.now(),
+      meta: { reason: 'envato_reauth' },
+    })
+    // Wait for the user's cookie to come back (cookie watcher sees the
+    // change) OR the timeout — whichever fires first.
+    await waitForEnvatoReauth(ENVATO_REAUTH_MAX_WAIT_MS)
+    // Resume — even on timeout. If the cookie is still missing, the
+    // retry will hit 403 again, which (with envato_reauth_attempted=true)
+    // takes the skip + skip_whole_source path above.
+    if (!state) return // run was cancelled while we slept
+    state.run_state = 'running'
+    state.pause_reason = null
+    item.phase = 'licensing'
+    item.claimed = false
+    item.signed_url = null
+    await persistAndBroadcast()
+    emitTelemetry('queue_resumed', { export_id: state.runId, t: Date.now() })
+    schedule()
+    return
+  }
   if (verdict.retry) {
     // Emit a rate_limit_hit telemetry for 429 retries (so State F has
     // visibility into retry chains).
@@ -1122,6 +1185,42 @@ async function applyVerdict(item, verdict, context) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms))
+}
+
+// Max wall time we'll keep the queue paused while waiting for the user
+// to sign back in to elements.envato.com. After this, we resume and let
+// the retry hit 403 again (which takes the skip + skip_whole_source
+// path because envato_reauth_attempted is now true). 2 minutes is long
+// enough for a real sign-in (open tab, type credentials, possibly 2FA)
+// without parking the run indefinitely.
+const ENVATO_REAUTH_MAX_WAIT_MS = 120000
+
+// Resolves when the Envato session cookie comes back ('ok') OR after
+// maxWaitMs, whichever fires first. The cookie watcher in auth.js
+// reports an aggregate 'ok'/'missing' status — we don't care which
+// cookie flipped, only that the aggregate went green.
+function waitForEnvatoReauth(maxWaitMs) {
+  return new Promise(resolve => {
+    let settled = false
+    let unsubscribe = () => {}
+    const finish = () => {
+      if (settled) return
+      settled = true
+      try { unsubscribe() } catch {}
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(finish, maxWaitMs)
+    // Belt + braces: if the user already has a fresh cookie when the
+    // pause starts (race: signed in between the failed license call and
+    // here), don't wait — resolve immediately.
+    hasEnvatoSession().then(present => {
+      if (present) finish()
+    }).catch(() => {})
+    unsubscribe = onEnvatoSessionChange(({ status }) => {
+      if (status === 'ok') finish()
+    })
+  })
 }
 
 // Ext.7: 24h-deduped Slack-alert emitter for deny-list hits.

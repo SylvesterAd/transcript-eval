@@ -42,6 +42,12 @@ export const INITIAL_PROGRESS_STATE = Object.freeze({
 
   // Optimistic UI — set on manual_action_sent, cleared when a snapshot echoes back the expected run_state
   pendingAction: null,    // {action:"pause"|"resume"|"cancel", sentAt:ms}
+
+  // Set when the extension broadcasts {type:"envato_reauth_needed"} mid-run
+  // (the queue has paused itself and is waiting for the user to sign back
+  // in to elements.envato.com). Cleared once the queue resumes (run_state
+  // back to 'running') OR the run finishes.
+  envatoReauth: null,     // null | { signInUrl, errorCode, maxWaitMs, since }
 })
 
 export function progressReducer(state, action) {
@@ -91,8 +97,27 @@ export function progressReducer(state, action) {
           : snap.run_state === expect
         if (match) pending = null
       }
-      return { ...state, snapshot: snap, pendingAction: pending }
+      // Clear the envato-reauth banner once the queue resumes past the
+      // pause. The extension flips run_state back to 'running' on its
+      // own (after either a successful re-auth OR the timeout); either
+      // way the modal banner has done its job.
+      let envatoReauth = state.envatoReauth
+      if (envatoReauth && snap?.run_state && snap.run_state !== 'paused') {
+        envatoReauth = null
+      }
+      return { ...state, snapshot: snap, pendingAction: pending, envatoReauth }
     }
+
+    case 'message_envato_reauth_needed':
+      return {
+        ...state,
+        envatoReauth: {
+          signInUrl: action.payload?.signInUrl || 'https://elements.envato.com/sign-in',
+          errorCode: action.payload?.errorCode || 'envato_403',
+          maxWaitMs: action.payload?.maxWaitMs || 120000,
+          since: Date.now(),
+        },
+      }
 
     case 'message_progress': {
       // Incremental per-item bytes update. If we haven't received a
