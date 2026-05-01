@@ -1079,7 +1079,12 @@ async function applyVerdict(item, verdict, context) {
       sign_in_url: 'https://elements.envato.com/sign-in',
       max_wait_ms: ENVATO_REAUTH_MAX_WAIT_MS,
     })
-    broadcast({ type: 'state', envato_session: 'missing' })
+    // The session-missing badge + storage flip above already broadcast
+    // the cookie watcher's view via service_worker.js. Don't ALSO emit
+    // a standalone {type:'state', envato_session:'missing'} here — that
+    // payload has no runId/items and useExportPort's reducer would
+    // overwrite the snapshot with it, breaking State D until the next
+    // persistAndBroadcast restored it.
     await persistAndBroadcast()
     emitTelemetry('queue_paused', {
       export_id: state.runId,

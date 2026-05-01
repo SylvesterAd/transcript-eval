@@ -70,11 +70,18 @@ export function useExportPort({ exportId, expectedRunId } = {}) {
       lastStateAtRef.current = Date.now()
       if (!msg || typeof msg !== 'object') return
       switch (msg.type) {
-        case 'state':
-          // Ext.5 contract: full snapshot under msg.export (or msg directly;
-          // accept both to be resilient).
-          dispatch({ type: 'message_state', payload: msg.export || msg })
+        case 'state': {
+          // Ext.5 contract: full snapshot under msg.export (or msg directly).
+          // Some standalone broadcasts piggyback on type:'state' to push
+          // session-status flags without a full snapshot — those would
+          // overwrite the real snapshot if we accepted them. Require
+          // either an `export` envelope OR runId+items on the bare msg.
+          const candidate = msg.export || msg
+          const isSnapshot = !!(candidate && candidate.runId && Array.isArray(candidate.items))
+          if (!isSnapshot) break
+          dispatch({ type: 'message_state', payload: candidate })
           break
+        }
         case 'progress':
           dispatch({ type: 'message_progress', payload: {
             item_id: msg.item_id,
@@ -159,7 +166,12 @@ export function useExportPort({ exportId, expectedRunId } = {}) {
       lastStateAtRef.current = Date.now()
       if (!msg || typeof msg !== 'object') return
       switch (msg.type) {
-        case 'state':     dispatch({ type: 'message_state', payload: msg.export || msg }); break
+        case 'state': {
+          const candidate = msg.export || msg
+          const isSnapshot = !!(candidate && candidate.runId && Array.isArray(candidate.items))
+          if (isSnapshot) dispatch({ type: 'message_state', payload: candidate })
+          break
+        }
         case 'progress':  dispatch({ type: 'message_progress', payload: { item_id: msg.item_id, phase: msg.phase, bytes: msg.bytes, total_bytes: msg.total_bytes }}); break
         case 'item_done': dispatch({ type: 'message_item_done', payload: { item_id: msg.item_id, result: msg.result }}); break
         case 'complete':  dispatch({ type: 'message_complete', payload: { ok_count: msg.ok_count, fail_count: msg.fail_count, folder_path: msg.folder_path, xml_paths: msg.xml_paths }}); break

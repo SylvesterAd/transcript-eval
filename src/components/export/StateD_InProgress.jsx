@@ -280,7 +280,7 @@ function phaseLabel(phase) {
  * }} props
  */
 export default function StateD_InProgress({
-  variant, snapshot, portStatus, portError, pendingAction, envatoReauth,
+  variant, snapshot, portStatus, portError, pendingAction, envatoReauth, envatoSessionMissing,
   reconnect, sendControl, mismatched, mismatchInfo,
 }) {
   const totals = useMemo(() => selectTotals(snapshot), [snapshot])
@@ -391,16 +391,19 @@ export default function StateD_InProgress({
           {snapshot.target_folder ? ` · ${snapshot.target_folder}` : ''}
         </SubHeader>
 
-        {envatoReauth && (
+        {(envatoReauth || envatoSessionMissing) && (
           <ReauthBanner>
             <AlertCircle size={16} style={{ flexShrink: 0 }} />
             <span style={{ flex: '1 1 280px' }}>
-              Envato Elements session expired ({envatoReauth.errorCode}). The
-              queue is paused — sign back in to continue. We'll retry once
-              automatically when your cookie refreshes; otherwise the
-              remaining Envato items will be skipped.
+              {envatoReauth
+                ? `Envato Elements session expired (${envatoReauth.errorCode}). The queue is paused — sign back in to continue. We'll retry once automatically when your cookie refreshes; otherwise the remaining Envato items will be skipped.`
+                : 'Sign in to Envato Elements to license the Envato clips in this export. Without a fresh session, those items will be skipped (Pexels still downloads).'}
             </span>
-            <ReauthSignInLink href={envatoReauth.signInUrl} target="_blank" rel="noreferrer">
+            <ReauthSignInLink
+              href={envatoReauth?.signInUrl || 'https://elements.envato.com/sign-in'}
+              target="_blank"
+              rel="noreferrer"
+            >
               <ExternalLink size={12} />
               Sign in to Envato
             </ReauthSignInLink>

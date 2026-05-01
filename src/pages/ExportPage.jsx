@@ -448,6 +448,14 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
 
   // States D / E / F — live-progress + State E XMEML + State F partial UI.
   if (state.phase === 'state_d' || state.phase === 'state_e' || state.phase === 'state_f') {
+    // Forward the extension's last-known envato_session into State D so the
+    // sign-in banner can render even when (a) the user landed on
+    // ?step=state_d directly, bypassing State B's preflight, or (b) the
+    // mid-run envato_reauth_needed broadcast was missed (Port not yet
+    // open / stale tab / queue raced and finished before the React reducer
+    // saw it). Manifest envato count tells us if the prompt is relevant.
+    const envatoSessionMissing = preflight.ping.value?.envato_session && preflight.ping.value.envato_session !== 'ok'
+    const envatoInManifest = (preflight.manifest.value?.totals?.by_source?.envato || 0) > 0
     return (
       <ActiveRun
         variant={variantLabel}
@@ -457,6 +465,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
         completePayload={state.complete_payload}
         unifiedManifest={state.unified_manifest}
         variantLabels={state.variant_labels}
+        envatoSessionMissing={envatoSessionMissing && envatoInManifest}
         onRetryFailed={onRetryFailed}
         onComplete={(payload) => dispatch({ type: 'export_completed', payload })}
       />
@@ -472,7 +481,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
 // lifecycle lives only for the duration of the active run.
 function ActiveRun({
   variant, exportId, expectedRunId, phase, completePayload,
-  unifiedManifest, variantLabels, onRetryFailed, onComplete,
+  unifiedManifest, variantLabels, envatoSessionMissing, onRetryFailed, onComplete,
 }) {
   const port = useExportPort({ exportId, expectedRunId })
 
@@ -514,6 +523,7 @@ function ActiveRun({
       portError={port.portError}
       pendingAction={port.pendingAction}
       envatoReauth={port.envatoReauth}
+      envatoSessionMissing={envatoSessionMissing}
       reconnect={port.reconnect}
       sendControl={port.sendControl}
       mismatched={port.mismatched}
