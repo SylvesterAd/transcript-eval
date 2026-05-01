@@ -140,6 +140,21 @@ export function classifyLicenseError(err, item) {
     return { skip: { error_code: 'envato_unavailable', detail: 'empty downloadUrl' } }
   }
 
+  // Item-specific 404 from the loader or download.data — the item exists
+  // for our resolver (Phase 1 found a UUID for it) but Envato's catalog
+  // no longer serves it. Skip the single item; rest of the run continues.
+  if (msg === 'envato_item_unavailable') {
+    return { skip: { error_code: 'envato_item_unavailable', detail: err?.detail || 'item 404' } }
+  }
+
+  // Loader / download.data returned 200 but our parser couldn't extract
+  // the expected field. Could be a Remix format change OR an unusual
+  // item shape. Skip the single item; the err.detail (response head)
+  // surfaces in diagnostics so we can adjust the regex.
+  if (msg === 'envato_no_asset_uuid' || msg === 'envato_no_download_url') {
+    return { skip: { error_code: msg, detail: err?.detail || 'parser miss' } }
+  }
+
   // Unsupported filetype (post-license URL check) — skip + deny-list.
   // Queue is responsible for the deny-list write; classifier just
   // returns the verdict.

@@ -209,16 +209,33 @@ function waitForTabComplete(tabId, maxWaitMs) {
 // retryAfter? } object — must be JSON-serializable so it can cross the
 // SW ⇄ page boundary. All fetches inherit the page's origin + cookie
 // jar, which is the entire point of routing through the tab.
+//
+// Parser strategy: Remix's streaming serializer outputs
+// `..."key","value"...` pairs but the gap between key-close-quote and
+// value-open-quote can include other tokens (commas, whitespace,
+// references like `,2,`). The exact-comma regex used to be too strict
+// and dropped legitimate items as "envato_unavailable". We now accept
+// any non-quote characters between the key and the next quoted value.
 async function licenseInPage(itemUuid) {
+  const ASSET_UUID_RE = /"assetUuid"[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i
+  const DOWNLOAD_URL_RE = /"downloadUrl"[^"]*"(https:\/\/[^"]+)"/
   try {
     const r1 = await fetch(`/stock-video/${encodeURIComponent(itemUuid)}.data`, { credentials: 'include' })
     if (r1.status === 401) return { error: 'envato_session_missing', status: 401 }
     if (r1.status === 403) return { error: 'envato_403', status: 403, body: await r1.text().catch(() => '') }
+    if (r1.status === 404) return { error: 'envato_item_unavailable', status: 404, detail: 'item_page_404' }
     if (r1.status === 429) return { error: 'envato_429', status: 429, retryAfter: r1.headers.get('Retry-After') }
     if (!r1.ok) return { error: 'envato_http_' + r1.status, status: r1.status }
     const t1 = await r1.text()
-    const am = t1.match(/"assetUuid"\s*,\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i)
-    if (!am) return { error: 'envato_unavailable' }
+    const am = t1.match(ASSET_UUID_RE)
+    if (!am) {
+      // Snip the response so we can debug from the diagnostic dump
+      // without leaking the whole body.
+      return {
+        error: 'envato_no_asset_uuid',
+        detail: `loader returned ${t1.length}B; head="${t1.slice(0, 120).replace(/\s+/g, ' ')}"`,
+      }
+    }
     const assetUuid = am[1]
 
     const r2 = await fetch(
@@ -228,11 +245,17 @@ async function licenseInPage(itemUuid) {
     if (r2.status === 401) return { error: 'envato_session_missing', status: 401 }
     if (r2.status === 402) return { error: 'envato_402', status: 402, body: await r2.text().catch(() => '') }
     if (r2.status === 403) return { error: 'envato_403', status: 403, body: await r2.text().catch(() => '') }
+    if (r2.status === 404) return { error: 'envato_item_unavailable', status: 404, detail: 'download_data_404' }
     if (r2.status === 429) return { error: 'envato_429', status: 429, retryAfter: r2.headers.get('Retry-After') }
     if (!r2.ok) return { error: 'envato_http_' + r2.status, status: r2.status }
     const t2 = await r2.text()
-    const dm = t2.match(/"downloadUrl"\s*,\s*"(https:\/\/[^"]+)"/)
-    if (!dm) return { error: 'envato_unavailable' }
+    const dm = t2.match(DOWNLOAD_URL_RE)
+    if (!dm) {
+      return {
+        error: 'envato_no_download_url',
+        detail: `download.data returned ${t2.length}B; head="${t2.slice(0, 120).replace(/\s+/g, ' ')}"`,
+      }
+    }
     return { signedUrl: dm[1] }
   } catch (err) {
     return { error: 'envato_network_error: ' + String(err?.message || err) }

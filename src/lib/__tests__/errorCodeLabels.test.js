@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest'
 import { ERROR_CODE_LABELS, getErrorLabel } from '../errorCodeLabels.js'
 
-// The 15 codes from extension/modules/telemetry.js:185–201. If the
+// Codes from extension/modules/telemetry.js ERROR_CODE_ENUM. If the
 // extension enum grows, this list must grow in lockstep — that's the
 // invariant exhaustiveness is asserting.
 const EXPECTED_CODES = [
@@ -14,6 +14,9 @@ const EXPECTED_CODES = [
   'envato_429',
   'envato_session_401',
   'envato_unavailable',
+  'envato_item_unavailable',
+  'envato_no_asset_uuid',
+  'envato_no_download_url',
   'envato_unsupported_filetype',
   'freepik_404',
   'freepik_429',
@@ -27,10 +30,10 @@ const EXPECTED_CODES = [
 ]
 
 describe('ERROR_CODE_LABELS', () => {
-  it('has exactly the 15 expected codes', () => {
+  it('has exactly the expected codes (lockstep with extension enum)', () => {
     const keys = Object.keys(ERROR_CODE_LABELS).sort()
     expect(keys).toEqual([...EXPECTED_CODES].sort())
-    expect(keys).toHaveLength(15)
+    expect(keys).toHaveLength(EXPECTED_CODES.length)
   })
 
   it('every label is a non-empty string', () => {
