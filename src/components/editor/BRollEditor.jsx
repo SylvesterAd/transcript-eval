@@ -77,38 +77,69 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   }, [editorCtx?.state?.tracks])
 
   const [rawInactivePlacements, setRawInactivePlacements] = useState({})
-  // Load inactive variant placements, and re-fetch while searches are running
+
+  // Helper: merges a fresh server fetch into rawInactivePlacements while preserving
+  // local optimistic userPlacements whose uuids haven't reached the server yet.
+  const mergeInactiveFetch = useCallback((pid, serverPlacements) => {
+    setRawInactivePlacements(prev => {
+      const local = prev[pid] || []
+      const serverIds = new Set(serverPlacements.filter(p => p.userPlacementId).map(p => p.userPlacementId))
+      const optimistic = local.filter(p => p.isUserPlacement && p.userPlacementId && !serverIds.has(p.userPlacementId))
+      return { ...prev, [pid]: [...serverPlacements, ...optimistic] }
+    })
+  }, [])
+
+  // Effect 1: ONE-SHOT initial load of inactive variants, sequentially, AFTER the
+  // active variant has finished loading. This deliberately avoids the all-in-parallel
+  // pattern that pinned the server (HAR file 2026-04-30: three concurrent editor-data
+  // calls each waiting ~110 s on a serialized backend bottleneck).
   useEffect(() => {
     if (variants.length <= 1) return
+    if (brollState.loading) return  // wait for active variant to land
     const inactiveIds = variants.filter((_, i) => i !== activeVariantIdx).map(v => v.id)
+    // Skip already-loaded variants (cheap O(N) check; N is small)
+    const stillNeeded = inactiveIds.filter(pid => !(rawInactivePlacements[pid]?.length))
+    if (!stillNeeded.length) return
     const controller = new AbortController()
-    function fetchInactive() {
-      for (const pid of inactiveIds) {
-        authFetchBRollData(pid, controller.signal)
-          .then(data => {
-            const serverPlacements = data.placements || []
-            setRawInactivePlacements(prev => {
-              const local = prev[pid] || []
-              const serverIds = new Set(serverPlacements.filter(p => p.userPlacementId).map(p => p.userPlacementId))
-              // Keep local optimistic userPlacements whose uuids are NOT yet on server
-              // (they're in flight; replacing would make them vanish from view).
-              const optimistic = local.filter(p => p.isUserPlacement && p.userPlacementId && !serverIds.has(p.userPlacementId))
-              return { ...prev, [pid]: [...serverPlacements, ...optimistic] }
-            })
-          })
-          .catch(err => { if (err.name !== 'AbortError') {/* swallow */} })
+    let cancelled = false
+    ;(async () => {
+      for (const pid of stillNeeded) {
+        if (cancelled) return
+        try {
+          const data = await authFetchBRollData(pid, controller.signal)
+          if (cancelled) return
+          mergeInactiveFetch(pid, data.placements || [])
+        } catch (err) {
+          if (err.name !== 'AbortError') {/* swallow */}
+        }
       }
-    }
-    fetchInactive()
-    // Re-fetch every 5s while a search is running
-    const isRunning = brollState.searchProgress?.status === 'running'
-    if (!isRunning) return () => controller.abort()
-    const interval = setInterval(fetchInactive, 5000)
+    })()
+    return () => { cancelled = true; controller.abort() }
+  }, [variants, activeVariantIdx, brollState.loading, rawInactivePlacements, mergeInactiveFetch])
+
+  // Effect 2: poll inactive variants every 5 s ONLY while a search is running.
+  // Separate from the initial-load effect so a status flip doesn't refire the load.
+  useEffect(() => {
+    if (variants.length <= 1) return
+    if (brollState.searchProgress?.status !== 'running') return
+    const inactiveIds = variants.filter((_, i) => i !== activeVariantIdx).map(v => v.id)
+    if (!inactiveIds.length) return
+    const controller = new AbortController()
+    const interval = setInterval(async () => {
+      for (const pid of inactiveIds) {
+        try {
+          const data = await authFetchBRollData(pid, controller.signal)
+          mergeInactiveFetch(pid, data.placements || [])
+        } catch (err) {
+          if (err.name !== 'AbortError') {/* swallow */}
+        }
+      }
+    }, 5000)
     return () => {
       clearInterval(interval)
       controller.abort()
     }
-  }, [variants, activeVariantIdx, brollState.searchProgress?.status])
+  }, [variants, activeVariantIdx, brollState.searchProgress?.status, mergeInactiveFetch])
 
   // Cache active variant's placements into inactive cache before switching
   const pendingSelectionRef = useRef(null)
