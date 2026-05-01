@@ -17,10 +17,25 @@ const STORAGE_KEY = 'te:jwt'
 const BACKEND_URL_KEY = 'te:backend_url'
 
 // Envato session cookies — watched for appear/disappear transitions
-// that mean the user signed in or out. Both are required for a
+// that mean the user signed in or out. Both must be present for a
 // logged-in session; either missing = no session.
-const ENVATO_COOKIE_NAMES = ['envato_client_id', 'elements.session.5']
+//
+// envato_client_id is a stable identity tag (set on first visit).
+// The Elements session cookie is VERSIONED — historically
+// `elements.session.5`, but Envato rotates the suffix periodically
+// (e.g. `.6`, `.7`). Hardcoding `.5` made us miss valid sessions
+// whenever the version bumped, manifesting as "session missing" even
+// for fully signed-in users. We now match by prefix.
+const ENVATO_CLIENT_ID_NAME = 'envato_client_id'
+const ENVATO_ELEMENTS_SESSION_PREFIX = 'elements.session.'
 const ENVATO_COOKIE_DOMAIN = '.envato.com'
+
+// Returns true if the cookie name is an Envato Elements session cookie
+// (any version suffix). Exported for diagnostics.js / tests so they
+// stay in sync with the prefix policy here.
+export function isEnvatoElementsSessionCookie(name) {
+  return typeof name === 'string' && name.startsWith(ENVATO_ELEMENTS_SESSION_PREFIX)
+}
 
 // Key for the cached Envato session status in chrome.storage.local.
 // Kept across SW restarts so popup can render without blocking on a
@@ -105,31 +120,29 @@ export async function hasValidJwt() {
   return jwt.expires_at > Date.now()
 }
 
-// Reads .envato.com cookies. Returns true ONLY if both
-// envato_client_id and elements.session.5 are present (name-match
-// only; we don't validate cookie value — Envato's server does that).
+// Reads .envato.com cookies. Returns true ONLY if both an
+// envato_client_id AND an elements.session.<N> cookie are present
+// (name-match only; we don't validate cookie value — Envato's server
+// does that on the live preflight call).
 //
-// chrome.cookies.get matches cookies whose Domain attribute is
-// compatible with the given URL. A cookie scoped to "elements.envato.com"
-// will NOT match a query for "https://www.envato.com/", so we have
-// to probe multiple URLs to cover where Envato actually scopes the
-// session cookie post-sign-in. Order is most-likely first.
+// We use chrome.cookies.getAll on each probe URL so the elements.session
+// suffix can match any version Envato is currently shipping (.5, .6, ...).
+// chrome.cookies.get can't pattern-match by name, hence getAll + filter.
 const ENVATO_COOKIE_PROBE_URLS = [
   'https://elements.envato.com/',
   'https://www.envato.com/',
   'https://account.envato.com/',
 ]
 export async function hasEnvatoSession() {
-  const results = await Promise.all(ENVATO_COOKIE_NAMES.map(name => (async () => {
-    for (const url of ENVATO_COOKIE_PROBE_URLS) {
-      const cookie = await new Promise(resolve =>
-        chrome.cookies.get({ url, name }, resolve)
-      )
-      if (cookie) return cookie
-    }
-    return null
-  })()))
-  return results.every(c => !!c)
+  for (const url of ENVATO_COOKIE_PROBE_URLS) {
+    const cookies = await new Promise(resolve =>
+      chrome.cookies.getAll({ url }, c => resolve(c || []))
+    )
+    const hasClientId = cookies.some(c => c.name === ENVATO_CLIENT_ID_NAME)
+    const hasElementsSession = cookies.some(c => isEnvatoElementsSessionCookie(c.name))
+    if (hasClientId && hasElementsSession) return true
+  }
+  return false
 }
 
 // Network pre-flight: hits download.data with the reference UUID to
@@ -173,7 +186,8 @@ export function onEnvatoSessionChange(handler) {
     const d = c.domain || ''
     const domainOk = d === ENVATO_COOKIE_DOMAIN || d === 'envato.com' || d.endsWith('.envato.com')
     if (!domainOk) return
-    if (!ENVATO_COOKIE_NAMES.includes(c.name)) return
+    // Match envato_client_id OR any elements.session.<N> version.
+    if (c.name !== ENVATO_CLIENT_ID_NAME && !isEnvatoElementsSessionCookie(c.name)) return
     // Re-read aggregate state (the changeInfo for one cookie doesn't
     // tell us about the other's state).
     const ok = await hasEnvatoSession()

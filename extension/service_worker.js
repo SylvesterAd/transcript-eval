@@ -31,10 +31,32 @@ import {
 
 async function handlePing() {
   const jwt = await getJwt()
-  const { envato_session_status } = await chrome.storage.local.get('envato_session_status')
-  // If the cookie watcher hasn't fired yet (fresh SW wake), fall
-  // back to a best-effort read; still fast (no network).
-  const envatoStatus = envato_session_status || (await hasEnvatoSession() ? 'ok' : 'missing')
+  // Layered session check, cheapest first:
+  //   1. Local cookie probe (no network) — fast happy path.
+  //   2. If cookies look missing, do ONE live preflight against the
+  //      Envato reference UUID. The cookie probe is heuristic
+  //      (name-prefix match) and can miss if Envato renames the
+  //      Elements session cookie entirely; the live check is ground
+  //      truth and uses Chrome's own cookie jar via credentials:'include'.
+  // Always reconcile chrome.storage.local so the popup + future pings
+  // reflect reality, not a stale flag from a previous session.
+  let envatoStatus
+  if (await hasEnvatoSession()) {
+    envatoStatus = 'ok'
+  } else {
+    try {
+      const live = await checkEnvatoSessionLive()
+      envatoStatus = live.status === 'ok' ? 'ok' : 'missing'
+    } catch {
+      envatoStatus = 'missing'
+    }
+  }
+  try {
+    const { envato_session_status: stored } = await chrome.storage.local.get('envato_session_status')
+    if (stored !== envatoStatus) {
+      await chrome.storage.local.set({ envato_session_status: envatoStatus })
+    }
+  } catch {}
   return {
     type: 'pong',
     version: MESSAGE_VERSION,

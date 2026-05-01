@@ -21,20 +21,15 @@ import {
   DIAGNOSTICS_SCHEMA_VERSION,
 } from '../config.js'
 
-// Cookie-presence probes. Names reconciled against
-// extension/modules/auth.js `hasEnvatoSession` (ENVATO_COOKIE_NAMES =
-// ['envato_client_id', 'elements.session.5']). auth.js probes
-// https://www.envato.com/ first, falls back to https://app.envato.com/
-// — we mirror that dual-probe below.
-const COOKIE_DOMAINS = {
-  has_envato_client_id: {
-    urls: ['https://www.envato.com/', 'https://app.envato.com/'],
-    name: 'envato_client_id',
-  },
-  has_elements_session: {
-    urls: ['https://www.envato.com/', 'https://app.envato.com/'],
-    name: 'elements.session.5',
-  },
+// Cookie-presence probes. envato_client_id is exact-name; the Elements
+// session cookie is VERSIONED (`elements.session.5`, `.6`, ...) — we
+// match by prefix to mirror auth.js `isEnvatoElementsSessionCookie`.
+// auth.js probes https://www.envato.com/ first, falls back to
+// https://app.envato.com/ — we mirror that dual-probe below.
+const COOKIE_PROBE_URLS = ['https://www.envato.com/', 'https://app.envato.com/']
+const COOKIE_PROBES = {
+  has_envato_client_id: { match: 'exact', name: 'envato_client_id' },
+  has_elements_session: { match: 'prefix', name: 'elements.session.' },
 }
 
 const JWT_RE     = /eyJ[A-Za-z0-9_\-]{10,}\./
@@ -96,13 +91,22 @@ export function scrubSensitive(input) {
   return walk(input)
 }
 
-// Probe a cookie at each provided URL; return true on first match.
-// Matches auth.js `hasEnvatoSession` dual-probe behavior.
-async function probeCookie(urls, name) {
+// Probe a cookie spec at each provided URL; return true on first match.
+// `match: 'exact'` matches by exact name. `match: 'prefix'` matches any
+// cookie whose name starts with `name` — required for the versioned
+// elements.session.<N> cookie (Envato rotates the suffix periodically).
+async function probeCookie(urls, spec) {
   for (const url of urls) {
     try {
-      const c = await chrome.cookies.get({ url, name })
-      if (c) return true
+      if (spec.match === 'prefix') {
+        const cookies = await chrome.cookies.getAll({ url })
+        if ((cookies || []).some(c => typeof c.name === 'string' && c.name.startsWith(spec.name))) {
+          return true
+        }
+      } else {
+        const c = await chrome.cookies.get({ url, name: spec.name })
+        if (c) return true
+      }
     } catch { /* continue to next URL */ }
   }
   return false
@@ -164,8 +168,8 @@ export async function buildBundle() {
 
   // --- environment.json ---
   const cookiePresence = {}
-  for (const [key, spec] of Object.entries(COOKIE_DOMAINS)) {
-    cookiePresence[key] = await probeCookie(spec.urls, spec.name)
+  for (const [key, spec] of Object.entries(COOKIE_PROBES)) {
+    cookiePresence[key] = await probeCookie(COOKIE_PROBE_URLS, spec)
   }
   const jwtRaw = snapshot['te:jwt'] || null
   const jwtPresence = {
