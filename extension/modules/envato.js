@@ -167,6 +167,12 @@ export async function getSignedDownloadUrl(newUuid) {
       if (result.status != null) e.httpStatus = result.status
       if (result.body != null) e.body = result.body
       if (result.retryAfter != null) e.retryAfter = result.retryAfter
+      // Forward parser-miss diagnostics (response length + head) so the
+      // queue's failItem stores it on item.error_detail and it surfaces
+      // in both the diagnostic dump AND State F's per-failure list.
+      // Without this the user just sees a generic "parser miss" with
+      // no clue what came back.
+      if (result.detail != null) e.detail = result.detail
       // Mirror the old SW-fetch-path side effect: on 401, flip the
       // shared session flag + broadcast so the popup goes red.
       if (result.status === 401) {
