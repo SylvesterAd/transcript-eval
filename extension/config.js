@@ -4,7 +4,7 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.9.1'
+export const EXT_VERSION = '0.9.2'
 export const ENV = 'prod'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
