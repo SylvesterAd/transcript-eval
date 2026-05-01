@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import styled from 'styled-components'
-import { AlertCircle, RefreshCw, FileText, Download, MessageCircle } from 'lucide-react'
+import { AlertCircle, RefreshCw, FileText, Download, MessageCircle, ExternalLink } from 'lucide-react'
 import { getErrorLabel } from '../../lib/errorCodeLabels.js'
 import { useExportXmlKickoff, triggerXmlDownload } from '../../hooks/useExportXmlKickoff.js'
 
@@ -105,6 +105,33 @@ const SourceChip = styled.span`
 const Reason = styled.span`
   color: #78350f;
   flex: 1;
+`
+
+const SourceLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #2563eb;
+  font-size: 11px;
+  text-decoration: none;
+  flex-shrink: 0;
+  &:hover { text-decoration: underline; }
+`
+
+const Detail = styled.div`
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+`
+
+const RowWrap = styled.div`
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0;
+  border-bottom: 1px solid #f3f4f6;
+  &:last-child { border-bottom: none; }
 `
 
 const ActionRow = styled.div`
@@ -250,13 +277,45 @@ function XmlKickoffPanel({ exportId, variantLabels, unifiedManifest, complete })
 
 function FailedItemRow({ item }) {
   const label = getErrorLabel(item.error_code)
+  // Per-source link to the upstream item, so users can click through and
+  // see whether it's been delisted, restricted, etc. Envato carries the
+  // original slug URL on envato_item_url; Pexels/Freepik build canonical
+  // URLs from the source_item_id.
+  const link = upstreamUrl(item)
   return (
-    <Row>
-      <Filename>{item.target_filename || `item-${item.seq}`}</Filename>
-      <SourceChip>{item.source || 'unknown'}</SourceChip>
-      <Reason>{label}</Reason>
-    </Row>
+    <RowWrap>
+      <Row>
+        <Filename>{item.target_filename || `item-${item.seq}`}</Filename>
+        <SourceChip>{item.source || 'unknown'}</SourceChip>
+        <Reason>{label}</Reason>
+        {link && (
+          <SourceLink href={link} target="_blank" rel="noreferrer" title={link}>
+            <ExternalLink size={11} /> View
+          </SourceLink>
+        )}
+      </Row>
+      {item.error_detail && <Detail>{item.error_detail}</Detail>}
+    </RowWrap>
   )
+}
+
+// Build a clickable upstream URL for any failed item. Returns null when
+// we don't know how to build one (unknown source or missing IDs).
+function upstreamUrl(item) {
+  const src = String(item?.source || '').toLowerCase()
+  const id = item?.source_item_id
+  if (src === 'envato') {
+    // The plugin captures the original elements.envato.com slug URL
+    // from the manifest in envato_item_url. If we somehow lost it,
+    // fall back to the resolved app.envato.com page (which is
+    // browseable as long as the item still exists).
+    if (item.envato_item_url) return item.envato_item_url
+    if (item.resolved_uuid) return `https://app.envato.com/stock-video/${item.resolved_uuid}`
+    return null
+  }
+  if (src === 'pexels' && id) return `https://www.pexels.com/video/${encodeURIComponent(id)}/`
+  if (src === 'freepik' && id) return `https://www.freepik.com/free-video/_${encodeURIComponent(id)}.htm`
+  return null
 }
 
 export default function StateF_Partial({

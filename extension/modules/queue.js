@@ -755,12 +755,18 @@ function broadcastItemTransition(_item) {
   broadcast({ type: 'state', export: snapshot() })
 }
 
-async function failItem(item, errorCode) {
+async function failItem(item, errorCode, errorDetail) {
   // Capture the phase BEFORE we flip it to 'failed' so the telemetry
   // payload describes which stage actually failed.
   const phaseBeforeFailure = item.phase
   item.phase = 'failed'
   item.error_code = errorCode
+  // error_detail is optional context the classifier hands us — for the
+  // tab-context envato licenser this includes the response head when
+  // parsing failed (envato_no_asset_uuid / envato_no_download_url) so
+  // the diagnostic dump tells us what the page actually returned. State
+  // F renders it as a tooltip beside the error label.
+  if (errorDetail != null) item.error_detail = errorDetail
   item.claimed = false
   state.stats.fail_count++
   await persistAndBroadcast()
@@ -778,6 +784,7 @@ async function failItem(item, errorCode) {
     meta: {
       attempts: (item.retries || 0) + 1,
       raw_error: errorCode, // keep the raw string so admin observability can triage unknowns
+      detail: errorDetail || undefined,
     },
   })
 
@@ -1035,13 +1042,13 @@ async function applyVerdict(item, verdict, context) {
       }
       await persistAndBroadcast()
     }
-    await failItem(item, verdict.skip.error_code)
+    await failItem(item, verdict.skip.error_code, verdict.skip.detail)
     // Signal settle so the worker's Promise doesn't dangle.
     item.__settle?.()
     return
   }
   if (verdict.hardStop) {
-    await failItem(item, verdict.hardStop.error_code)
+    await failItem(item, verdict.hardStop.error_code, verdict.hardStop.detail)
     item.__settle?.()
     await hardStopQueue(verdict.hardStop.error_code)
     return
