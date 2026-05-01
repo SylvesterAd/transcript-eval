@@ -19,6 +19,7 @@ export const ERROR_CODE_LABELS = Object.freeze({
   envato_session_401:           'Envato session expired — sign in again',
   envato_unavailable:           'Envato item unavailable (delisted or removed)',
   envato_item_unavailable:      'Envato item no longer exists in their catalog (404)',
+  envato_item_download_failed:  'Envato rejected our license request — try downloading manually to confirm access',
   envato_no_asset_uuid:         'Couldn\'t find the download variant for this Envato item',
   envato_no_download_url:       'Envato licensed the item but didn\'t return a download URL',
   envato_unsupported_filetype:  'Envato returned an unsupported file format',

@@ -224,6 +224,7 @@ const ERROR_CODE_ENUM = Object.freeze([
   'envato_session_401',
   'envato_unavailable',
   'envato_item_unavailable',
+  'envato_item_download_failed',
   'envato_no_asset_uuid',
   'envato_no_download_url',
   'envato_unsupported_filetype',

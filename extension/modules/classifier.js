@@ -155,6 +155,13 @@ export function classifyLicenseError(err, item) {
     return { skip: { error_code: msg, detail: err?.detail || 'parser miss' } }
   }
 
+  // Envato's download.data returned 200 with an in-payload error
+  // ({"error":"Download failed",...}) — the item is broken on Envato's
+  // side, not ours. Skip; nothing to retry.
+  if (msg === 'envato_item_download_failed') {
+    return { skip: { error_code: 'envato_item_download_failed', detail: err?.detail || 'envato rejected the item' } }
+  }
+
   // Unsupported filetype (post-license URL check) — skip + deny-list.
   // Queue is responsible for the deny-list write; classifier just
   // returns the verdict.

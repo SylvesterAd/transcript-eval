@@ -257,6 +257,19 @@ async function licenseInPage(itemUuid) {
     const t2 = await r2.text()
     const dm = t2.match(DOWNLOAD_URL_RE)
     if (!dm) {
+      // Envato sometimes returns HTTP 200 with an in-payload error
+      // ({"error":"Download failed","errorCode":"..."}) for items whose
+      // single asset is broken on their side. Detect this shape and
+      // surface Envato's own message rather than a generic parser miss
+      // — there's nothing the plugin can do, the item is bad upstream.
+      const envErr = t2.match(/"error"\s*,\s*"([^"]+)"/i)
+      if (envErr) {
+        const code = t2.match(/"errorCode"\s*,\s*"([^"]+)"/i)
+        return {
+          error: 'envato_item_download_failed',
+          detail: code ? `Envato: ${envErr[1]} (${code[1]})` : `Envato: ${envErr[1]}`,
+        }
+      }
       return {
         error: 'envato_no_download_url',
         detail: `download.data returned ${t2.length}B; head="${t2.slice(0, 120).replace(/\s+/g, ' ')}"`,
