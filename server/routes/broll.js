@@ -174,14 +174,13 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
       console.warn('[broll-export-manifest] transcript-match refinement failed; falling back to plan timecodes:', e.message)
     }
 
-    // Pure transform: pick → filter → manifest item shape. We pin
-    // allowedSources to ['pexels'] for now — envato + freepik download
-    // paths are still being shaken out, and silently mixing sources
-    // confuses users when the editor displays one source as "selected"
-    // but the export pipeline picks a different one via fall-through.
-    // To re-enable additional sources, expand the allowlist (or remove
-    // it entirely to restore "any non-storyblocks" behavior).
-    const ALLOWED_SOURCES = ['pexels']
+    // Pure transform: pick → filter → manifest item shape. Allowlist
+    // controls which sources flow into the manifest; freepik is still
+    // gated off while its download path is shaken out. Envato is enabled
+    // — extension/modules/queue.js owns the resolve→license→download
+    // chain end-to-end, ENVATO_REFERENCE_UUID is set, Ext.7 covers the
+    // failure modes. To enable freepik, append 'freepik' here.
+    const ALLOWED_SOURCES = ['pexels', 'envato']
     const { items, totals } = buildManifestFromPlacements(placements, { variant, allowedSources: ALLOWED_SOURCES })
 
     // A-roll injection: parse pipelineId for the videoId (pattern is
