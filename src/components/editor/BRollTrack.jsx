@@ -354,7 +354,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
             {hasResult ? (
               <>
                 <img
-                  src={result.thumbnail_url || result.preview_url || result.url}
+                  src={result.poster_url || result.thumbnail_url || result.preview_url || result.url}
                   alt=""
                   className="w-full h-full object-cover pointer-events-none"
                   loading="lazy"

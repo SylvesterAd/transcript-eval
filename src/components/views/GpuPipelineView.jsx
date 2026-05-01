@@ -120,8 +120,8 @@ function VideoThumbnail({ item, showScore, scoreLabel }) {
           />
         ) : (
           <>
-            {item.thumbnail_url ? (
-              <img src={item.thumbnail_url} alt={item.title} className="w-full h-full object-cover" loading="lazy" />
+            {(item.poster_url || item.thumbnail_url) ? (
+              <img src={item.poster_url || item.thumbnail_url} alt={item.title} className="w-full h-full object-cover" loading="lazy" />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-zinc-600"><Image size={20} /></div>
             )}
@@ -136,7 +136,7 @@ function VideoThumbnail({ item, showScore, scoreLabel }) {
       <div className="p-1.5 space-y-0.5">
         <div className="flex items-center gap-1">
           <SourceBadge source={item.source} />
-          {item.duration > 0 && <span className="text-[10px] text-zinc-500">{item.duration}s</span>}
+          {(item.duration_seconds || item.duration) > 0 && <span className="text-[10px] text-zinc-500">{item.duration_seconds || item.duration}s</span>}
         </div>
         <div className="text-[10px] text-zinc-400 truncate" title={item.title}>{item.title || 'Untitled'}</div>
         {showScore && item[scoreLabel] != null && (

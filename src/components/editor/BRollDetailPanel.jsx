@@ -285,7 +285,7 @@ function EditModal({ placement, index, onSearch, onClose }) {
 function BRollOptionThumbnail({ result, isSelected, onSelect, eager = false }) {
   const videoRef = useRef(null)
   const [playing, setPlaying] = useState(false)
-  const thumb = result.thumbnail_url || result.preview_url || result.url
+  const thumb = result.poster_url || result.thumbnail_url || result.preview_url || result.url
   // Prefer SD preview_url for thumbnails — preview_url_hq is sometimes a server-side guess
   // (Pexels 1080p URL doesn't exist for every video), so trying it first causes 403s.
   const videoUrl = result.preview_url || result.preview_url_hq || result.url
