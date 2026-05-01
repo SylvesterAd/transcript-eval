@@ -225,7 +225,42 @@ function waitForTabComplete(tabId, maxWaitMs) {
 async function licenseInPage(itemUuid) {
   const ASSET_UUID_RE = /"assetUuid"[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i
   const DOWNLOAD_URL_RE = /"downloadUrl"[^"]*"(https:\/\/[^"]+)"/
+
+  // Helper: hit download.data with optional assetUuid. Returns
+  // { signedUrl } on success, { httpError } on transport failure, or
+  // { errorPayload, raw } when Envato 200's with an in-payload error
+  // (so the caller can decide whether to retry without assetUuid).
+  async function tryLicense(assetUuid) {
+    const params = `itemUuid=${encodeURIComponent(itemUuid)}&itemType=stock-video${assetUuid ? `&assetUuid=${encodeURIComponent(assetUuid)}` : ''}&_routes=routes/download/route`
+    const r = await fetch(`/download.data?${params}`, { credentials: 'include' })
+    if (r.status === 401) return { httpError: { error: 'envato_session_missing', status: 401 } }
+    if (r.status === 402) return { httpError: { error: 'envato_402', status: 402, body: await r.text().catch(() => '') } }
+    if (r.status === 403) return { httpError: { error: 'envato_403', status: 403, body: await r.text().catch(() => '') } }
+    if (r.status === 404) return { httpError: { error: 'envato_item_unavailable', status: 404, detail: 'download_data_404' } }
+    if (r.status === 429) return { httpError: { error: 'envato_429', status: 429, retryAfter: r.headers.get('Retry-After') } }
+    if (!r.ok) return { httpError: { error: 'envato_http_' + r.status, status: r.status } }
+    const t = await r.text()
+    const dm = t.match(DOWNLOAD_URL_RE)
+    if (dm) return { signedUrl: dm[1] }
+    // 200 but no downloadUrl — extract Envato's in-payload error shape
+    // for the caller to inspect.
+    const envErr = t.match(/"error"\s*,\s*"([^"]+)"/i)
+    const code = t.match(/"errorCode"\s*,\s*"([^"]+)"/i)
+    return {
+      errorPayload: {
+        message: envErr ? envErr[1] : null,
+        code: code ? code[1] : null,
+      },
+      raw: t,
+    }
+  }
+
   try {
+    // Discover the loader's first assetUuid (works for multi-variant
+    // items where Envato's UI sends one). For single-variant items the
+    // loader still surfaces SOME assetUuid (often a preview asset) but
+    // licensing with that wrong-asset UUID returns Envato's "Download
+    // failed" payload — see the fallback below.
     const r1 = await fetch(`/stock-video/${encodeURIComponent(itemUuid)}.data`, { credentials: 'include' })
     if (r1.status === 401) return { error: 'envato_session_missing', status: 401 }
     if (r1.status === 403) return { error: 'envato_403', status: 403, body: await r1.text().catch(() => '') }
@@ -234,48 +269,46 @@ async function licenseInPage(itemUuid) {
     if (!r1.ok) return { error: 'envato_http_' + r1.status, status: r1.status }
     const t1 = await r1.text()
     const am = t1.match(ASSET_UUID_RE)
-    if (!am) {
-      // Snip the response so we can debug from the diagnostic dump
-      // without leaking the whole body.
-      return {
-        error: 'envato_no_asset_uuid',
-        detail: `loader returned ${t1.length}B; head="${t1.slice(0, 120).replace(/\s+/g, ' ')}"`,
-      }
-    }
-    const assetUuid = am[1]
+    const assetUuid = am ? am[1] : null
 
-    const r2 = await fetch(
-      `/download.data?itemUuid=${encodeURIComponent(itemUuid)}&itemType=stock-video&assetUuid=${encodeURIComponent(assetUuid)}&_routes=routes/download/route`,
-      { credentials: 'include' }
-    )
-    if (r2.status === 401) return { error: 'envato_session_missing', status: 401 }
-    if (r2.status === 402) return { error: 'envato_402', status: 402, body: await r2.text().catch(() => '') }
-    if (r2.status === 403) return { error: 'envato_403', status: 403, body: await r2.text().catch(() => '') }
-    if (r2.status === 404) return { error: 'envato_item_unavailable', status: 404, detail: 'download_data_404' }
-    if (r2.status === 429) return { error: 'envato_429', status: 429, retryAfter: r2.headers.get('Retry-After') }
-    if (!r2.ok) return { error: 'envato_http_' + r2.status, status: r2.status }
-    const t2 = await r2.text()
-    const dm = t2.match(DOWNLOAD_URL_RE)
-    if (!dm) {
-      // Envato sometimes returns HTTP 200 with an in-payload error
-      // ({"error":"Download failed","errorCode":"..."}) for items whose
-      // single asset is broken on their side. Detect this shape and
-      // surface Envato's own message rather than a generic parser miss
-      // — there's nothing the plugin can do, the item is bad upstream.
-      const envErr = t2.match(/"error"\s*,\s*"([^"]+)"/i)
-      if (envErr) {
-        const code = t2.match(/"errorCode"\s*,\s*"([^"]+)"/i)
+    // Phase 2 — try with assetUuid first (multi-variant items REQUIRE
+    // it; HAR confirms). If Envato rejects with the in-payload error
+    // shape, retry without — single-variant items work that way (HAR
+    // of item 020's working browser download had no assetUuid param).
+    let attempt = await tryLicense(assetUuid)
+    if (attempt.signedUrl) return { signedUrl: attempt.signedUrl }
+    if (attempt.httpError) return attempt.httpError
+
+    // Got an error payload — fall back to no-assetUuid (single-variant
+    // path). If that also fails, surface Envato's first error message.
+    if (assetUuid) {
+      const fallback = await tryLicense(null)
+      if (fallback.signedUrl) return { signedUrl: fallback.signedUrl }
+      if (fallback.httpError) return fallback.httpError
+      // Both attempts returned in-payload errors. Use whichever has an
+      // error message (prefer the no-assetUuid one since it's the
+      // canonical path for single-variant items).
+      const final = fallback.errorPayload?.message ? fallback.errorPayload : attempt.errorPayload
+      if (final?.message) {
         return {
           error: 'envato_item_download_failed',
-          detail: code ? `Envato: ${envErr[1]} (${code[1]})` : `Envato: ${envErr[1]}`,
+          detail: final.code ? `Envato: ${final.message} (${final.code})` : `Envato: ${final.message}`,
         }
       }
+    } else if (attempt.errorPayload?.message) {
       return {
-        error: 'envato_no_download_url',
-        detail: `download.data returned ${t2.length}B; head="${t2.slice(0, 120).replace(/\s+/g, ' ')}"`,
+        error: 'envato_item_download_failed',
+        detail: attempt.errorPayload.code
+          ? `Envato: ${attempt.errorPayload.message} (${attempt.errorPayload.code})`
+          : `Envato: ${attempt.errorPayload.message}`,
       }
     }
-    return { signedUrl: dm[1] }
+
+    // No downloadUrl AND no recognizable error payload — shape unknown.
+    return {
+      error: 'envato_no_download_url',
+      detail: `download.data returned ${attempt.raw?.length || 0}B; head="${(attempt.raw || '').slice(0, 120).replace(/\s+/g, ' ')}"`,
+    }
   } catch (err) {
     return { error: 'envato_network_error: ' + String(err?.message || err) }
   }
