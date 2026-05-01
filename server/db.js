@@ -231,15 +231,24 @@ try {
       // is treated as one, retry without CONCURRENTLY. Logged so we know which path
       // we took.
       if (err.code === '25001' || /transaction block/i.test(err.message)) {
-        console.warn('[db] CONCURRENTLY refused; falling back to blocking CREATE INDEX')
+        console.warn('[db] CONCURRENTLY refused; falling back to BLOCKING CREATE INDEX on broll_runs — writes to that table will pause until done')
         return pool.query(`
           CREATE INDEX IF NOT EXISTS idx_broll_runs_pipeline_id
           ON broll_runs ((metadata_json::jsonb ->> 'pipelineId') text_pattern_ops)
           WHERE status = 'complete'
         `)
       }
+      console.warn('[db] idx_broll_runs_pipeline_id creation failed:', err.code, err.message)
       throw err
     })
+    // Surface index presence in logs so operators can confirm the perf win is live.
+    // Does not throw on failure — the outer catch already handles real DB errors.
+    try {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM pg_indexes WHERE indexname = 'idx_broll_runs_pipeline_id' LIMIT 1`
+      )
+      console.log(`[db] idx_broll_runs_pipeline_id ${rows.length ? 'present' : 'MISSING — getBRollEditorData() will be slow'}`)
+    } catch {}
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
