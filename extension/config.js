@@ -20,12 +20,23 @@ export const MESSAGE_VERSION = 1
 // a slow network + cold Envato cache without hanging forever.
 export const RESOLVER_TIMEOUT_MS = 15000
 
+// Cap on how long we'll wait for the licenser tab to fully load
+// (chrome.tabs status === 'complete') before injecting the fetch
+// script. Envato's stock-video page is heavy; 30s is generous but
+// bounded so a hung tab doesn't park the queue forever.
+export const ENVATO_TAB_LOAD_TIMEOUT_MS = 30000
+
 // Per-stage worker pool sizes. Ext.2/3 capped everything at 1 for
 // isolated debugging; Ext.5 is where the real queue runs concurrent
 // workers. Per the spec's "Large exports" table: 5 resolvers, 5
 // licensers, 3 downloaders. Tune here; every pool reads these.
+//
+// LICENSE concurrency dropped from 5 → 2 in the tab-based licenser
+// (each in-flight licenser opens a hidden envato.com tab; 5 hidden
+// tabs at once is heavy on memory + Envato sees a burst of page
+// views in seconds). 2 trades a bit of throughput for stability.
 export const MAX_ENVATO_RESOLVER_CONCURRENCY = 5
-export const MAX_ENVATO_LICENSE_CONCURRENCY = 5
+export const MAX_ENVATO_LICENSE_CONCURRENCY = 2
 export const MAX_DOWNLOAD_CONCURRENCY = 3
 
 // Legacy alias — Ext.2's single debug path still imports this.

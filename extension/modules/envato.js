@@ -17,7 +17,7 @@
 //
 // Orchestration is a bare `await` chain — Ext.2's concurrency cap is 1.
 
-import { RESOLVER_TIMEOUT_MS, MESSAGE_VERSION } from '../config.js'
+import { RESOLVER_TIMEOUT_MS, ENVATO_TAB_LOAD_TIMEOUT_MS, MESSAGE_VERSION } from '../config.js'
 import { checkEnvatoSessionLive } from './auth.js'
 import { broadcastToPort } from './port.js'
 
@@ -32,10 +32,9 @@ const APP_URL_UUID_RE = /^https:\/\/app\.envato\.com\/[^\/]+\/([0-9a-f]{8}-[0-9a
 // that follows it.
 const REMIX_DOWNLOAD_URL_RE = /"downloadUrl"\s*,\s*"(https:\/\/[^"]+)"/
 
-// Matches the assetUuid field in the stock-video item's Remix loader
-// response. Format: "assetUuid","<uuid>" (Remix pairs the key with the
-// next value in its serialized stream).
-const REMIX_ASSET_UUID_RE = /"assetUuid"\s*,\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i
+// (assetUuid regex now lives inline inside licenseInPage, since the
+// fetch + parse runs in the page context — keeping the regex local
+// avoids a serialization step.)
 
 // Parses the response-content-disposition filename out of an AWS-
 // flavored signed URL. The query parameter name varies
@@ -112,117 +111,132 @@ export async function resolveOldIdToNewUuid(oldUrl) {
 }
 
 /**
- * Phase 1.5. Fetches the stock-video item's Remix loader and extracts
- * the `assetUuid` — Envato's per-variant identifier for the downloadable
- * file. Required as a query parameter on download.data (Phase 2) since
- * Envato's API change in 2026; without it download.data returns a flat
- * 403 even with a valid Elements session and active subscription.
+ * Phase 2 (combined assetUuid discovery + license commit).
  *
- * Throws with the same error shape as getSignedDownloadUrl so the queue
- * classifier handles 401/403/429/5xx consistently across phases.
- */
-export async function fetchAssetUuidForItem(itemUuid) {
-  const url = `https://app.envato.com/stock-video/${encodeURIComponent(itemUuid)}.data`
-  let resp
-  try {
-    resp = await fetch(url, { credentials: 'include' })
-  } catch (err) {
-    throw new Error('envato_network_error: ' + String(err?.message || err))
-  }
-  if (resp.status === 401) {
-    await handle401Envato()
-    const err = new Error('envato_session_missing')
-    err.httpStatus = 401
-    throw err
-  }
-  if (resp.status === 403) {
-    const err = new Error('envato_403')
-    err.httpStatus = 403
-    try { err.body = await resp.text() } catch {}
-    throw err
-  }
-  if (resp.status === 429) {
-    const err = new Error('envato_429')
-    err.httpStatus = 429
-    err.retryAfter = resp.headers.get('Retry-After') || null
-    throw err
-  }
-  if (resp.status >= 500) {
-    const err = new Error('envato_http_' + resp.status)
-    err.httpStatus = resp.status
-    throw err
-  }
-  if (!resp.ok) {
-    const err = new Error('envato_http_' + resp.status)
-    err.httpStatus = resp.status
-    throw err
-  }
-  const text = await resp.text()
-  const m = REMIX_ASSET_UUID_RE.exec(text)
-  if (!m) throw new Error('envato_unavailable')
-  return m[1]
-}
-
-/**
- * Phase 2. Commits an Envato license and returns the signed CDN URL.
- * THIS IS THE LICENSE COMMIT POINT — never speculatively. Throws on
- * 401/403/429/empty-downloadUrl/other non-OK.
+ * Why a tab + chrome.scripting.executeScript instead of a plain SW
+ * fetch: Envato's app.envato.com endpoints reject requests that don't
+ * carry sec-fetch-site:same-origin (browser-set, not spoofable from
+ * application code) AND/OR third-party cookies (the Elements session
+ * cookie is SameSite=Strict, so it isn't sent on cross-site fetches —
+ * which is what every SW fetch is, since the SW lives at
+ * chrome-extension://<id>). Both issues vanish when the request
+ * originates from a real envato.com page context.
  *
- * Two-step internally: fetches the item's assetUuid from the Remix
- * loader, then calls download.data with both itemUuid + assetUuid.
- * Envato added the assetUuid requirement in 2026 — old single-UUID
- * callers get a flat 403 from download.data.
+ * Flow:
+ *   1. Open https://app.envato.com/stock-video/<itemUuid> in a hidden
+ *      tab (active:false so it doesn't flash).
+ *   2. Wait for page load.
+ *   3. Inject a script that fetches `<page>.data`, parses out the
+ *      assetUuid, then calls /download.data with both UUIDs and parses
+ *      the signed CDN URL out of the Remix stream response.
+ *   4. Close the tab.
+ *
+ * THIS IS THE LICENSE COMMIT POINT — never call speculatively. Throws
+ * with the same error shape as the old SW-fetch path so the classifier
+ * dispatches identically.
  */
 export async function getSignedDownloadUrl(newUuid) {
-  const assetUuid = await fetchAssetUuidForItem(newUuid)
-  const url = `https://app.envato.com/download.data?itemUuid=${encodeURIComponent(newUuid)}&itemType=stock-video&assetUuid=${encodeURIComponent(assetUuid)}&_routes=routes/download/route`
-  let resp
+  const itemUrl = `https://app.envato.com/stock-video/${encodeURIComponent(newUuid)}`
+  const tab = await new Promise((resolve, reject) => {
+    chrome.tabs.create({ url: itemUrl, active: false }, t => {
+      const err = chrome.runtime.lastError
+      if (err) reject(new Error(err.message))
+      else resolve(t)
+    })
+  })
+
   try {
-    resp = await fetch(url, { credentials: 'include' })
+    await waitForTabComplete(tab.id, ENVATO_TAB_LOAD_TIMEOUT_MS)
+
+    let result
+    try {
+      const [{ result: r }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: licenseInPage,
+        args: [newUuid],
+      })
+      result = r
+    } catch (err) {
+      throw new Error('envato_network_error: ' + String(err?.message || err))
+    }
+
+    if (!result) throw new Error('envato_unavailable')
+
+    if (result.error) {
+      const e = new Error(result.error)
+      if (result.status != null) e.httpStatus = result.status
+      if (result.body != null) e.body = result.body
+      if (result.retryAfter != null) e.retryAfter = result.retryAfter
+      // Mirror the old SW-fetch-path side effect: on 401, flip the
+      // shared session flag + broadcast so the popup goes red.
+      if (result.status === 401) {
+        try { await handle401Envato() } catch {}
+      }
+      throw e
+    }
+
+    if (!result.signedUrl) throw new Error('envato_unavailable')
+    return result.signedUrl
+  } finally {
+    try { await chrome.tabs.remove(tab.id) } catch {}
+  }
+}
+
+// Resolves when the tab finishes loading (status === 'complete').
+// Bounded by maxWaitMs so a hung navigation can't park the licenser
+// pool forever.
+function waitForTabComplete(tabId, maxWaitMs) {
+  return new Promise(resolve => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      try { chrome.tabs.onUpdated.removeListener(listener) } catch {}
+      clearTimeout(timer)
+      resolve()
+    }
+    const listener = (id, info) => {
+      if (id !== tabId) return
+      if (info.status === 'complete') finish()
+    }
+    chrome.tabs.onUpdated.addListener(listener)
+    const timer = setTimeout(finish, maxWaitMs)
+  })
+}
+
+// Runs INSIDE the envato.com page (chrome.scripting.executeScript
+// world). Returns a plain { signedUrl } | { error, status?, body?,
+// retryAfter? } object — must be JSON-serializable so it can cross the
+// SW ⇄ page boundary. All fetches inherit the page's origin + cookie
+// jar, which is the entire point of routing through the tab.
+async function licenseInPage(itemUuid) {
+  try {
+    const r1 = await fetch(`/stock-video/${encodeURIComponent(itemUuid)}.data`, { credentials: 'include' })
+    if (r1.status === 401) return { error: 'envato_session_missing', status: 401 }
+    if (r1.status === 403) return { error: 'envato_403', status: 403, body: await r1.text().catch(() => '') }
+    if (r1.status === 429) return { error: 'envato_429', status: 429, retryAfter: r1.headers.get('Retry-After') }
+    if (!r1.ok) return { error: 'envato_http_' + r1.status, status: r1.status }
+    const t1 = await r1.text()
+    const am = t1.match(/"assetUuid"\s*,\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i)
+    if (!am) return { error: 'envato_unavailable' }
+    const assetUuid = am[1]
+
+    const r2 = await fetch(
+      `/download.data?itemUuid=${encodeURIComponent(itemUuid)}&itemType=stock-video&assetUuid=${encodeURIComponent(assetUuid)}&_routes=routes/download/route`,
+      { credentials: 'include' }
+    )
+    if (r2.status === 401) return { error: 'envato_session_missing', status: 401 }
+    if (r2.status === 402) return { error: 'envato_402', status: 402, body: await r2.text().catch(() => '') }
+    if (r2.status === 403) return { error: 'envato_403', status: 403, body: await r2.text().catch(() => '') }
+    if (r2.status === 429) return { error: 'envato_429', status: 429, retryAfter: r2.headers.get('Retry-After') }
+    if (!r2.ok) return { error: 'envato_http_' + r2.status, status: r2.status }
+    const t2 = await r2.text()
+    const dm = t2.match(/"downloadUrl"\s*,\s*"(https:\/\/[^"]+)"/)
+    if (!dm) return { error: 'envato_unavailable' }
+    return { signedUrl: dm[1] }
   } catch (err) {
-    throw new Error('envato_network_error: ' + String(err?.message || err))
+    return { error: 'envato_network_error: ' + String(err?.message || err) }
   }
-
-  if (resp.status === 401) {
-    await handle401Envato()
-    const err = new Error('envato_session_missing')
-    err.httpStatus = 401
-    throw err
-  }
-  if (resp.status === 402) {
-    const err = new Error('envato_402')
-    err.httpStatus = 402
-    // Read body so classifier can check for the "upgrade" hint.
-    try { err.body = await resp.text() } catch {}
-    throw err
-  }
-  if (resp.status === 403) {
-    const err = new Error('envato_403')
-    err.httpStatus = 403
-    try { err.body = await resp.text() } catch {}
-    throw err
-  }
-  if (resp.status === 429) {
-    const err = new Error('envato_429')
-    err.httpStatus = 429
-    err.retryAfter = resp.headers.get('Retry-After') || null
-    throw err
-  }
-  if (resp.status >= 500) {
-    const err = new Error('envato_http_' + resp.status)
-    err.httpStatus = resp.status
-    throw err
-  }
-  if (!resp.ok) {
-    const err = new Error('envato_http_' + resp.status)
-    err.httpStatus = resp.status
-    throw err
-  }
-
-  const text = await resp.text()
-  const signedUrl = extractDownloadUrlFromRemixStream(text)
-  if (!signedUrl) throw new Error('envato_unavailable')
-  return signedUrl
 }
 
 /**
