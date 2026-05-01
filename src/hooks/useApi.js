@@ -56,7 +56,9 @@ async function fetchWithRetry(path, maxAttempts = 3) {
 
   inflightGets.set(path, promise)
   // Release the entry whether the request succeeds or fails.
-  promise.finally(() => inflightGets.delete(path))
+  // .catch on the finally branch suppresses an unhandled rejection on the cleanup
+  // path — the caller's await of `promise` still receives the original rejection.
+  promise.finally(() => inflightGets.delete(path)).catch(() => {})
   return promise
 }
 
