@@ -35,4 +35,19 @@ describe('deriveStages', () => {
     const s = stages.find(s => s.id === 'broll_strategy')
     expect(s.paused).toBe(true)
   })
+  it('marks classify as paused when assembly_status is classified and no sub-groups exist', () => {
+    const state = { parent: { assembly_status: 'classified', videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }] }, subGroups: [] }
+    const stages = deriveStages(state)
+    const c = stages.find(s => s.id === 'classify')
+    expect(c.paused).toBe(true)
+    expect(c.done).toBe(false)
+    expect(c.active).toBe(false)
+  })
+  it('does not mark classify as paused once sub-groups exist', () => {
+    const state = { parent: { assembly_status: 'classified', videos: [] }, subGroups: [{ id: 1 }] }
+    const stages = deriveStages(state)
+    const c = stages.find(s => s.id === 'classify')
+    expect(c.paused).toBe(false)
+    expect(c.done).toBe(true)
+  })
 })

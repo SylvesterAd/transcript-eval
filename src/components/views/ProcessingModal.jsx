@@ -34,6 +34,10 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
 
   const classifyDone = parent.assembly_status === 'confirmed' || parent.assembly_status === 'done' || subGroups.length > 0
   const classifying = parent.assembly_status === 'classifying'
+  // 'classified' = backend finished classification but no sub-groups exist yet
+  // (auto-confirm only fires for path_id === 'hands-off'; everyone else must
+  // confirm in AssetsView). Surface as paused-for-review so the user has a CTA.
+  const classifyPaused = parent.assembly_status === 'classified' && subGroups.length === 0
 
   const sgDone = (sg) => sg.assembly_status === 'done' || sg.assembly_status === 'error'
   const syncDone = subGroups.length > 0 && subGroups.every(sgDone)
@@ -57,7 +61,7 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
   return [
     { id: 'upload',         label: 'Upload',                 done: uploadDone, active: !uploadDone },
     { id: 'transcribe',     label: 'Transcribing',           done: videos.length > 0 && transcribed === videos.length, active: transcribing, sub: `${transcribed} of ${videos.length} done` },
-    { id: 'classify',       label: 'Classifying',            done: classifyDone, active: classifying },
+    { id: 'classify',       label: 'Classifying',            done: classifyDone, active: classifying, paused: classifyPaused },
     { id: 'sync',           label: 'Multi-cam sync',         done: syncDone, active: syncActive },
     { id: 'rough_cut',      label: 'AI Rough Cut',           skipped: rcSkipped, done: rcDone, active: rcActive },
     { id: 'broll_refs',     label: 'References analyzed',     active: brollActive && brollSubstage === 'refs',     done: brollDone || (brollActive && ['strategy','plan','search'].includes(brollSubstage)) },
@@ -571,7 +575,7 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
                 We're running the pipeline — feel free to keep an eye on the stages below.
               </p>
             </div>
-            <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} />
+            <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} groupId={groupId} />
             <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
               <div className="flex items-center justify-end">
                 <span className="text-[11px] italic text-on-surface-variant">
@@ -745,7 +749,7 @@ function FullAutoBanner({ onTakeMeToProjects, onDismiss }) {
   )
 }
 
-function StageTimeline({ stages, subGroups = [], navigate }) {
+function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
   // Pick the first paused sub-group for the "Open project to pick" CTA per stage.
   const pausedAtStrategySg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_strategy')
   const pausedAtPlanSg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_plan')
@@ -777,6 +781,7 @@ function StageTimeline({ stages, subGroups = [], navigate }) {
 
         let pausedSg = null
         let pausedRoute = null
+        let pausedLabel = 'Open project to pick'
         if (stage.paused) {
           if (stage.id === 'broll_strategy' && pausedAtStrategySg) {
             pausedSg = pausedAtStrategySg
@@ -784,6 +789,9 @@ function StageTimeline({ stages, subGroups = [], navigate }) {
           } else if (stage.id === 'broll_plan' && pausedAtPlanSg) {
             pausedSg = pausedAtPlanSg
             pausedRoute = `/editor/${pausedAtPlanSg.id}/brolls/strategy/plan`
+          } else if (stage.id === 'classify' && groupId) {
+            pausedRoute = `/editor/${groupId}/assets`
+            pausedLabel = 'Review classification'
           }
         }
 
@@ -813,7 +821,7 @@ function StageTimeline({ stages, subGroups = [], navigate }) {
                 onClick={() => navigate(pausedRoute)}
                 className="px-4 py-2 rounded-lg bg-amber-400/15 text-amber-300 border border-amber-400/30 font-bold text-xs uppercase tracking-wider hover:bg-amber-400/25 transition-colors shrink-0"
               >
-                Open project to pick
+                {pausedLabel}
               </button>
             )}
           </div>
