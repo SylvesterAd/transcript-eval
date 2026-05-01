@@ -55,7 +55,18 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
 
   useEffect(() => {
     brollState.registerInactiveCacheSetter?.((pid, updater) => {
-      setRawInactivePlacements(prev => ({ ...prev, [pid]: updater(prev[pid]) }))
+      setRawInactivePlacements(prev => {
+        const next = updater(prev[pid])
+        // null/undefined returns mean "invalidate" — delete the key so the
+        // skip-already-loaded `in` predicate in Effect 1 sees the variant as
+        // un-loaded and refetches it. Storing null would leave the key present
+        // and the next refetch would never fire.
+        if (next == null) {
+          const { [pid]: _drop, ...rest } = prev
+          return rest
+        }
+        return { ...prev, [pid]: next }
+      })
     })
     return () => brollState.registerInactiveCacheSetter?.(null)
   }, [brollState.registerInactiveCacheSetter])
