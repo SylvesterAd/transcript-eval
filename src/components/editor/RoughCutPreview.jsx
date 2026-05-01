@@ -115,7 +115,7 @@ function PreviewVideo({ track, videoRefs, visible }) {
     <video
       ref={ref}
       src={src}
-      className={visible ? 'max-w-full max-h-full object-contain' : 'absolute w-px h-px opacity-0 pointer-events-none overflow-hidden'}
+      className={visible ? 'w-full h-full object-contain' : 'absolute w-px h-px opacity-0 pointer-events-none overflow-hidden'}
       preload="auto"
       playsInline
       muted
