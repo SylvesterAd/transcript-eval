@@ -96,7 +96,9 @@ vi.mock('../broll-runner.js', () => ({
   }),
   runBrollSearchFirst10: vi.fn(async () => {
     state.runnerCalls.push('runBrollSearchFirst10')
+    return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length}` }
   }),
+  waitForSearchBatchComplete: vi.fn(async () => {}),
   waitForPipelinesComplete: vi.fn(async () => {}),
 }))
 
@@ -113,7 +115,15 @@ beforeEach(() => {
 describe('runFullAutoBrollChain with resumeFromSubstage', () => {
   it('default behavior (no option) runs all phases', async () => {
     await runFullAutoBrollChain(7)
-    expect(state.runnerCalls).toEqual(['runAllReferences', 'runStrategies', 'runPlanForEachVariant', 'runBrollSearchFirst10'])
+    // Phase 4 (search) now runs BROLL_SEARCH_BATCHES=3 sequential batches.
+    expect(state.runnerCalls).toEqual([
+      'runAllReferences',
+      'runStrategies',
+      'runPlanForEachVariant',
+      'runBrollSearchFirst10',
+      'runBrollSearchFirst10',
+      'runBrollSearchFirst10',
+    ])
   })
 
   it('skips refs phase when BOTH prep and analysis outputs exist', async () => {

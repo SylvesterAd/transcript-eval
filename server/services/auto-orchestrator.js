@@ -386,6 +386,12 @@ async function phaseHasOutputs(groupId, phase) {
 const HEARTBEAT_TTL_MS = 90 * 1000
 const HEARTBEAT_INTERVAL_MS = 30 * 1000
 
+// Number of sequential 10-per-variant batches to run during the upload
+// chain's Phase 4. Each batch waits for the GPU worker to drain before
+// the next enqueues. Spec:
+// docs/superpowers/specs/2026-05-01-broll-sequential-batches-design.md
+const BROLL_SEARCH_BATCHES = 3
+
 // runFullAutoBrollChain — fires the b-roll pipeline chain (references analyzed
 // → strategy → plan → first-10 search) for sub-groups whose parent picked
 // hands-off / strategy-only / guided. Respects pathToFlags pauses.
@@ -553,9 +559,21 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
       return
     }
 
-    // Phase 4: search — always runs (idempotent re-run is safer than skipping)
+    // Phase 4: search — always runs (idempotent re-run is safer than skipping).
+    // Runs BROLL_SEARCH_BATCHES sequential batches of 10 per variant. Each
+    // iteration waits for the GPU worker to drain before the next enqueues,
+    // so broll_chain_status='done' reflects real GPU completion of all
+    // ~30 placements/variant rather than just enqueue.
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
-    await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: plans.planPipelineIds })
+    for (let i = 0; i < BROLL_SEARCH_BATCHES; i++) {
+      if (await isCancelled(subGroupId)) return
+      const { searchPipelineId } = await runner.runBrollSearchFirst10({
+        subGroupId, planPipelineIds: plans.planPipelineIds,
+      })
+      await runner.waitForSearchBatchComplete(searchPipelineId, {
+        isCancelled: () => isCancelled(subGroupId),
+      })
+    }
 
     await db.prepare(
       "UPDATE video_groups SET broll_chain_status = 'done', broll_chain_substage = NULL WHERE id = ?"
@@ -608,13 +626,30 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
         return
       }
       await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
-      await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: plans.planPipelineIds })
+      for (let i = 0; i < BROLL_SEARCH_BATCHES; i++) {
+        if (await isCancelled(subGroupId)) return
+        const { searchPipelineId } = await runner.runBrollSearchFirst10({
+          subGroupId, planPipelineIds: plans.planPipelineIds,
+        })
+        await runner.waitForSearchBatchComplete(searchPipelineId, {
+          isCancelled: () => isCancelled(subGroupId),
+        })
+      }
       await db.prepare(
         "UPDATE video_groups SET broll_chain_status = 'done', broll_chain_substage = NULL WHERE id = ?"
       ).run(subGroupId)
       await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
     } else if (fromStage === 'search') {
-      await runner.runBrollSearchFirst10({ subGroupId, planPipelineIds: opts.planPipelineIds || [opts.planPipelineId] })
+      const planPipelineIds = opts.planPipelineIds || [opts.planPipelineId]
+      for (let i = 0; i < BROLL_SEARCH_BATCHES; i++) {
+        if (await isCancelled(subGroupId)) return
+        const { searchPipelineId } = await runner.runBrollSearchFirst10({
+          subGroupId, planPipelineIds,
+        })
+        await runner.waitForSearchBatchComplete(searchPipelineId, {
+          isCancelled: () => isCancelled(subGroupId),
+        })
+      }
       await db.prepare(
         "UPDATE video_groups SET broll_chain_status = 'done', broll_chain_substage = NULL WHERE id = ?"
       ).run(subGroupId)

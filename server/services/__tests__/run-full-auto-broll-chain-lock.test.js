@@ -81,6 +81,10 @@ vi.mock('../broll-runner.js', () => ({
   }),
   runBrollSearchFirst10: vi.fn(async () => {
     state.runnerCalls.push('runBrollSearchFirst10')
+    return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length}` }
+  }),
+  waitForSearchBatchComplete: vi.fn(async () => {
+    state.runnerCalls.push('waitForSearchBatchComplete')
   }),
   waitForPipelinesComplete: vi.fn(async () => {}),
 }))
@@ -143,5 +147,29 @@ describe('runFullAutoBrollChain duplicate-fire guard', () => {
     state.brollChainHeartbeatAt = new Date(Date.now() - 30 * 1000)
     await runFullAutoBrollChain(7)
     expect(state.runnerCalls[0]).toBe('runAllReferences')
+  })
+})
+
+describe('runFullAutoBrollChain Phase 4 sequential batches', () => {
+  it('runs 3 sequential search batches with a wait between each', async () => {
+    state.brollChainStatus = null
+    state.brollChainHeartbeatAt = null
+    await runFullAutoBrollChain(7)
+
+    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length
+    const waitCalls = state.runnerCalls.filter(c => c === 'waitForSearchBatchComplete').length
+    expect(searchCalls).toBe(3)
+    expect(waitCalls).toBe(3)
+
+    // Verify ordering: each runBrollSearchFirst10 must be immediately
+    // followed by a waitForSearchBatchComplete (no two enqueues in a row).
+    const phase4 = state.runnerCalls.filter(
+      c => c === 'runBrollSearchFirst10' || c === 'waitForSearchBatchComplete'
+    )
+    expect(phase4).toEqual([
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+    ])
   })
 })
