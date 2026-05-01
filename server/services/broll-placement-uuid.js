@@ -61,9 +61,15 @@ export async function getOrCreatePlacementUuid(planPipelineId, chapterIndex, pla
  * mutates it. Returns Map<chapterIndex, Map<placementIndex, uuid>>.
  */
 export async function ensurePlanUuids(planPipelineId) {
+  // Use the indexed JSONB expression instead of a full-table LIKE scan, and
+  // SELECT only the columns we actually parse — output_text is huge for plan
+  // runs and pulling the rest of the row (prompt_used, system_instruction_used,
+  // params_json, etc.) is pure waste here.
   const planRuns = await db.prepare(
-    `SELECT * FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id`
-  ).all(`%"pipelineId":"${planPipelineId}"%`)
+    `SELECT id, output_text, metadata_json FROM broll_runs
+     WHERE (metadata_json::jsonb ->> 'pipelineId') = ? AND status = 'complete'
+     ORDER BY id`
+  ).all(planPipelineId)
   const chapterRuns = planRuns.filter(r => {
     try {
       const m = JSON.parse(r.metadata_json || '{}')
@@ -71,6 +77,21 @@ export async function ensurePlanUuids(planPipelineId) {
     } catch { return false }
   })
 
+  // Pre-load all existing UUIDs for this plan in ONE query, instead of a
+  // per-placement SELECT round-trip. broll_placement_uuids has an index on
+  // plan_pipeline_id (idx_broll_placement_uuids_plan in schema-pg.sql) so this
+  // is a fast index scan. Avoids the N+1 pattern that was costing ~50ms per
+  // placement × 50+ placements per pipeline on Supavisor.
+  const existingRows = await db.prepare(
+    `SELECT chapter_index, placement_index, uuid FROM broll_placement_uuids WHERE plan_pipeline_id = ?`
+  ).all(planPipelineId)
+  const existingMap = new Map() // `${chIdx}:${plIdx}` → uuid
+  for (const row of existingRows) {
+    existingMap.set(`${row.chapter_index}:${row.placement_index}`, row.uuid)
+  }
+
+  // Collect placements that need a new UUID, then bulk-INSERT them in one query.
+  const needsCreate = [] // [{ chIdx, plIdx, uuid }]
   const out = new Map()
   for (const r of chapterRuns) {
     const meta = JSON.parse(r.metadata_json || '{}')
@@ -93,12 +114,46 @@ export async function ensurePlanUuids(planPipelineId) {
     let brollIdx = 0
     for (const p of items) {
       if (p?.category && p.category !== 'broll') continue
-      const uuid = await getOrCreatePlacementUuid(planPipelineId, chIdx, brollIdx)
+      const key = `${chIdx}:${brollIdx}`
+      let uuid = existingMap.get(key)
+      if (!uuid) {
+        uuid = newUuid()
+        needsCreate.push({ chIdx, plIdx: brollIdx, uuid })
+      }
       chapterMap.set(brollIdx, uuid)
       brollIdx++
     }
     out.set(chIdx, chapterMap)
   }
+
+  // Bulk insert any missing UUIDs in a single query. ON CONFLICT DO NOTHING
+  // preserves the original race-safety contract: a concurrent caller that won
+  // the insert keeps its uuid, and our generated `uuid` is dropped silently.
+  // After the insert, we re-read just the rows we tried to insert to pick up
+  // the winners' uuids — but only if the conflict set is non-empty.
+  if (needsCreate.length) {
+    const values = needsCreate.map((_, i) => `($1, $${i*3+2}, $${i*3+3}, $${i*3+4})`).join(', ')
+    const params = [planPipelineId]
+    for (const r of needsCreate) params.push(r.chIdx, r.plIdx, r.uuid)
+    await db.prepare(
+      `INSERT INTO broll_placement_uuids (plan_pipeline_id, chapter_index, placement_index, uuid)
+       VALUES ${values}
+       ON CONFLICT (plan_pipeline_id, chapter_index, placement_index) DO NOTHING`
+    ).run(...params)
+
+    // If multiple writers raced, our `out` Map may have the loser's uuid.
+    // Re-read the full set in one query and overwrite to the winner's uuid.
+    const finalRows = await db.prepare(
+      `SELECT chapter_index, placement_index, uuid FROM broll_placement_uuids WHERE plan_pipeline_id = ?`
+    ).all(planPipelineId)
+    for (const row of finalRows) {
+      const chMap = out.get(row.chapter_index)
+      if (chMap && chMap.has(row.placement_index)) {
+        chMap.set(row.placement_index, row.uuid)
+      }
+    }
+  }
+
   return out
 }
 
