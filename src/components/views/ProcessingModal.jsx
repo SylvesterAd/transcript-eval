@@ -67,7 +67,7 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
     { id: 'broll_refs',     label: 'References analyzed',     active: brollActive && brollSubstage === 'refs',     done: brollDone || (brollActive && ['strategy','plan','search'].includes(brollSubstage)) },
     { id: 'broll_strategy', label: 'B-roll strategy',         paused: brollPausedAtStrat, active: brollActive && brollSubstage === 'strategy', done: brollDone || (brollActive && ['plan','search'].includes(brollSubstage)) },
     { id: 'broll_plan',     label: 'B-roll plan',             paused: brollPausedAtPlan,  active: brollActive && brollSubstage === 'plan',     done: brollDone || (brollActive && brollSubstage === 'search') },
-    { id: 'broll_search',   label: 'B-roll search (first 10)', active: brollActive && brollSubstage === 'search', done: brollDone },
+    { id: 'broll_search',   label: 'B-roll search (first 30)', active: brollActive && brollSubstage === 'search', done: brollDone },
     { id: 'done',           label: 'Done',                   done: brollDone },
   ]
 }
