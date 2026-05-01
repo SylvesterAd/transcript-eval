@@ -41,6 +41,11 @@ vi.mock('../../db.js', () => ({
           if (/COUNT\(DISTINCT[\s\S]+stageIndex[\s\S]+FROM broll_runs/.test(sql)) {
             return state.completionRowsByPid[args[0]] || null
           }
+          // waitForSearchBatchComplete: counts broll_searches rows still waiting/running for a batch.
+          if (/SELECT count\(\*\)[\s\S]*FROM broll_searches[\s\S]*WHERE batch_id = \?/i.test(sql)) {
+            if (state.batchCountAlways !== undefined) return { n: state.batchCountAlways }
+            return { n: state.batchCountSeq.shift() ?? 0 }
+          }
           // existingCombined lookup (post-e229184): SELECT 1 ... LIMIT 1
           if (/SELECT 1 FROM broll_runs[\s\S]*LIMIT 1/.test(sql)) return state.existingCombinedRun
           throw new Error(`unexpected get: ${sql}`)
@@ -232,5 +237,62 @@ describe('runBrollSearchFirst10', () => {
     expect(broll.executeSearchBatch).toHaveBeenCalledWith(
       ['plan-387-1', 'plan-387-2'], 10, r.searchPipelineId,
     )
+  })
+})
+
+describe('waitForSearchBatchComplete', () => {
+  // The helper hits db.prepare(...).get(searchPipelineId). The existing
+  // db.js mock at the top of this file routes db.prepare based on SQL regex.
+  // We extend it via per-test state on a new state.batchCountSeq array:
+  // the mock returns { n: <next-value> } for the count query and pops the
+  // array as it goes. Empty array → returns { n: 0 } (immediate resolve).
+  //
+  // The mock for db.prepare lives at the top of this file; ensure the
+  // SELECT count(*) ... FROM broll_searches WHERE batch_id = ? branch
+  // returns { n: state.batchCountSeq.shift() ?? 0 }.
+
+  beforeEach(() => {
+    state.batchCountSeq = []
+  })
+
+  it('resolves immediately when no rows are waiting/running', async () => {
+    const { waitForSearchBatchComplete } = await import('../broll-runner.js?wfsbc1=' + Date.now())
+    state.batchCountSeq = [0]
+    await expect(
+      waitForSearchBatchComplete('search-batch-empty', { pollIntervalMs: 10, maxWaitMs: 1000 })
+    ).resolves.toBeUndefined()
+  })
+
+  it('resolves once count reaches 0', async () => {
+    const { waitForSearchBatchComplete } = await import('../broll-runner.js?wfsbc2=' + Date.now())
+    state.batchCountSeq = [3, 2, 1, 0]
+    await expect(
+      waitForSearchBatchComplete('search-batch-drain', { pollIntervalMs: 10, maxWaitMs: 1000 })
+    ).resolves.toBeUndefined()
+  })
+
+  it('rejects on timeout when count never drains', async () => {
+    const { waitForSearchBatchComplete } = await import('../broll-runner.js?wfsbc3=' + Date.now())
+    // Always returns 5 — never drains
+    state.batchCountSeq = []
+    state.batchCountAlways = 5
+    await expect(
+      waitForSearchBatchComplete('search-batch-stuck', { pollIntervalMs: 10, maxWaitMs: 50 })
+    ).rejects.toThrow(/timed out/)
+    state.batchCountAlways = undefined
+  })
+
+  it('returns early (no throw) when isCancelled callback returns true', async () => {
+    const { waitForSearchBatchComplete } = await import('../broll-runner.js?wfsbc4=' + Date.now())
+    state.batchCountSeq = []
+    state.batchCountAlways = 5
+    let calls = 0
+    const isCancelled = async () => { calls++; return calls >= 2 }
+    await expect(
+      waitForSearchBatchComplete('search-batch-cancel', {
+        pollIntervalMs: 10, maxWaitMs: 5000, isCancelled,
+      })
+    ).resolves.toBeUndefined()
+    state.batchCountAlways = undefined
   })
 })

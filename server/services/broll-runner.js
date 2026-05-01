@@ -381,6 +381,33 @@ export async function waitForPipelinesComplete(
   throw new Error(`waitForPipelinesComplete: timed out after ${maxWaitMs}ms`)
 }
 
+// waitForSearchBatchComplete — resolves when every broll_searches row tagged
+// with this batch_id has left the waiting/running states. Polled because
+// the GPU search worker (server/services/broll-search-worker.js) writes
+// terminal status from another process — there is no in-memory signal
+// available here. Tolerates 0-row batches: count is 0 on first poll → resolve.
+//
+// Used by the upload chain to gate "batch N done" before enqueuing batch N+1.
+//
+// Spec: docs/superpowers/specs/2026-05-01-broll-sequential-batches-design.md
+export async function waitForSearchBatchComplete(searchPipelineId, {
+  pollIntervalMs = 3000,
+  maxWaitMs = 15 * 60_000,
+  isCancelled = null,
+} = {}) {
+  const start = Date.now()
+  while (Date.now() - start < maxWaitMs) {
+    if (isCancelled && (await isCancelled())) return
+    const row = await db.prepare(
+      `SELECT count(*)::int AS n FROM broll_searches
+       WHERE batch_id = ? AND status IN ('waiting', 'running')`
+    ).get(searchPipelineId)
+    if ((row?.n ?? 0) === 0) return
+    await new Promise(r => setTimeout(r, pollIntervalMs))
+  }
+  throw new Error(`waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId})`)
+}
+
 // runBrollSearchFirst10 — kicks off the unified keywords + GPU search batch
 // (executeSearchBatch from broll.js, also exposed via /pipeline/search-next-batch
 // at broll.js:628). Returns { searchPipelineId } so callers can poll progress.
