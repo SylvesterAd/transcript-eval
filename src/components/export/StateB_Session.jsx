@@ -111,7 +111,7 @@ export default function StateB_Session({ variant, envatoItemCount, onContinue })
           Sign in to license and download them.
         </Detail>
 
-        <SignInButton href="https://app.envato.com/sign-in" target="_blank" rel="noreferrer">
+        <SignInButton href="https://elements.envato.com/sign-in" target="_blank" rel="noreferrer">
           <ExternalLink size={16} />
           Sign in to Envato
         </SignInButton>
