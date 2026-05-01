@@ -97,8 +97,10 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     if (variants.length <= 1) return
     if (brollState.loading) return  // wait for active variant to land
     const inactiveIds = variants.filter((_, i) => i !== activeVariantIdx).map(v => v.id)
-    // Skip already-loaded variants (cheap O(N) check; N is small)
-    const stillNeeded = inactiveIds.filter(pid => !(rawInactivePlacements[pid]?.length))
+    // Skip already-loaded variants. Use `in` not `.length` so a variant whose
+    // server response is legitimately empty ([]) is also marked as loaded —
+    // otherwise its `length === 0` would re-qualify it on every render and loop.
+    const stillNeeded = inactiveIds.filter(pid => !(pid in rawInactivePlacements))
     if (!stillNeeded.length) return
     const controller = new AbortController()
     let cancelled = false
