@@ -145,15 +145,21 @@ export async function hasEnvatoSession() {
   return false
 }
 
-// Network pre-flight: hits download.data with the reference UUID to
-// confirm Envato actually recognizes the session (cookies present is
-// necessary but not sufficient — Envato may have invalidated on its
-// side). Returns a structured result so the caller can distinguish
-// "401 — session missing" (user action needed) from "5xx / network
-// error" (transient) from "reference UUID delisted" (rotate the
-// constant).
+// Network pre-flight: hits the stock-video item's Remix loader for the
+// reference UUID to confirm Envato actually recognizes the session
+// (cookies present is necessary but not sufficient — Envato may have
+// invalidated on its side). Returns a structured result so the caller
+// can distinguish "401 — session missing" (user action needed) from
+// "5xx / network error" (transient) from "reference UUID delisted"
+// (rotate the constant).
+//
+// We deliberately probe `/stock-video/<uuid>.data` (the loader) rather
+// than `/download.data` — download.data now requires an assetUuid
+// query parameter (Envato's 2026 API change), and licensed-asset
+// preflight would commit a download against the user's fair-use
+// counter. The .data loader is auth-gated but cost-free.
 export async function checkEnvatoSessionLive() {
-  const url = `https://app.envato.com/download.data?itemUuid=${encodeURIComponent(ENVATO_REFERENCE_UUID)}&itemType=stock-video&_routes=routes/download/route`
+  const url = `https://app.envato.com/stock-video/${encodeURIComponent(ENVATO_REFERENCE_UUID)}.data`
   let resp
   try {
     resp = await fetch(url, { credentials: 'include' })

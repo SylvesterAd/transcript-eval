@@ -32,6 +32,11 @@ const APP_URL_UUID_RE = /^https:\/\/app\.envato\.com\/[^\/]+\/([0-9a-f]{8}-[0-9a
 // that follows it.
 const REMIX_DOWNLOAD_URL_RE = /"downloadUrl"\s*,\s*"(https:\/\/[^"]+)"/
 
+// Matches the assetUuid field in the stock-video item's Remix loader
+// response. Format: "assetUuid","<uuid>" (Remix pairs the key with the
+// next value in its serialized stream).
+const REMIX_ASSET_UUID_RE = /"assetUuid"\s*,\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i
+
 // Parses the response-content-disposition filename out of an AWS-
 // flavored signed URL. The query parameter name varies
 // (response-content-disposition OR X-Amz-SignedHeaders-adjacent params)
@@ -107,12 +112,70 @@ export async function resolveOldIdToNewUuid(oldUrl) {
 }
 
 /**
+ * Phase 1.5. Fetches the stock-video item's Remix loader and extracts
+ * the `assetUuid` — Envato's per-variant identifier for the downloadable
+ * file. Required as a query parameter on download.data (Phase 2) since
+ * Envato's API change in 2026; without it download.data returns a flat
+ * 403 even with a valid Elements session and active subscription.
+ *
+ * Throws with the same error shape as getSignedDownloadUrl so the queue
+ * classifier handles 401/403/429/5xx consistently across phases.
+ */
+export async function fetchAssetUuidForItem(itemUuid) {
+  const url = `https://app.envato.com/stock-video/${encodeURIComponent(itemUuid)}.data`
+  let resp
+  try {
+    resp = await fetch(url, { credentials: 'include' })
+  } catch (err) {
+    throw new Error('envato_network_error: ' + String(err?.message || err))
+  }
+  if (resp.status === 401) {
+    await handle401Envato()
+    const err = new Error('envato_session_missing')
+    err.httpStatus = 401
+    throw err
+  }
+  if (resp.status === 403) {
+    const err = new Error('envato_403')
+    err.httpStatus = 403
+    try { err.body = await resp.text() } catch {}
+    throw err
+  }
+  if (resp.status === 429) {
+    const err = new Error('envato_429')
+    err.httpStatus = 429
+    err.retryAfter = resp.headers.get('Retry-After') || null
+    throw err
+  }
+  if (resp.status >= 500) {
+    const err = new Error('envato_http_' + resp.status)
+    err.httpStatus = resp.status
+    throw err
+  }
+  if (!resp.ok) {
+    const err = new Error('envato_http_' + resp.status)
+    err.httpStatus = resp.status
+    throw err
+  }
+  const text = await resp.text()
+  const m = REMIX_ASSET_UUID_RE.exec(text)
+  if (!m) throw new Error('envato_unavailable')
+  return m[1]
+}
+
+/**
  * Phase 2. Commits an Envato license and returns the signed CDN URL.
  * THIS IS THE LICENSE COMMIT POINT — never speculatively. Throws on
  * 401/403/429/empty-downloadUrl/other non-OK.
+ *
+ * Two-step internally: fetches the item's assetUuid from the Remix
+ * loader, then calls download.data with both itemUuid + assetUuid.
+ * Envato added the assetUuid requirement in 2026 — old single-UUID
+ * callers get a flat 403 from download.data.
  */
 export async function getSignedDownloadUrl(newUuid) {
-  const url = `https://app.envato.com/download.data?itemUuid=${encodeURIComponent(newUuid)}&itemType=stock-video&_routes=routes/download/route`
+  const assetUuid = await fetchAssetUuidForItem(newUuid)
+  const url = `https://app.envato.com/download.data?itemUuid=${encodeURIComponent(newUuid)}&itemType=stock-video&assetUuid=${encodeURIComponent(assetUuid)}&_routes=routes/download/route`
   let resp
   try {
     resp = await fetch(url, { credentials: 'include' })
