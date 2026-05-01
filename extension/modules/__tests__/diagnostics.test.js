@@ -169,10 +169,10 @@ describe('buildBundle', () => {
     expect(res.filename).toMatch(/^transcript-eval-diagnostics-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}.*\.zip$/)
   })
 
-  it('calls chrome.downloads.download with saveAs:true', async () => {
+  it('calls chrome.downloads.download with saveAs:false (avoids macOS focus-loss popup-close)', async () => {
     await buildBundle()
     expect(globalThis.chrome.downloads.download).toHaveBeenCalledWith(
-      expect.objectContaining({ saveAs: true })
+      expect.objectContaining({ saveAs: false })
     )
     const callArg = globalThis.chrome.downloads.download.mock.calls[0][0]
     expect(callArg.filename).toMatch(/\.zip$/)

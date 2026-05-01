@@ -305,12 +305,13 @@ function upstreamUrl(item) {
   const src = String(item?.source || '').toLowerCase()
   const id = item?.source_item_id
   if (src === 'envato') {
-    // The plugin captures the original elements.envato.com slug URL
-    // from the manifest in envato_item_url. If we somehow lost it,
-    // fall back to the resolved app.envato.com page (which is
-    // browseable as long as the item still exists).
-    if (item.envato_item_url) return item.envato_item_url
+    // Prefer the resolved app.envato.com page over the manifest's
+    // original elements.envato.com slug — the slug URL is a permanent
+    // 301 redirect to the same page, but Envato's redirect adds a
+    // short delay + sometimes triggers a tracking flicker. Fall back
+    // to the slug if Phase 1 hadn't run yet (no resolved_uuid).
     if (item.resolved_uuid) return `https://app.envato.com/stock-video/${item.resolved_uuid}`
+    if (item.envato_item_url) return item.envato_item_url
     return null
   }
   if (src === 'pexels' && id) return `https://www.pexels.com/video/${encodeURIComponent(id)}/`

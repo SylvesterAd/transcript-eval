@@ -212,10 +212,18 @@ export async function buildBundle() {
   const blob = new Blob([zipped], { type: 'application/zip' })
   const url = URL.createObjectURL(blob)
 
+  // saveAs:false — write straight into the user's Downloads folder.
+  // Originally true (so the user could pick the save location) but the
+  // macOS save-as dialog steals focus from the extension popup, Chrome
+  // auto-closes popups on focus loss, AND on slower machines the modal
+  // file picker pegged the UI thread long enough that users perceived
+  // it as the browser hanging. The diagnostic bundle is small (~few KB)
+  // and the filename is unique-by-timestamp, so dropping into Downloads
+  // is fine — users find it via the Chrome download shelf if needed.
   const downloadId = await chrome.downloads.download({
     url,
     filename,
-    saveAs: true,
+    saveAs: false,
   })
   // Blob URL remains valid until download completes; revoke
   // defensively after a delay (Chrome holds the ref; belt-and-braces).
