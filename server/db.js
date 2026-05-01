@@ -218,6 +218,28 @@ try {
     )`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_export_events_export ON export_events(export_id, t)`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_export_events_failures ON export_events(event, received_at) WHERE event IN ('item_failed','rate_limit_hit','session_expired')`)
+    // Index broll_runs by pipelineId extracted from metadata_json.
+    // Replaces full-table LIKE '%"pipelineId":"…"%' scans in getBRollEditorData()
+    // and a dozen other call sites. text_pattern_ops makes the index usable
+    // for LIKE 'prefix%' matches regardless of database collation.
+    await pool.query(`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_broll_runs_pipeline_id
+      ON broll_runs ((metadata_json::jsonb ->> 'pipelineId') text_pattern_ops)
+      WHERE status = 'complete'
+    `).catch(err => {
+      // CONCURRENTLY can't run inside a transaction; if the schema-init query above
+      // is treated as one, retry without CONCURRENTLY. Logged so we know which path
+      // we took.
+      if (err.code === '25001' || /transaction block/i.test(err.message)) {
+        console.warn('[db] CONCURRENTLY refused; falling back to blocking CREATE INDEX')
+        return pool.query(`
+          CREATE INDEX IF NOT EXISTS idx_broll_runs_pipeline_id
+          ON broll_runs ((metadata_json::jsonb ->> 'pipelineId') text_pattern_ops)
+          WHERE status = 'complete'
+        `)
+      }
+      throw err
+    })
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
