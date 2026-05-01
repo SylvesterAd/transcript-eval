@@ -75,7 +75,7 @@ export default function BRollPreview() {
 
   return (
     <div className="relative w-full h-full bg-black flex items-center justify-center">
-      <div className={showBRoll ? 'opacity-0 absolute inset-0' : 'w-full h-full flex items-center justify-center'}>
+      <div className={showBRoll ? 'opacity-0 absolute inset-0' : 'absolute inset-0 flex flex-col'}>
         <RoughCutPreview useHls />
       </div>
 
