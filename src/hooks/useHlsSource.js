@@ -18,7 +18,6 @@ export function useHlsSource(videoRef, { hlsUrl, mp4Url }) {
 
     if (hlsUrl && Hls.isSupported()) {
       const hls = new Hls({
-        capLevelToPlayerSize: true,
         maxBufferLength: 10,
       })
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -49,5 +48,6 @@ export function useHlsSource(videoRef, { hlsUrl, mp4Url }) {
         video.load()
       }
     }
-  }, [videoRef, hlsUrl, mp4Url])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- videoRef identity is stable; reading current inside the effect
+  }, [hlsUrl, mp4Url])
 }

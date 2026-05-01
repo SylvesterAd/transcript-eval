@@ -42,7 +42,8 @@ describe('useHlsSource', () => {
     expect(hlsInstances).toHaveLength(1)
     expect(hlsInstances[0].loadSource).toHaveBeenCalledWith('https://example/m.m3u8')
     expect(hlsInstances[0].attachMedia).toHaveBeenCalledWith(video)
-    expect(hlsInstances[0].config).toMatchObject({ capLevelToPlayerSize: true })
+    expect(hlsInstances[0].config).toMatchObject({ maxBufferLength: 10 })
+    expect(hlsInstances[0].config).not.toHaveProperty('capLevelToPlayerSize')
   })
 
   it('falls back to native src in Safari when Hls.isSupported() is false', () => {
