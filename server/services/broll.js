@@ -5790,18 +5790,42 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
     // produced an export the user couldn't see in the editor — confusing.
     // The route pins ['pexels'] today; loosening to e.g. ['pexels','freepik']
     // re-enables those sources without re-introducing fall-through.
+    // persistedSelectedResult exists in two storage forms in the wild:
+    //   - numeric index — the editor reducer (selectResult) writes
+    //     edits[key].selectedResult = resultIndex (a number) into
+    //     broll_editor_state, and getBRollEditorData passes it through
+    //     unchanged. This is the production path.
+    //   - full result object — legacy/test form. Some unit tests pass
+    //     the picked result as an object literal.
+    // Resolve both into an object pick before downstream logic. Without
+    // this, numeric indices silently fail the typeof === 'object' check
+    // and the manifest falls back to results[0], ignoring user picks
+    // (e.g. switching pexels → envato in the editor never reached export).
     let pick
-    if (p.persistedSelectedResult && typeof p.persistedSelectedResult === 'object') {
-      pick = p.persistedSelectedResult
-    } else if (sourceAllowlist) {
-      const top = p.results[0]
-      const topSrc = String(top?.source || '').toLowerCase()
-      pick = topSrc && sourceAllowlist.has(topSrc) ? top : null
-    } else {
-      pick = p.results.find(r => {
-        const s = String(r?.source || '').toLowerCase()
-        return s && s !== 'storyblocks'
-      })
+    let userPicked = false
+    if (p.persistedSelectedResult != null) {
+      if (typeof p.persistedSelectedResult === 'object') {
+        pick = p.persistedSelectedResult
+        userPicked = true
+      } else if (typeof p.persistedSelectedResult === 'number' && p.persistedSelectedResult >= 0) {
+        const resolved = p.results[p.persistedSelectedResult]
+        if (resolved) {
+          pick = resolved
+          userPicked = true
+        }
+      }
+    }
+    if (!userPicked) {
+      if (sourceAllowlist) {
+        const top = p.results[0]
+        const topSrc = String(top?.source || '').toLowerCase()
+        pick = topSrc && sourceAllowlist.has(topSrc) ? top : null
+      } else {
+        pick = p.results.find(r => {
+          const s = String(r?.source || '').toLowerCase()
+          return s && s !== 'storyblocks'
+        })
+      }
     }
     if (!pick) continue
 

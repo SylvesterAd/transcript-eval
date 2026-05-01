@@ -78,6 +78,51 @@ describe('buildManifestFromPlacements', () => {
     expect(out.items[0].source_item_id).toBe('12345')
   })
 
+  it('resolves numeric persistedSelectedResult as an index into results', () => {
+    // This is the PRODUCTION storage form. The editor reducer's selectResult
+    // writes edits[key].selectedResult = resultIndex (a number) into
+    // broll_editor_state.state_json; getBRollEditorData passes it through
+    // verbatim onto p.persistedSelectedResult. Before the fix, the manifest
+    // builder only honored object-form picks, so numeric indices silently
+    // dropped to the auto-pick branch and the user's editor pick (e.g.
+    // pexels → envato) never reached the export.
+    const placements = [makePlacement({
+      results: [
+        makeResult({ source: 'pexels', source_item_id: 'first_pexels' }),
+        makeResult({ source: 'envato', source_item_id: 'second_envato' }),
+      ],
+      persistedSelectedResult: 1, // user clicked the envato thumbnail
+    })]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items[0].source).toBe('envato')
+    expect(out.items[0].source_item_id).toBe('second_envato')
+  })
+
+  it('numeric persistedSelectedResult honors allowlist (envato pick passes through ["pexels","envato"])', () => {
+    const placements = [makePlacement({
+      results: [
+        makeResult({ source: 'pexels', source_item_id: 'p1' }),
+        makeResult({ source: 'envato', source_item_id: 'e1' }),
+      ],
+      persistedSelectedResult: 1,
+    })]
+    const out = buildManifestFromPlacements(placements, { variant: null, allowedSources: ['pexels', 'envato'] })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].source).toBe('envato')
+    expect(out.items[0].source_item_id).toBe('e1')
+  })
+
+  it('numeric persistedSelectedResult that points out-of-bounds falls through to default pick', () => {
+    // Defensive: stale index in editor-state after results array shrank.
+    const placements = [makePlacement({
+      results: [makeResult({ source: 'pexels', source_item_id: 'p1' })],
+      persistedSelectedResult: 99,
+    })]
+    const out = buildManifestFromPlacements(placements, { variant: null })
+    expect(out.items).toHaveLength(1)
+    expect(out.items[0].source_item_id).toBe('p1')
+  })
+
   it('skips placement when ALL results are storyblocks', () => {
     const placements = [
       makePlacement({ results: [
