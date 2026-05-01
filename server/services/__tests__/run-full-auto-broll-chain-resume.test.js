@@ -98,13 +98,15 @@ vi.mock('../broll-runner.js', () => ({
     state.runnerCalls.push('runBrollSearchFirst10')
     return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length}` }
   }),
-  waitForSearchBatchComplete: vi.fn(async () => {}),
+  waitForSearchBatchComplete: vi.fn(async () => {
+    state.runnerCalls.push('waitForSearchBatchComplete')
+  }),
   waitForPipelinesComplete: vi.fn(async () => {}),
 }))
 
 vi.mock('../email-notifier.js', () => ({ send: vi.fn(async () => {}) }))
 
-const { runFullAutoBrollChain } = await import('../auto-orchestrator.js')
+const { runFullAutoBrollChain, resumeChain } = await import('../auto-orchestrator.js')
 
 beforeEach(() => {
   state.brollChainUpdates = []
@@ -115,14 +117,18 @@ beforeEach(() => {
 describe('runFullAutoBrollChain with resumeFromSubstage', () => {
   it('default behavior (no option) runs all phases', async () => {
     await runFullAutoBrollChain(7)
-    // Phase 4 (search) now runs BROLL_SEARCH_BATCHES=3 sequential batches.
+    // Phase 4 (search) now runs BROLL_SEARCH_BATCHES=3 sequential batches,
+    // each followed by a waitForSearchBatchComplete.
     expect(state.runnerCalls).toEqual([
       'runAllReferences',
       'runStrategies',
       'runPlanForEachVariant',
       'runBrollSearchFirst10',
+      'waitForSearchBatchComplete',
       'runBrollSearchFirst10',
+      'waitForSearchBatchComplete',
       'runBrollSearchFirst10',
+      'waitForSearchBatchComplete',
     ])
   })
 
@@ -175,5 +181,43 @@ describe('runFullAutoBrollChain with resumeFromSubstage', () => {
     state.phaseOutputs.plan = true
     await runFullAutoBrollChain(7, { resumeFromSubstage: 'plan' })
     expect(state.runnerCalls).toContain('runBrollSearchFirst10')
+  })
+})
+
+describe('resumeChain Phase 4 sequential batches', () => {
+  it("runs 3 sequential search batches when fromStage='plan' completes the final search step", async () => {
+    state.runnerCalls = []
+    state.subGroup = { id: 7, user_id: 'u1', path_id: 'hands-off', parent_group_id: 1 }
+    await resumeChain(7, 'plan', { strategyPipelineIds: ['s-1'], prepPipelineId: 'prep-1' })
+    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length
+    const waitCalls = state.runnerCalls.filter(c => c === 'waitForSearchBatchComplete').length
+    expect(searchCalls).toBe(3)
+    expect(waitCalls).toBe(3)
+    const phase4 = state.runnerCalls.filter(
+      c => c === 'runBrollSearchFirst10' || c === 'waitForSearchBatchComplete'
+    )
+    expect(phase4).toEqual([
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+    ])
+  })
+
+  it("runs 3 sequential search batches when fromStage='search'", async () => {
+    state.runnerCalls = []
+    state.subGroup = { id: 7, user_id: 'u1', path_id: 'hands-off', parent_group_id: 1 }
+    await resumeChain(7, 'search', { planPipelineIds: ['p-1'] })
+    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length
+    const waitCalls = state.runnerCalls.filter(c => c === 'waitForSearchBatchComplete').length
+    expect(searchCalls).toBe(3)
+    expect(waitCalls).toBe(3)
+    const phase4 = state.runnerCalls.filter(
+      c => c === 'runBrollSearchFirst10' || c === 'waitForSearchBatchComplete'
+    )
+    expect(phase4).toEqual([
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
+    ])
   })
 })

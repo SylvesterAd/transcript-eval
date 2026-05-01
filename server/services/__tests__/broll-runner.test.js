@@ -238,6 +238,32 @@ describe('runBrollSearchFirst10', () => {
       ['plan-387-1', 'plan-387-2'], 10, r.searchPipelineId,
     )
   })
+
+  it('awaits executeSearchBatch before returning (regression: race with waitForSearchBatchComplete)', async () => {
+    // Simulate the LLM-call delay inside executeSearchBatch. If runBrollSearchFirst10
+    // does not await, it returns immediately and the caller polls before INSERTs land.
+    const broll = await import('../broll.js')
+    broll.executeSearchBatch.mockClear()
+    let resolveSearch
+    const searchPromise = new Promise(r => { resolveSearch = r })
+    broll.executeSearchBatch.mockImplementationOnce(() => searchPromise)
+
+    const { runBrollSearchFirst10 } = await import('../broll-runner.js?awaits=' + Date.now())
+
+    let resolved = false
+    const callPromise = runBrollSearchFirst10({
+      subGroupId: 1, planPipelineIds: ['p1'],
+    }).then(r => { resolved = true; return r })
+
+    // Yield to the event loop so any non-awaited resolution would have happened.
+    await new Promise(r => setTimeout(r, 20))
+    expect(resolved).toBe(false)  // would be true under the buggy fire-and-forget version
+
+    resolveSearch()
+    const r = await callPromise
+    expect(resolved).toBe(true)
+    expect(r.searchPipelineId).toMatch(/^search-batch-\d+$/)
+  })
 })
 
 describe('waitForSearchBatchComplete', () => {

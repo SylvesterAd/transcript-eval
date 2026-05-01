@@ -408,9 +408,14 @@ export async function waitForSearchBatchComplete(searchPipelineId, {
   throw new Error(`waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId})`)
 }
 
-// runBrollSearchFirst10 — kicks off the unified keywords + GPU search batch
+// runBrollSearchFirst10 — runs the unified keywords + GPU search batch
 // (executeSearchBatch from broll.js, also exposed via /pipeline/search-next-batch
-// at broll.js:628). Returns { searchPipelineId } so callers can poll progress.
+// at broll.js:628). Awaits the keyword + INSERT phase, then returns
+// { searchPipelineId }. The GPU worker drains the inserted rows asynchronously.
+//
+// Awaiting matters: callers that immediately poll waitForSearchBatchComplete
+// would otherwise see count=0 (rows not yet inserted) and return prematurely,
+// causing the next loop iteration to enqueue duplicates of the same placements.
 export async function runBrollSearchFirst10({
   subGroupId, planPipelineIds, batchSize = 10,
 }) {
@@ -420,7 +425,6 @@ export async function runBrollSearchFirst10({
   const { executeSearchBatch } = await import('./broll.js')
 
   const searchPipelineId = `search-batch-${Date.now()}`
-  executeSearchBatch(planPipelineIds, batchSize, searchPipelineId)
-    .catch(err => console.error(`[broll-runner] Search batch failed: ${err.message}`))
+  await executeSearchBatch(planPipelineIds, batchSize, searchPipelineId)
   return { searchPipelineId }
 }
