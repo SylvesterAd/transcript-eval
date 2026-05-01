@@ -22,28 +22,44 @@ function handleUnauthorized(res) {
   }
 }
 
+// In-flight GET cache: coalesce concurrent identical requests so multiple
+// components asking for the same URL don't each fire their own network call.
+// Entry is deleted as soon as the underlying Promise settles, so this is NOT
+// a stale-data cache.
+const inflightGets = new Map() // path → Promise<json>
+
 async function fetchWithRetry(path, maxAttempts = 3) {
-  let lastErr
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const headers = await getAuthHeaders()
-      const res = await fetch(`${BASE}${path}`, { headers })
-      if (res.status === 401) {
-        handleUnauthorized(res)
-        throw new Error('401 Unauthorized')
-      }
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-      return await res.json()
-    } catch (e) {
-      lastErr = e
-      // Don't retry auth errors — they won't succeed by retrying
-      if (e.message.startsWith('401')) break
-      if (attempt < maxAttempts) {
-        await new Promise(r => setTimeout(r, 300 * Math.pow(2, attempt - 1)))
+  if (inflightGets.has(path)) return inflightGets.get(path)
+
+  const promise = (async () => {
+    let lastErr
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const headers = await getAuthHeaders()
+        const res = await fetch(`${BASE}${path}`, { headers })
+        if (res.status === 401) {
+          handleUnauthorized(res)
+          throw new Error('401 Unauthorized')
+        }
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+        return await res.json()
+      } catch (e) {
+        lastErr = e
+        if (e.message.startsWith('401')) break
+        if (attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, 300 * Math.pow(2, attempt - 1)))
+        }
       }
     }
-  }
-  throw lastErr
+    throw lastErr
+  })()
+
+  inflightGets.set(path, promise)
+  // Release the entry whether the request succeeds or fails.
+  // .catch on the finally branch suppresses an unhandled rejection on the cleanup
+  // path — the caller's await of `promise` still receives the original rejection.
+  promise.finally(() => inflightGets.delete(path)).catch(() => {})
+  return promise
 }
 
 export function useApi(path, deps = []) {

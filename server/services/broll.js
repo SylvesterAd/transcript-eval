@@ -5402,9 +5402,9 @@ export async function getBRollEditorData(planPipelineId) {
   // 1. Load per-chapter plan sub-runs → extract placements
   const planSubRuns = await db.prepare(`
     SELECT id, output_text, metadata_json FROM broll_runs
-    WHERE metadata_json LIKE ? AND status = 'complete'
+    WHERE (metadata_json::jsonb ->> 'pipelineId') = ? AND status = 'complete'
     ORDER BY id
-  `).all(`%"pipelineId":"${planPipelineId}"%`)
+  `).all(planPipelineId)
 
   const chapterRuns = planSubRuns.filter(r => {
     try { const m = JSON.parse(r.metadata_json || '{}'); return m.isSubRun && m.stageName === 'Per-chapter B-Roll plan' }
@@ -5525,9 +5525,9 @@ export async function getBRollEditorData(planPipelineId) {
     // Legacy fallback: broll_runs + broll_search_logs for pre-migration data
     const searchRuns = await db.prepare(`
       SELECT id, output_text, metadata_json FROM broll_runs
-      WHERE metadata_json LIKE ? AND status IN ('complete', 'failed')
+      WHERE (metadata_json::jsonb ->> 'pipelineId') LIKE ? AND status IN ('complete', 'failed')
       ORDER BY id
-    `).all(`%"pipelineId":"bs-${planPipelineId}-%`)
+    `).all(`bs-${planPipelineId}-%`)
 
     const searchSubRuns = searchRuns.filter(r => {
       try { return JSON.parse(r.metadata_json || '{}').isSubRun } catch { return false }
@@ -5582,8 +5582,8 @@ export async function getBRollEditorData(planPipelineId) {
 
   // 2c. Mark placements that have keywords but no GPU results as 'keywords_ready'
   const kwRuns = await db.prepare(
-    `SELECT output_text, metadata_json FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete'`
-  ).all(`%"pipelineId":"kw-${planPipelineId}-%`)
+    `SELECT output_text, metadata_json FROM broll_runs WHERE (metadata_json::jsonb ->> 'pipelineId') LIKE ? AND status = 'complete'`
+  ).all(`kw-${planPipelineId}-%`)
   const kwProcessedIndices = new Set()
   for (const r of kwRuns) {
     try {
