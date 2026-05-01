@@ -1,8 +1,9 @@
 import { useContext, useEffect, useRef, useMemo } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { formatTime } from './useEditorState.js'
+import { useHlsSource } from '../../hooks/useHlsSource.js'
 
-export default function RoughCutPreview() {
+export default function RoughCutPreview({ useHls = false }) {
   const { state, videoRefs, totalDuration } = useContext(EditorContext)
 
   const videoTracks = state.tracks.filter(t => t.type === 'video')
@@ -65,6 +66,7 @@ export default function RoughCutPreview() {
               track={track}
               videoRefs={videoRefs}
               visible={track.videoId === activeTrack.videoId}
+              useHls={useHls}
             />
           ))}
           {/* Overlay for out-of-range */}
@@ -94,7 +96,7 @@ export default function RoughCutPreview() {
   )
 }
 
-function PreviewVideo({ track, videoRefs, visible }) {
+function PreviewVideo({ track, videoRefs, visible, useHls }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -104,17 +106,30 @@ function PreviewVideo({ track, videoRefs, visible }) {
     return () => { delete videoRefs.current[track.videoId] }
   }, [track.videoId, videoRefs])
 
-  // Rough cut editor uses Cloudflare MP4 (frame-accurate seeking) or direct source URL
-  const cfMp4 = track.cfStreamUid ? `https://videodelivery.net/${track.cfStreamUid}/downloads/default.mp4` : null
-  const directSrc = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
-  const src = cfMp4 || directSrc
+  // Rough-cut editor uses Cloudflare MP4 (frame-accurate seeking).
+  // B-roll editor uses HLS (adaptive bitrate, ~480p cap) for efficiency.
+  const cfMp4Url = track.cfStreamUid
+    ? `https://videodelivery.net/${track.cfStreamUid}/downloads/default.mp4`
+    : null
+  const cfHlsUrl = track.cfStreamUid
+    ? `https://videodelivery.net/${track.cfStreamUid}/manifest/video.m3u8`
+    : null
+  const directSrc = track.filePath?.startsWith('http')
+    ? track.filePath
+    : track.filePath
+      ? `/uploads/videos/${track.filePath.split('/').pop()}`
+      : null
 
-  if (!src) return null
+  const hlsUrl = useHls ? cfHlsUrl : null
+  const mp4Url = cfMp4Url || directSrc
+
+  useHlsSource(ref, { hlsUrl, mp4Url })
+
+  if (!hlsUrl && !mp4Url) return null
 
   return (
     <video
       ref={ref}
-      src={src}
       className={visible ? 'w-full h-full object-contain' : 'absolute w-px h-px opacity-0 pointer-events-none overflow-hidden'}
       preload="auto"
       playsInline
