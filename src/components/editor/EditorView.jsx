@@ -47,6 +47,49 @@ function RoughCutFailureBanner({ status, requiredTokens, balance, onRetry, onDis
   )
 }
 
+// Non-blocking banner shown inside the editor when the b-roll auto-chain
+// failed AT a point where the user was still routed into the editor
+// (post-pause for strategy-only/guided, or null path). Pre-pause
+// failures route to <FailedView> in the loader instead and never show
+// this banner.
+//
+// Uses the same per-path pause-point mapping as src/lib/projectRoute.js;
+// keep them in sync.
+const BANNER_PATH_PAUSE = {
+  'hands-off': null,
+  'strategy-only': 'strategy',
+  'guided': 'plan',
+}
+const BANNER_SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
+
+export function BRollFailureBanner({ status, substage, pathId }) {
+  const [dismissed, setDismissed] = useState(false)
+  if (status !== 'failed') return null
+  if (dismissed) return null
+  // Pre-pause failures handled by <FailedView>; suppress here.
+  if (Object.prototype.hasOwnProperty.call(BANNER_PATH_PAUSE, pathId)) {
+    const pause = BANNER_PATH_PAUSE[pathId]
+    if (pause === null) return null   // hands-off → never reaches editor on failure
+    const failIdx = BANNER_SUBSTAGE_ORDER.indexOf(substage)
+    if (failIdx < 0 || failIdx <= BANNER_SUBSTAGE_ORDER.indexOf(pause)) return null
+  }
+  return (
+    <div className="bg-red-900/40 border-b border-red-700/50 px-4 py-2 flex items-center gap-3 text-sm">
+      <span className="material-symbols-outlined text-red-300">error</span>
+      <span className="flex-1 text-red-100">
+        B-roll auto-generation failed{substage ? ` during the ${substage} stage` : ''}. Some assets may be missing.
+      </span>
+      <button
+        onClick={() => setDismissed(true)}
+        aria-label="Dismiss"
+        className="text-red-300 hover:text-red-100 text-xs uppercase tracking-wider px-2"
+      >
+        Dismiss
+      </button>
+    </div>
+  )
+}
+
 export default function EditorView() {
   const { id, tab, sub, detail } = useParams()
   const navigate = useNavigate()
@@ -895,6 +938,12 @@ export default function EditorView() {
             await authFetch(`/videos/groups/${id}/dismiss-rough-cut-error`, { method: 'POST' })
             refetchDetail()
           }}
+        />
+
+        <BRollFailureBanner
+          status={groupDetail?.broll_chain_status}
+          substage={groupDetail?.broll_chain_substage}
+          pathId={groupDetail?.path_id}
         />
 
         {/* Body */}
