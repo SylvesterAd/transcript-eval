@@ -131,23 +131,88 @@ async function withStageRetry(fn, { label, abortSignal } = {}) {
 }
 
 // ── Robust JSON extraction from LLM output ──
-function extractJSON(text) {
+//
+// Two-pass parsing per candidate string:
+//   1. Strict JSON.parse — fast path for well-formed output.
+//   2. Lenient pass that strips known Gemini-Flash JSON tics:
+//        - trailing commas before } or ]
+//        - stray duplicate quote on its own line between value and structural char
+//      Then JSON.parse again. The lenient regexes are conservative — they only
+//      rewrite tokens that are syntax-illegal anyway, so they can't corrupt
+//      otherwise-valid JSON.
+//
+// Exported for unit tests in __tests__/broll-extract-json.test.js.
+export function extractJSON(text) {
   if (!text) return null
+
+  function tryParse(s) {
+    try { return JSON.parse(s) } catch {}
+    const lenient = s
+      // trailing commas:  ,\s*}  →  }   and  ,\s*]  →  ]
+      .replace(/,(\s*[}\]])/g, '$1')
+      // stray duplicate quote on its own line between a closed string and
+      // the next structural char: "value"\n"\n}  →  "value"\n}
+      .replace(/("\s*)\n\s*"(\s*\n\s*[\]},])/g, '$1$2')
+    return JSON.parse(lenient)
+  }
+
   // Try ```json ... ``` or ``` ... ``` fence
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (fence) return JSON.parse(fence[1].trim())
+  if (fence) return tryParse(fence[1].trim())
+
   // Strip LLM / aggregation prefixes: "json\n" header, "=== Example: ... ===" wrapper
   let cleaned = text
     .replace(/^json\s*\n/, '')
     .replace(/```\s*$/, '')
     .replace(/^(={2,}[^\n]+={2,}\s*\n)+/, '')
     .trim()
-  try { return JSON.parse(cleaned) } catch {}
+  try { return tryParse(cleaned) } catch {}
+
   // Last resort: slice from first { or [ to last } or ]
   const start = cleaned.search(/[{\[]/)
   const end = Math.max(cleaned.lastIndexOf('}'), cleaned.lastIndexOf(']'))
-  if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1))
+  if (start >= 0 && end > start) return tryParse(cleaned.slice(start, end + 1))
+
   throw new Error('No JSON found in text')
+}
+
+// Parse output from a prior stage with the lenient extractJSON path.
+// On failure, throw an error tagged with the upstream stageIndex so the
+// pipeline catch in executePipeline can delete that row and
+// let resume re-run the stage. Pass stageIndex=null when the caller is
+// using a non-stage source (e.g. llmAnswer fallback) — no row to invalidate.
+//
+// Used by programmatic actions (build_time_windows, split_by_chapter, etc.)
+// that consume earlier stages' JSON output.
+export function parsePriorStage(text, upstreamStageIndex) {
+  try {
+    if (!text) throw new Error('empty input')
+    return extractJSON(text)
+  } catch (e) {
+    const wrapped = new Error(
+      `Parse of stage ${upstreamStageIndex == null ? '?' : upstreamStageIndex} output failed: ${e.message}`,
+    )
+    if (upstreamStageIndex != null) wrapped.upstreamStageIndex = upstreamStageIndex
+    wrapped.cause = e
+    throw wrapped
+  }
+}
+
+// Delete the upstream stage's broll_runs row when a programmatic stage
+// fails parsing it, so the next resume call re-runs that stage. Called
+// from the executePipeline catch when err.upstreamStageIndex is set.
+//
+// Exported for unit tests in __tests__/broll-pipeline-resume-on-parse-fail.test.js.
+export async function handleUpstreamFailureCleanup({ pipelineId, err }) {
+  if (err?.upstreamStageIndex == null) return
+  await db.prepare(
+    `DELETE FROM broll_runs
+     WHERE (metadata_json::jsonb)->>'pipelineId' = ?
+       AND ((metadata_json::jsonb)->>'stageIndex')::int = ?
+       AND status = 'complete'
+       AND COALESCE((metadata_json::jsonb)->>'isSubRun', 'false') != 'true'`,
+  ).run(pipelineId, err.upstreamStageIndex)
+  console.log(`[broll-pipeline] Removed stage ${err.upstreamStageIndex} row for ${pipelineId} — resume will re-run it`)
 }
 
 // ── Pipeline snapshots for diagnostics ──
@@ -4626,11 +4691,15 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           currentTranscript = reassembleSegments(segments)
           output = currentTranscript
         } else if (action === 'build_time_windows') {
-          // Parse A-Roll + Chapters JSON and split into equal-length ~1 min windows
-          const chaptersSource = params.chaptersStageIndex != null ? stageOutputs[params.chaptersStageIndex] : (llmAnswers[1] || llmAnswer)
-          const stage1 = chaptersSource
-          let parsed
-          try { parsed = JSON.parse(stage1) } catch { parsed = extractJSON(stage1) }
+          // Parse A-Roll + Chapters JSON and split into equal-length ~1 min windows.
+          // parsePriorStage tags errors with the upstream stageIndex so executePipeline's
+          // catch can delete that row and let resume re-run it (Flash JSON failures
+          // are non-deterministic; one re-roll usually clears them).
+          const upstreamIdx = params.chaptersStageIndex != null ? params.chaptersStageIndex : null
+          const chaptersSource = upstreamIdx != null
+            ? stageOutputs[upstreamIdx]
+            : (llmAnswers[1] || llmAnswer)
+          const parsed = parsePriorStage(chaptersSource, upstreamIdx)
           normalizeTimestamps(parsed)
           // Get duration from the actual video file
           const windowVideoId = stage._videoId || effectiveExamples[0]?.id
@@ -5129,6 +5198,10 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
   } catch (err) {
     console.error(`[broll-pipeline] PIPELINE CATCH (${typeof pipelineId !== 'undefined' ? pipelineId : 'unknown'}): ${err.message}`)
+    // If the failure was caused by parsing a prior stage's output, drop that
+    // stage's row so a subsequent resume re-runs it. See parsePriorStage.
+    try { await handleUpstreamFailureCleanup({ pipelineId, err }) }
+    catch (cleanupErr) { console.warn(`[broll-pipeline] cleanup failed: ${cleanupErr.message}`) }
     pipelineAbortControllers.delete(pipelineId)
     const isAbort = abortedBrollPipelines.has(pipelineId) || err.name === 'AbortError'
     brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: stageOutputs.length, totalStages: stages.length, status: 'failed', error: isAbort ? 'Aborted by user' : err.message })

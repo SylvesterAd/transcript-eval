@@ -543,6 +543,10 @@ router.get('/', requireAuth, async (req, res) => {
       COALESCE(parent.assembly_status, vg.assembly_status) AS group_assembly_status,
       COALESCE(parent.assembly_error, vg.assembly_error) AS group_assembly_error,
       COALESCE(parent.id, vg.id) AS effective_group_id,
+      vg.parent_group_id AS group_parent_group_id,
+      vg.id AS sub_group_id,
+      vg.broll_chain_status AS sub_group_broll_chain_status,
+      vg.broll_chain_substage AS sub_group_broll_chain_substage,
       COALESCE(parent.libraries_json, vg.libraries_json) AS group_libraries_json,
       COALESCE(parent.freepik_opt_in, vg.freepik_opt_in) AS group_freepik_opt_in,
       COALESCE(parent.audience_json, vg.audience_json) AS group_audience_json,
@@ -572,6 +576,14 @@ router.get('/', requireAuth, async (req, res) => {
     v.rough_cut_status = v.group_rough_cut_status || null
     v.broll_chain_status = v.group_broll_chain_status || null
     v.broll_chain_substage = v.group_broll_chain_substage || null
+    // Parent-row aggregation (ProjectsView.handleProjectClick) needs the
+    // original sub-group id (separate from the remapped group_id) and the
+    // sub-group's own raw chain status/substage so we can derive the
+    // parent's effective state from N sub-groups. The SQL aliases above
+    // already attach sub_group_id / sub_group_broll_chain_{status,substage}
+    // directly to v; rename group_parent_group_id → parent_group_id.
+    v.parent_group_id = v.group_parent_group_id || null
+    delete v.group_parent_group_id
     delete v.group_libraries_json
     delete v.group_freepik_opt_in
     delete v.group_audience_json

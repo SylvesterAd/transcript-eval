@@ -580,8 +580,10 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     ).run(subGroupId)
     await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
   } catch (err) {
+    // Keep broll_chain_substage so the frontend can show WHERE the chain broke
+    // (loader vs editor decision lives in src/lib/projectRoute.js#failedPrePause).
     await db.prepare(
-      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_substage = NULL, broll_chain_error = ? WHERE id = ?"
+      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
   } finally {
@@ -657,7 +659,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
     }
   } catch (err) {
     await db.prepare(
-      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_substage = NULL, broll_chain_error = ? WHERE id = ?"
+      "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
   }

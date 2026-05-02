@@ -10,6 +10,44 @@ import ProcessingModal from './ProcessingModal.jsx'
 const tabs = ['Recent', 'Owned by me', 'Shared with me']
 const CONFIG_STEPS = new Set(['libraries', 'audience', 'references', 'roughcut', 'path'])
 
+// Compute the effective broll_chain_status / substage for a project row
+// by aggregating its sub-groups. The chain runs on sub-groups (created by
+// multicam classification) — the parent project row never holds it
+// directly. Used to feed resolveProjectRoute correctly when the user
+// clicks a parent row.
+//
+// Aggregation rule (priority — first match wins):
+//   1. any sub-group running/pending → 'running'
+//   2. any sub-group failed          → 'failed' (substage from that sub-group)
+//   3. any sub-group paused_at_*     → that paused state
+//   4. all sub-groups done           → 'done'
+//   5. otherwise                     → null
+//
+// Exported for unit tests in __tests__/ProjectsView-aggregate.test.js.
+export function aggregateChainStatus(subGroups = []) {
+  if (!subGroups.length) return { status: null, substage: null }
+
+  const running = subGroups.find(sg =>
+    sg.broll_chain_status === 'running' || sg.broll_chain_status === 'pending',
+  )
+  if (running) return { status: 'running', substage: running.broll_chain_substage || null }
+
+  const failed = subGroups.find(sg => sg.broll_chain_status === 'failed')
+  if (failed) return { status: 'failed', substage: failed.broll_chain_substage || null }
+
+  const pausedStrategy = subGroups.find(sg => sg.broll_chain_status === 'paused_at_strategy')
+  if (pausedStrategy) return { status: 'paused_at_strategy', substage: 'strategy' }
+
+  const pausedPlan = subGroups.find(sg => sg.broll_chain_status === 'paused_at_plan')
+  if (pausedPlan) return { status: 'paused_at_plan', substage: 'plan' }
+
+  if (subGroups.every(sg => sg.broll_chain_status === 'done')) {
+    return { status: 'done', substage: null }
+  }
+
+  return { status: null, substage: null }
+}
+
 // Compute how far through the slice-2 chain a project is. Stages mirror
 // the orchestrator's pipeline: upload → transcribe → classify → sync →
 // rough_cut → broll. We treat a project as terminal (full bar, no
@@ -143,7 +181,36 @@ export default function ProjectsView() {
   } : null
 
   const handleProjectClick = (project) => {
-    navigate(resolveProjectRoute(project))
+    // Parent project rows never carry broll_chain_status directly — the
+    // chain runs on their sub-groups. Aggregate before routing so a
+    // failed-pre-pause sub-group correctly sends the user to <FailedView>
+    // and a done sub-group lets them into the editor.
+    //
+    // We use sub_group_id + sub_group_broll_chain_{status,substage} (raw,
+    // pre-COALESCE values from the videos endpoint) so multiple sub-groups
+    // under the same parent get one entry each in the aggregation set.
+    // If parent_group_id isn't exposed (legacy single-group projects), the
+    // filter is empty and we fall back to the project's own chain status.
+    const subGroups = (videos || [])
+      .filter(v => v.parent_group_id === project.id && v.sub_group_id != null)
+      .reduce((acc, v) => {
+        if (!acc.find(sg => sg.id === v.sub_group_id)) {
+          acc.push({
+            id: v.sub_group_id,
+            broll_chain_status: v.sub_group_broll_chain_status || null,
+            broll_chain_substage: v.sub_group_broll_chain_substage || null,
+          })
+        }
+        return acc
+      }, [])
+    const aggregated = subGroups.length
+      ? aggregateChainStatus(subGroups)
+      : { status: project.broll_chain_status, substage: project.broll_chain_substage }
+    navigate(resolveProjectRoute({
+      ...project,
+      broll_chain_status: aggregated.status,
+      broll_chain_substage: aggregated.substage,
+    }))
   }
 
   const handleDelete = async (e, project) => {
