@@ -131,22 +131,48 @@ async function withStageRetry(fn, { label, abortSignal } = {}) {
 }
 
 // ── Robust JSON extraction from LLM output ──
-function extractJSON(text) {
+//
+// Two-pass parsing per candidate string:
+//   1. Strict JSON.parse — fast path for well-formed output.
+//   2. Lenient pass that strips known Gemini-Flash JSON tics:
+//        - trailing commas before } or ]
+//        - stray duplicate quote on its own line between value and structural char
+//      Then JSON.parse again. The lenient regexes are conservative — they only
+//      rewrite tokens that are syntax-illegal anyway, so they can't corrupt
+//      otherwise-valid JSON.
+//
+// Exported for unit tests in __tests__/broll-extract-json.test.js.
+export function extractJSON(text) {
   if (!text) return null
+
+  function tryParse(s) {
+    try { return JSON.parse(s) } catch {}
+    const lenient = s
+      // trailing commas:  ,\s*}  →  }   and  ,\s*]  →  ]
+      .replace(/,(\s*[}\]])/g, '$1')
+      // stray duplicate quote on its own line between a closed string and
+      // the next structural char: "value"\n"\n}  →  "value"\n}
+      .replace(/("\s*)\n\s*"(\s*\n\s*[\]},])/g, '$1$2')
+    return JSON.parse(lenient)
+  }
+
   // Try ```json ... ``` or ``` ... ``` fence
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (fence) return JSON.parse(fence[1].trim())
+  if (fence) return tryParse(fence[1].trim())
+
   // Strip LLM / aggregation prefixes: "json\n" header, "=== Example: ... ===" wrapper
   let cleaned = text
     .replace(/^json\s*\n/, '')
     .replace(/```\s*$/, '')
     .replace(/^(={2,}[^\n]+={2,}\s*\n)+/, '')
     .trim()
-  try { return JSON.parse(cleaned) } catch {}
+  try { return tryParse(cleaned) } catch {}
+
   // Last resort: slice from first { or [ to last } or ]
   const start = cleaned.search(/[{\[]/)
   const end = Math.max(cleaned.lastIndexOf('}'), cleaned.lastIndexOf(']'))
-  if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1))
+  if (start >= 0 && end > start) return tryParse(cleaned.slice(start, end + 1))
+
   throw new Error('No JSON found in text')
 }
 
