@@ -1690,17 +1690,45 @@ async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
   return { status: 'timeout' }
 }
 
+// Pure source-list builder, exported for unit tests.
+// Inputs: a row's libraries_json (string | array | null) and freepik_opt_in (bool | null).
+// Output: deduped array of source names with the artlist filter applied
+// and pexels always appended; freepik appended unless explicitly opted out.
+//
+// Exported for unit tests in __tests__/resolve-broll-sources.test.js.
+export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
+  let libraries = []
+  if (libraries_json != null) {
+    try {
+      const parsed = typeof libraries_json === 'string' ? JSON.parse(libraries_json) : libraries_json
+      if (Array.isArray(parsed)) libraries = parsed
+    } catch {}
+  }
+  const freepikOptIn = freepik_opt_in !== false  // null → default-on
+  const sources = [...libraries.filter(l => l !== 'artlist'), 'pexels']
+  if (freepikOptIn) sources.push('freepik')
+  return Array.from(new Set(sources))
+}
+
 // Resolve which stock libraries to send to the broll proxy for a given plan pipeline.
-// Reads `libraries_json` + `freepik_opt_in` from the parent video group, filters
-// `artlist` (no proxy provider yet), and always appends `pexels` (free, always on).
-// `overrides.sources` (if non-empty) wins, with the same artlist filter applied.
-async function resolveBrollSources(planPipelineId, overrides = {}) {
+// Reads the parent video group's `libraries_json` + `freepik_opt_in` (falling
+// back to the sub-group's own values if there's no parent), filters `artlist`,
+// and always appends `pexels`. `overrides.sources` (if non-empty) wins, with
+// the same artlist filter applied.
+//
+// SQL MUST walk the parent: post-classification, `videos.group_id` points at
+// the sub-group, but library config is configured on the parent project.
+// Without the JOIN, the user's "Envato" opt-in is silently ignored — only
+// Pexels (and default-on Freepik) get searched. Mirrors the COALESCE pattern
+// in server/routes/videos.js:550.
+//
+// Exported for unit tests; production callers go through executeBrollSearch.
+export async function resolveBrollSources(planPipelineId, overrides = {}) {
   if (overrides.sources?.length) {
     return overrides.sources.filter(s => s !== 'artlist')
   }
 
-  let libraries = []
-  let freepikOptIn = true
+  let row = { libraries_json: null, freepik_opt_in: null }
 
   try {
     const planRuns = await db.prepare(
@@ -1711,29 +1739,27 @@ async function resolveBrollSources(planPipelineId, overrides = {}) {
     // Fallback: many older plan runs were written without groupId in metadata
     // (executePipeline never propagated the groupId arg into the metadata blob).
     // The video_id IS persisted, so look up the group via videos.group_id.
-    // Without this fallback, group-level libraries_json (e.g. envato opt-in) is
-    // silently ignored for the affected plans and only pexels+freepik gets sent.
     if (!groupId && firstRun?.video_id) {
       const v = await db.prepare(`SELECT group_id FROM videos WHERE id = ?`).get(firstRun.video_id)
       groupId = v?.group_id || null
     }
 
     if (groupId) {
-      const group = await db.prepare(
-        `SELECT libraries_json, freepik_opt_in FROM video_groups WHERE id = ?`
+      const got = await db.prepare(
+        `SELECT
+           COALESCE(parent.libraries_json, vg.libraries_json) AS libraries_json,
+           COALESCE(parent.freepik_opt_in, vg.freepik_opt_in) AS freepik_opt_in
+         FROM video_groups vg
+         LEFT JOIN video_groups parent ON parent.id = vg.parent_group_id
+         WHERE vg.id = ?`
       ).get(groupId)
-      if (group?.libraries_json) {
-        try { libraries = JSON.parse(group.libraries_json) || [] } catch {}
-      }
-      if (group?.freepik_opt_in === false) freepikOptIn = false
+      if (got) row = got
     }
   } catch (e) {
     console.error('[broll] resolveBrollSources failed, falling back to pexels only:', e)
   }
 
-  const sources = [...libraries.filter(l => l !== 'artlist'), 'pexels']
-  if (freepikOptIn) sources.push('freepik')
-  return Array.from(new Set(sources))
+  return resolveSourcesFromGroup(row)
 }
 
 // Search stock footage for each B-Roll placement using keywords + GPU-powered API
