@@ -143,11 +143,15 @@ describe('runPlanForEachVariant', () => {
   it('runs one plan pipeline per strategy variant', async () => {
     const broll = await import('../broll.js')
     let counter = 0
-    // Stub executeCreatePlan: each call registers a new plan-* progress entry
+    // Stub executeCreatePlan: each call returns a new planPipelineId.
+    // (Post-fix contract: runPlanForEachVariant reads the ID from the
+    // resolved value, not from the progress map — see broll-runner.js
+    // runPlanForEachVariant comment for history.)
     broll.executeCreatePlan.mockImplementation(async (prepId, stratId, vid, gid) => {
       counter += 1
       const pid = `plan-${vid}-${Date.now()}-${counter}`
       broll.brollPipelineProgress.set(pid, { phase: 'create_plan', status: 'running' })
+      return { planPipelineId: pid, stageCount: 1, totalTokensIn: 0, totalTokensOut: 0, totalCost: 0, totalRuntime: 0 }
     })
 
     const { runPlanForEachVariant } = await import('../broll-runner.js?plan=' + Date.now())
