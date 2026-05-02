@@ -164,6 +164,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         video_type: 'raw',
         file_size: entry.file.size,
         cf_stream_uid: cfStreamUid,
+        duration_seconds: entry.durationSeconds ?? null,
       })
 
       setFiles(prev => prev.map(f =>
