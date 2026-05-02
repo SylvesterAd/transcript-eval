@@ -198,6 +198,23 @@ export function parsePriorStage(text, upstreamStageIndex) {
   }
 }
 
+// Delete the upstream stage's broll_runs row when a programmatic stage
+// fails parsing it, so the next resume call re-runs that stage. Called
+// from the executePipeline catch when err.upstreamStageIndex is set.
+//
+// Exported for unit tests in __tests__/broll-pipeline-resume-on-parse-fail.test.js.
+export async function handleUpstreamFailureCleanup({ pipelineId, err }) {
+  if (err?.upstreamStageIndex == null) return
+  await db.prepare(
+    `DELETE FROM broll_runs
+     WHERE (metadata_json::jsonb)->>'pipelineId' = ?
+       AND ((metadata_json::jsonb)->>'stageIndex')::int = ?
+       AND status = 'complete'
+       AND COALESCE((metadata_json::jsonb)->>'isSubRun', 'false') != 'true'`,
+  ).run(pipelineId, err.upstreamStageIndex)
+  console.log(`[broll-pipeline] Removed stage ${err.upstreamStageIndex} row for ${pipelineId} — resume will re-run it`)
+}
+
 // ── Pipeline snapshots for diagnostics ──
 const SNAPSHOT_DIR = join(TEMP_DIR, 'pipeline-snapshots')
 mkdirSync(SNAPSHOT_DIR, { recursive: true })
@@ -5181,6 +5198,10 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
   } catch (err) {
     console.error(`[broll-pipeline] PIPELINE CATCH (${typeof pipelineId !== 'undefined' ? pipelineId : 'unknown'}): ${err.message}`)
+    // If the failure was caused by parsing a prior stage's output, drop that
+    // stage's row so a subsequent resume re-runs it. See parsePriorStage.
+    try { await handleUpstreamFailureCleanup({ pipelineId, err }) }
+    catch (cleanupErr) { console.warn(`[broll-pipeline] cleanup failed: ${cleanupErr.message}`) }
     pipelineAbortControllers.delete(pipelineId)
     const isAbort = abortedBrollPipelines.has(pipelineId) || err.name === 'AbortError'
     brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: stageOutputs.length, totalStages: stages.length, status: 'failed', error: isAbort ? 'Aborted by user' : err.message })
