@@ -18,6 +18,21 @@ export function resolveDetailToIndex(detail) {
   return Number.isFinite(n) ? n : null
 }
 
+// Pick the favorite-reference variant for hands-off (Full Auto).
+// Priority: refSource.is_favorite → first non-combined → first.
+// Combined variants (cstrat-*) are excluded from the favorite check
+// because they have no refSource by construction.
+//
+// Exported for unit tests in __tests__/BRollEditor-variant-pick.test.jsx.
+export function pickHandsOffVariant(all) {
+  if (!all?.length) return all
+  const favorite = all.find(v => !v.isCombined && v.refSource?.is_favorite)
+  if (favorite) return [favorite]
+  const nonCombined = all.find(v => !v.isCombined)
+  if (nonCombined) return [nonCombined]
+  return [all[0]]
+}
+
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
   const { id, detail } = useParams()
   const navigate = useNavigate()
@@ -30,14 +45,23 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   const pathId = editorCtx?.state?.groupDetail?.path_id || null
 
   // Build variant list from planVariants (with strategy labels) or fallback to pipeline IDs.
-  // For the hands-off path we hide the picker by collapsing to the first variant — the
-  // user opted out of manual variant selection, so we just auto-use variant 0.
+  // For the hands-off path we collapse to the favorite variant — the user
+  // opted out of manual variant selection, so we auto-pick whichever plan
+  // is based on the favorite reference video. Falls back to first non-
+  // combined, then first, when no favorite is identifiable. See
+  // pickHandsOffVariant for full priority order.
   const variants = useMemo(() => {
+    // For hands-off we need refSource/isCombined to pick correctly, so do
+    // the slice on the raw planVariantsProp before mapping to {id,label}.
+    const sourceList = pathId === 'hands-off' && planVariantsProp?.length
+      ? pickHandsOffVariant(planVariantsProp)
+      : planVariantsProp
+
     let all
-    if (planVariantsProp?.length) {
-      all = planVariantsProp.map(v => ({
+    if (sourceList?.length) {
+      all = sourceList.map(v => ({
         id: v.pipelineId,
-        label: v.label || `Variant ${String.fromCharCode(65 + planVariantsProp.indexOf(v))}`,
+        label: v.label || `Variant ${String.fromCharCode(65 + (planVariantsProp?.indexOf(v) ?? 0))}`,
       }))
     } else if (!allPlanPipelineIds?.length) {
       all = [{ id: planPipelineId, label: 'B-Roll' }]
@@ -46,8 +70,13 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         id: pid,
         label: `Variant ${String.fromCharCode(65 + i)}`,
       }))
+      // Without planVariantsProp we have no refSource/isCombined info, so
+      // keep the legacy slice-first behavior for hands-off in the fallback
+      // path. This branch is rarely hit (planVariantsProp is normally set
+      // by BRollPanel) but preserved for safety.
+      if (pathId === 'hands-off') all = all.slice(0, 1)
     }
-    return pathId === 'hands-off' ? all.slice(0, 1) : all
+    return all
   }, [allPlanPipelineIds, planPipelineId, planVariantsProp, pathId])
 
   const activePipelineId = variants[activeVariantIdx]?.id || planPipelineId
