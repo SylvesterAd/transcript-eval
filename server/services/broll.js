@@ -176,6 +176,28 @@ export function extractJSON(text) {
   throw new Error('No JSON found in text')
 }
 
+// Parse output from a prior stage with the lenient extractJSON path.
+// On failure, throw an error tagged with the upstream stageIndex so the
+// pipeline catch in executePipeline (~line 331) can delete that row and
+// let resume re-run the stage. Pass stageIndex=null when the caller is
+// using a non-stage source (e.g. llmAnswer fallback) — no row to invalidate.
+//
+// Used by programmatic actions (build_time_windows, split_by_chapter, etc.)
+// that consume earlier stages' JSON output.
+export function parsePriorStage(text, upstreamStageIndex) {
+  try {
+    if (!text) throw new Error('empty input')
+    return extractJSON(text)
+  } catch (e) {
+    const wrapped = new Error(
+      `Parse of stage ${upstreamStageIndex == null ? '?' : upstreamStageIndex} output failed: ${e.message}`,
+    )
+    if (upstreamStageIndex != null) wrapped.upstreamStageIndex = upstreamStageIndex
+    wrapped.cause = e
+    throw wrapped
+  }
+}
+
 // ── Pipeline snapshots for diagnostics ──
 const SNAPSHOT_DIR = join(TEMP_DIR, 'pipeline-snapshots')
 mkdirSync(SNAPSHOT_DIR, { recursive: true })
