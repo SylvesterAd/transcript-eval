@@ -143,11 +143,15 @@ describe('runPlanForEachVariant', () => {
   it('runs one plan pipeline per strategy variant', async () => {
     const broll = await import('../broll.js')
     let counter = 0
-    // Stub executeCreatePlan: each call registers a new plan-* progress entry
+    // Stub executeCreatePlan: each call returns a new planPipelineId.
+    // (Post-fix contract: runPlanForEachVariant reads the ID from the
+    // resolved value, not from the progress map — see broll-runner.js
+    // runPlanForEachVariant comment for history.)
     broll.executeCreatePlan.mockImplementation(async (prepId, stratId, vid, gid) => {
       counter += 1
       const pid = `plan-${vid}-${Date.now()}-${counter}`
       broll.brollPipelineProgress.set(pid, { phase: 'create_plan', status: 'running' })
+      return { planPipelineId: pid, stageCount: 1, totalTokensIn: 0, totalTokensOut: 0, totalCost: 0, totalRuntime: 0 }
     })
 
     const { runPlanForEachVariant } = await import('../broll-runner.js?plan=' + Date.now())
@@ -297,14 +301,19 @@ describe('waitForSearchBatchComplete', () => {
     ).resolves.toBeUndefined()
   })
 
-  it('rejects on timeout when count never drains', async () => {
+  it('returns silently with a warn log on timeout when count never drains', async () => {
     const { waitForSearchBatchComplete } = await import('../broll-runner.js?wfsbc3=' + Date.now())
     // Always returns 5 — never drains
     state.batchCountSeq = []
     state.batchCountAlways = 5
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     await expect(
       waitForSearchBatchComplete('search-batch-stuck', { pollIntervalMs: 10, maxWaitMs: 50 })
-    ).rejects.toThrow(/timed out/)
+    ).resolves.toBeUndefined()
+    expect(warnSpy).toHaveBeenCalled()
+    const warnMsg = warnSpy.mock.calls.map(c => c.join(' ')).join('\n')
+    expect(warnMsg).toMatch(/timed out|search-batch-stuck/i)
+    warnSpy.mockRestore()
     state.batchCountAlways = undefined
   })
 

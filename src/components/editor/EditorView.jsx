@@ -62,6 +62,25 @@ const BANNER_PATH_PAUSE = {
 }
 const BANNER_SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
 
+// Determines whether the editor should hand off to the processing
+// loader's <FailedView>. True when the chain failed at-or-before the
+// path's natural pause-point — i.e., the same condition as
+// src/lib/projectRoute.js#failedPrePause. Reproduced here (rather than
+// imported) to keep this component self-contained — the constants
+// above already mirror that file.
+//
+// Exported for unit tests in __tests__/EditorView-failed-redirect.test.jsx.
+export function shouldRedirectFailedPrePause(group) {
+  if (!group) return false
+  if (group.broll_chain_status !== 'failed') return false
+  if (!Object.prototype.hasOwnProperty.call(BANNER_PATH_PAUSE, group.path_id)) return false
+  const pause = BANNER_PATH_PAUSE[group.path_id]
+  if (pause === null) return true
+  const failIdx = BANNER_SUBSTAGE_ORDER.indexOf(group.broll_chain_substage)
+  if (failIdx < 0) return true
+  return failIdx <= BANNER_SUBSTAGE_ORDER.indexOf(pause)
+}
+
 export function BRollFailureBanner({ status, substage, pathId }) {
   const [dismissed, setDismissed] = useState(false)
   if (status !== 'failed') return null
@@ -95,6 +114,18 @@ export default function EditorView() {
   const navigate = useNavigate()
   const { data: groupDetail, loading, error, refetch: refetchDetail } = useApi(`/videos/groups/${id}/detail`)
   const { data: wordTimestamps, refetch: refetchTimestamps } = useApi(`/videos/groups/${id}/word-timestamps`)
+
+  // Direct-URL access (e.g. user opened /editor/267/brolls/edit in a fresh
+  // tab) bypasses resolveProjectRoute. Without this, hands-off failures
+  // would land in the editor with no failure UI (BRollFailureBanner
+  // suppresses for pre-pause failures because we expect the loader to
+  // catch them). Redirect to the processing screen so <FailedView>
+  // renders as designed.
+  useEffect(() => {
+    if (shouldRedirectFailedPrePause(groupDetail)) {
+      navigate(`/?step=processing&group=${id}`, { replace: true })
+    }
+  }, [groupDetail, id, navigate])
   const { state, dispatch, totalDuration, formatTime } = useEditorState()
   const [showRoughCutWarning, setShowRoughCutWarning] = useState(false)
   const [flowRunState, setFlowRunState] = useState(null)

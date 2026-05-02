@@ -279,11 +279,26 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
   return { strategyPipelineIds: allPipelineIds, combinedPipelineId }
 }
 
-// runPlanForEachVariant — extracted from POST /broll/pipeline/run-plan (broll.js:1063)
+// runPlanForEachVariant — fires executeCreatePlan once per strategy variant.
 //
-// Fires executeCreatePlan once per strategy variant. executeCreatePlan
-// generates its own pipelineId (plan-{videoId}-{Date.now()}); we snapshot the
-// progress map before/after each call to capture the new plan ID.
+// Plans run in parallel (Promise.all) and we read each one's pipelineId
+// from the resolved value of executeCreatePlan, which returns
+// `{ planPipelineId, ... }`. This is deterministic — every plan that
+// completes successfully ends up in planPipelineIds.
+//
+// Earlier versions polled brollPipelineProgress 500 ms after dispatch
+// to scrape the new plan-* entry. That race silently dropped plans
+// whose internal prep work took longer than 500 ms (saw 65s in
+// production for plan #3 on group 267 — only the favorite plan was
+// captured, so search ran on it alone and Variants B/C got zero
+// broll_searches rows). See docs/superpowers/plans/2026-05-02-broll-
+// followup-fixes.md Task 4.
+//
+// Failed plans are logged and skipped — their slot is omitted from the
+// returned planPipelineIds. Order matches strategyPipelineIds for
+// successful plans (Promise.all preserves array order in resolved
+// values, so we filter without re-ordering).
+//
 // Returns { planPipelineIds }.
 export async function runPlanForEachVariant({
   subGroupId, mainVideoId, prepPipelineId, strategyPipelineIds,
@@ -291,28 +306,22 @@ export async function runPlanForEachVariant({
   if (!prepPipelineId || !strategyPipelineIds?.length || !mainVideoId) {
     throw new Error('runPlanForEachVariant: prepPipelineId, strategyPipelineIds, and mainVideoId required')
   }
-  const { executeCreatePlan, brollPipelineProgress } = await import('./broll.js')
+  const { executeCreatePlan } = await import('./broll.js')
 
-  const planPipelineIds = []
-  for (const stratId of strategyPipelineIds) {
-    const beforeIds = new Set(brollPipelineProgress.keys())
+  const promises = strategyPipelineIds.map(stratId =>
+    executeCreatePlan(prepPipelineId, stratId, mainVideoId, subGroupId || null)
+      .then(result => ({ ok: true, planPipelineId: result.planPipelineId, stratId }))
+      .catch(err => {
+        console.error(`[broll-runner] Create plan failed for strategy ${stratId}: ${err.message}`)
+        return { ok: false, stratId, error: err.message }
+      })
+  )
 
-    const result = executeCreatePlan(prepPipelineId, stratId, mainVideoId, subGroupId || null)
-    result.catch(err => console.error(`[broll-runner] Create plan failed for strategy ${stratId}: ${err.message}`))
+  const results = await Promise.all(promises)
+  const planPipelineIds = results.filter(r => r.ok).map(r => r.planPipelineId)
 
-    // Wait briefly for executeCreatePlan to register its progress entry
-    await new Promise(r => setTimeout(r, 500))
-
-    let newPlanId = null
-    for (const [pid, prog] of brollPipelineProgress.entries()) {
-      if (beforeIds.has(pid)) continue
-      if (pid.startsWith('plan-') && prog.phase === 'create_plan') {
-        newPlanId = pid
-        break
-      }
-    }
-    if (newPlanId) planPipelineIds.push(newPlanId)
-    else console.warn(`[broll-runner] runPlanForEachVariant: no new plan-* pipeline registered for strategy ${stratId}`)
+  if (planPipelineIds.length < strategyPipelineIds.length) {
+    console.warn(`[broll-runner] runPlanForEachVariant: ${planPipelineIds.length}/${strategyPipelineIds.length} plans succeeded`)
   }
 
   return { planPipelineIds }
@@ -381,18 +390,21 @@ export async function waitForPipelinesComplete(
   throw new Error(`waitForPipelinesComplete: timed out after ${maxWaitMs}ms`)
 }
 
-// waitForSearchBatchComplete — resolves when every broll_searches row tagged
-// with this batch_id has left the waiting/running states. Polled because
-// the GPU search worker (server/services/broll-search-worker.js) writes
-// terminal status from another process — there is no in-memory signal
-// available here. Tolerates 0-row batches: count is 0 on first poll → resolve.
+// Polls until every broll_searches row in this batch has left the
+// waiting/running states, or until maxWaitMs elapses.
 //
-// Used by the upload chain to gate "batch N done" before enqueuing batch N+1.
-//
-// Spec: docs/superpowers/specs/2026-05-01-broll-sequential-batches-design.md
+// On timeout we log a warning and return (NOT throw). The reasoning:
+// the GPU worker processes placements serially in a separate process,
+// and a single slow placement (saw 11 min in production for one row)
+// can blow the per-batch budget. Hard-failing the chain in that case
+// aborts subsequent batches and the user gets nothing. By returning
+// soft we let the orchestrator continue; remaining placements keep
+// processing in the worker and the editor surfaces partial results
+// immediately. The 30-min default is enough for the typical 10-row
+// batch even with one slow outlier.
 export async function waitForSearchBatchComplete(searchPipelineId, {
   pollIntervalMs = 3000,
-  maxWaitMs = 15 * 60_000,
+  maxWaitMs = 30 * 60_000,
   isCancelled = null,
 } = {}) {
   const start = Date.now()
@@ -405,7 +417,7 @@ export async function waitForSearchBatchComplete(searchPipelineId, {
     if ((row?.n ?? 0) === 0) return
     await new Promise(r => setTimeout(r, pollIntervalMs))
   }
-  throw new Error(`waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId})`)
+  console.warn(`[broll-runner] waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId}) — proceeding with partial results; remaining placements will complete asynchronously`)
 }
 
 // runBrollSearchFirst10 — runs the unified keywords + GPU search batch
