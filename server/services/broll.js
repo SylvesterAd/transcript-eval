@@ -178,7 +178,7 @@ export function extractJSON(text) {
 
 // Parse output from a prior stage with the lenient extractJSON path.
 // On failure, throw an error tagged with the upstream stageIndex so the
-// pipeline catch in executePipeline (~line 331) can delete that row and
+// pipeline catch in executePipeline can delete that row and
 // let resume re-run the stage. Pass stageIndex=null when the caller is
 // using a non-stage source (e.g. llmAnswer fallback) — no row to invalidate.
 //
