@@ -39,7 +39,11 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
     'SELECT duration_seconds FROM videos WHERE group_id = ?'
   ).all(groupId)
   const totalDuration = videos.reduce((sum, v) => sum + (v.duration_seconds || 0), 0)
-  const tokenCost = estimateTokenCost(totalDuration)
+  // Estimator returns 0 when duration is unknown (preview-time signal).
+  // At deduction time we still charge a 1-token minimum to prevent
+  // free runs on edge-case zero-duration data — paranoia, since the
+  // route guards against starting a run on a group with no videos.
+  const tokenCost = Math.max(1, estimateTokenCost(totalDuration))
 
   // Transactional token deduction.
   const client = await db.pool.connect()

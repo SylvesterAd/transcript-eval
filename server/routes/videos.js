@@ -1639,16 +1639,29 @@ router.post('/stream/create-upload', requireAuth, async (req, res) => {
   }
 })
 
+// Sanitize a client-supplied duration_seconds into a finite positive integer
+// or null. The client probes via HTML5 <video>; some containers/codecs
+// report Infinity, NaN, or a negative on edge cases. Server-side
+// processVideoMetadata still runs as the canonical source — this is a
+// preview hint that lets the rough-cut estimator be accurate from t≈0.
+function sanitizeDurationSeconds(value) {
+  if (value == null) return null
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.round(n)
+}
+
 // Register a video already uploaded to Supabase Storage (direct browser upload)
-router.post('/register', requireAuth, async (req, res) => {
+export async function _registerVideoHandler(req, res) {
   try {
-    const { file_url, filename, title, group_id, video_type = 'raw', file_size, link_video_id, cf_stream_uid } = req.body
+    const { file_url, filename, title, group_id, video_type = 'raw', file_size, link_video_id, cf_stream_uid, duration_seconds } = req.body
 
     if (!file_url && !cf_stream_uid) return res.status(400).json({ error: 'file_url or cf_stream_uid is required' })
 
     // For CF-only uploads, derive file_path from the CF MP4 URL
     const effectiveFileUrl = file_url || (cf_stream_uid ? cfMp4Url(cf_stream_uid) : null)
     const videoName = title || filename || 'Untitled'
+    const cleanDuration = sanitizeDurationSeconds(duration_seconds)
 
     // Create or use group
     let finalGroupId = group_id ? parseInt(group_id) : null
@@ -1667,13 +1680,15 @@ router.post('/register', requireAuth, async (req, res) => {
       }
     }
 
-    // Insert video record (metadata will be filled in background)
+    // Insert video record. duration_seconds is set from the client probe when
+    // provided (instant); processVideoMetadata later overwrites with the
+    // authoritative ffprobe/CF Stream value.
     const result = await db.prepare(
-      'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json, cf_stream_uid) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(videoName, effectiveFileUrl, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null, cf_stream_uid || null)
+      'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json, cf_stream_uid, duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(videoName, effectiveFileUrl, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null, cf_stream_uid || null, cleanDuration)
 
     const videoId = result.lastInsertRowid
-    console.log(`[register] Video registered: id=${videoId}, title="${videoName}", cf_stream=${cf_stream_uid || 'none'}`)
+    console.log(`[register] Video registered: id=${videoId}, title="${videoName}", cf_stream=${cf_stream_uid || 'none'}, duration=${cleanDuration ?? 'unknown'}s`)
 
     // Background: all run in parallel — don't wait for metadata before transcribing
     processVideoMetadata(videoId).catch(err => console.error(`[register] Metadata failed for video ${videoId}:`, err.message))
@@ -1688,7 +1703,9 @@ router.post('/register', requireAuth, async (req, res) => {
     console.error('[register] Error:', err)
     res.status(500).json({ error: err.message || 'Registration failed' })
   }
-})
+}
+
+router.post('/register', requireAuth, _registerVideoHandler)
 
 // Upload video file + transcribe (legacy: small files via multer)
 router.post('/upload', requireAuth, handleUpload('video'), async (req, res) => {

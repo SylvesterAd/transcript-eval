@@ -13,6 +13,42 @@ const VIDEO_ACCEPT = VIDEO_EXTS.join(',')
 const SCRIPT_ACCEPT = SCRIPT_EXTS.join(',')
 const MAX_SIZE = 50 * 1024 * 1024 * 1024 // 50GB
 
+// Probe a video file's duration locally before upload starts. Reads only
+// the moov atom via an HTML5 <video> element + blob URL — no bytes are
+// uploaded, no extra deps. Returns the duration in seconds, or null when
+// the browser can't decode the container (rare formats, corrupted files,
+// or live-style MSE streams that report Infinity until seek).
+//
+// Used by validateAndAddFiles to attach durationSeconds to each file
+// entry; the value is then forwarded to /videos/register so the rough-
+// cut estimator has accurate data from t≈0 instead of waiting ~30-90 s
+// for Cloudflare Stream to report it server-side.
+//
+// The optional opts arg lets unit tests inject mock factories — see
+// __tests__/UploadModal-probe-duration.test.js. Production callers omit
+// opts and use the default DOM factories.
+export function probeDuration(file, opts = {}) {
+  const _createElement = opts._createElement || ((tag) => document.createElement(tag))
+  const _createObjectURL = opts._createObjectURL || ((f) => URL.createObjectURL(f))
+  const _revokeObjectURL = opts._revokeObjectURL || ((u) => URL.revokeObjectURL(u))
+
+  return new Promise((resolve) => {
+    const url = _createObjectURL(file)
+    const v = _createElement('video')
+    v.preload = 'metadata'
+    v.onloadedmetadata = () => {
+      const dur = Number.isFinite(v.duration) ? v.duration : null
+      _revokeObjectURL(url)
+      resolve(dur)
+    }
+    v.onerror = () => {
+      _revokeObjectURL(url)
+      resolve(null)
+    }
+    v.src = url
+  })
+}
+
 export default function UploadModal({ onClose, onComplete, initialGroupId, onFilesChange }) {
   const [files, _setFiles] = useState([])
   const setFiles = useCallback((updater) => {
@@ -128,6 +164,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         video_type: 'raw',
         file_size: entry.file.size,
         cf_stream_uid: cfStreamUid,
+        duration_seconds: entry.durationSeconds ?? null,
       })
 
       setFiles(prev => prev.map(f =>
@@ -164,20 +201,32 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
       const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8)
 
       if (!exts.includes(ext)) {
-        entries.push({ id, name: file.name, file, type, status: 'error', progress: 0, error: errorMsg, xhr: null, serverId: null })
+        entries.push({ id, name: file.name, file, type, status: 'error', progress: 0, error: errorMsg, xhr: null, serverId: null, durationSeconds: null })
         continue
       }
       if (file.size > MAX_SIZE) {
-        entries.push({ id, name: file.name, file, type, status: 'error', progress: 0, error: 'File too large (max 50GB)', xhr: null, serverId: null })
+        entries.push({ id, name: file.name, file, type, status: 'error', progress: 0, error: 'File too large (max 50GB)', xhr: null, serverId: null, durationSeconds: null })
         continue
       }
 
-      entries.push({ id, name: file.name, file, type, status: 'uploading', progress: 0, error: null, xhr: null, serverId: null })
+      entries.push({ id, name: file.name, file, type, status: 'uploading', progress: 0, error: null, xhr: null, serverId: null, durationSeconds: null })
     }
 
     setFiles(prev => [...prev, ...entries])
-    // Upload files sequentially to avoid overwhelming Supabase
+
+    // Probe duration in parallel for every video entry in this batch (no I/O,
+    // just local moov-atom read), then start uploads. Probe failures are
+    // non-fatal — the entry uploads with durationSeconds=null and the server-
+    // side ffprobe/CF Stream path fills it in later as a fallback.
     ;(async () => {
+      await Promise.all(entries.map(async (entry) => {
+        if (entry.status !== 'uploading' || entry.type !== 'video') return
+        const dur = await probeDuration(entry.file)
+        if (dur != null) {
+          entry.durationSeconds = Math.round(dur)
+          setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, durationSeconds: entry.durationSeconds } : f))
+        }
+      }))
       for (const entry of entries) {
         if (entry.status === 'uploading') await startUpload(entry)
       }
