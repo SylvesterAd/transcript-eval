@@ -12,6 +12,26 @@ const MAX_SIZE = 50 * 1024 * 1024 * 1024
 // Pure helpers — exported for unit tests in __tests__/ProcessingModal-stages.test.jsx
 // ---------------------------------------------------------------------------
 
+// Per-path pause-point mapping — mirrors src/lib/projectRoute.js so the
+// modal's "failed" branch matches the routing decision exactly.
+const PATH_PAUSE_SUBSTAGE = {
+  'hands-off': null,
+  'strategy-only': 'strategy',
+  'guided': 'plan',
+}
+const SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
+
+function isFailedPrePause(sg, parentPathId) {
+  if (sg.broll_chain_status !== 'failed') return false
+  const pathId = sg.path_id || parentPathId
+  if (!Object.prototype.hasOwnProperty.call(PATH_PAUSE_SUBSTAGE, pathId)) return false
+  const pause = PATH_PAUSE_SUBSTAGE[pathId]
+  if (pause === null) return true
+  const failIdx = SUBSTAGE_ORDER.indexOf(sg.broll_chain_substage)
+  if (failIdx < 0) return true
+  return failIdx <= SUBSTAGE_ORDER.indexOf(pause)
+}
+
 export function deriveMode({ parent, files = [], subGroups = [] }) {
   const anyUploading = files.some(f => f.status === 'uploading')
   if (anyUploading) return 'uploading'
@@ -23,7 +43,13 @@ export function deriveMode({ parent, files = [], subGroups = [] }) {
     (parent.auto_rough_cut === false || sg.rough_cut_status === 'done' || sg.rough_cut_status === 'failed' || sg.rough_cut_status === 'insufficient_tokens') &&
     (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed' || sg.broll_chain_status === 'paused_at_strategy' || sg.broll_chain_status === 'paused_at_plan')
   )
-  return allTerminal ? 'done' : 'pipeline'
+  if (!allTerminal) return 'pipeline'
+  // Promote the pre-pause failure to its own mode so the loader can
+  // render <FailedView> with a Contact Support CTA. Post-pause and
+  // null-path failures fall through to 'done' and get a banner in the
+  // editor instead.
+  if (subGroups.some(sg => isFailedPrePause(sg, parent?.path_id))) return 'failed'
+  return 'done'
 }
 
 export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {

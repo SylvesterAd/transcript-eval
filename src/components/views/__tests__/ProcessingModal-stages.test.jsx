@@ -14,6 +14,42 @@ describe('deriveMode', () => {
     const state = { parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', auto_rough_cut: true }, subGroups: [{ assembly_status: 'done', rough_cut_status: 'done', broll_chain_status: 'done' }], files: [{ status: 'complete' }] }
     expect(deriveMode(state)).toBe('done')
   })
+
+  it('returns "failed" when hands-off sub-group is failed at any substage', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'hands-off', auto_rough_cut: false },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: null, broll_chain_status: 'failed', broll_chain_substage: 'refs', path_id: 'hands-off' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('failed')
+  })
+
+  it('returns "failed" when strategy-only sub-group is failed at strategy substage', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'strategy-only', auto_rough_cut: false },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: null, broll_chain_status: 'failed', broll_chain_substage: 'strategy', path_id: 'strategy-only' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('failed')
+  })
+
+  it('returns "done" (not "failed") when strategy-only sub-group failed at search (post-pause)', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'strategy-only', auto_rough_cut: false },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: null, broll_chain_status: 'failed', broll_chain_substage: 'search', path_id: 'strategy-only' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('done')
+  })
+
+  it('returns "done" when all sub-groups are truly done', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'hands-off', auto_rough_cut: false },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: null, broll_chain_status: 'done', path_id: 'hands-off' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('done')
+  })
 })
 
 describe('deriveStages', () => {
