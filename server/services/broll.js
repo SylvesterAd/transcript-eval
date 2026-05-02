@@ -4674,11 +4674,15 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           currentTranscript = reassembleSegments(segments)
           output = currentTranscript
         } else if (action === 'build_time_windows') {
-          // Parse A-Roll + Chapters JSON and split into equal-length ~1 min windows
-          const chaptersSource = params.chaptersStageIndex != null ? stageOutputs[params.chaptersStageIndex] : (llmAnswers[1] || llmAnswer)
-          const stage1 = chaptersSource
-          let parsed
-          try { parsed = JSON.parse(stage1) } catch { parsed = extractJSON(stage1) }
+          // Parse A-Roll + Chapters JSON and split into equal-length ~1 min windows.
+          // parsePriorStage tags errors with the upstream stageIndex so executePipeline's
+          // catch can delete that row and let resume re-run it (Flash JSON failures
+          // are non-deterministic; one re-roll usually clears them).
+          const upstreamIdx = params.chaptersStageIndex != null ? params.chaptersStageIndex : null
+          const chaptersSource = upstreamIdx != null
+            ? stageOutputs[upstreamIdx]
+            : (llmAnswers[1] || llmAnswer)
+          const parsed = parsePriorStage(chaptersSource, upstreamIdx)
           normalizeTimestamps(parsed)
           // Get duration from the actual video file
           const windowVideoId = stage._videoId || effectiveExamples[0]?.id
