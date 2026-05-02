@@ -612,6 +612,10 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
           </div>
         )}
 
+        {mode === 'failed' && (
+          <FailedView subGroups={subGroups} />
+        )}
+
         {mode === 'done' && (
           <DoneView subGroups={subGroups} navigate={navigate} onComplete={handleComplete} />
         )}
@@ -854,6 +858,47 @@ function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
         )
       })}
     </div>
+  )
+}
+
+export function FailedView({ subGroups = [] }) {
+  // Pick the first failed sub-group's substage for the hint. If there are
+  // multiple failed sub-groups (rare), the first one is representative
+  // enough; the user is going to support either way.
+  const failed = subGroups.find(sg => sg.broll_chain_status === 'failed') || subGroups[0]
+  const substage = failed?.broll_chain_substage || 'reference analysis'
+  const editorHref = `/editor/${failed?.id}/assets`
+  const supportHref = 'mailto:silvestras.stonk@gmail.com?subject=B-Roll%20generation%20failed'
+
+  return (
+    <>
+      <div className="text-center p-8 pb-4">
+        <span className="inline-flex w-14 h-14 rounded-full bg-red-400/15 items-center justify-center">
+          <span className="material-symbols-outlined text-red-400 text-3xl">error</span>
+        </span>
+        <h1 className="font-extrabold text-3xl lg:text-4xl text-on-surface tracking-tight mt-4">
+          Something went wrong
+        </h1>
+        <p className="text-on-surface-variant opacity-80 mt-2">
+          B-roll generation failed during the <span className="font-medium text-on-surface">{substage}</span> stage. Please contact support — we'll take a look.
+        </p>
+      </div>
+
+      <div className="px-8 pb-4 space-y-3">
+        <a
+          href={supportHref}
+          className="block w-full p-5 rounded-2xl bg-primary-container text-on-primary-fixed font-bold text-sm uppercase tracking-wider hover:opacity-90 transition-opacity text-center"
+        >
+          Contact support
+        </a>
+        <a
+          href={editorHref}
+          className="block w-full p-3 text-on-surface-variant text-xs uppercase tracking-wider hover:text-on-surface text-center"
+        >
+          Continue to editor anyway
+        </a>
+      </div>
+    </>
   )
 }
 

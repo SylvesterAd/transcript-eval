@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest'
-import { deriveMode, deriveStages } from '../ProcessingModal.jsx'
+import { describe, it, expect, afterEach } from 'vitest'
+import { render, screen, cleanup } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { deriveMode, deriveStages, FailedView } from '../ProcessingModal.jsx'
 
 describe('deriveMode', () => {
   it('returns uploading when any file is still uploading', () => {
@@ -85,5 +87,42 @@ describe('deriveStages', () => {
     const c = stages.find(s => s.id === 'classify')
     expect(c.paused).toBe(false)
     expect(c.done).toBe(true)
+  })
+})
+
+describe('<FailedView />', () => {
+  // RTL doesn't auto-cleanup without @testing-library/jest-dom or vitest's
+  // globals enabled, so we unmount manually between tests to keep
+  // screen.* queries scoped to the latest render.
+  afterEach(() => cleanup())
+
+  function renderWithRouter(ui) {
+    return render(<MemoryRouter>{ui}</MemoryRouter>)
+  }
+
+  it('renders headline and contact-support CTA', () => {
+    renderWithRouter(
+      <FailedView subGroups={[{ id: 9, broll_chain_substage: 'refs' }]} />,
+    )
+    // getByText/getByRole throw when nothing matches, so a truthy check
+    // is sufficient — matches the intent of toBeInTheDocument without
+    // requiring @testing-library/jest-dom (not installed).
+    expect(screen.getByText(/something went wrong/i)).toBeTruthy()
+    expect(screen.getByRole('link', { name: /contact support/i })).toBeTruthy()
+  })
+
+  it('mentions the substage where the chain broke', () => {
+    renderWithRouter(
+      <FailedView subGroups={[{ id: 9, broll_chain_substage: 'strategy' }]} />,
+    )
+    expect(screen.getByText(/strategy/i)).toBeTruthy()
+  })
+
+  it('renders an escape-hatch link to the editor', () => {
+    renderWithRouter(
+      <FailedView subGroups={[{ id: 9, broll_chain_substage: 'refs' }]} />,
+    )
+    const link = screen.getByRole('link', { name: /continue to editor/i })
+    expect(link.getAttribute('href')).toBe('/editor/9/assets')
   })
 })
