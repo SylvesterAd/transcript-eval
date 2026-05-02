@@ -381,18 +381,21 @@ export async function waitForPipelinesComplete(
   throw new Error(`waitForPipelinesComplete: timed out after ${maxWaitMs}ms`)
 }
 
-// waitForSearchBatchComplete — resolves when every broll_searches row tagged
-// with this batch_id has left the waiting/running states. Polled because
-// the GPU search worker (server/services/broll-search-worker.js) writes
-// terminal status from another process — there is no in-memory signal
-// available here. Tolerates 0-row batches: count is 0 on first poll → resolve.
+// Polls until every broll_searches row in this batch has left the
+// waiting/running states, or until maxWaitMs elapses.
 //
-// Used by the upload chain to gate "batch N done" before enqueuing batch N+1.
-//
-// Spec: docs/superpowers/specs/2026-05-01-broll-sequential-batches-design.md
+// On timeout we log a warning and return (NOT throw). The reasoning:
+// the GPU worker processes placements serially in a separate process,
+// and a single slow placement (saw 11 min in production for one row)
+// can blow the per-batch budget. Hard-failing the chain in that case
+// aborts subsequent batches and the user gets nothing. By returning
+// soft we let the orchestrator continue; remaining placements keep
+// processing in the worker and the editor surfaces partial results
+// immediately. The 30-min default is enough for the typical 10-row
+// batch even with one slow outlier.
 export async function waitForSearchBatchComplete(searchPipelineId, {
   pollIntervalMs = 3000,
-  maxWaitMs = 15 * 60_000,
+  maxWaitMs = 30 * 60_000,
   isCancelled = null,
 } = {}) {
   const start = Date.now()
@@ -405,7 +408,7 @@ export async function waitForSearchBatchComplete(searchPipelineId, {
     if ((row?.n ?? 0) === 0) return
     await new Promise(r => setTimeout(r, pollIntervalMs))
   }
-  throw new Error(`waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId})`)
+  console.warn(`[broll-runner] waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId}) — proceeding with partial results; remaining placements will complete asynchronously`)
 }
 
 // runBrollSearchFirst10 — runs the unified keywords + GPU search batch

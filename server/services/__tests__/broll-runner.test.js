@@ -297,14 +297,19 @@ describe('waitForSearchBatchComplete', () => {
     ).resolves.toBeUndefined()
   })
 
-  it('rejects on timeout when count never drains', async () => {
+  it('returns silently with a warn log on timeout when count never drains', async () => {
     const { waitForSearchBatchComplete } = await import('../broll-runner.js?wfsbc3=' + Date.now())
     // Always returns 5 — never drains
     state.batchCountSeq = []
     state.batchCountAlways = 5
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     await expect(
       waitForSearchBatchComplete('search-batch-stuck', { pollIntervalMs: 10, maxWaitMs: 50 })
-    ).rejects.toThrow(/timed out/)
+    ).resolves.toBeUndefined()
+    expect(warnSpy).toHaveBeenCalled()
+    const warnMsg = warnSpy.mock.calls.map(c => c.join(' ')).join('\n')
+    expect(warnMsg).toMatch(/timed out|search-batch-stuck/i)
+    warnSpy.mockRestore()
     state.batchCountAlways = undefined
   })
 
