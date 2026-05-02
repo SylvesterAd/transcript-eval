@@ -104,9 +104,14 @@ describe('resolveProjectRoute', () => {
         .toBe('/editor/42/assets')
     })
 
-    it('routes to editor when broll_chain_status is failed (auto path)', () => {
+    it('routes to editor when broll_chain_status is failed post-pause (auto path)', () => {
+      // Failure at substage 'search' on a 'guided' path is post-pause
+      // (user already picked a plan). Pre-pause failures route to the
+      // processing loader instead — see "failed-pre-pause routing per
+      // path" describe block.
       expect(resolveProjectRoute({
-        ...READY, id: 42, broll_chain_status: 'failed',
+        ...READY, id: 42, path_id: 'guided',
+        broll_chain_status: 'failed', broll_chain_substage: 'search',
       })).toBe('/editor/42/assets')
     })
 
@@ -162,6 +167,92 @@ describe('resolveProjectRoute', () => {
         ...READY, id: 256, assembly_status: 'done',
         path_id: 'hands-off', broll_chain_status: null,
       })).toBe('/?step=processing&group=256')
+    })
+  })
+
+  describe('failed-pre-pause routing per path', () => {
+    it('hands-off failed at refs → processing (Full Auto user expects everything)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'hands-off',
+        broll_chain_status: 'failed', broll_chain_substage: 'refs',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('hands-off failed at strategy → processing', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'hands-off',
+        broll_chain_status: 'failed', broll_chain_substage: 'strategy',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('hands-off failed at search → processing (still pre-"done" for Full Auto)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'hands-off',
+        broll_chain_status: 'failed', broll_chain_substage: 'search',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('strategy-only failed at refs → processing (no strategy to pick yet)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'strategy-only',
+        broll_chain_status: 'failed', broll_chain_substage: 'refs',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('strategy-only failed at strategy → processing (still no strategy to pick)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'strategy-only',
+        broll_chain_status: 'failed', broll_chain_substage: 'strategy',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('strategy-only failed at plan → editor (user already picked strategy)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'strategy-only',
+        broll_chain_status: 'failed', broll_chain_substage: 'plan',
+      })).toBe('/editor/7/assets')
+    })
+
+    it('strategy-only failed at search → editor', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'strategy-only',
+        broll_chain_status: 'failed', broll_chain_substage: 'search',
+      })).toBe('/editor/7/assets')
+    })
+
+    it('guided failed at plan → processing (no plan to pick yet)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'guided',
+        broll_chain_status: 'failed', broll_chain_substage: 'plan',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('guided failed at search → editor (user already picked plan)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'guided',
+        broll_chain_status: 'failed', broll_chain_substage: 'search',
+      })).toBe('/editor/7/assets')
+    })
+
+    it('null path failed → editor (manual mode, no auto-chain expected)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: null,
+        broll_chain_status: 'failed', broll_chain_substage: 'refs',
+      })).toBe('/editor/7/assets')
+    })
+
+    it('paused_at_strategy still routes to editor (intentional checkpoint)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'strategy-only',
+        broll_chain_status: 'paused_at_strategy', broll_chain_substage: 'strategy',
+      })).toBe('/editor/7/assets')
+    })
+
+    it('paused_at_plan still routes to editor (intentional checkpoint)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'guided',
+        broll_chain_status: 'paused_at_plan', broll_chain_substage: 'plan',
+      })).toBe('/editor/7/assets')
     })
   })
 })
