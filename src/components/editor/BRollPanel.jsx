@@ -491,11 +491,8 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
       })
     }
 
-    // Sort: per-reference plans first (alphabetical by strategyPipelineId), combined last.
-    // Match strategyVariants.sort() so plan order mirrors strategy order, and so
-    // variants[0] in BRollEditor lands on the favorite during the initial render —
-    // before pathId arrives and pickHandsOffVariant can run. See sortPlanVariants
-    // export at top of file for full reasoning.
+    // Sort so variants[0] in BRollEditor lands on the favorite during the initial
+    // render — see sortPlanVariants export at top of file for full reasoning.
     const sortedVariants = sortPlanVariants(variants)
 
     // Assign labels matching strategy variant letters
