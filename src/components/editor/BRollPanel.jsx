@@ -37,11 +37,8 @@ function formatDuration(sec) {
 // Why: planVariants is built by iterating Object.entries(pipelineMap), and pipelineMap
 // is keyed by first-appearance in videoRuns (which the API returns ORDER BY created_at
 // DESC). The combined plan typically finishes last, so without this sort it ends up at
-// index 0. BRollEditor's variants useMemo only collapses to the favorite via
-// pickHandsOffVariant when pathId === 'hands-off' AND that pathId has loaded — on the
-// initial render groupDetail is still loading, so variants[0] becomes the combined plan
-// and the editor briefly fetches editor-data for the wrong pipeline. Sorting here means
-// variants[0] is the favorite even before pathId arrives.
+// index 0. BRollEditor renders the picker with activeVariantIdx=0 by default, so the
+// sort here ensures the favorite-reference plan is the default-selected variant.
 export function sortPlanVariants(variants) {
   return [...variants].sort((a, b) => {
     const aCombined = !!a.stratVariant?.isCombined
