@@ -30,6 +30,34 @@ function formatDuration(sec) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+// Sort plan variants the same way strategyVariants is sorted (see the variants.sort
+// at BRollPanel.planVariants → strategyVariants useMemo): per-reference plans first
+// in alphabetical order by strategyPipelineId, combined last.
+//
+// Why: planVariants is built by iterating Object.entries(pipelineMap), and pipelineMap
+// is keyed by first-appearance in videoRuns (which the API returns ORDER BY created_at
+// DESC). The combined plan typically finishes last, so without this sort it ends up at
+// index 0. BRollEditor's variants useMemo only collapses to the favorite via
+// pickHandsOffVariant when pathId === 'hands-off' AND that pathId has loaded — on the
+// initial render groupDetail is still loading, so variants[0] becomes the combined plan
+// and the editor briefly fetches editor-data for the wrong pipeline. Sorting here means
+// variants[0] is the favorite even before pathId arrives.
+export function sortPlanVariants(variants) {
+  return [...variants].sort((a, b) => {
+    const aCombined = !!a.stratVariant?.isCombined
+    const bCombined = !!b.stratVariant?.isCombined
+    if (aCombined && !bCombined) return 1
+    if (!aCombined && bCombined) return -1
+    // Among non-combined: sort by strategyPipelineId alphabetically; null/empty sorts last
+    const aId = a.strategyPipelineId || null
+    const bId = b.strategyPipelineId || null
+    if (aId === null && bId === null) return 0
+    if (aId === null) return 1
+    if (bId === null) return -1
+    return aId.localeCompare(bId)
+  })
+}
+
 export default function BRollPanel({ groupId, videoId, sub, detail }) {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -463,20 +491,24 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
       })
     }
 
+    // Sort so variants[0] in BRollEditor lands on the favorite during the initial
+    // render — see sortPlanVariants export at top of file for full reasoning.
+    const sortedVariants = sortPlanVariants(variants)
+
     // Assign labels matching strategy variant letters
-    for (const v of variants) {
+    for (const v of sortedVariants) {
       if (v.stratVariant) {
         v.label = v.stratVariant.label
         v.isCombined = v.stratVariant.isCombined
         v.refSource = v.stratVariant.refSource
       } else {
-        v.label = `Plan ${variants.indexOf(v) + 1}`
+        v.label = `Plan ${sortedVariants.indexOf(v) + 1}`
         v.isCombined = false
         v.refSource = null
       }
     }
 
-    return variants
+    return sortedVariants
   }, [videoRuns, pipelineMap, strategyVariants, mainVideoChapters])
 
   // Check for completed plan (new style)
