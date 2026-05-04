@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { sortPlanVariants } from '../BRollPanel.jsx'
+import { sortPlanVariants, filterVariantsWithPlacements } from '../BRollPanel.jsx'
 
 describe('sortPlanVariants', () => {
   it('puts per-reference plans before the combined plan', () => {
@@ -70,5 +70,43 @@ describe('sortPlanVariants', () => {
     ]
     const sorted = sortPlanVariants(input)
     expect(sorted.map(v => v.pipelineId)).toEqual(['plan-fav', 'plan-empty'])
+  })
+})
+
+describe('filterVariantsWithPlacements', () => {
+  it('drops variants with zero placements', () => {
+    const input = [
+      { pipelineId: 'plan-a', totalPlacements: 41 },
+      { pipelineId: 'plan-empty', totalPlacements: 0 },
+      { pipelineId: 'plan-b', totalPlacements: 12 },
+    ]
+    const filtered = filterVariantsWithPlacements(input)
+    expect(filtered.map(v => v.pipelineId)).toEqual(['plan-a', 'plan-b'])
+  })
+
+  it('keeps all variants when every variant has placements', () => {
+    const input = [
+      { pipelineId: 'plan-a', totalPlacements: 5 },
+      { pipelineId: 'plan-b', totalPlacements: 1 },
+    ]
+    const filtered = filterVariantsWithPlacements(input)
+    expect(filtered).toHaveLength(2)
+  })
+
+  it('treats missing or non-numeric totalPlacements as zero', () => {
+    // Defensive: a partially-built variant from a parser hiccup shouldn't
+    // surface a label-only tab with no content.
+    const input = [
+      { pipelineId: 'plan-undefined' },
+      { pipelineId: 'plan-null', totalPlacements: null },
+      { pipelineId: 'plan-string', totalPlacements: 'lots' },
+      { pipelineId: 'plan-real', totalPlacements: 3 },
+    ]
+    const filtered = filterVariantsWithPlacements(input)
+    expect(filtered.map(v => v.pipelineId)).toEqual(['plan-real'])
+  })
+
+  it('returns empty array unchanged', () => {
+    expect(filterVariantsWithPlacements([])).toEqual([])
   })
 })

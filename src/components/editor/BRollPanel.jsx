@@ -37,11 +37,8 @@ function formatDuration(sec) {
 // Why: planVariants is built by iterating Object.entries(pipelineMap), and pipelineMap
 // is keyed by first-appearance in videoRuns (which the API returns ORDER BY created_at
 // DESC). The combined plan typically finishes last, so without this sort it ends up at
-// index 0. BRollEditor's variants useMemo only collapses to the favorite via
-// pickHandsOffVariant when pathId === 'hands-off' AND that pathId has loaded — on the
-// initial render groupDetail is still loading, so variants[0] becomes the combined plan
-// and the editor briefly fetches editor-data for the wrong pipeline. Sorting here means
-// variants[0] is the favorite even before pathId arrives.
+// index 0. BRollEditor renders the picker with activeVariantIdx=0 by default, so the
+// sort here ensures the favorite-reference plan is the default-selected variant.
 export function sortPlanVariants(variants) {
   return [...variants].sort((a, b) => {
     const aCombined = !!a.stratVariant?.isCombined
@@ -56,6 +53,15 @@ export function sortPlanVariants(variants) {
     if (bId === null) return -1
     return aId.localeCompare(bId)
   })
+}
+
+// Drop variants whose plan generation produced no placements. A `complete`
+// pipeline status doesn't guarantee non-empty placements — a parser hiccup or
+// an LLM that returned an empty array would otherwise surface as a labeled
+// tab with no content. Keep the filter pure and exported so the UI layer can
+// rely on `planVariants` only containing renderable entries.
+export function filterVariantsWithPlacements(variants) {
+  return variants.filter(v => Number.isFinite(v?.totalPlacements) && v.totalPlacements > 0)
 }
 
 export default function BRollPanel({ groupId, videoId, sub, detail }) {
@@ -495,20 +501,24 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
     // render — see sortPlanVariants export at top of file for full reasoning.
     const sortedVariants = sortPlanVariants(variants)
 
+    // Drop variants with zero placements — see filterVariantsWithPlacements
+    // export at top of file for full reasoning.
+    const renderableVariants = filterVariantsWithPlacements(sortedVariants)
+
     // Assign labels matching strategy variant letters
-    for (const v of sortedVariants) {
+    for (const v of renderableVariants) {
       if (v.stratVariant) {
         v.label = v.stratVariant.label
         v.isCombined = v.stratVariant.isCombined
         v.refSource = v.stratVariant.refSource
       } else {
-        v.label = `Plan ${sortedVariants.indexOf(v) + 1}`
+        v.label = `Plan ${renderableVariants.indexOf(v) + 1}`
         v.isCombined = false
         v.refSource = null
       }
     }
 
-    return sortedVariants
+    return renderableVariants
   }, [videoRuns, pipelineMap, strategyVariants, mainVideoChapters])
 
   // Check for completed plan (new style)
