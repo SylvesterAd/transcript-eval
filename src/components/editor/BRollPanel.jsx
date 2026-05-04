@@ -58,6 +58,15 @@ export function sortPlanVariants(variants) {
   })
 }
 
+// Drop variants whose plan generation produced no placements. A `complete`
+// pipeline status doesn't guarantee non-empty placements — a parser hiccup or
+// an LLM that returned an empty array would otherwise surface as a labeled
+// tab with no content. Keep the filter pure and exported so the UI layer can
+// rely on `planVariants` only containing renderable entries.
+export function filterVariantsWithPlacements(variants) {
+  return variants.filter(v => Number.isFinite(v?.totalPlacements) && v.totalPlacements > 0)
+}
+
 export default function BRollPanel({ groupId, videoId, sub, detail }) {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -495,20 +504,24 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
     // render — see sortPlanVariants export at top of file for full reasoning.
     const sortedVariants = sortPlanVariants(variants)
 
+    // Drop variants with zero placements — see filterVariantsWithPlacements
+    // export at top of file for full reasoning.
+    const renderableVariants = filterVariantsWithPlacements(sortedVariants)
+
     // Assign labels matching strategy variant letters
-    for (const v of sortedVariants) {
+    for (const v of renderableVariants) {
       if (v.stratVariant) {
         v.label = v.stratVariant.label
         v.isCombined = v.stratVariant.isCombined
         v.refSource = v.stratVariant.refSource
       } else {
-        v.label = `Plan ${sortedVariants.indexOf(v) + 1}`
+        v.label = `Plan ${renderableVariants.indexOf(v) + 1}`
         v.isCombined = false
         v.refSource = null
       }
     }
 
-    return sortedVariants
+    return renderableVariants
   }, [videoRuns, pipelineMap, strategyVariants, mainVideoChapters])
 
   // Check for completed plan (new style)
