@@ -32,9 +32,9 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   // a clean view without any path-based logic here.
   const variants = useMemo(() => {
     if (planVariantsProp?.length) {
-      return planVariantsProp.map(v => ({
+      return planVariantsProp.map((v, i) => ({
         id: v.pipelineId,
-        label: v.label || `Variant ${String.fromCharCode(65 + planVariantsProp.indexOf(v))}`,
+        label: v.label || `Variant ${String.fromCharCode(65 + i)}`,
       }))
     }
     if (!allPlanPipelineIds?.length) {
