@@ -4123,6 +4123,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     const perVideoResults = []
     let sTokensIn = 0, sTokensOut = 0, sCost = 0
     let lastResolved = { prompt: '', system: '' }
+    let lastApiKeyLast5 = null
 
     for (let e = 0; e < vids.length; e++) {
       if (abortedBrollPipelines.has(pipelineId)) break
@@ -4151,10 +4152,11 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       sTokensIn += result.tokensIn || 0
       sTokensOut += result.tokensOut || 0
       sCost += result.cost || 0
+      if (result.apiKeyLast5) lastApiKeyLast5 = result.apiKeyLast5
       lastResolved = { prompt: result._resolvedPrompt || '', system: result._resolvedSystem || '' }
     }
 
-    return { text: perVideoResults.join('\n\n'), tokensIn: sTokensIn, tokensOut: sTokensOut, cost: sCost, _resolvedPrompt: lastResolved.prompt, _resolvedSystem: lastResolved.system }
+    return { text: perVideoResults.join('\n\n'), tokensIn: sTokensIn, tokensOut: sTokensOut, cost: sCost, apiKeyLast5: lastApiKeyLast5, _resolvedPrompt: lastResolved.prompt, _resolvedSystem: lastResolved.system }
   }
 
   const pipelineStart = Date.now()
@@ -4494,6 +4496,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
         output = exResult.text
         resolvedPrompt = exResult._resolvedPrompt || ''; resolvedSystem = exResult._resolvedSystem || ''
         stageTokensIn += exResult.tokensIn || 0; stageTokensOut += exResult.tokensOut || 0; stageCost += exResult.cost || 0
+        if (exResult.apiKeyLast5) stageApiKeyLast5 = exResult.apiKeyLast5
         examplesOutput = output // update aggregated examples output
 
         if (isQuestion) {
