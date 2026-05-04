@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS spending_log (
   total_tokens INTEGER DEFAULT 0,
   total_runtime_ms INTEGER DEFAULT 0,
   source TEXT,
+  api_key_last5 TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

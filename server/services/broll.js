@@ -1382,7 +1382,7 @@ export async function executeAltPlans(planPipelineId) {
         console.log(`[broll-pipeline] ${altPipelineId} Stage ${i + 1}/${altStages.length}: ${stageName}`)
 
         let output = ''
-        let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0
+        let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0, stageApiKeyLast5 = null
         const stageStart = Date.now()
 
         if (stage.type === 'transcript_question' && stage.per_chapter) {
@@ -1437,7 +1437,7 @@ export async function executeAltPlans(planPipelineId) {
             chapterResults[c] = result.text
             stageTokensIn += result.tokensIn || 0
             stageTokensOut += result.tokensOut || 0
-            stageCost += result.cost || 0
+            stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
             completedChapters++
             brollPipelineProgress.set(altPipelineId, { ...brollPipelineProgress.get(altPipelineId), subDone: completedChapters, subTotal: chapterSplits.length, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
@@ -1488,7 +1488,7 @@ export async function executeAltPlans(planPipelineId) {
         )
 
         if (stageCost > 0 || stageTokensIn + stageTokensOut > 0) {
-          await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll alt-plan ${altPipelineId} stage ${i}`, new Date().toISOString())
+          await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll alt-plan ${altPipelineId} stage ${i}`, stageApiKeyLast5, new Date().toISOString())
         }
       }
 
@@ -1630,7 +1630,7 @@ export async function executeKeywords(planPipelineId) {
       )
 
       if ((result.cost || 0) > 0 || (result.tokensIn || 0) + (result.tokensOut || 0) > 0) {
-        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)').run(result.cost || 0, (result.tokensIn || 0) + (result.tokensOut || 0), 0, `broll keywords ${keywordsPipelineId} item ${idx}`, new Date().toISOString())
+        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(result.cost || 0, (result.tokensIn || 0) + (result.tokensOut || 0), 0, `broll keywords ${keywordsPipelineId} item ${idx}`, result.apiKeyLast5 || null, new Date().toISOString())
       }
     }
 
@@ -2747,7 +2747,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
       console.log(`[broll-pipeline] ${pipelineId} Stage ${i + 1}/${stages.length}: ${stageName}`)
 
       let output = ''
-      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0
+      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0, stageApiKeyLast5 = null
       const stageStart = Date.now()
 
       if (stage.type === 'transcript_question' && stage.per_chapter) {
@@ -2808,7 +2808,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
           chapterResults[c] = result.text
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
-          stageCost += result.cost || 0
+          stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
           completedChapters++
           brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subDone: completedChapters, subTotal: chapterSplits.length, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
@@ -2926,7 +2926,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
       )
 
       if (stageCost > 0 || stageTokensIn + stageTokensOut > 0) {
-        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-strategy ${pipelineId} stage ${i}`, new Date().toISOString())
+        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-strategy ${pipelineId} stage ${i}`, stageApiKeyLast5, new Date().toISOString())
       }
     }
 
@@ -3175,7 +3175,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
       console.log(`[broll-pipeline] ${pipelineId} Stage ${i + 1}/${stages.length}: ${stageName}`)
 
       let output = ''
-      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0
+      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0, stageApiKeyLast5 = null
       const stageStart = Date.now()
 
       if (stage.type === 'transcript_question' && stage.per_chapter) {
@@ -3230,7 +3230,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
           chapterResults[c] = result.text
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
-          stageCost += result.cost || 0
+          stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
           completedChapters++
           brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subDone: completedChapters, subTotal: chapterSplits.length, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
@@ -3482,7 +3482,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
       )
 
       if (stageCost > 0 || stageTokensIn + stageTokensOut > 0) {
-        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-combined-strategy ${pipelineId} stage ${i}`, new Date().toISOString())
+        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-combined-strategy ${pipelineId} stage ${i}`, stageApiKeyLast5, new Date().toISOString())
       }
     }
 
@@ -3716,7 +3716,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
       console.log(`[broll-pipeline] ${pipelineId} Stage ${i + 1}/${stages.length}: ${stageName}`)
 
       let output = ''
-      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0
+      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0, stageApiKeyLast5 = null
       const stageStart = Date.now()
 
       if (stage.type === 'transcript_question' && stage.per_chapter) {
@@ -3773,7 +3773,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
           chapterResults[c] = result.text
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
-          stageCost += result.cost || 0
+          stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
           completedChapters++
           brollPipelineProgress.set(pipelineId, { ...brollPipelineProgress.get(pipelineId), subDone: completedChapters, subTotal: chapterSplits.length, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}` })
 
@@ -3833,7 +3833,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
       )
 
       if (stageCost > 0 || stageTokensIn + stageTokensOut > 0) {
-        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-plan ${pipelineId} stage ${i}`, new Date().toISOString())
+        await db.prepare('INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll create-plan ${pipelineId} stage ${i}`, stageApiKeyLast5, new Date().toISOString())
       }
     }
 
@@ -4312,7 +4312,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
       const stageStart = Date.now()
       let output = ''
-      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0
+      let stageTokensIn = 0, stageTokensOut = 0, stageCost = 0, stageApiKeyLast5 = null
       let resolvedPrompt = '', resolvedSystem = ''
       const isVideoType = stage.type === 'video_llm' || stage.type === 'video_question'
       const isQuestion = stage.type === 'video_question' || stage.type === 'transcript_question'
@@ -4434,7 +4434,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
                 totalCost += result.cost || 0
                 stageTokensIn += result.tokensIn || 0
                 stageTokensOut += result.tokensOut || 0
-                stageCost += result.cost || 0
+                stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
 
                 await storeSubRun({
                   stageIndex: i, stageName, subIndex: w,
@@ -4511,7 +4511,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
         const result = await runLLMCall(stage, mainVideoFilePath, null, true)
         output = result.text
         resolvedPrompt = result._resolvedPrompt || ''; resolvedSystem = result._resolvedSystem || ''
-        stageTokensIn += result.tokensIn || 0; stageTokensOut += result.tokensOut || 0; stageCost += result.cost || 0
+        stageTokensIn += result.tokensIn || 0; stageTokensOut += result.tokensOut || 0; stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
         totalTokensIn += result.tokensIn || 0; totalTokensOut += result.tokensOut || 0; totalCost += result.cost || 0
 
         if (isQuestion) {
@@ -4526,7 +4526,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
         output = result.text
         resolvedPrompt = result._resolvedPrompt || ''; resolvedSystem = result._resolvedSystem || ''
         currentTranscript = output
-        stageTokensIn += result.tokensIn || 0; stageTokensOut += result.tokensOut || 0; stageCost += result.cost || 0
+        stageTokensIn += result.tokensIn || 0; stageTokensOut += result.tokensOut || 0; stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
         totalTokensIn += result.tokensIn || 0; totalTokensOut += result.tokensOut || 0; totalCost += result.cost || 0
 
       } else if (stage.type === 'transcript_question' && stage.per_chapter) {
@@ -4617,7 +4617,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           totalCost += result.cost || 0
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
-          stageCost += result.cost || 0
+          stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
           completedChapters++
 
           brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: i, totalStages: stages.length, status: 'running', stageName: `${phaseLabel}${stageName}`, phase, videoLabel, subDone: completedChapters, subTotal: chapterSplits.length, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}` })
@@ -4656,7 +4656,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
         questionCount++
         llmAnswer = output
         llmAnswers[questionCount] = output
-        stageTokensIn += result.tokensIn || 0; stageTokensOut += result.tokensOut || 0; stageCost += result.cost || 0
+        stageTokensIn += result.tokensIn || 0; stageTokensOut += result.tokensOut || 0; stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
         totalTokensIn += result.tokensIn || 0; totalTokensOut += result.tokensOut || 0; totalCost += result.cost || 0
 
       } else if (stage.type === 'transcript_parallel') {
@@ -5189,8 +5189,8 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
         // Persist spending to spending_log — survives run deletion
         if (stageCost > 0 || stageTokensIn + stageTokensOut > 0) {
           await db.prepare(
-            'INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)'
-          ).run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll pipeline ${pipelineId} stage ${i}`, new Date().toISOString())
+            'INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+          ).run(stageCost, stageTokensIn + stageTokensOut, stageRuntime, `broll pipeline ${pipelineId} stage ${i}`, stageApiKeyLast5, new Date().toISOString())
         }
       }
 

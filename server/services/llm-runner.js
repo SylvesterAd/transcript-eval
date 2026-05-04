@@ -246,6 +246,7 @@ export async function executeRun(experimentRunId) {
       let tokensIn = 0
       let tokensOut = 0
       let stageCost = 0
+      let stageApiKeyLast5 = null
       let promptUsed = ''
       let systemUsed = ''
       let modelUsed = stage.model || ''
@@ -429,7 +430,7 @@ export async function executeRun(experimentRunId) {
             })
             tokensIn += llmResult.tokensIn || 0
             tokensOut += llmResult.tokensOut || 0
-            stageCost += llmResult.cost || 0
+            stageCost += llmResult.cost || 0; if (llmResult.apiKeyLast5) stageApiKeyLast5 = llmResult.apiKeyLast5
 
             try {
               stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
@@ -553,7 +554,7 @@ export async function executeRun(experimentRunId) {
 
                 tokensIn += llmResult.tokensIn || 0
                 tokensOut += llmResult.tokensOut || 0
-                stageCost += llmResult.cost || 0
+                stageCost += llmResult.cost || 0; if (llmResult.apiKeyLast5) stageApiKeyLast5 = llmResult.apiKeyLast5
 
                 try {
                   const applied = applyOutputMode(stage.output_mode, llmResult.text, seg.mainText)
@@ -673,6 +674,7 @@ export async function executeRun(experimentRunId) {
           tokensIn = llmResult.tokensIn
           tokensOut = llmResult.tokensOut
           stageCost = llmResult.cost
+          stageApiKeyLast5 = llmResult.apiKeyLast5 || null
         }
 
         llmQuestionCount++
@@ -695,7 +697,7 @@ export async function executeRun(experimentRunId) {
           })
           tokensIn += llmResult.tokensIn || 0
           tokensOut += llmResult.tokensOut || 0
-          stageCost += llmResult.cost || 0
+          stageCost += llmResult.cost || 0; if (llmResult.apiKeyLast5) stageApiKeyLast5 = llmResult.apiKeyLast5
 
           try {
             stageOutput = applyOutputMode(stage.output_mode, llmResult.text, currentInput).cleanedText
@@ -750,8 +752,8 @@ export async function executeRun(experimentRunId) {
       // Persist spending immediately — survives run deletion or restart-from-stage
       if (stageCost > 0 || tokensIn + tokensOut > 0) {
         await db.prepare(
-          'INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, created_at) VALUES (?, ?, ?, ?, ?)'
-        ).run(stageCost, tokensIn + tokensOut, Date.now() - stageStart, `run #${experimentRunId} stage ${i}`, new Date().toISOString())
+          'INSERT INTO spending_log (total_cost, total_tokens, total_runtime_ms, source, api_key_last5, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(stageCost, tokensIn + tokensOut, Date.now() - stageStart, `run #${experimentRunId} stage ${i}`, stageApiKeyLast5, new Date().toISOString())
       }
 
       // Update currentInput for stages that produce cleaned text
@@ -1263,7 +1265,16 @@ async function _callLLMInner({ model, systemInstruction, prompt, params, experim
           const keyLast4 = currentGoogleKey ? '...' + currentGoogleKey.slice(-4) : 'none'
           console.log(`${tag} Calling ${currentModel} — key: ${keyLabel} (${keyLast4})`)
         }
-        return await callFn()
+        const result = await callFn()
+        const usedKey = currentModel.startsWith('gemini') ? currentGoogleKey
+          : currentModel.startsWith('claude') ? anthropicKey
+          : currentModel.startsWith('gpt') ? openaiKey
+          : null
+        const provider = currentModel.startsWith('gemini') ? 'google'
+          : currentModel.startsWith('claude') ? 'anthropic'
+          : currentModel.startsWith('gpt') ? 'openai'
+          : null
+        return { ...result, apiKeyLast5: usedKey ? usedKey.slice(-5) : null, provider }
       } catch (err) {
         if (err.name === 'AbortError' || err.message === 'Aborted') throw new Error('Aborted')
         if (err.name === 'TimeoutError') throw new Error(`LLM request timed out after 5 minutes for ${currentModel}`)

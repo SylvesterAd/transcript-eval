@@ -23,6 +23,27 @@ router.get('/spending/total', requireAuth, async (req, res) => {
   })
 })
 
+// Per-API-key spending breakdown (must be before /:id).
+// Rows with NULL api_key_last5 (logged before this feature shipped) bucket under "pre-tracking".
+router.get('/spending/by-key', requireAuth, async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT api_key_last5,
+      COUNT(*) AS entries,
+      COALESCE(SUM(total_cost), 0) AS total_cost,
+      COALESCE(SUM(total_tokens), 0) AS total_tokens
+    FROM spending_log
+    GROUP BY api_key_last5
+  `).all()
+  res.json({
+    keys: rows.map(r => ({
+      api_key_last5: r.api_key_last5 || null,
+      runs: parseInt(r.entries),
+      total_cost: r.total_cost,
+      total_tokens: parseInt(r.total_tokens),
+    })),
+  })
+})
+
 // Today's LLM spending summary (must be before /:id)
 router.get('/spending/today', requireAuth, async (req, res) => {
   const today = new Date().toISOString().slice(0, 10)

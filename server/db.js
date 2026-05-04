@@ -46,6 +46,7 @@ try {
   try {
     await pool.query(`ALTER TABLE transcripts DROP CONSTRAINT IF EXISTS transcripts_type_check`)
     await pool.query(`ALTER TABLE transcripts ADD CONSTRAINT transcripts_type_check CHECK (type IN ('raw', 'human_edited', 'rough_cut_adjusted'))`)
+    await pool.query(`ALTER TABLE spending_log ADD COLUMN IF NOT EXISTS api_key_last5 TEXT`)
     await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE`)
     // Liveness signal for downloadYouTubeVideo. Refreshed every
     // YT_HEARTBEAT_INTERVAL_MS while the yt-dlp + Supabase upload pipeline
