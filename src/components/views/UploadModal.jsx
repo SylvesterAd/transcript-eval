@@ -115,6 +115,60 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
     try {
       console.log(`[upload] uploadFileWithProgress called for ${entry.name}, gid=${gid}`)
       const entryId = entry.id
+      const ext = '.' + entry.file.name.split('.').pop().toLowerCase()
+      const isAudio = AUDIO_EXTS.includes(ext) || (entry.file.type || '').startsWith('audio/')
+
+      // Audio files cannot use Cloudflare Stream (video-only transcoding).
+      // Route audio through multer → Supabase via POST /videos/upload,
+      // mirroring ProcessingModal's add-files XHR pattern.
+      if (isAudio) {
+        await new Promise(async (resolve, reject) => {
+          const formData = new FormData()
+          formData.append('video', entry.file)
+          formData.append('title', entry.name)
+          formData.append('group_id', gid)
+          formData.append('video_type', 'raw')
+
+          const API_BASE = import.meta.env.VITE_API_URL || '/api'
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', `${API_BASE}/videos/upload`)
+
+          // Match TUS path: send Supabase auth token if available
+          if (supabase) {
+            const { data: { session } } = await supabase.auth.getSession()
+            if (session?.access_token) {
+              xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`)
+            }
+          }
+
+          xhr.upload.onprogress = (e) => {
+            if (!e.lengthComputable) return
+            const pct = Math.round((e.loaded / e.total) * 100)
+            setFiles(prev => prev.map(f => f.id === entryId
+              ? { ...f, progress: pct, loaded: e.loaded, total: e.total }
+              : f))
+          }
+          xhr.onload = () => {
+            try {
+              const data = JSON.parse(xhr.responseText)
+              if (xhr.status >= 200 && xhr.status < 300) {
+                setFiles(prev => prev.map(f => f.id === entryId
+                  ? { ...f, status: 'complete', progress: 100, serverId: data.videoId }
+                  : f))
+                resolve()
+              } else {
+                reject(new Error(data.error || 'Upload failed'))
+              }
+            } catch {
+              reject(new Error('Upload failed'))
+            }
+          }
+          xhr.onerror = () => reject(new Error('Network error'))
+          xhr.timeout = 3600000
+          xhr.send(formData)
+        })
+        return
+      }
 
       // 1. Upload via TUS to backend proxy → Cloudflare Stream
       // Backend proxies the TUS creation POST to CF, returns Location header.
