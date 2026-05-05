@@ -253,6 +253,14 @@ async function maybeAutoClassify(groupId) {
   if (!groupId) return
   if (classifyingGroups.has(groupId)) return
 
+  // Audio-only A-roll groups never need multicam classification (no waveforms
+  // to align). Bail before the pending-transcription probe so audio groups
+  // skip classify entirely once their transcripts finish.
+  const hasAudio = await db.prepare(
+    "SELECT 1 FROM videos WHERE group_id = ? AND media_type = 'audio' LIMIT 1"
+  ).get(groupId)
+  if (hasAudio) return
+
   const pending = await db.prepare(
     "SELECT 1 FROM videos WHERE group_id = ? AND (transcription_status IS NULL OR transcription_status NOT IN ('done', 'failed')) LIMIT 1"
   ).get(groupId)

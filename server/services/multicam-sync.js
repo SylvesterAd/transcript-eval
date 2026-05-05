@@ -179,6 +179,21 @@ export async function classifyVideosForReview(groupId) {
 }
 
 export async function analyzeMulticam(groupId, options = {}) {
+  // Audio guard: any audio media in the group disables multicam — there are no
+  // waveforms to cross-correlate, no camera angles to switch between. Audio-only
+  // A-roll uploads always belong in a single-track timeline.
+  const hasAudio = await db.prepare(
+    "SELECT 1 FROM videos WHERE group_id = ? AND media_type = 'audio' LIMIT 1"
+  ).get(groupId)
+  if (hasAudio) {
+    console.log(`[multicam] Skipping group ${groupId}: contains audio media`)
+    return { skipped: true, reason: 'audio_in_group' }
+  }
+
+  // Test-only: skip the heavy ffmpeg/transcript/Gemini work after we've proven
+  // the audio guard let us through. Production callers never set this.
+  if (options.dryRun) return { skipped: false, dryRun: true }
+
   let videos = await db.prepare(`
     SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
     FROM videos v
