@@ -11,7 +11,7 @@ import db from '../db.js'
 
 const SOURCE_STRATEGY_ID = 7
 const AUDIO_NOTE_TAG = '{{special_audio_note}}'
-const STAGE_TO_DROP = /analyze\s+a-?roll/i  // matches "Analyze A-Roll Appearances"
+const STAGE_TO_DROP = /(analyze\s+a-?roll|export.*post.?cut.*video)/i  // matches "Analyze A-Roll Appearances" and "Export post-cut video"
 
 ;(async () => {
   console.log(`Cloning strategy id=${SOURCE_STRATEGY_ID} as Audio-Only variant...`)
@@ -68,7 +68,7 @@ const STAGE_TO_DROP = /analyze\s+a-?roll/i  // matches "Analyze A-Roll Appearanc
   const keptStages = stages.filter(s => !STAGE_TO_DROP.test(s.name || ''))
 
   if (droppedStages.length === 0) {
-    console.warn('WARNING: no stage matched /analyze.*a-?roll/i. Verify by running the pre-flight discovery query.')
+    console.warn('WARNING: no stage matched STAGE_TO_DROP. Verify by running the pre-flight discovery query.')
   } else {
     console.log(`Dropped ${droppedStages.length} stage(s): ${droppedStages.map(s => s.name).join(', ')}`)
   }

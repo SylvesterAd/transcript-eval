@@ -44,4 +44,22 @@ describe('filterStagesForMedia (audio)', () => {
     const out = filterStagesForMedia(stages, 'video')
     expect(out.map(s => s.name)).toEqual(['A', 'B'])
   })
+
+  it('drops programmatic stages with video-only actions when audio', () => {
+    const stages = [
+      { name: 'Export post-cut video', type: 'programmatic', target: 'text_only', action: 'export_post_cut_video' },
+      { name: 'Segment transcript', type: 'programmatic', target: 'text_only', action: 'segment' },
+    ]
+    const out = filterStagesForMedia(stages, 'audio')
+    expect(out.map(s => s.name)).toEqual(['Segment transcript'])
+  })
+
+  it('keeps all programmatic stages for video', () => {
+    const stages = [
+      { name: 'Export post-cut video', type: 'programmatic', target: 'text_only', action: 'export_post_cut_video' },
+      { name: 'Segment transcript', type: 'programmatic', target: 'text_only', action: 'segment' },
+    ]
+    const out = filterStagesForMedia(stages, 'video')
+    expect(out.map(s => s.name)).toEqual(['Export post-cut video', 'Segment transcript'])
+  })
 })

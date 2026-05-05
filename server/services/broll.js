@@ -3899,6 +3899,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
 // main_video would crash on the missing video file; programmatic stages are
 // not covered by this filter (out of scope for Task 7).
 const VIDEO_STAGE_TYPES = new Set(['video_llm', 'video_question'])
+const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set(['export_post_cut_video'])
 
 function filterStagesForMedia(stages, mediaType) {
   if (mediaType !== 'audio') return stages
@@ -3907,6 +3908,10 @@ function filterStagesForMedia(stages, mediaType) {
     const targetsMain = s.target === 'main_video'
     if (isVideoStage && targetsMain) {
       console.log(`[broll-pipeline] Skipping video stage on audio media: ${s.name}`)
+      return false
+    }
+    if (s.type === 'programmatic' && VIDEO_ONLY_PROGRAMMATIC_ACTIONS.has(s.action)) {
+      console.log(`[broll-pipeline] Skipping video-only programmatic stage on audio media: ${s.name} (action=${s.action})`)
       return false
     }
     return true
