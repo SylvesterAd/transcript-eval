@@ -861,6 +861,28 @@ router.post('/groups/:id/confirm-classification', requireAuth, async (req, res) 
   }
 })
 
+// Retrigger chainAfterClassify on a stuck classified group. Used by
+// ProcessingModal when it sees an auto-path project sitting at
+// assembly_status='classified' with no sub-groups (typically because the
+// group was classified before the chainAfterClassify expansion shipped).
+// Idempotent: chainAfterClassify itself bails if status isn't 'classified'.
+router.post('/groups/:id/retrigger-classify', requireAuth, async (req, res) => {
+  const groupId = parseInt(req.params.id)
+  const group = await db.prepare(
+    `SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`
+  ).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  try {
+    const { chainAfterClassify } = await import('../services/auto-orchestrator.js')
+    await chainAfterClassify(groupId)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error(`[retrigger-classify] Group ${groupId} failed:`, err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // Save editor state for a group
 router.put('/groups/:id/editor-state', requireAuth, async (req, res) => {
   const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
