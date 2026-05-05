@@ -41,7 +41,11 @@ describe('probeDuration', () => {
     const { factories } = mockFactories({ fakeVideo })
 
     const promise = probeDuration(file, factories)
-    setTimeout(() => fakeVideo.onloadedmetadata?.(), 0)
+    // video fires with Infinity → null; audio fallback uses same element, fires again → null
+    setTimeout(() => {
+      fakeVideo.onloadedmetadata?.()
+      setTimeout(() => fakeVideo.onloadedmetadata?.(), 0)
+    }, 0)
 
     expect(await promise).toBe(null)
   })
@@ -52,21 +56,30 @@ describe('probeDuration', () => {
     const { factories } = mockFactories({ fakeVideo })
 
     const promise = probeDuration(file, factories)
-    setTimeout(() => fakeVideo.onloadedmetadata?.(), 0)
+    // video fires with NaN → null; audio fallback uses same element, fires again → null
+    setTimeout(() => {
+      fakeVideo.onloadedmetadata?.()
+      setTimeout(() => fakeVideo.onloadedmetadata?.(), 0)
+    }, 0)
 
     expect(await promise).toBe(null)
   })
 
-  it('returns null when the video element fires onerror', async () => {
+  it('returns null when both video and audio elements fire onerror', async () => {
     const file = new Blob([], { type: 'video/mp4' })
     const fakeVideo = { duration: 0, src: null, preload: null, onloadedmetadata: null, onerror: null }
     const { factories, calls } = mockFactories({ fakeVideo })
 
     const promise = probeDuration(file, factories)
-    setTimeout(() => fakeVideo.onerror?.(), 0)
+    // Fire onerror once for video, then again for the audio fallback
+    // (mockFactories returns the same element for both tags)
+    setTimeout(() => {
+      fakeVideo.onerror?.()
+      setTimeout(() => fakeVideo.onerror?.(), 0)
+    }, 0)
 
     expect(await promise).toBe(null)
-    expect(calls.revokeObjectURL).toBe(1) // still cleans up the blob URL
+    expect(calls.revokeObjectURL).toBe(2) // one revoke per element (video + audio)
   })
 
   it('sets preload="metadata" on the video element (no full file decode)', async () => {
