@@ -642,7 +642,7 @@ router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, 
       }
       pathId = group?.path_id || null
     }
-    const { stopAfterStrategy, stopAfterPlan } = pathToFlags(pathId)
+    const { stopAfterStrategy } = pathToFlags(pathId)
 
     const result = await executePipeline(
       req.params.id,
@@ -653,7 +653,7 @@ router.post('/strategies/:id/versions/:versionId/run', requireAuth, async (req, 
       editorCuts,
       reference_run_id || null,
       null,
-      { stopAfterPlan, stopAfterStrategy, exampleVideoId: example_video_id || null },
+      { stopAfterStrategy, exampleVideoId: example_video_id || null },
     )
     res.json(result)
   } catch (err) {
