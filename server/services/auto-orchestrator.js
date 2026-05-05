@@ -9,8 +9,12 @@
 // references at the right level.
 //
 // chainAfterClassify — called by maybeAutoClassify after classification
-// finishes. For path_id='hands-off' projects, it auto-confirms the
-// classification so the user doesn't have to click anything.
+// finishes. Auto-confirms the classification for ANY group with a known
+// auto path (hands-off / strategy-only / guided), so the user never has
+// to review classification — paths gate strategy/plan review, not this.
+// Originally only fired for hands-off; expanded to all auto paths because
+// the classification review UI was buggy and gating it added no value —
+// every auto path wants to immediately advance past classification.
 
 import db from '../db.js'
 import { analyzeMulticam, runClassification } from './multicam-sync.js'
@@ -335,7 +339,7 @@ export async function chainAfterClassify(groupId) {
     'SELECT id, user_id, path_id, auto_rough_cut, classification_json, assembly_status FROM video_groups WHERE id = ?'
   ).get(groupId)
   if (!g) return
-  if (g.path_id !== 'hands-off') return
+  if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
   if (g.assembly_status !== 'classified') return // classifier may have failed
   if (!g.classification_json) return
 
@@ -343,7 +347,7 @@ export async function chainAfterClassify(groupId) {
   try { parsed = JSON.parse(g.classification_json) } catch { return }
   if (!parsed?.groups?.length) return
 
-  console.log(`[orchestrator] Auto-confirming classification for hands-off group ${groupId}`)
+  console.log(`[orchestrator] Auto-confirming classification for ${g.path_id} group ${groupId}`)
   await confirmClassificationGroup(groupId, parsed.groups, {
     propagateAutoRoughCut: !!g.auto_rough_cut,
     propagatePathId: g.path_id,

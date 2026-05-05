@@ -246,21 +246,26 @@ describe('confirmClassificationGroup', () => {
 })
 
 describe('chainAfterClassify', () => {
-  it('auto-confirms classification for hands-off groups', async () => {
-    state.groupRow = {
-      id: 7,
-      user_id: 'u1',
-      path_id: 'hands-off',
-      auto_rough_cut: true,
-      classification_json: JSON.stringify({ groups: [{ name: 'A', videoIds: [1] }] }),
-      assembly_status: 'classified',
+  it.each(['hands-off', 'strategy-only', 'guided'])(
+    'auto-confirms classification for %s groups',
+    async (pathId) => {
+      state.inserts.length = 0
+      state.parentUpdates.length = 0
+      state.groupRow = {
+        id: 7,
+        user_id: 'u1',
+        path_id: pathId,
+        auto_rough_cut: true,
+        classification_json: JSON.stringify({ groups: [{ name: 'A', videoIds: [1] }] }),
+        assembly_status: 'classified',
+      }
+      await chainAfterClassify(7)
+      expect(state.inserts).toHaveLength(1)
+      expect(state.parentUpdates).toHaveLength(1)
     }
-    await chainAfterClassify(7)
-    expect(state.inserts).toHaveLength(1)
-    expect(state.parentUpdates).toHaveLength(1)
-  })
+  )
 
-  it('skips when path_id is not hands-off', async () => {
+  it('skips when path_id is null/unset (legacy projects, no auto path picked)', async () => {
     state.groupRow = {
       id: 7,
       user_id: 'u1',

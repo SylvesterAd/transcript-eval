@@ -157,9 +157,12 @@ export default function AssetsView() {
     setConfirming(false)
   }
 
-  // Auto-confirm + advance for single-video projects (no multi-cam means there's nothing
-  // to sync, and surfacing an extra Confirm button is just friction). Fires only once
-  // per mount via autoConfirmRef so we don't loop on re-renders.
+  // Auto-confirm + advance whenever classification finished AND the project picked
+  // an auto path (hands-off / strategy-only / guided) OR is a single-video project.
+  // No path = legacy/manual project; multi-cam single-video = nothing to sync. In
+  // both auto-path multi-video and single-video cases, the classification review UI
+  // adds friction without giving the user a meaningful decision. Fires once per
+  // mount via autoConfirmRef so we don't loop on re-renders.
   // Sub-groups are explicitly skipped — confirming a sub-group would create a
   // recursive sub-sub-group (the 239→240→241 bug pattern).
   const autoConfirmRef = useRef(false)
@@ -167,7 +170,9 @@ export default function AssetsView() {
     if (autoConfirmRef.current) return
     if (isSubGroup) return
     if (data?.group?.assembly_status !== 'classified') return
-    if (groups.length !== 1 || (groups[0].videoIds?.length || 0) !== 1) return
+    const isSingleVideo = groups.length === 1 && (groups[0].videoIds?.length || 0) === 1
+    const isAutoPath = ['hands-off', 'strategy-only', 'guided'].includes(data?.group?.path_id)
+    if (!isSingleVideo && !isAutoPath) return
     autoConfirmRef.current = true
     ;(async () => {
       try {
@@ -181,7 +186,7 @@ export default function AssetsView() {
         }
       } catch {}
     })()
-  }, [id, data?.group?.assembly_status, groups, isSubGroup])
+  }, [id, data?.group?.assembly_status, data?.group?.path_id, groups, isSubGroup])
 
   // After auto-confirm completes, jump straight to the editor — skipping the
   // "Proceed to Editor" click. Only fires for the auto-confirm path; users who
