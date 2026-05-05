@@ -14,6 +14,7 @@ vi.mock('../../db.js', () => ({
 
 import { unshiftPostCutTime, remapPlacementTimes } from '../broll.js'
 import { computeEffectiveCuts } from '../broll.js'
+import { persistPlacementOutput } from '../broll.js'
 
 // Reference shifter — algebraic forward direction. Same logic as
 // generatePostCutTranscript's getOffset, simplified for tests.
@@ -199,5 +200,52 @@ describe('remapPlacementTimes', () => {
     expect(out[1]).toEqual({ description: 'no times here' })
     expect(out[2].start_seconds).toBe(120)
     expect(out[2].end_seconds).toBeUndefined()
+  })
+})
+
+describe('persistPlacementOutput — chokepoint', () => {
+  const editorCuts = { cuts: [{ start: 60, end: 80 }], cutExclusions: [] }
+
+  it('returns input unchanged when editorCuts has no cuts', async () => {
+    const out = await persistPlacementOutput(JSON.stringify([{ start_seconds: 10 }]), null)
+    expect(JSON.parse(out)).toEqual([{ start_seconds: 10 }])
+    const out2 = await persistPlacementOutput(JSON.stringify([{ start_seconds: 10 }]), { cuts: [] })
+    expect(JSON.parse(out2)).toEqual([{ start_seconds: 10 }])
+  })
+
+  it('un-shifts placement timecodes when editorCuts has cuts', async () => {
+    const stageOutput = JSON.stringify([
+      { start_seconds: 100, end_seconds: 110, type: 'broll' },
+    ])
+    const out = await persistPlacementOutput(stageOutput, editorCuts)
+    const parsed = JSON.parse(out)
+    expect(parsed[0].start_seconds).toBe(120) // 100 + 20 cut duration
+    expect(parsed[0].end_seconds).toBe(130)
+  })
+
+  it('handles JSON wrapped in markdown fence', async () => {
+    const stageOutput = '```json\n[{"start_seconds":100,"end_seconds":110}]\n```'
+    const out = await persistPlacementOutput(stageOutput, editorCuts)
+    const parsed = JSON.parse(out)
+    expect(parsed[0].start_seconds).toBe(120)
+  })
+
+  it('un-shifts placements nested under {chapters: [...].placements} structure', async () => {
+    const stageOutput = JSON.stringify({
+      chapters: [
+        { chapter_number: 1, placements: [{ start_seconds: 100, end_seconds: 110 }] },
+      ],
+    })
+    const out = await persistPlacementOutput(stageOutput, editorCuts)
+    const parsed = JSON.parse(out)
+    expect(parsed.chapters[0].placements[0].start_seconds).toBe(120)
+  })
+
+  it('returns raw output unchanged when JSON is unparseable (logs warning)', async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const stageOutput = 'totally not json'
+    const out = await persistPlacementOutput(stageOutput, editorCuts)
+    expect(out).toBe(stageOutput)
+    consoleWarn.mockRestore()
   })
 })

@@ -1172,6 +1172,56 @@ export function remapPlacementTimes(placements, effectiveCuts) {
   })
 }
 
+/**
+ * Single chokepoint for stages that emit placement-shaped JSON.
+ *
+ * Takes the raw stage output text + the editor cuts that were in effect
+ * during this pipeline run. If cuts were applied, parses the JSON,
+ * un-shifts every placement's timecodes back to original time, and
+ * re-serializes. If parsing fails, logs a warning and returns the raw
+ * text unchanged (preserves prior behavior for non-placement stages).
+ *
+ * Handles both shapes:
+ *   - Top-level array: [{ start_seconds, end_seconds, ... }, ...]
+ *   - Wrapped in chapters: { chapters: [{ placements: [...] }, ...] }
+ *
+ * Stages that should NOT use this helper: pure transcript stages,
+ * chapter analysis without placements, plan strategy text. The helper
+ * is a no-op for inputs that don't contain placement-shaped data.
+ */
+export async function persistPlacementOutput(stageOutput, editorCuts) {
+  if (!editorCuts?.cuts?.length) return stageOutput
+  const effective = computeEffectiveCuts(editorCuts.cuts, editorCuts.cutExclusions || [])
+  if (!effective.length) return stageOutput
+
+  let parsed
+  try {
+    parsed = extractJSON(stageOutput)
+  } catch (err) {
+    console.warn('[persistPlacementOutput] Could not parse stage output, returning unchanged:', err.message)
+    return stageOutput
+  }
+
+  let remapped
+  if (Array.isArray(parsed)) {
+    remapped = remapPlacementTimes(parsed, effective)
+  } else if (parsed && Array.isArray(parsed.chapters)) {
+    remapped = {
+      ...parsed,
+      chapters: parsed.chapters.map(ch => ({
+        ...ch,
+        placements: Array.isArray(ch.placements)
+          ? remapPlacementTimes(ch.placements, effective)
+          : ch.placements,
+      })),
+    }
+  } else {
+    // Not placement-shaped — pass through.
+    return stageOutput
+  }
+  return JSON.stringify(remapped, null, 2)
+}
+
 // ── Pipeline progress & abort tracking ───────────────────────────────
 export const brollPipelineProgress = new Map()
 export const abortedBrollPipelines = new Set()
