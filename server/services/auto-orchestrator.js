@@ -610,9 +610,19 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
   if (!sg) return
 
   // 'strategy' delegates to runFullAutoBrollChain, which respects stopAfterStrategy
-  // and sets its own status/substage transitions.
+  // and sets its own status/substage transitions. Wrap in try/catch so DB/lock
+  // failures BEFORE the chain's own try-block (lines ~429-441) still mark the
+  // group as failed — matching the handling of the 'plan' and 'search' branches.
   if (fromStage === 'strategy') {
-    return __orchestratorDeps.runFullAutoBrollChain(subGroupId)
+    try {
+      return await __orchestratorDeps.runFullAutoBrollChain(subGroupId)
+    } catch (err) {
+      await db.prepare(
+        "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
+      ).run(String(err.message).slice(0, 500), subGroupId)
+      await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
+      return
+    }
   }
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'

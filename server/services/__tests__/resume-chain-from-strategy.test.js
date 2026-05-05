@@ -46,4 +46,15 @@ describe('resumeChain(fromStage=strategy)', () => {
     )
     expect(direct).toBeFalsy()
   })
+
+  it('marks group failed and emails on chain rejection', async () => {
+    runFullAutoBrollChainMock.mockRejectedValueOnce(new Error('chain blew up'))
+
+    await orchestrator.resumeChain(99, 'strategy')
+
+    const failedUpdate = dbState.updates.find(u =>
+      u.sql.includes("broll_chain_status = 'failed'")
+    )
+    expect(failedUpdate).toBeTruthy()
+  })
 })
