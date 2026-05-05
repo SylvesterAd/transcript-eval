@@ -843,10 +843,15 @@ export async function updateStatus(groupId, status, error = null, transcript = n
               "UPDATE video_groups SET rough_cut_status = 'running' WHERE id = ?"
             ).run(groupId)
           }
-          // After rough cut terminal — chain into the b-roll pipeline if the
-          // project picked an auto path. Fire-and-forget so pipeline failures
-          // don't block the rough_cut_status write above.
-          if (isAutoPath) {
+          // After rough cut terminal — for 'guided', pause for user review;
+          // otherwise chain into the b-roll pipeline if the project picked an
+          // auto path. Fire-and-forget so pipeline failures don't block the
+          // rough_cut_status write above.
+          if (flagRow?.path_id === 'guided') {
+            await db.prepare(
+              "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
+            ).run(groupId)
+          } else if (isAutoPath) {
             const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
             runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
           }
@@ -856,7 +861,11 @@ export async function updateStatus(groupId, status, error = null, transcript = n
           await db.prepare(
             "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
           ).run(groupId)
-          if (isAutoPath) {
+          if (flagRow?.path_id === 'guided') {
+            await db.prepare(
+              "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
+            ).run(groupId)
+          } else if (isAutoPath) {
             const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
             runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
           }
