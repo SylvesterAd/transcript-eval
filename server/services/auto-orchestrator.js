@@ -366,10 +366,18 @@ export async function chainAfterClassify(groupId) {
 // is guarded by runFullAutoBrollChain's heartbeat lock.
 export async function chainAfterRoughCut(groupId) {
   const g = await db.prepare(
-    'SELECT user_id, path_id FROM video_groups WHERE id = ?'
+    'SELECT user_id, path_id, broll_chain_status FROM video_groups WHERE id = ?'
   ).get(groupId)
   if (!g) return
   if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
+
+  // Don't clobber a chain that's already advanced past rough-cut review.
+  // Possible if the previous (buggy) code paused prematurely and the user
+  // clicked through to strategy before the cut actually completed; we
+  // shouldn't reset their progress when the IIFE finally fires us.
+  if (['running', 'paused_at_strategy', 'paused_at_plan', 'done', 'failed'].includes(g.broll_chain_status)) {
+    return
+  }
 
   if (g.path_id === 'guided') {
     await db.prepare(
