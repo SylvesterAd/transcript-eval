@@ -4,7 +4,18 @@ import { formatTime } from './useEditorState.js'
 import { useHlsSource } from '../../hooks/useHlsSource.js'
 
 export default function RoughCutPreview({ useHls = false }) {
-  const { state, videoRefs, totalDuration } = useContext(EditorContext)
+  const { state, videoRefs, totalDuration, mediaType } = useContext(EditorContext)
+
+  // Audio-only A-roll groups have no video to render; show a placeholder
+  // in the rough-cut preview slot. Transcript editor and all rough-cut
+  // controls remain fully functional — only the visual preview is replaced.
+  if (mediaType === 'audio') {
+    return (
+      <div className="flex items-center justify-center w-full h-full bg-zinc-950 border border-zinc-800 rounded text-zinc-500 text-sm">
+        No video — audio only
+      </div>
+    )
+  }
 
   const videoTracks = state.tracks.filter(t => t.type === 'video')
   const isMainMode = state.roughCutTrackMode === 'main'
