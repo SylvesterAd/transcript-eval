@@ -197,9 +197,9 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
   }, [ensureGroup, uploadFileWithProgress])
 
   const validateAndAddFiles = useCallback((fileList, type) => {
-    const exts = type === 'video' ? VIDEO_EXTS : SCRIPT_EXTS
+    const exts = type === 'video' ? [...VIDEO_EXTS, ...AUDIO_EXTS] : SCRIPT_EXTS
     const errorMsg = type === 'video'
-      ? `Unsupported format. Accepted: ${VIDEO_EXTS.join(', ')}`
+      ? `Unsupported format. Accepted: ${[...VIDEO_EXTS, ...AUDIO_EXTS].join(', ')}`
       : `Unsupported format. Accepted: ${SCRIPT_EXTS.join(', ')}`
 
     const entries = []

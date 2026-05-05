@@ -6,6 +6,8 @@ import { supabase } from '../../lib/supabaseClient.js'
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
+const AUDIO_EXTS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']
+const ACCEPTED_EXTS = [...VIDEO_EXTS, ...AUDIO_EXTS]
 const MAX_SIZE = 50 * 1024 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
@@ -452,7 +454,7 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     for (const file of fileList) {
       const ext = '.' + file.name.split('.').pop().toLowerCase()
       const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8)
-      if (!VIDEO_EXTS.includes(ext)) {
+      if (!ACCEPTED_EXTS.includes(ext)) {
         entries.push({ id, name: file.name, file, type: 'video', status: 'error', progress: 0, error: 'Unsupported format', xhr: null, serverId: null })
         continue
       }
@@ -695,7 +697,7 @@ function UploadingFileList({
         <input
           ref={fileInputRef}
           type="file"
-          accept={VIDEO_EXTS.join(',')}
+          accept={ACCEPTED_EXTS.join(',')}
           multiple
           className="hidden"
           onChange={(e) => { if (e.target.files?.length) handleAddFiles(e.target.files); e.target.value = '' }}
