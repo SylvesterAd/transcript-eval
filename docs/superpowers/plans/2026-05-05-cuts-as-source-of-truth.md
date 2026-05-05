@@ -2939,6 +2939,95 @@ git commit -m "fix: address smoke-test issues from project 273 walkthrough"
 
 ---
 
+## Phase B Investigation Findings
+
+Investigation date: 2026-05-05.
+
+### Schema correction
+
+The live DB uses `broll_strategies` + `broll_strategy_versions` tables, **not** `strategies` + `strategy_versions`. The `broll_strategies` table has `strategy_kind` (not `kind`) and the versions table uses `id`-ordering (no `version_number` column). The `strategies`/`strategy_versions` tables exist but contain unrelated transcript-cleaning strategies.
+
+### Strategy seed authority
+
+**Option (a):** JS seed scripts in `server/seed/` that INSERT/UPDATE rows in the DB. No SQL migration files, no in-app UI creation for these strategies. The canonical pattern is `server/seed/create-broll-plan-strategy.js` (creates kind=`'plan'`, though that row no longer exists in production — superseded by the `split-plan-strategies.js` migration that created separate `plan_prep`, `create_strategy`, and `create_plan` rows). Each seed script either creates a new `broll_strategy_versions` row or updates the existing one.
+
+### All broll_strategies rows (production as of 2026-05-05)
+
+| ID | Name | strategy_kind | bundle_key | Version count | Latest version id |
+|---|---|---|---|---|---|
+| 2 | Main Video B-Roll Deep Analysis v2 | main_analysis | — | 2 | 9 |
+| 6 | B-Roll Video Search | broll_search | — | 0 | — |
+| 7 | Plan Prep | plan_prep | — | 1 | 14 |
+| 8 | Create B-Roll Strategy | create_strategy | — | 1 | 15 |
+| 9 | Create B-Roll Plan | create_plan | — | 1 | 16 |
+| 10 | Combined Best-of-All Strategy | create_combined_strategy | — | 1 | 17 |
+| 11 | B-Roll Search Keywords (Batch) | keywords_batch | — | 1 | 18 |
+| 12 | Plan Prep (Audio-Only) | plan_prep | audio_only | 3 | 21 |
+
+### Target strategies for Tasks 9–11
+
+**All strategies that need post-cut prep stages are ALREADY PREPPED:**
+
+| Strategy ID | Name | strategy_kind | Stage 0 action | Already prepped? | textOnly |
+|---|---|---|---|---|---|
+| 7 | Plan Prep | plan_prep | generate_post_cut_transcript | YES | false (has video_question on main_video at idx 2) |
+| 12 | Plan Prep (Audio-Only) | plan_prep | generate_post_cut_transcript | YES (no export_post_cut_video — audio-only) | true |
+
+### Strategies to skip (and why)
+
+| Strategy ID | Name | strategy_kind | Reason |
+|---|---|---|---|
+| 2 | Main Video B-Roll Deep Analysis v2 | main_analysis | Runs on REFERENCE EXAMPLE videos, not the rough cut. Stage 0 is `video_question` on `examples` target. Designed to be cut-agnostic. |
+| 8 | Create B-Roll Strategy | create_strategy | Text-only. Reads `plan_prep` saved outputs from `broll_runs`. Does not run on the video at all. |
+| 9 | Create B-Roll Plan | create_plan | Text-only. Reads `plan_prep` + `create_strategy` saved outputs. Does not run on the video at all. |
+| 10 | Combined Best-of-All Strategy | create_combined_strategy | Text-only. Same as above. |
+| 11 | B-Roll Search Keywords (Batch) | keywords_batch | Text-only. Downstream of plan. |
+| 6 | B-Roll Video Search | broll_search | No version seeded. |
+
+### TARGETS array for seed-post-cut-strategies.js — REVISED
+
+**The original plan's assumption was incorrect.** The three "other strategies" (analysis / plan strategy / plan creation) do NOT each need independent post-cut prep stages prepended:
+
+- **"Analysis"** in the UI (`/brolls/strategy/analysis`) = `plan_prep` (id=7) + `main_analysis` (id=2). The `plan_prep` **already has** stages 1+2 at idx 0 and 1. The `main_analysis` runs on reference videos by design.
+- **"Generate Strategies"** = `create_strategy` (id=8). Reads plan_prep DB output. No video stages. Nothing to prepend.
+- **"Generate Plan"** = `create_plan` (id=9). Same — reads from prior saved runs.
+
+**Tasks 9–11 as written are a no-op against the current production DB.** The seed script will find that every `plan_prep` strategy already starts with `generate_post_cut_transcript` and exit cleanly.
+
+If Tasks 9–11 need rethinking, the most likely candidate is:
+
+`main_analysis` (id=2) — if the intent is to analyze the ROUGH-CUT version of the main video (not just reference videos). Currently it does NOT do this. Adding post-cut prep stages here would change its semantics significantly.
+
+**Recommended TARGETS array for seed-post-cut-strategies.js (safe idempotent form):**
+
+```js
+const TARGETS = [
+  // plan_prep already has generate_post_cut_transcript + export_post_cut_video at idx 0-1.
+  // Audio-only variant already has generate_post_cut_transcript at idx 0 (no FFmpeg stage).
+  // create_strategy, create_plan, create_combined_strategy are text-only — no video stages.
+  // main_analysis runs on reference videos — does not run on the rough cut.
+  //
+  // CONCLUSION: no strategies currently need post-cut prep prepended.
+  // The seed script should be a verified no-op that logs its findings and exits 0.
+]
+// If the intent is to add post-cut prep to main_analysis so it also analyzes
+// the rough-cut main video, add:
+//   { nameLike: 'Main Video B-Roll Deep Analysis', textOnly: false }
+// This is a semantic change and needs explicit sign-off.
+```
+
+### Action for implementer
+
+Before writing `seed-post-cut-strategies.js` (Task 10), confirm with the project owner:
+
+1. Is `plan_prep` (id=7) already doing what was intended (it has stages 1+2 already)?
+2. Should `main_analysis` (id=2) ALSO analyze the rough-cut main video (in addition to references), or is the current reference-only behavior correct?
+3. Are Tasks 9–11 superseded by the fact that `plan_prep` already has the stages?
+
+The user report ("analysis strategy doesn't use the rough cut") may have been observed on an old run before `plan_prep` version 14 was seeded, or may refer to `main_analysis` (which is reference-only by design).
+
+---
+
 ## Self-Review
 
 The plan covers every requirement in the spec:
