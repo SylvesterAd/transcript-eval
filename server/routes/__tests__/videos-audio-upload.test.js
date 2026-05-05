@@ -213,3 +213,208 @@ describe('POST /videos/upload — audio media_type handling', () => {
     expect(framesStatusUpdate).toBeDefined()
   })
 })
+
+// Reusable factory for upload-multiple req objects. Mirrors what multer
+// produces with .array() — the route reads .files (plural).
+function makeMultiReq({ files, body = {} }) {
+  return {
+    auth: { userId: 'test-user' },
+    body: { title: 'Mixed batch', video_type: 'raw', ...body },
+    files: files.map((f, i) => ({
+      originalname: f.originalname,
+      mimetype: f.mimetype,
+      path: '/tmp/upload-temp-' + i,
+      filename: 'upload-' + i + '-' + Date.now() + f.originalname.slice(f.originalname.lastIndexOf('.')),
+      size: 1234,
+    })),
+  }
+}
+
+describe('POST /videos/upload-multiple — audio media_type handling', () => {
+  beforeEach(() => {
+    dbCalls.length = 0
+    extractThumbnailMock.mockClear()
+    getVideoDurationMock.mockClear()
+    getVideoMediaInfoMock.mockClear()
+    extractVideoFrames.mockClear()
+  })
+
+  it('sets per-file media_type when mixed audio + video are uploaded', async () => {
+    const { _uploadMultipleVideosHandler } = await import('../videos.js')
+
+    const req = makeMultiReq({
+      files: [
+        { originalname: 'a.mp3', mimetype: 'audio/mpeg' },
+        { originalname: 'b.mp4', mimetype: 'video/mp4' },
+      ],
+      body: { title: 'Mixed', video_type: 'raw' },
+    })
+    const res = makeRes()
+    await _uploadMultipleVideosHandler(req, res)
+
+    expect(res._status).toBe(201)
+
+    // Two video INSERTs — collect them in encounter order, which equals
+    // the file order because the handler iterates orderedFiles serially.
+    const inserts = dbCalls.filter(c => /INSERT INTO videos/i.test(c.sql))
+    expect(inserts).toHaveLength(2)
+    // Every INSERT must include media_type now.
+    for (const ins of inserts) expect(ins.sql).toMatch(/media_type/)
+    // Last positional arg is media_type per the new column order.
+    const types = inserts.map(ins => ins.args[ins.args.length - 1]).sort()
+    expect(types).toEqual(['audio', 'video'])
+  })
+
+  it('skips thumbnail + frame extraction for audio rows in a mixed batch', async () => {
+    const { _uploadMultipleVideosHandler } = await import('../videos.js')
+
+    const req = makeMultiReq({
+      files: [
+        { originalname: 'voice.mp3', mimetype: 'audio/mpeg' },
+        { originalname: 'clip.mp4', mimetype: 'video/mp4' },
+      ],
+      body: { video_type: 'raw' },
+    })
+    const res = makeRes()
+    await _uploadMultipleVideosHandler(req, res)
+
+    // extractThumbnail should fire exactly once — for the video file only.
+    expect(extractThumbnailMock).toHaveBeenCalledTimes(1)
+
+    // Flush deferred microtasks from the fire-and-forget background calls.
+    await new Promise(r => setImmediate(r))
+
+    // Load-bearing: in the raw+multi branch the handler iterates videoIds
+    // and calls startBackgroundFrameExtraction only for non-audio entries.
+    // Each successful frame-extraction kickoff issues TWO `UPDATE videos
+    // SET frames_status` queries (status='extracting' then result). With
+    // one video file in the batch we should see >= 1; with the gate at
+    // _uploadMultipleVideosHandler removed, both files would trigger and
+    // the count would be >= 2. We assert exactly the count expected for
+    // the video-only path (mock returns 0, so the success branch runs).
+    const framesStatusUpdates = dbCalls.filter(c => /UPDATE videos SET frames_status/i.test(c.sql))
+    // 2 updates for the single video row. If the `if (fileMediaTypes[i]
+    // !== 'audio')` gate is removed, this jumps to 4 (both files).
+    expect(framesStatusUpdates.length).toBe(2)
+  })
+
+  it('all-audio non-raw batch (single file) sets media_type=audio and skips frames', async () => {
+    const { _uploadMultipleVideosHandler } = await import('../videos.js')
+
+    // video_type !== 'raw' OR length === 1 → falls into the concat/single
+    // branch, which we also patched. A single audio file is the simplest
+    // path through that branch.
+    const req = makeMultiReq({
+      files: [{ originalname: 'solo.wav', mimetype: 'audio/wav' }],
+      body: { video_type: 'broll', title: 'Solo audio' },
+    })
+    const res = makeRes()
+    await _uploadMultipleVideosHandler(req, res)
+
+    expect(res._status).toBe(201)
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeDefined()
+    expect(insert.sql).toMatch(/media_type/)
+    expect(insert.args[insert.args.length - 1]).toBe('audio')
+    // thumbnail_path arg position is 3rd (title, file_path, thumbnail_path, ...).
+    expect(insert.args[2]).toBeNull()
+    expect(extractThumbnailMock).not.toHaveBeenCalled()
+
+    await new Promise(r => setImmediate(r))
+    // Load-bearing: pins the `if (!isAudio) startBackgroundFrameExtraction`
+    // gate in the non-raw / single-file branch of
+    // _uploadMultipleVideosHandler. Removing the gate would fire frame
+    // extraction and emit `UPDATE videos SET frames_status` calls.
+    const framesStatusUpdate = dbCalls.find(c => /UPDATE videos SET frames_status/i.test(c.sql))
+    expect(framesStatusUpdate).toBeUndefined()
+  })
+})
+
+// Build a minimal req object for /register testing. Mirrors what the
+// existing videos-register-duration tests pass through.
+function makeRegisterReq(body = {}) {
+  return { auth: { userId: 'test-user' }, body }
+}
+
+describe('POST /videos/register — audio media_type handling', () => {
+  beforeEach(() => {
+    dbCalls.length = 0
+    extractVideoFrames.mockClear()
+  })
+
+  it('rejects audio + cf_stream_uid combo with HTTP 400', async () => {
+    const { _registerVideoHandler } = await import('../videos.js')
+
+    const req = makeRegisterReq({
+      cf_stream_uid: 'cf-uid-bad',
+      filename: 'voice.mp3',
+      title: 'Voice over CF (forbidden)',
+      group_id: 42,
+      video_type: 'raw',
+      file_size: 1000,
+      media_type: 'audio',
+    })
+    const res = makeRes()
+    await _registerVideoHandler(req, res)
+
+    // Pin the exact contract: HTTP 400 + the specific error text. If the
+    // CF-Stream rejection block is removed, this regresses immediately.
+    expect(res._status).toBe(400)
+    expect(res._body).toEqual({ error: 'Audio uploads cannot use Cloudflare Stream' })
+    // No video row should have been inserted.
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeUndefined()
+  })
+
+  it('persists media_type=audio when caller registers an audio file_url (no CF)', async () => {
+    const { _registerVideoHandler } = await import('../videos.js')
+
+    const req = makeRegisterReq({
+      file_url: 'https://supabase.test/audio/voice.mp3',
+      filename: 'voice.mp3',
+      title: 'Voice over via storage',
+      group_id: 42,
+      video_type: 'raw',
+      file_size: 1000,
+      media_type: 'audio',
+    })
+    const res = makeRes()
+    await _registerVideoHandler(req, res)
+
+    expect(res._status).toBe(201)
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeDefined()
+    expect(insert.sql).toMatch(/media_type/)
+    // media_type is the trailing positional arg in the new INSERT.
+    expect(insert.args[insert.args.length - 1]).toBe('audio')
+
+    // Load-bearing: startBackgroundFrameExtraction must not fire for audio
+    // rows. The function's first state-changing SQL is `UPDATE videos SET
+    // frames_status` — if the `!isAudio` gate is removed, that statement
+    // appears in dbCalls and the test fails.
+    await new Promise(r => setImmediate(r))
+    const framesStatusUpdate = dbCalls.find(c => /UPDATE videos SET frames_status/i.test(c.sql))
+    expect(framesStatusUpdate).toBeUndefined()
+  })
+
+  it('defaults media_type=video when not specified (regression for CF Stream callers)', async () => {
+    const { _registerVideoHandler } = await import('../videos.js')
+
+    const req = makeRegisterReq({
+      cf_stream_uid: 'cf-uid-legit',
+      filename: 'clip.mp4',
+      title: 'CF Stream upload',
+      group_id: 42,
+      video_type: 'raw',
+      file_size: 1000,
+      // no media_type — old clients
+    })
+    const res = makeRes()
+    await _registerVideoHandler(req, res)
+
+    expect(res._status).toBe(201)
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeDefined()
+    expect(insert.args[insert.args.length - 1]).toBe('video')
+  })
+})
