@@ -1068,8 +1068,8 @@ router.post('/pipeline/run-plan', requireAuth, async (req, res) => {
 router.post('/groups/:subId/resume-chain', requireAuth, async (req, res) => {
   const subId = parseInt(req.params.subId)
   const fromStage = String(req.query.from || '')
-  if (!['plan', 'search'].includes(fromStage)) {
-    return res.status(400).json({ error: 'from must be "plan" or "search"' })
+  if (!['strategy', 'plan', 'search'].includes(fromStage)) {
+    return res.status(400).json({ error: 'from must be "strategy", "plan", or "search"' })
   }
   const sg = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`)
     .get(subId, ...(isAdmin(req) ? [] : [req.auth.userId]))
