@@ -5326,11 +5326,12 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             plan: parsedPlans[idx] || null,
           }))
 
-          output = JSON.stringify({
+          const rawOutput = JSON.stringify({
             video_context: allChaptersCtx,
             total_chapters: chapters.length,
             chapters,
           }, null, 2)
+          output = await persistPlacementOutput(rawOutput, editorCuts)
         } else {
           output = currentTranscript
         }
