@@ -598,14 +598,22 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   }
 }
 
-// resumeChain — called after the user picks a strategy/plan at a checkpoint.
-//   fromStage = 'plan'  → user picked strategies; run plan + search
-//   fromStage = 'search' → user picked plan; run search only
+// resumeChain — called after the user picks a strategy/plan at a checkpoint,
+// or clicks "B-Roll Strategy" sidebar item to resume from rough cut.
+//   fromStage = 'strategy' → resume from rough cut; runs refs+strategy, pauses at strategy
+//   fromStage = 'plan'     → user picked strategies; run plan + search
+//   fromStage = 'search'   → user picked plan; run search only
 export async function resumeChain(subGroupId, fromStage, opts = {}) {
   const sg = await db.prepare(
     'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
   ).get(subGroupId)
   if (!sg) return
+
+  // 'strategy' delegates to runFullAutoBrollChain, which respects stopAfterStrategy
+  // and sets its own status/substage transitions.
+  if (fromStage === 'strategy') {
+    return __orchestratorDeps.runFullAutoBrollChain(subGroupId)
+  }
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
   await db.prepare(
