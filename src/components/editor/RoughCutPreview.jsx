@@ -6,18 +6,29 @@ import { useHlsSource } from '../../hooks/useHlsSource.js'
 export default function RoughCutPreview({ useHls = false }) {
   const { state, videoRefs, totalDuration, mediaType } = useContext(EditorContext)
 
-  // Audio-only A-roll groups have no video to render; show a placeholder
-  // in the rough-cut preview slot. Transcript editor and all rough-cut
-  // controls remain fully functional — only the visual preview is replaced.
+  const videoTracks = state.tracks.filter(t => t.type === 'video')
+
+  // Audio-only A-roll groups have no video to render visually. Show a
+  // placeholder in the preview slot, but ALSO mount the media elements
+  // off-screen so the playback engine has something to drive — without
+  // them videoRefs stays empty and the user can't hear the audio.
   if (mediaType === 'audio') {
     return (
-      <div className="flex items-center justify-center w-full h-full bg-zinc-950 border border-zinc-800 rounded text-zinc-500 text-sm">
-        No video — audio only
+      <div className="flex items-center justify-center w-full h-full bg-zinc-950 border border-zinc-800 rounded text-zinc-500 text-sm relative">
+        <span>No video — audio only</span>
+        {videoTracks.map(track => (
+          <PreviewVideo
+            key={track.id}
+            track={track}
+            videoRefs={videoRefs}
+            visible={false}
+            useHls={useHls}
+          />
+        ))}
       </div>
     )
   }
 
-  const videoTracks = state.tracks.filter(t => t.type === 'video')
   const isMainMode = state.roughCutTrackMode === 'main'
 
   // In Main Track mode, merge overlapping tracks into segments

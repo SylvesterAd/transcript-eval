@@ -1204,13 +1204,11 @@ function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
               <RoughCutPreview />
             </div>
           </div>
-        ) : mediaType === 'audio' ? (
-          // Audio-only A-roll: nothing to preview visually. Keep layout stable
-          // by occupying the same flex slot as <VideoPreviewGrid />.
-          <div className="flex-1 flex items-center justify-center w-full h-full bg-zinc-950 border border-zinc-800 rounded text-zinc-500 text-sm">
-            No video — audio only
-          </div>
         ) : (
+          // VideoPreviewGrid handles mediaType==='audio' itself: shows the mic
+          // rows in place of the grid AND mounts hidden <video> elements so
+          // the playback engine can drive audio. Don't short-circuit here or
+          // those refs never register and the user can't hear anything.
           <VideoPreviewGrid />
         )}
       </div>
