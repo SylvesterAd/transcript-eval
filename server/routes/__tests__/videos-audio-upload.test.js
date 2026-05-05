@@ -25,7 +25,17 @@ const dbCalls = []
 vi.mock('../../db.js', () => ({
   default: {
     prepare: (sql) => ({
-      get: () => null,
+      // Return a non-null row for "SELECT * FROM videos WHERE id = ?" so
+      // startBackgroundFrameExtraction proceeds past its early-return
+      // (`if (!video?.file_path) return`). Without this, the
+      // "extractVideoFrames not called for audio" assertion is vacuous —
+      // it would pass even if the `if (!isAudio)` gate were removed.
+      get: (id) => {
+        if (/SELECT \* FROM videos WHERE id = \?/i.test(sql)) {
+          return { id, file_path: 'https://supabase.test/upload-url', media_type: 'video' }
+        }
+        return null
+      },
       all: () => [],
       run: (...args) => {
         dbCalls.push({ sql, args })
@@ -50,7 +60,10 @@ vi.mock('../../services/video-processor.js', () => ({
   checkFfmpeg: (...a) => checkFfmpegMock(...a),
   extractEnergyEnvelope: vi.fn(),
   extractWaveformPeaks: vi.fn(),
-  extractVideoFrames: vi.fn(),
+  // Resolve to 0 so startBackgroundFrameExtraction's .then() chain doesn't
+  // throw "Cannot read properties of undefined (reading 'then')" when the
+  // function actually runs (video uploads).
+  extractVideoFrames: vi.fn().mockResolvedValue(0),
   concatenateVideos: vi.fn(),
 }))
 
@@ -58,8 +71,11 @@ vi.mock('../../services/storage.js', () => ({
   uploadFile: vi.fn().mockResolvedValue('https://supabase.test/upload-url'),
   deleteByUrl: vi.fn(),
   deleteFolder: vi.fn(),
-  downloadToTemp: vi.fn(),
-  uploadFrames: vi.fn(),
+  // Resolve so the fire-and-forget transcription/frame paths (now reachable
+  // because the db mock returns a non-null video row) don't blow up on
+  // undefined downloads and pollute the test output with unhandled rejections.
+  downloadToTemp: vi.fn().mockResolvedValue('/tmp/downloaded-file.mp4'),
+  uploadFrames: vi.fn().mockResolvedValue(undefined),
   TEMP_DIR: '/tmp',
 }))
 
@@ -154,6 +170,12 @@ describe('POST /videos/upload — audio media_type handling', () => {
     // Flush any deferred microtasks from the fire-and-forget background call.
     await new Promise(r => setImmediate(r))
     expect(extractVideoFrames).not.toHaveBeenCalled()
+    // Load-bearing: startBackgroundFrameExtraction must not run at all for
+    // audio. Its second SQL statement is the unique "UPDATE videos SET
+    // frames_status" — if the `if (!isAudio)` gate at videos.js:1792 is
+    // removed, the function reaches this query and the test fails.
+    const framesStatusUpdate = dbCalls.find(c => /UPDATE videos SET frames_status/i.test(c.sql))
+    expect(framesStatusUpdate).toBeUndefined()
   })
 
   it('falls back to filename when MIME is application/octet-stream for audio', async () => {
@@ -181,5 +203,13 @@ describe('POST /videos/upload — audio media_type handling', () => {
     expect(insert.args).toContain('video')
     // For video, extractThumbnail must run (ffmpeg is mocked-true).
     expect(extractThumbnailMock).toHaveBeenCalled()
+
+    // Positive counterpart to the audio test: startBackgroundFrameExtraction
+    // must run for video uploads. Pinning both directions ensures the audio
+    // test's negative assertion is load-bearing (i.e. would fail if the
+    // `if (!isAudio)` gate at videos.js:1792 were removed).
+    await new Promise(r => setImmediate(r))
+    const framesStatusUpdate = dbCalls.find(c => /UPDATE videos SET frames_status/i.test(c.sql))
+    expect(framesStatusUpdate).toBeDefined()
   })
 })
