@@ -64,19 +64,19 @@ mkdirSync(TEMP_DIR, { recursive: true })
 // Map a video_groups.path_id to the pipeline stop flags it implies.
 //   hands-off     → full auto, no mid-run checkpoints, auto-select variants
 //   strategy-only → pause after strategy (analysis) phase
-//   guided        → pause after strategy AND after plan phases
+//   guided        → pause after rough cut AND after strategy phases
 // null / unknown  → default to strategy-only (safer than hands-off)
 export function pathToFlags(pathId) {
   switch (pathId) {
     case 'hands-off':
-      return { stopAfterStrategy: false, stopAfterPlan: false, autoSelectVariants: true }
+      return { stopAfterRoughCut: false, stopAfterStrategy: false, autoSelectVariants: true }
     case 'strategy-only':
-      return { stopAfterStrategy: true,  stopAfterPlan: false, autoSelectVariants: false }
+      return { stopAfterRoughCut: false, stopAfterStrategy: true,  autoSelectVariants: false }
     case 'guided':
-      return { stopAfterStrategy: true,  stopAfterPlan: true,  autoSelectVariants: false }
+      return { stopAfterRoughCut: true,  stopAfterStrategy: true,  autoSelectVariants: false }
     default:
       // legacy / unset: behave as strategy-only for safety
-      return { stopAfterStrategy: true, stopAfterPlan: false, autoSelectVariants: false }
+      return { stopAfterRoughCut: false, stopAfterStrategy: true, autoSelectVariants: false }
   }
 }
 
