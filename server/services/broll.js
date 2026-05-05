@@ -1146,6 +1146,32 @@ export function unshiftPostCutTime(tPost, effectiveCuts, kind = 'start') {
   return tPost + cumOffset
 }
 
+/**
+ * Apply unshiftPostCutTime to every placement entry's start_seconds (with
+ * 'start' boundary rule) and end_seconds (with 'end' boundary rule). All
+ * non-time fields preserved. Entries without start_seconds/end_seconds
+ * passed through untouched.
+ *
+ * Used by persistPlacementOutput to map post-cut timecodes (LLM output)
+ * back to original time before persisting to broll_runs.output_text.
+ */
+export function remapPlacementTimes(placements, effectiveCuts) {
+  if (placements == null) return placements
+  if (!Array.isArray(placements)) return placements
+  if (!effectiveCuts || effectiveCuts.length === 0) return placements
+  return placements.map(p => {
+    if (!p || typeof p !== 'object') return p
+    const out = { ...p }
+    if (typeof p.start_seconds === 'number' && Number.isFinite(p.start_seconds)) {
+      out.start_seconds = unshiftPostCutTime(p.start_seconds, effectiveCuts, 'start')
+    }
+    if (typeof p.end_seconds === 'number' && Number.isFinite(p.end_seconds)) {
+      out.end_seconds = unshiftPostCutTime(p.end_seconds, effectiveCuts, 'end')
+    }
+    return out
+  })
+}
+
 // ── Pipeline progress & abort tracking ───────────────────────────────
 export const brollPipelineProgress = new Map()
 export const abortedBrollPipelines = new Set()

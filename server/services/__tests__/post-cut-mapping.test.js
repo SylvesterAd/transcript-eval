@@ -139,3 +139,65 @@ describe('unshiftPostCutTime — boundary rules', () => {
     expect(unshiftPostCutTime(25, multi, 'end')).toBe(30)
   })
 })
+
+describe('remapPlacementTimes', () => {
+  const cuts = [{ start: 60, end: 80 }]
+
+  it('un-shifts start_seconds (start kind) and end_seconds (end kind)', () => {
+    const placements = [
+      { start_seconds: 10, end_seconds: 50, type: 'broll', description: 'x' },
+      { start_seconds: 100, end_seconds: 150, type: 'broll', description: 'y' },
+    ]
+    const out = remapPlacementTimes(placements, cuts)
+    expect(out[0].start_seconds).toBe(10)
+    expect(out[0].end_seconds).toBe(50)
+    expect(out[1].start_seconds).toBe(120) // 100 post-cut → 120 original (after [60,80] cut)
+    expect(out[1].end_seconds).toBe(170)
+  })
+
+  it('handles boundary timecode at start/end with asymmetric rule', () => {
+    const placements = [{ start_seconds: 60, end_seconds: 60, type: 'broll' }]
+    const out = remapPlacementTimes(placements, cuts)
+    expect(out[0].start_seconds).toBe(80) // start kind → past cut
+    expect(out[0].end_seconds).toBe(60)   // end kind → before cut
+  })
+
+  it('returns input unchanged when cuts list is empty', () => {
+    const placements = [{ start_seconds: 10, end_seconds: 50 }]
+    expect(remapPlacementTimes(placements, [])).toEqual(placements)
+  })
+
+  it('preserves all non-time fields (description, type, etc.)', () => {
+    const placements = [{
+      start_seconds: 10, end_seconds: 50,
+      type: 'broll', description: 'mountain', visual_description: 'snowy',
+      function: 'Inform', extra_field: 42,
+    }]
+    const out = remapPlacementTimes(placements, cuts)
+    expect(out[0]).toMatchObject({
+      type: 'broll',
+      description: 'mountain',
+      visual_description: 'snowy',
+      function: 'Inform',
+      extra_field: 42,
+    })
+  })
+
+  it('handles non-array input gracefully', () => {
+    expect(remapPlacementTimes(null, cuts)).toBe(null)
+    expect(remapPlacementTimes(undefined, cuts)).toBe(undefined)
+  })
+
+  it('skips entries that are missing start_seconds/end_seconds', () => {
+    const placements = [
+      { start_seconds: 10, end_seconds: 50 },
+      { description: 'no times here' },
+      { start_seconds: 100 }, // partial
+    ]
+    const out = remapPlacementTimes(placements, cuts)
+    expect(out[0].start_seconds).toBe(10)
+    expect(out[1]).toEqual({ description: 'no times here' })
+    expect(out[2].start_seconds).toBe(120)
+    expect(out[2].end_seconds).toBeUndefined()
+  })
+})
