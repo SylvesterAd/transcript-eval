@@ -58,10 +58,10 @@ const PATHS = [
     icon: 'account_tree',
     flow: [
       { label: 'References analyzed', status: 'auto' },
+      { label: 'Rough cut review',    status: 'review', checkpoint: true },
       { label: 'Strategy proposal',   status: 'review', checkpoint: true },
-      { label: 'B-roll plan',         status: 'review', checkpoint: true },
+      { label: 'B-roll plan',         status: 'auto' },
       { label: 'Search & download',   status: 'auto' },
-      { label: 'Final review',        status: 'review', checkpoint: true },
     ],
     eta: '~24–36 hrs for a 40-min video',
     note: "Each checkpoint waits on your login — without it, the next phase won't start.",

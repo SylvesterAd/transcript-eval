@@ -1084,7 +1084,7 @@ export default function EditorView() {
       )}
 
       {/* Processing loader while sidebar-triggered resume is in flight */}
-      {(resumeKickedAt && groupDetail?.broll_chain_status === 'running') && (
+      {(resumeKickedAt && (groupDetail?.broll_chain_status === 'running' || groupDetail?.broll_chain_status === 'paused_at_rough_cut')) && (
         <ProcessingModal
           groupId={id}
           onBack={() => setResumeKickedAt(null)}

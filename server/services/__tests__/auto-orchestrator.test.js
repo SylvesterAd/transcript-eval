@@ -64,6 +64,9 @@ vi.mock('../../db.js', () => ({
           if (/FROM broll_example_sources WHERE example_set_id/.test(sql)) {
             return state.exampleSources
           }
+          if (/SELECT id FROM video_groups WHERE parent_group_id/.test(sql)) {
+            return []  // no prior sub-groups — idempotency check passes
+          }
           if (/SELECT id, name FROM video_groups WHERE parent_group_id/.test(sql)) {
             return state.reclassifyTargetGroups
           }
