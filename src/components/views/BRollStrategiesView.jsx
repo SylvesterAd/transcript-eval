@@ -48,6 +48,7 @@ const TEMPLATE_VARS = [
   { tag: '{{stage_N_output}}', desc: 'Output from stage N (e.g. {{stage_1_output}})' },
   { tag: '{{segment_number}}', desc: 'Current segment #' },
   { tag: '{{total_segments}}', desc: 'Total segments' },
+  { tag: '{{special_audio_note}}', desc: 'Voice-over instruction for audio uploads (empty for video)' },
 ]
 
 function kindLabel(kind) {
