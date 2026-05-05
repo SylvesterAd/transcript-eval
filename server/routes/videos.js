@@ -617,8 +617,10 @@ router.get('/groups', requireAuth, async (req, res) => {
   res.json(groups)
 })
 
-// Get group detail with assembled transcript
-router.get('/groups/:id/detail', requireAuth, async (req, res) => {
+// Get group detail with assembled transcript. Exported for unit tests
+// (the regression test for media_type asserts the SELECT column list
+// captured by a mocked db).
+export async function _getGroupDetailHandler(req, res) {
   const groupId = req.params.id
   const userScope = isAdmin(req) ? '' : 'AND user_id = ?'
   const userArgs = isAdmin(req) ? [] : [req.auth.userId]
@@ -628,7 +630,7 @@ router.get('/groups/:id/detail', requireAuth, async (req, res) => {
   // soon as the SELECTs finish.
   const [group, videos] = await Promise.all([
     db.prepare(`SELECT * FROM video_groups WHERE id = ? ${userScope}`).get(groupId, ...userArgs),
-    db.prepare('SELECT id, title, video_type, duration_seconds, transcription_status, transcription_error, thumbnail_path, file_path, frames_status FROM videos WHERE group_id = ?').all(groupId),
+    db.prepare('SELECT id, title, video_type, media_type, duration_seconds, transcription_status, transcription_error, thumbnail_path, file_path, frames_status FROM videos WHERE group_id = ?').all(groupId),
   ])
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
@@ -654,7 +656,8 @@ router.get('/groups/:id/detail', requireAuth, async (req, res) => {
     editor_state: group.editor_state_json ? JSON.parse(group.editor_state_json) : null,
     annotations: group.annotations_json ? JSON.parse(group.annotations_json) : null,
   })
-})
+}
+router.get('/groups/:id/detail', requireAuth, _getGroupDetailHandler)
 
 // Poll assembly status (lightweight — no JSON parsing)
 router.get('/groups/:id/status', requireAuth, async (req, res) => {
@@ -712,8 +715,10 @@ router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
   res.json({ parent: { ...parent, videos }, subGroups })
 })
 
-// Get classification data + videos with media info
-router.get('/groups/:id/classification', requireAuth, async (req, res) => {
+// Get classification data + videos with media info. Exported for unit
+// tests (the regression test for media_type asserts the SELECT column
+// list captured by a mocked db).
+export async function _getGroupClassificationHandler(req, res) {
   const group = await db.prepare(`SELECT id, name, assembly_status, assembly_error, classification_json, parent_group_id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
@@ -725,7 +730,7 @@ router.get('/groups/:id/classification', requireAuth, async (req, res) => {
     const subIds = subGroups.map(sg => sg.id)
     if (subIds.length > 0) {
       videos = await db.prepare(`
-        SELECT id, title, duration_seconds, thumbnail_path, media_info_json, file_path
+        SELECT id, title, media_type, duration_seconds, thumbnail_path, media_info_json, file_path
         FROM videos WHERE group_id IN (${subIds.map(() => '?').join(',')}) AND video_type = 'raw' ORDER BY id
       `).all(...subIds)
     } else {
@@ -733,7 +738,7 @@ router.get('/groups/:id/classification', requireAuth, async (req, res) => {
     }
   } else {
     videos = await db.prepare(`
-      SELECT id, title, duration_seconds, thumbnail_path, media_info_json, file_path
+      SELECT id, title, media_type, duration_seconds, thumbnail_path, media_info_json, file_path
       FROM videos WHERE group_id = ? AND video_type = 'raw' ORDER BY id
     `).all(req.params.id)
   }
@@ -770,7 +775,8 @@ router.get('/groups/:id/classification', requireAuth, async (req, res) => {
     videos: videosWithInfo,
     subGroups,
   })
-})
+}
+router.get('/groups/:id/classification', requireAuth, _getGroupClassificationHandler)
 
 // Re-run Gemini classification on a top-level project. Smart-diff: if the new
 // classification produces the same per-sub-group videoId partitioning, the
