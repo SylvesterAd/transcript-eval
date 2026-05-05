@@ -95,6 +95,11 @@ export default function AssetsView() {
   // to the parent project to re-classify (where progress can be preserved
   // when the new partitioning matches the existing sub-group structure).
   const isSubGroup = !!data?.group?.parent_group_id
+  // Audio-only groups have no multicam/sync workflow — there's nothing to
+  // classify, so the Re-classify button and "Classifying" status are hidden.
+  // Task 4's backend guard short-circuits the underlying API call.
+  const groupVideos = data?.videos || []
+  const hasAudio = groupVideos.some(v => v.media_type === 'audio')
 
   // Derive confirmedGroups from API when project is already confirmed
   const effectiveConfirmedGroups = confirmedGroups || (
@@ -220,7 +225,7 @@ export default function AssetsView() {
   // view (sub-groups don't get an assets-management surface — see the redirect
   // useEffect above). Distinct labels for each state so the user doesn't read
   // a data-loading spinner as an in-progress classification operation.
-  const isClassifying = data?.group?.assembly_status === 'classifying' || reclassifying
+  const isClassifying = !hasAudio && (data?.group?.assembly_status === 'classifying' || reclassifying)
   const isRedirectingToParent = !!data?.group?.parent_group_id
   if (loading || isClassifying || isRedirectingToParent) {
     let label
@@ -287,7 +292,7 @@ export default function AssetsView() {
           <p className="text-on-surface-variant text-sm">{effectiveConfirmedGroups ? 'Organize and sync your raw footage for the kinetic editor.' : (data?.group?.name || '')}</p>
         </div>
         <div className="flex gap-3">
-          {!isSubGroup && (
+          {!isSubGroup && !hasAudio && (
             <button
               onClick={handleReclassify}
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-on-surface-variant hover:bg-surface-container-highest/50 transition-colors"

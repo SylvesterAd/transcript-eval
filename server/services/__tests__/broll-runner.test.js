@@ -30,6 +30,15 @@ vi.mock('../../db.js', () => ({
       return {
         async get(...args) {
           if (/SELECT editor_state_json FROM video_groups WHERE id = \?/.test(sql)) return state.group
+          // resolvePlanStrategyId audio-detection probe (Task 6). Default state has
+          // no audio videos in the group, so the resolver falls through to the
+          // default plan_prep lookup (next clause).
+          if (/SELECT 1 FROM videos WHERE group_id = \? AND media_type = 'audio'/.test(sql)) return null
+          // resolvePlanStrategyId audio-only strategy lookup. Only reached when the
+          // audio-detection probe returns a row, which doesn't happen in the existing
+          // tests — kept here for completeness so future audio-aware tests don't
+          // explode on an unhandled SQL.
+          if (/bundle_key = 'audio_only'/.test(sql)) return null
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'plan_prep'/.test(sql)) return state.planPrepStrategy
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_strategy'/.test(sql)) return state.createStrategy
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy'/.test(sql)) return state.combinedStrategy

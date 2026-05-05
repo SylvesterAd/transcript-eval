@@ -880,9 +880,17 @@ export default function EditorView() {
     return () => window.removeEventListener('keydown', handler)
   }, [state.isPlaying, state.currentTime, state.activeTab, state.transcriptSelection, totalDuration, dispatch])
 
+  // Audio-only A-roll groups display a "No video" placeholder where video
+  // would normally render. Derived from the raw video record's media_type;
+  // defaults to 'video' for legacy records or until the API exposes the
+  // column in the /detail SELECT.
+  const groupVideos = groupDetail?.videos || []
+  const mainVideo = groupVideos.find(v => v.video_type === 'raw') || groupVideos[0]
+  const mediaType = mainVideo?.media_type || 'video'
+
   const editorContextValue = useMemo(
-    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading }),
-    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading]
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType]
   )
 
   if (loading) {
@@ -1063,7 +1071,7 @@ export default function EditorView() {
  * Drag the handle to resize — video preview grows/shrinks, timeline follows.
  */
 function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
-  const { flowRunState } = useContext(EditorContext)
+  const { flowRunState, mediaType } = useContext(EditorContext)
   const [bottomH, setBottomH] = useState(isMainMode ? 310 : 350) // px — playback controls + timeline
   const [videoW, setVideoW] = useState(45) // % width of video preview panel (rough cut)
   const prevMainMode = useRef(isMainMode)
@@ -1158,6 +1166,12 @@ function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
             <div style={{ width: `${videoW}%` }} className="shrink-0 flex flex-col min-h-0">
               <RoughCutPreview />
             </div>
+          </div>
+        ) : mediaType === 'audio' ? (
+          // Audio-only A-roll: nothing to preview visually. Keep layout stable
+          // by occupying the same flex slot as <VideoPreviewGrid />.
+          <div className="flex-1 flex items-center justify-center w-full h-full bg-zinc-950 border border-zinc-800 rounded text-zinc-500 text-sm">
+            No video — audio only
           </div>
         ) : (
           <VideoPreviewGrid />

@@ -1185,6 +1185,19 @@ function buildAudienceBlock(audienceText) {
   return `When beat_strategies describe people or lifestyle scenarios, briefly contextualize them to fit the audience (e.g., "older white American couple" instead of just "a couple") — one or two adjectives, never a paragraph. Skip the audience hint for beats that don't involve people.\n\nAudience: ${audienceText}`
 }
 
+// Verbatim text the user wants injected into all plans/strategies for audio uploads.
+// Empty for video — the placeholder expands to '' so existing prompts are unchanged.
+// Wired into every replacePlaceholders site below as {{special_audio_note}}.
+const SPECIAL_AUDIO_NOTE_TEXT = `VERY IMPORTANT NOTE: new main video a-roll consist of no talking head appearance AND it's only Voice over SO you must show b-rolls all the time. Make sure we adjust b-roll frequency and show b-rolls all the time during the video without ANY empty spaces in between!`
+
+export function buildSpecialAudioNote(mediaType) {
+  return mediaType === 'audio' ? SPECIAL_AUDIO_NOTE_TEXT : ''
+}
+
+// Exported as a __test__ alias so unit tests can import without colliding with
+// any future import name. Mirrors __test__filterStagesForMedia (Task 7).
+export { buildSpecialAudioNote as __test__buildSpecialAudioNote }
+
 // Run alt plans for non-favorite reference videos using a completed plan pipeline's data
 export async function executeAltPlans(planPipelineId) {
   // Load the plan pipeline's completed stages
@@ -1217,6 +1230,10 @@ export async function executeAltPlans(planPipelineId) {
   if (exampleVideos.length < 2) throw new Error('Need at least 2 reference videos for alternative plans')
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
+  // {{special_audio_note}} expands based on the MAIN video's media_type (the video the
+  // alt plan is being generated for), not the reference video being analysed.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
   const favoriteVideo = exampleVideos.find(v => v.isFavorite) || exampleVideos[0]
   const altVideos = exampleVideos.filter(v => v !== favoriteVideo)
 
@@ -1364,6 +1381,7 @@ export async function executeAltPlans(planPipelineId) {
         .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
         .replace(/\{\{audience\}\}/g, audienceText)
         .replace(/\{\{audience_block\}\}/g, audienceBlock)
+        .replace(/\{\{special_audio_note\}\}/g, specialAudioNote)
       for (const [num, ans] of Object.entries(llmAnswers)) {
         result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
       }
@@ -2710,6 +2728,9 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
+  // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_strategy' })
 
@@ -2727,6 +2748,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
       .replace(/\{\{audience\}\}/g, audienceText)
       .replace(/\{\{audience_block\}\}/g, audienceBlock)
+      .replace(/\{\{special_audio_note\}\}/g, specialAudioNote)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3137,6 +3159,9 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
+  // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_combined_strategy' })
 
@@ -3155,6 +3180,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
       .replace(/\{\{reference_analysis\}\}/g, allReferenceAnalyses) // fallback
       .replace(/\{\{audience\}\}/g, audienceText)
       .replace(/\{\{audience_block\}\}/g, audienceBlock)
+      .replace(/\{\{special_audio_note\}\}/g, specialAudioNote)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3681,6 +3707,9 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
+  // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Plan', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_plan' })
 
@@ -3696,6 +3725,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{audience\}\}/g, audienceText)
       .replace(/\{\{audience_block\}\}/g, audienceBlock)
+      .replace(/\{\{special_audio_note\}\}/g, specialAudioNote)
     // llm_answer_1 maps to aRollOutput (A-Roll analysis from prep pipeline)
     result = result.replace(/\{\{llm_answer_1\}\}/g, aRollOutput)
     for (const [num, ans] of Object.entries(llmAnswers)) {
@@ -3861,6 +3891,37 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   }
 }
 
+// Audio defense-in-depth: drop video-only stage types targeting main_video when
+// the main media is audio. The audio-only seed strategy (Task 5) already
+// excludes these at the seed level — this catches the case where a user
+// manually picks the wrong strategy for an audio group, or a future strategy
+// adds video stages we forget to exclude. video_llm/video_question against
+// main_video would crash on the missing video file; programmatic stages are
+// not covered by this filter (out of scope for Task 7).
+const VIDEO_STAGE_TYPES = new Set(['video_llm', 'video_question'])
+const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set(['export_post_cut_video'])
+
+function filterStagesForMedia(stages, mediaType) {
+  if (mediaType !== 'audio') return stages
+  return stages.filter(s => {
+    const isVideoStage = VIDEO_STAGE_TYPES.has(s.type)
+    const targetsMain = s.target === 'main_video'
+    if (isVideoStage && targetsMain) {
+      console.log(`[broll-pipeline] Skipping video stage on audio media: ${s.name}`)
+      return false
+    }
+    if (s.type === 'programmatic' && VIDEO_ONLY_PROGRAMMATIC_ACTIONS.has(s.action)) {
+      console.log(`[broll-pipeline] Skipping video-only programmatic stage on audio media: ${s.name} (action=${s.action})`)
+      return false
+    }
+    return true
+  })
+}
+
+// Exported as a __test__ alias so unit tests can exercise the helper without
+// driving the full executePipeline.
+export { filterStagesForMedia as __test__filterStagesForMedia }
+
 export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
   const strategy = await getStrategy(strategyId)
   if (!strategy) throw new Error('Strategy not found')
@@ -3870,6 +3931,18 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
   let planStages = JSON.parse(version.stages_json || '[]')
   if (!planStages.length) throw new Error('No stages defined in this version')
+
+  // Audio guard: drop video stages targeting main_video when main video is audio.
+  // Defense-in-depth — the resolver normally picks an audio-only strategy whose
+  // seed already excludes these stages, but a manual override or future seed
+  // mismatch would otherwise crash on the missing video file.
+  let mainMediaType = 'video'
+  if (videoId) {
+    const v = await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId)
+    mainMediaType = v?.media_type || 'video'
+  }
+  planStages = filterStagesForMedia(planStages, mainMediaType)
+  if (!planStages.length) throw new Error('No stages remain after audio filter')
 
   // Pre-load example videos early (needed for chaining logic)
   let exampleVideos = []
@@ -4053,6 +4126,9 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
   const videoTitle = mainVideo?.title || `Video #${videoId}`
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
+  // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
+  // Re-uses mainMediaType resolved earlier for filterStagesForMedia, so no extra DB hit.
+  const specialAudioNote = buildSpecialAudioNote(mainMediaType)
   const pipelineMeta = { strategyId, videoId, groupId, strategyName: strategy.name, videoTitle, startedAt: Date.now(), exampleVideoId: exampleVideoId || null }
 
   if (resumeData) {
@@ -4079,6 +4155,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       .replace(/\{\{all_chapter_analyses\}\}/g, allChapters)
       .replace(/\{\{audience\}\}/g, audienceText)
       .replace(/\{\{audience_block\}\}/g, audienceBlock)
+      .replace(/\{\{special_audio_note\}\}/g, specialAudioNote)
     for (const [num, ans] of Object.entries(llmAnswers)) {
       result = result.replace(new RegExp(`\\{\\{llm_answer_${num}\\}\\}`, 'g'), ans)
     }

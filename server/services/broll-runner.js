@@ -4,6 +4,26 @@
 
 import db from '../db.js'
 
+// Resolve the plan strategy id for a given subgroup. Returns the audio-only
+// variant when any video in the group has media_type='audio', otherwise the
+// default plan strategy (matched by strategy_kind='plan_prep' first row).
+async function resolvePlanStrategyId(subGroupId) {
+  const audio = await db.prepare(
+    "SELECT 1 FROM videos WHERE group_id = ? AND media_type = 'audio' LIMIT 1"
+  ).get(subGroupId)
+  if (audio) {
+    const audioStrategy = await db.prepare(
+      "SELECT id FROM broll_strategies WHERE bundle_key = 'audio_only' AND strategy_kind = 'plan_prep' ORDER BY id LIMIT 1"
+    ).get()
+    if (audioStrategy?.id) return audioStrategy.id
+    console.warn('[broll-runner] media_type=audio but no audio_only plan strategy seeded; falling back to default')
+  }
+  const def = await db.prepare(
+    "SELECT id FROM broll_strategies WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1"
+  ).get()
+  return def?.id || 7
+}
+
 // runAllReferences — extracted from POST /broll/pipeline/run-all (broll.js:927)
 //
 // Fires plan-prep + per-reference analysis pipelines in parallel.
@@ -54,9 +74,10 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
 
   let prepPipelineId = existingPrepId
   if (!existingPrepId) {
-    prepPipelineId = `${planPrepStrategyId || 7}-${mainVideoId}-${Date.now()}`
+    const resolvedPlanStrategyId = await resolvePlanStrategyId(subGroupId)
+    prepPipelineId = `${resolvedPlanStrategyId}-${mainVideoId}-${Date.now()}`
     brollPipelineProgress.set(prepPipelineId, {
-      strategyId: planPrepStrategyId || 7, videoId: mainVideoId, groupId: subGroupId,
+      strategyId: resolvedPlanStrategyId, videoId: mainVideoId, groupId: subGroupId,
       status: 'running', stageName: 'Loading data...', stageIndex: 0, totalStages: 5,
       phase: 'plan_prep', strategyName: 'Plan Prep',
     })
@@ -440,3 +461,7 @@ export async function runBrollSearchFirst10({
   await executeSearchBatch(planPipelineIds, batchSize, searchPipelineId)
   return { searchPipelineId }
 }
+
+// Test-only export: lets server/services/__tests__/broll-runner-audio-resolver.test.js
+// exercise the resolver in isolation without driving runAllReferences end-to-end.
+export { resolvePlanStrategyId as __test__resolvePlanStrategyId }
