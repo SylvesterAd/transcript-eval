@@ -107,3 +107,35 @@ describe('unshiftPostCutTime — round-trip identity', () => {
     expect(unshiftPostCutTime(299, cuts, 'start')).toBeCloseTo(399, 9)
   })
 })
+
+describe('unshiftPostCutTime — boundary rules', () => {
+  const cuts = [{ start: 60, end: 80 }]
+  // Post-cut boundary for this cut = 60 - 0 = 60.
+
+  it("kind='start' at boundary jumps past cut → cut.end", () => {
+    expect(unshiftPostCutTime(60, cuts, 'start')).toBe(80)
+  })
+
+  it("kind='end' at boundary stays before cut → cut.start", () => {
+    expect(unshiftPostCutTime(60, cuts, 'end')).toBe(60)
+  })
+
+  it("kind='start' just past boundary maps continuously", () => {
+    expect(unshiftPostCutTime(60.001, cuts, 'start')).toBeCloseTo(80.001, 9)
+  })
+
+  it("kind='end' just before boundary maps continuously", () => {
+    expect(unshiftPostCutTime(59.999, cuts, 'end')).toBeCloseTo(59.999, 9)
+  })
+
+  it('multiple cuts: boundary rule applies per-cut', () => {
+    const multi = [
+      { start: 10, end: 15 }, // post-cut boundary 10
+      { start: 30, end: 40 }, // post-cut boundary 30 - 5 = 25
+    ]
+    expect(unshiftPostCutTime(10, multi, 'start')).toBe(15)
+    expect(unshiftPostCutTime(10, multi, 'end')).toBe(10)
+    expect(unshiftPostCutTime(25, multi, 'start')).toBe(40)
+    expect(unshiftPostCutTime(25, multi, 'end')).toBe(30)
+  })
+})
