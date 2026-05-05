@@ -20,14 +20,14 @@ const ASSEMBLY_DONE_VALUES = new Set(['done', 'confirmed'])
 const CHAIN_IN_PROGRESS = new Set(['pending', 'running'])
 
 // Auto-orchestration paths and their natural pause-point. The chain
-// transitions through substages refs → strategy → plan → search → done.
+// transitions through substages rough_cut → refs → strategy → plan → search → done.
 // A `null` pause means the path has no checkpoint (Full Auto).
 const PATH_PAUSE_SUBSTAGE = {
   'hands-off': null,
   'strategy-only': 'strategy',
-  'guided': 'plan',
+  'guided': 'rough_cut',
 }
-const SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
+const SUBSTAGE_ORDER = ['rough_cut', 'refs', 'strategy', 'plan', 'search']
 const AUTO_PATHS = new Set(Object.keys(PATH_PAUSE_SUBSTAGE))
 
 // True when the chain failed BEFORE this path's natural pause-point.
@@ -75,6 +75,9 @@ export function resolveProjectRoute(project) {
     return `/?step=processing&group=${id}`
   }
   if (CHAIN_IN_PROGRESS.has(project.broll_chain_status)) {
+    return `/?step=processing&group=${id}`
+  }
+  if (project.broll_chain_status === 'paused_at_rough_cut') {
     return `/?step=processing&group=${id}`
   }
   // Failure routing: hold pre-pause failures on the loader so the user

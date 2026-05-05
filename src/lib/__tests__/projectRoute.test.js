@@ -83,6 +83,12 @@ describe('resolveProjectRoute', () => {
       expect(resolveProjectRoute({ ...READY, id: 7, broll_chain_status: 'running' }))
         .toBe('/?step=processing&group=7')
     })
+
+    it('routes to processing when broll_chain_status is paused_at_rough_cut (guided review checkpoint)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'guided', broll_chain_status: 'paused_at_rough_cut',
+      })).toBe('/?step=processing&group=7')
+    })
   })
 
   describe('ready for editor', () => {
@@ -106,7 +112,7 @@ describe('resolveProjectRoute', () => {
 
     it('routes to editor when broll_chain_status is failed post-pause (auto path)', () => {
       // Failure at substage 'search' on a 'guided' path is post-pause
-      // (user already picked a plan). Pre-pause failures route to the
+      // (user already approved rough cut). Pre-pause failures route to the
       // processing loader instead — see "failed-pre-pause routing per
       // path" describe block.
       expect(resolveProjectRoute({
@@ -220,14 +226,21 @@ describe('resolveProjectRoute', () => {
       })).toBe('/editor/7/assets')
     })
 
-    it('guided failed at plan → processing (no plan to pick yet)', () => {
+    it('guided failed at rough_cut → processing (no rough cut approved yet)', () => {
       expect(resolveProjectRoute({
         ...READY, id: 7, path_id: 'guided',
-        broll_chain_status: 'failed', broll_chain_substage: 'plan',
+        broll_chain_status: 'failed', broll_chain_substage: 'rough_cut',
       })).toBe('/?step=processing&group=7')
     })
 
-    it('guided failed at search → editor (user already picked plan)', () => {
+    it('guided failed at plan → editor (user already approved rough cut)', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'guided',
+        broll_chain_status: 'failed', broll_chain_substage: 'plan',
+      })).toBe('/editor/7/assets')
+    })
+
+    it('guided failed at search → editor (user already approved rough cut)', () => {
       expect(resolveProjectRoute({
         ...READY, id: 7, path_id: 'guided',
         broll_chain_status: 'failed', broll_chain_substage: 'search',
