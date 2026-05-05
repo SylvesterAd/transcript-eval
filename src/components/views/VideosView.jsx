@@ -440,6 +440,11 @@ function VideoRow({ video: v, onRefresh }) {
         <div className="font-medium truncate">{v.title}</div>
         <div className="text-sm text-zinc-400 mt-0.5 flex gap-3 items-center flex-wrap">
           <TypeBadge type={v.video_type} />
+          {v.media_type === 'audio' && (
+            <span className="px-1.5 py-0.5 text-[10px] rounded bg-purple-900/40 border border-purple-800 text-purple-300">
+              AUDIO
+            </span>
+          )}
           {v.duration_seconds && <span>{formatDuration(v.duration_seconds)}</span>}
           <span className={v.has_raw ? 'text-emerald-400' : 'text-zinc-600'}>Raw: {v.has_raw ? 'Yes' : 'No'}</span>
           <span className={v.has_human_edited ? 'text-emerald-400' : 'text-zinc-600'}>Human: {v.has_human_edited ? 'Yes' : 'No'}</span>
