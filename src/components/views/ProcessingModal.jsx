@@ -17,9 +17,10 @@ const MAX_SIZE = 50 * 1024 * 1024 * 1024
 const PATH_PAUSE_SUBSTAGE = {
   'hands-off': null,
   'strategy-only': 'strategy',
-  'guided': 'plan',
+  // 'guided' pauses at rough_cut first (earliest boundary for pre-pause failure routing).
+  'guided': 'rough_cut',
 }
-const SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
+const SUBSTAGE_ORDER = ['rough_cut', 'refs', 'strategy', 'plan', 'search']
 
 function isFailedPrePause(sg, parentPathId) {
   if (sg.broll_chain_status !== 'failed') return false
@@ -41,7 +42,7 @@ export function deriveMode({ parent, files = [], subGroups = [] }) {
   const allTerminal = subGroups.every(sg =>
     (sg.assembly_status === 'done' || sg.assembly_status === 'error') &&
     (parent.auto_rough_cut === false || sg.rough_cut_status === 'done' || sg.rough_cut_status === 'failed' || sg.rough_cut_status === 'insufficient_tokens') &&
-    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed' || sg.broll_chain_status === 'paused_at_strategy' || sg.broll_chain_status === 'paused_at_plan')
+    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed' || sg.broll_chain_status === 'paused_at_rough_cut' || sg.broll_chain_status === 'paused_at_strategy' || sg.broll_chain_status === 'paused_at_plan')
   )
   if (!allTerminal) return 'pipeline'
   // Promote the pre-pause failure to its own mode so the loader can
@@ -73,6 +74,7 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
   const rcDone = rcSkipped || (subGroups.length > 0 && subGroups.every(sg => ['done','failed','insufficient_tokens'].includes(sg.rough_cut_status)))
   const rcActive = subGroups.some(sg => sg.rough_cut_status === 'pending' || sg.rough_cut_status === 'running')
 
+  const brollPausedAtRough = subGroups.some(sg => sg.broll_chain_status === 'paused_at_rough_cut')
   const brollPausedAtStrat = subGroups.some(sg => sg.broll_chain_status === 'paused_at_strategy')
   const brollPausedAtPlan  = subGroups.some(sg => sg.broll_chain_status === 'paused_at_plan')
   const brollDone = subGroups.length > 0 && subGroups.every(sg => sg.broll_chain_status === 'done')
@@ -89,7 +91,7 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
     { id: 'transcribe',     label: 'Transcribing',           done: videos.length > 0 && transcribed === videos.length, active: transcribing, sub: `${transcribed} of ${videos.length} done` },
     { id: 'classify',       label: 'Classifying',            done: classifyDone, active: classifying, paused: classifyPaused },
     { id: 'sync',           label: 'Multi-cam sync',         done: syncDone, active: syncActive },
-    { id: 'rough_cut',      label: 'AI Rough Cut',           skipped: rcSkipped, done: rcDone, active: rcActive },
+    { id: 'rough_cut',      label: 'AI Rough Cut',           skipped: rcSkipped, done: rcDone, active: rcActive, paused: brollPausedAtRough },
     { id: 'broll_refs',     label: 'References analyzed',     active: brollActive && brollSubstage === 'refs',     done: brollDone || (brollActive && ['strategy','plan','search'].includes(brollSubstage)) },
     { id: 'broll_strategy', label: 'B-roll strategy',         paused: brollPausedAtStrat, active: brollActive && brollSubstage === 'strategy', done: brollDone || (brollActive && ['plan','search'].includes(brollSubstage)) },
     { id: 'broll_plan',     label: 'B-roll plan',             paused: brollPausedAtPlan,  active: brollActive && brollSubstage === 'plan',     done: brollDone || (brollActive && brollSubstage === 'search') },
@@ -781,6 +783,7 @@ function FullAutoBanner({ onTakeMeToProjects, onDismiss }) {
 
 function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
   // Pick the first paused sub-group for the "Open project to pick" CTA per stage.
+  const pausedAtRoughCutSg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_rough_cut')
   const pausedAtStrategySg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_strategy')
   const pausedAtPlanSg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_plan')
 
@@ -813,7 +816,10 @@ function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
         let pausedRoute = null
         let pausedLabel = 'Open project to pick'
         if (stage.paused) {
-          if (stage.id === 'broll_strategy' && pausedAtStrategySg) {
+          if (stage.id === 'rough_cut' && pausedAtRoughCutSg) {
+            pausedSg = pausedAtRoughCutSg
+            pausedRoute = `/editor/${pausedAtRoughCutSg.id}/roughcut`
+          } else if (stage.id === 'broll_strategy' && pausedAtStrategySg) {
             pausedSg = pausedAtStrategySg
             pausedRoute = `/editor/${pausedAtStrategySg.id}/brolls/strategy/strategy`
           } else if (stage.id === 'broll_plan' && pausedAtPlanSg) {
