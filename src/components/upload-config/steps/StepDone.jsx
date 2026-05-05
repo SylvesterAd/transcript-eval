@@ -33,7 +33,7 @@ function summarizeAudience(a) {
 
 function summarizePath(id) {
   return ({
-    'guided':        'C · Guided Review',
+    'guided':        'C · Rough Cut + Strategy',
     'strategy-only': 'B · Strategy Review',
     'hands-off':     'A · Full Auto',
   }[id]) || '—'

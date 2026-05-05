@@ -63,7 +63,7 @@ vi.mock('../../db.js', () => ({
 }))
 
 vi.mock('../../routes/broll.js', () => ({
-  pathToFlags: () => ({ stopAfterStrategy: false, stopAfterPlan: false, autoSelectVariants: true }),
+  pathToFlags: () => ({ stopAfterRoughCut: false, stopAfterStrategy: false, autoSelectVariants: true }),
 }))
 
 vi.mock('../broll-runner.js', () => ({

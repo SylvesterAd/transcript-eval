@@ -26,37 +26,37 @@ import { pathToFlags } from '../broll.js'
 describe('pathToFlags', () => {
   it('hands-off: no stops, auto-select variants', () => {
     expect(pathToFlags('hands-off')).toEqual({
+      stopAfterRoughCut: false,
       stopAfterStrategy: false,
-      stopAfterPlan: false,
       autoSelectVariants: true,
     })
   })
 
   it('strategy-only: stop after strategy only', () => {
     expect(pathToFlags('strategy-only')).toEqual({
+      stopAfterRoughCut: false,
       stopAfterStrategy: true,
-      stopAfterPlan: false,
       autoSelectVariants: false,
     })
   })
 
-  it('guided: stop after strategy AND plan', () => {
+  it('guided: stop after rough cut AND strategy', () => {
     expect(pathToFlags('guided')).toEqual({
+      stopAfterRoughCut: true,
       stopAfterStrategy: true,
-      stopAfterPlan: true,
       autoSelectVariants: false,
     })
   })
 
   it('null / unknown: defaults to strategy-only behavior', () => {
     expect(pathToFlags(null)).toEqual({
+      stopAfterRoughCut: false,
       stopAfterStrategy: true,
-      stopAfterPlan: false,
       autoSelectVariants: false,
     })
     expect(pathToFlags('unknown-value')).toEqual({
+      stopAfterRoughCut: false,
       stopAfterStrategy: true,
-      stopAfterPlan: false,
       autoSelectVariants: false,
     })
   })

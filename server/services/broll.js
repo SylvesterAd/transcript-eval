@@ -2558,7 +2558,7 @@ export async function executePlanPrep(videoId, groupId, editorCuts = null, pipel
     editorCuts,
     null, // no referenceRunId
     null, // no resumeData
-    { stopAfterPlan: false, exampleVideoId: null, pipelineIdOverride },
+    { exampleVideoId: null, pipelineIdOverride },
   )
 
   return {
@@ -3922,7 +3922,7 @@ function filterStagesForMedia(stages, mediaType) {
 // driving the full executePipeline.
 export { filterStagesForMedia as __test__filterStagesForMedia }
 
-export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
+export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
   const strategy = await getStrategy(strategyId)
   if (!strategy) throw new Error('Strategy not found')
 
@@ -4335,7 +4335,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
         }
       }
 
-      // Stop-after-strategy checkpoint (mirror of stopAfterPlan below):
+      // Stop-after-strategy checkpoint:
       // strategy-only / guided paths pause the pipeline at the boundary
       // between the analysis phase and the plan phase so the user can
       // review the creative strategy before plan generation continues.
@@ -4367,11 +4367,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
       if (analysisStageCount && altPlanPhases.length && i === planPhaseStartIdx + planStages.length && !favoriteOutput) {
         favoriteOutput = stageOutputs[planPhaseStartIdx + planStages.length - 1] || ''
         console.log(`[broll-pipeline] Favorite plan complete (${favoriteOutput.length} chars)`)
-        // Stop here if alt plans should be triggered separately (Step 3)
-        if (stopAfterPlan) {
-          console.log(`[broll-pipeline] stopAfterPlan: stopping before alt_plan phase (${altPlanPhases.length} alt videos pending)`)
-          break
-        }
       }
 
       // ── Resume: skip already-completed stages ──

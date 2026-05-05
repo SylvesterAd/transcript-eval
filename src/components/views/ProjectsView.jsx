@@ -35,6 +35,9 @@ export function aggregateChainStatus(subGroups = []) {
   const failed = subGroups.find(sg => sg.broll_chain_status === 'failed')
   if (failed) return { status: 'failed', substage: failed.broll_chain_substage || null }
 
+  const pausedRoughCut = subGroups.find(sg => sg.broll_chain_status === 'paused_at_rough_cut')
+  if (pausedRoughCut) return { status: 'paused_at_rough_cut', substage: 'rough_cut' }
+
   const pausedStrategy = subGroups.find(sg => sg.broll_chain_status === 'paused_at_strategy')
   if (pausedStrategy) return { status: 'paused_at_strategy', substage: 'strategy' }
 

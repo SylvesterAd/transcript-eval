@@ -10,22 +10,46 @@ const items = [
 
 const SYNC_READY_STATUSES = ['done', 'confirmed']
 
-export default function EditorSidebar({ activeTab = 'sync', activeSub, assemblyStatus, hasVideos = true, hasBrollSearch = false, onTabChange }) {
+export default function EditorSidebar({
+  activeTab = 'sync',
+  activeSub,
+  assemblyStatus,
+  hasVideos = true,
+  hasBrollSearch = false,
+  brollChainStatus = null,
+  onTabChange,
+  onResumeFromRoughCut,
+}) {
   const { isAdmin } = useRole()
+  const pausedAtRoughCut = brollChainStatus === 'paused_at_rough_cut'
+
   return (
     <aside className="flex flex-col items-center py-4 gap-8 border-r border-white/5 bg-[#0e0e10] w-20 shrink-0">
       <nav className="flex flex-col gap-6 w-full px-2">
         {items.filter(item => !item.adminOnly || isAdmin).map(item => {
-          const locked = item.needsSync && (!SYNC_READY_STATUSES.includes(assemblyStatus) || !hasVideos)
+          const baseLocked = item.needsSync && (!SYNC_READY_STATUSES.includes(assemblyStatus) || !hasVideos)
           const brollLocked = item.needsBrollSearch && !hasBrollSearch
-          const disabled = item.disabled || locked || brollLocked
+          // While paused at rough cut, brolls-strategy must be clickable so the
+          // user can kick the resume. Other broll items stay locked.
+          const overrideUnlock = pausedAtRoughCut && item.id === 'brolls-strategy'
+          const disabled = item.disabled || ((baseLocked || brollLocked) && !overrideUnlock)
           const active = item.tab
             ? activeTab === item.tab && (item.id === 'brolls-strategy' ? activeSub !== 'edit' : activeSub === 'edit')
             : item.id === activeTab
+
+          const handleClick = () => {
+            if (disabled) return
+            if (pausedAtRoughCut && item.id === 'brolls-strategy') {
+              onResumeFromRoughCut?.()
+              return
+            }
+            onTabChange?.(item.navTo || item.id)
+          }
+
           return (
             <div
               key={item.id}
-              onClick={() => !disabled && onTabChange?.(item.navTo || item.id)}
+              onClick={handleClick}
               className={`flex flex-col items-center gap-1 cursor-pointer py-3 rounded-lg transition-all ${
                 active
                   ? 'text-[#cefc00] bg-[#cefc00]/5'

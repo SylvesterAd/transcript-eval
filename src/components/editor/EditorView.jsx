@@ -22,6 +22,7 @@ import RoughCutPreview from './RoughCutPreview.jsx'
 import AssetsView from './AssetsView.jsx'
 import BRollPanel from './BRollPanel.jsx'
 import EstimationModal from './EstimationModal.jsx'
+import ProcessingModal from '../views/ProcessingModal.jsx'
 
 export const EditorContext = createContext(null)
 
@@ -58,9 +59,10 @@ function RoughCutFailureBanner({ status, requiredTokens, balance, onRetry, onDis
 const BANNER_PATH_PAUSE = {
   'hands-off': null,
   'strategy-only': 'strategy',
-  'guided': 'plan',
+  // 'guided' pauses at rough_cut first (earliest pre-pause boundary).
+  'guided': 'rough_cut',
 }
-const BANNER_SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
+const BANNER_SUBSTAGE_ORDER = ['rough_cut', 'refs', 'strategy', 'plan', 'search']
 
 // Determines whether the editor should hand off to the processing
 // loader's <FailedView>. True when the chain failed at-or-before the
@@ -344,6 +346,21 @@ export default function EditorView() {
     }
   }, [state.groupId])
 
+  // Handler: resume b-roll chain from rough-cut pause to strategy
+  const [resumeKickedAt, setResumeKickedAt] = useState(null)
+  const handleResumeFromRoughCut = async () => {
+    // Optimistically reflect "running" so ProcessingModal mounts immediately.
+    setResumeKickedAt(Date.now())
+    try {
+      await apiPost(`/broll/groups/${id}/resume-chain?from=strategy`)
+    } catch (err) {
+      console.error('[resume] failed:', err.message)
+      setResumeKickedAt(null)
+    }
+    // Navigate to the strategy tab so the panel is visible while loader runs.
+    navigate(`/editor/${id}/brolls/strategy`)
+  }
+
   // Handler: accept estimation and start pipeline
   const handleAcceptAIRoughCut = useCallback(async () => {
     if (!state.groupId) return
@@ -378,6 +395,15 @@ export default function EditorView() {
       setEstimationLoading(false)
     }
   }, [state.groupId, refetchDetail])
+
+  // Clear resumeKickedAt when the resume chain reaches a terminal status
+  useEffect(() => {
+    if (!resumeKickedAt) return
+    const status = groupDetail?.broll_chain_status
+    if (status === 'paused_at_strategy' || status === 'done' || status === 'failed') {
+      setResumeKickedAt(null)
+    }
+  }, [resumeKickedAt, groupDetail?.broll_chain_status])
 
   // Load word timestamps — re-runs when tracks reference changes (e.g. after INIT_TRACKS)
   // to handle the case where timestamps loaded before tracks were populated,
@@ -993,6 +1019,8 @@ export default function EditorView() {
             assemblyStatus={groupDetail?.assembly_status}
             hasVideos={groupDetail?.videos?.length > 0}
             hasBrollSearch={hasBrollSearch}
+            brollChainStatus={groupDetail?.broll_chain_status}
+            onResumeFromRoughCut={handleResumeFromRoughCut}
             onTabChange={(newTab) => {
               // Warn when leaving roughcut with progress
               const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0
@@ -1060,6 +1088,15 @@ export default function EditorView() {
           onAccept={handleAcceptAIRoughCut}
           onDecline={() => { setShowEstimationModal(false); setEstimation(null) }}
           loading={estimationLoading}
+        />
+      )}
+
+      {/* Processing loader while sidebar-triggered resume is in flight */}
+      {(resumeKickedAt && (groupDetail?.broll_chain_status === 'running' || groupDetail?.broll_chain_status === 'paused_at_rough_cut')) && (
+        <ProcessingModal
+          groupId={id}
+          onBack={() => setResumeKickedAt(null)}
+          onComplete={() => setResumeKickedAt(null)}
         />
       )}
     </EditorContext.Provider>

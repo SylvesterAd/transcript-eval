@@ -566,12 +566,6 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     }
     if (await isCancelled(subGroupId)) return
 
-    if (flags.stopAfterPlan) {
-      await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_plan' WHERE id = ?").run(subGroupId)
-      await emailNotifier.send('paused_at_plan', { subGroupId, userId: sg.user_id })
-      return
-    }
-
     // Phase 4: search — always runs (idempotent re-run is safer than skipping).
     // Runs BROLL_SEARCH_BATCHES sequential batches of 10 per variant. Each
     // iteration waits for the GPU worker to drain before the next enqueues,
@@ -604,14 +598,32 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   }
 }
 
-// resumeChain — called after the user picks a strategy/plan at a checkpoint.
-//   fromStage = 'plan'  → user picked strategies; run plan + search
-//   fromStage = 'search' → user picked plan; run search only
+// resumeChain — called after the user picks a strategy/plan at a checkpoint,
+// or clicks "B-Roll Strategy" sidebar item to resume from rough cut.
+//   fromStage = 'strategy' → resume from rough cut; runs refs+strategy, pauses at strategy
+//   fromStage = 'plan'     → user picked strategies; run plan + search
+//   fromStage = 'search'   → user picked plan; run search only
 export async function resumeChain(subGroupId, fromStage, opts = {}) {
   const sg = await db.prepare(
     'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
   ).get(subGroupId)
   if (!sg) return
+
+  // 'strategy' delegates to runFullAutoBrollChain, which respects stopAfterStrategy
+  // and sets its own status/substage transitions. Wrap in try/catch so DB/lock
+  // failures BEFORE the chain's own try-block (lines ~429-441) still mark the
+  // group as failed — matching the handling of the 'plan' and 'search' branches.
+  if (fromStage === 'strategy') {
+    try {
+      return await __orchestratorDeps.runFullAutoBrollChain(subGroupId)
+    } catch (err) {
+      await db.prepare(
+        "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
+      ).run(String(err.message).slice(0, 500), subGroupId)
+      await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
+      return
+    }
+  }
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
   await db.prepare(
@@ -635,11 +647,6 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
       if (await isCancelled(subGroupId)) return
 
-      if (sg.path_id === 'guided') {
-        await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_plan' WHERE id = ?").run(subGroupId)
-        await emailNotifier.send('paused_at_plan', { subGroupId, userId: sg.user_id })
-        return
-      }
       await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
       for (let i = 0; i < BROLL_SEARCH_BATCHES; i++) {
         if (await isCancelled(subGroupId)) return
