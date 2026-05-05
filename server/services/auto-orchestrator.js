@@ -149,6 +149,19 @@ export async function confirmClassificationGroup(parentGroupId, groups, opts) {
     throw new Error(`Cannot split group ${parentGroupId}: it is already a sub-group of ${parentRow.parent_group_id}`)
   }
 
+  // Idempotency: if sub-groups already exist for this parent, return them
+  // without re-inserting. Two simultaneous confirms (auto-confirm useEffect
+  // firing across an unmount/remount, two open tabs, or a manual click on
+  // top of the auto path) would otherwise create duplicate MAIN sub-groups —
+  // the second video-move UPDATE wins, leaving the lower-id sub-group empty,
+  // and AssetsView's "Proceed to Editor" navigates to that orphan.
+  const alreadyConfirmed = await db.prepare(
+    'SELECT id FROM video_groups WHERE parent_group_id = ? ORDER BY id'
+  ).all(parentGroupId)
+  if (alreadyConfirmed.length > 0) {
+    return { subGroupIds: alreadyConfirmed.map(r => r.id) }
+  }
+
   const subGroupIds = []
 
   // Pull example_set rows once; sources are linked via example_set_id, not
