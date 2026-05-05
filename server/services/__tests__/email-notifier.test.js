@@ -50,7 +50,7 @@ describe('email-notifier', () => {
     await send('done', { subGroupId: 1, userId: 'u1' })
     expect(mockSend).toHaveBeenCalledOnce()
     const call = mockSend.mock.calls[0][0]
-    expect(call.from).toMatch(/Adpunk/)
+    expect(call.from).toMatch(/Cutpunk/)
     expect(call.to).toBe('user@example.com')
     expect(call.subject).toMatch(/Project X.*ready/)
     expect(call.html).toContain('href=')

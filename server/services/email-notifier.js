@@ -11,7 +11,7 @@
 import { Resend } from 'resend'
 import db from '../db.js'
 
-const FROM = 'Adpunk <noreply@adpunk.ai>'
+const FROM = 'Cutpunk <noreply@cutpunk.ai>'
 const PUBLIC_FRONTEND_URL = process.env.PUBLIC_FRONTEND_URL
   || 'https://transcript-eval-sylvesterads-projects.vercel.app'
 
