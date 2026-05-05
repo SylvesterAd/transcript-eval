@@ -866,6 +866,8 @@ export async function updateStatus(groupId, status, error = null, transcript = n
             await db.prepare(
               "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
             ).run(groupId)
+            const { send: sendEmail } = await import('./email-notifier.js')
+            await sendEmail('paused_at_rough_cut', { subGroupId: groupId, userId: flagRow.user_id })
           } else if (isAutoPath) {
             const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
             runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
@@ -880,6 +882,8 @@ export async function updateStatus(groupId, status, error = null, transcript = n
             await db.prepare(
               "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
             ).run(groupId)
+            const { send: sendEmail } = await import('./email-notifier.js')
+            await sendEmail('paused_at_rough_cut', { subGroupId: groupId, userId: flagRow.user_id })
           } else if (isAutoPath) {
             const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
             runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
