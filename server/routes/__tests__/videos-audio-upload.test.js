@@ -17,6 +17,7 @@
 // not started, and the video INSERT carries audio in the column list.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { extractVideoFrames } from '../../services/video-processor.js'
 
 // Capture every prepared statement and the args passed to .run().
 const dbCalls = []
@@ -113,6 +114,7 @@ describe('POST /videos/upload — audio media_type handling', () => {
     extractThumbnailMock.mockClear()
     getVideoDurationMock.mockClear()
     getVideoMediaInfoMock.mockClear()
+    extractVideoFrames.mockClear()
   })
 
   it('sets media_type=audio when an mp3 is uploaded', async () => {
@@ -140,6 +142,18 @@ describe('POST /videos/upload — audio media_type handling', () => {
     await _uploadVideoHandler(req, res)
 
     expect(extractThumbnailMock).not.toHaveBeenCalled()
+  })
+
+  it('does not call extractVideoFrames (frame extraction) for audio uploads', async () => {
+    const { _uploadVideoHandler } = await import('../videos.js')
+
+    const req = makeReq({ originalname: 'frames.mp3', mimetype: 'audio/mpeg', body: { title: 'Voice frames' } })
+    const res = makeRes()
+    await _uploadVideoHandler(req, res)
+
+    // Flush any deferred microtasks from the fire-and-forget background call.
+    await new Promise(r => setImmediate(r))
+    expect(extractVideoFrames).not.toHaveBeenCalled()
   })
 
   it('falls back to filename when MIME is application/octet-stream for audio', async () => {
