@@ -260,6 +260,23 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   // running on the server regardless — exit just closes this modal view.
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
 
+  // Skip the manual classification-review CTA for any auto-path project.
+  // Server-side chainAfterClassify auto-confirms going forward, but groups
+  // that classified before that fix is deployed (or with a dropped event)
+  // get stuck at assembly_status='classified' with no sub-groups. Navigate
+  // them straight to AssetsView, which has its own auto-confirm useEffect
+  // that mirrors the server logic for these paths.
+  const autoConfirmRedirectRef = useRef(false)
+  useEffect(() => {
+    if (autoConfirmRedirectRef.current) return
+    if (!parent) return
+    if (parent.assembly_status !== 'classified') return
+    if (subGroups.length > 0) return
+    if (!['hands-off', 'strategy-only', 'guided'].includes(parent.path_id)) return
+    autoConfirmRedirectRef.current = true
+    navigate(`/editor/${parent.id}/assets`, { replace: true })
+  }, [parent, subGroups, navigate])
+
   // Bootstrap files from server if we have none (e.g. navigated here after b-roll step)
   const bootstrappedRef = useRef(false)
   useEffect(() => {
