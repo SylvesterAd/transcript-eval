@@ -64,7 +64,9 @@ vi.mock('../../services/video-processor.js', () => ({
   // throw "Cannot read properties of undefined (reading 'then')" when the
   // function actually runs (video uploads).
   extractVideoFrames: vi.fn().mockResolvedValue(0),
-  concatenateVideos: vi.fn(),
+  // Resolve to a fake combined-output path so the concat branch
+  // (orderedFiles.length > 1) doesn't crash on `actualPath.split('/')`.
+  concatenateVideos: vi.fn().mockResolvedValue('/tmp/combined.mp4'),
 }))
 
 vi.mock('../../services/storage.js', () => ({
@@ -327,6 +329,34 @@ describe('POST /videos/upload-multiple — audio media_type handling', () => {
     // extraction and emit `UPDATE videos SET frames_status` calls.
     const framesStatusUpdate = dbCalls.find(c => /UPDATE videos SET frames_status/i.test(c.sql))
     expect(framesStatusUpdate).toBeUndefined()
+  })
+
+  it('mixed-input concat batch (1 audio + 1 video) tags media_type=video on the concatenated row', async () => {
+    // Concat branch path: video_type !== 'raw' AND files.length > 1.
+    // Per the design decision in videos.js (~line 1949-1956), mixed inputs
+    // produce media_type='video' (preserving historical concat-as-video
+    // contract, even though concatenateVideos always outputs mp3). This
+    // pins the `orderedFiles.every(isAudioFile)` rule against an accidental
+    // flip to `.some(...)`, which would re-tag mixed concats as audio.
+    const { _uploadMultipleVideosHandler } = await import('../videos.js')
+
+    const req = makeMultiReq({
+      files: [
+        { originalname: 'voice.mp3', mimetype: 'audio/mpeg' },
+        { originalname: 'cam.mp4', mimetype: 'video/mp4' },
+      ],
+      body: { title: 'Mixed concat', video_type: 'broll', order: '[0,1]' },
+    })
+    const res = makeRes()
+    await _uploadMultipleVideosHandler(req, res)
+
+    expect(res._status).toBeLessThan(400)
+    // The concat branch produces a single videos row.
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeDefined()
+    // media_type is the LAST positional arg in the new INSERT shape (8 columns).
+    const lastArg = insert.args[insert.args.length - 1]
+    expect(lastArg).toBe('video')
   })
 })
 
