@@ -59,9 +59,10 @@ function RoughCutFailureBanner({ status, requiredTokens, balance, onRetry, onDis
 const BANNER_PATH_PAUSE = {
   'hands-off': null,
   'strategy-only': 'strategy',
-  'guided': 'plan',
+  // 'guided' pauses at rough_cut first (earliest pre-pause boundary).
+  'guided': 'rough_cut',
 }
-const BANNER_SUBSTAGE_ORDER = ['refs', 'strategy', 'plan', 'search']
+const BANNER_SUBSTAGE_ORDER = ['rough_cut', 'refs', 'strategy', 'plan', 'search']
 
 // Determines whether the editor should hand off to the processing
 // loader's <FailedView>. True when the chain failed at-or-before the
