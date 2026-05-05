@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef } from 'react'
+import { Mic } from 'lucide-react'
 import { EditorContext } from './EditorView.jsx'
 import { formatTime } from './useEditorState.js'
 
@@ -12,9 +13,26 @@ function gridClass(count) {
 }
 
 export default function VideoPreviewGrid() {
-  const { state, videoRefs } = useContext(EditorContext)
+  const { state, videoRefs, mediaType } = useContext(EditorContext)
   const videoTracks = state.tracks.filter(t => t.type === 'video' && t.visible)
   const order = state.originalVideoOrder || []
+
+  if (mediaType === 'audio') {
+    return (
+      <div className="flex-1 flex flex-col gap-2 bg-black rounded-xl overflow-hidden shadow-2xl p-2">
+        {videoTracks.map(track => (
+          <div key={track.id} className="flex items-center gap-2 p-2 bg-zinc-900 rounded">
+            <Mic size={16} className="text-zinc-500" />
+            <span className="truncate">{track.title}</span>
+            <span className="text-xs text-zinc-600">audio</span>
+          </div>
+        ))}
+        {videoTracks.length === 0 && (
+          <div className="flex items-center justify-center text-on-surface-variant text-sm">No visible tracks</div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className={`flex-1 grid ${gridClass(videoTracks.length)} gap-2 bg-black rounded-xl overflow-hidden shadow-2xl p-2`}>

@@ -23,7 +23,8 @@ function frameUrl(videoId, time, cfStreamUid) {
 }
 
 function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {
-  const { state, dispatch } = useContext(EditorContext)
+  const { state, dispatch, mediaType } = useContext(EditorContext)
+  if (mediaType === 'audio') return null
   const group = track.groupId ? state.groups[track.groupId] : null
   const color = group?.color || '#acaaad'
 
@@ -189,7 +190,8 @@ export default memo(VideoFrameTrack)
  * segments: [{start, end, videoId, offset, duration, filePath, groupId}]
  */
 function CompositeFrameTrackImpl({ segments, zoom, cuts, scrollRef, scrollX }) {
-  const { state, dispatch } = useContext(EditorContext)
+  const { state, dispatch, mediaType } = useContext(EditorContext)
+  if (mediaType === 'audio') return null
 
   // Viewport clipping
   const displayInterval = Math.max(0.1, FRAME_W / zoom)
