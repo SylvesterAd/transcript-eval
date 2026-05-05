@@ -16,6 +16,7 @@ import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TE
 import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled, waitForStreamReady, enableMp4Downloads, waitForMp4Ready, mp4Url as cfMp4Url, thumbnailUrl as cfThumbnailUrl } from '../services/cloudflare-stream.js'
 import { runAiRoughCut } from '../services/rough-cut-runner.js'
 import { estimateTokenCost, estimateProcessingTime } from '../services/token-pricing.js'
+import { isAudioFile } from '../lib/media-type.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -1717,86 +1718,90 @@ export async function _registerVideoHandler(req, res) {
 
 router.post('/register', requireAuth, _registerVideoHandler)
 
-// Upload video file + transcribe (legacy: small files via multer)
-router.post('/upload', requireAuth, handleUpload('video'), async (req, res) => {
+// Upload video file + transcribe (legacy: small files via multer).
+// Exported for unit testing — see videos-audio-upload.test.js.
+export async function _uploadVideoHandler(req, res) {
   if (!req.file) return res.status(400).json({ error: 'No video file uploaded' })
   try {
-  console.log(`[upload] File received: ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)} MB)`)
+    console.log(`[upload] File received: ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)} MB)`)
 
-  const { title, video_type = 'raw', group_id, group_name, link_video_id } = req.body
+    const { title, video_type = 'raw', group_id, group_name, link_video_id } = req.body
+    const videoName = title || req.file.originalname.replace(extname(req.file.originalname), '')
+    const filePath = req.file.path
+    const isAudio = isAudioFile(req.file)
+    const mediaType = isAudio ? 'audio' : 'video'
 
-  const videoName = title || req.file.originalname.replace(extname(req.file.originalname), '')
-  const filePath = req.file.path
+    // Create or use group
+    let finalGroupId = group_id ? parseInt(group_id) : null
+    if (!finalGroupId && group_name) {
+      const result = await db.prepare('INSERT INTO video_groups (name, user_id) VALUES (?, ?)').run(group_name, req.auth.userId)
+      finalGroupId = result.lastInsertRowid
+    }
 
-  // Create or use group
-  let finalGroupId = group_id ? parseInt(group_id) : null
-  if (!finalGroupId && group_name) {
-    const result = await db.prepare('INSERT INTO video_groups (name, user_id) VALUES (?, ?)').run(group_name, req.auth.userId)
-    finalGroupId = result.lastInsertRowid
-  }
-
-  // Link to existing video of opposite type
-  if (!finalGroupId && link_video_id) {
-    const linkedVideo = await db.prepare('SELECT * FROM videos WHERE id = ?').get(parseInt(link_video_id))
-    if (linkedVideo) {
-      if (linkedVideo.group_id) {
-        finalGroupId = linkedVideo.group_id
-      } else {
-        const groupResult = await db.prepare('INSERT INTO video_groups (name, user_id) VALUES (?, ?)').run(linkedVideo.title || videoName, req.auth.userId)
-        finalGroupId = groupResult.lastInsertRowid
-        await db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(finalGroupId, linkedVideo.id)
+    // Link to existing video of opposite type
+    if (!finalGroupId && link_video_id) {
+      const linkedVideo = await db.prepare('SELECT * FROM videos WHERE id = ?').get(parseInt(link_video_id))
+      if (linkedVideo) {
+        if (linkedVideo.group_id) {
+          finalGroupId = linkedVideo.group_id
+        } else {
+          const groupResult = await db.prepare('INSERT INTO video_groups (name, user_id) VALUES (?, ?)').run(linkedVideo.title || videoName, req.auth.userId)
+          finalGroupId = groupResult.lastInsertRowid
+          await db.prepare('UPDATE videos SET group_id = ? WHERE id = ?').run(finalGroupId, linkedVideo.id)
+        }
       }
     }
-  }
 
-  // Extract thumbnail (to local THUMBNAILS_DIR first)
-  let thumbnailPath = null
-  let localThumbPath = null
-  const hasFfmpeg = await checkFfmpeg()
-  if (hasFfmpeg) {
-    const thumbFilename = req.file.filename.replace(extname(req.file.filename), '.jpg')
-    localThumbPath = await extractThumbnail(filePath, thumbFilename)
-    if (localThumbPath) {
-      // Upload thumbnail to Supabase Storage
-      thumbnailPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+    // Thumbnail extraction — video only. Audio uploads get NULL thumbnail (UI shows fallback).
+    let thumbnailPath = null
+    let localThumbPath = null
+    const hasFfmpeg = await checkFfmpeg()
+    if (hasFfmpeg && !isAudio) {
+      const thumbFilename = req.file.filename.replace(extname(req.file.filename), '.jpg')
+      localThumbPath = await extractThumbnail(filePath, thumbFilename)
+      if (localThumbPath) {
+        thumbnailPath = await uploadFile('thumbnails', thumbFilename, localThumbPath)
+      }
     }
-  }
 
-  // Get duration + media info
-  let duration = null
-  let mediaInfo = null
-  if (hasFfmpeg) {
-    duration = await getVideoDuration(filePath)
-    mediaInfo = await getVideoMediaInfo(filePath)
-  }
+    // Duration + media info — works for both audio and video via ffprobe
+    let duration = null
+    let mediaInfo = null
+    if (hasFfmpeg) {
+      duration = await getVideoDuration(filePath)
+      mediaInfo = await getVideoMediaInfo(filePath)
+    }
 
-  // Upload video to Supabase Storage
-  const videoUrl = await uploadFile('videos', req.file.filename, filePath)
+    // Upload file to Supabase Storage (same bucket; we don't split by type)
+    const videoUrl = await uploadFile('videos', req.file.filename, filePath)
 
-  // Insert video record
-  const result = await db.prepare(
-    'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(videoName, videoUrl, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null)
+    // Insert video record (note: media_type column added)
+    const result = await db.prepare(
+      'INSERT INTO videos (title, file_path, thumbnail_path, video_type, group_id, duration_seconds, media_info_json, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(videoName, videoUrl, thumbnailPath, video_type, finalGroupId, duration, mediaInfo ? JSON.stringify(mediaInfo) : null, mediaType)
 
-  const videoId = result.lastInsertRowid
+    const videoId = result.lastInsertRowid
 
-  // Clean up local temp files
-  try { unlinkSync(filePath) } catch {}
-  if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
+    // Clean up local temp files
+    try { unlinkSync(filePath) } catch {}
+    if (localThumbPath) { try { unlinkSync(localThumbPath) } catch {} }
 
-  // Auto-start background transcription + frame extraction
-  startBackgroundTranscription(videoId)
-  startBackgroundFrameExtraction(videoId)
+    // Auto-start background transcription (works for audio).
+    // Frame extraction — video only.
+    startBackgroundTranscription(videoId)
+    if (!isAudio) startBackgroundFrameExtraction(videoId)
 
-  res.status(201).json({
-    videoId,
-    video: await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId),
-  })
+    res.status(201).json({
+      videoId,
+      video: await db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId),
+    })
   } catch (err) {
     console.error('[upload] Error:', err)
     res.status(500).json({ error: err.message || 'Upload failed' })
   }
-})
+}
+
+router.post('/upload', requireAuth, handleUpload('video'), _uploadVideoHandler)
 
 // Upload multiple files — raw footage: individual transcription + multicam analysis; other: concatenate
 router.post('/upload-multiple', requireAuth, handleUpload({ name: 'videos', maxCount: 20 }), async (req, res) => {
