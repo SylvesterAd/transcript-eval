@@ -865,37 +865,38 @@ export async function updateStatus(groupId, status, error = null, transcript = n
       const { runAiRoughCut } = await import('./rough-cut-runner.js')
       runAiRoughCut({ groupId, userId: flagRow.user_id })
         .then(async (r) => {
+          // Three TERMINAL outcomes (already_exists, failed, insufficient_tokens):
+          // chain straight into the b-roll pipeline / pause for guided. The fourth
+          // outcome (r.ok && !already_exists) means a NEW pipeline kicked off that
+          // is still running async — chainAfterRoughCut fires from rough-cut-runner
+          // when the IIFE actually completes, NOT here, otherwise the user would see
+          // 'paused_at_rough_cut' while the cut is still being computed.
+          let isTerminal = false
           if (r.error === 'insufficient_tokens') {
             await db.prepare(
               "UPDATE video_groups SET rough_cut_status = 'insufficient_tokens', rough_cut_error_required = ? WHERE id = ?"
             ).run(r.required, groupId)
+            // No chain fire — user must add tokens and retry.
           } else if (r.error || (!r.ok && !r.already_exists)) {
             await db.prepare(
               "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
             ).run(groupId)
+            isTerminal = true  // kickoff failed — don't wait for a pipeline that won't run
           } else if (r.already_exists) {
             await db.prepare(
               "UPDATE video_groups SET rough_cut_status = 'done' WHERE id = ?"
             ).run(groupId)
+            isTerminal = true
           } else {
-            // ok=true — pipeline running; Task 6 flips to 'done' on completion.
+            // ok=true && !already_exists — pipeline running; rough-cut-runner.js
+            // flips to 'done' (or 'failed') on completion AND calls chainAfterRoughCut.
             await db.prepare(
               "UPDATE video_groups SET rough_cut_status = 'running' WHERE id = ?"
             ).run(groupId)
           }
-          // After rough cut terminal — for 'guided', pause for user review;
-          // otherwise chain into the b-roll pipeline if the project picked an
-          // auto path. Fire-and-forget so pipeline failures don't block the
-          // rough_cut_status write above.
-          if (flagRow?.path_id === 'guided') {
-            await db.prepare(
-              "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
-            ).run(groupId)
-            const { send: sendEmail } = await import('./email-notifier.js')
-            await sendEmail('paused_at_rough_cut', { subGroupId: groupId, userId: flagRow.user_id })
-          } else if (isAutoPath) {
-            const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
-            runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
+          if (isTerminal) {
+            const { chainAfterRoughCut } = await import('./auto-orchestrator.js')
+            await chainAfterRoughCut(groupId)
           }
         })
         .catch(async (err) => {
@@ -903,16 +904,9 @@ export async function updateStatus(groupId, status, error = null, transcript = n
           await db.prepare(
             "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ?"
           ).run(groupId)
-          if (flagRow?.path_id === 'guided') {
-            await db.prepare(
-              "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
-            ).run(groupId)
-            const { send: sendEmail } = await import('./email-notifier.js')
-            await sendEmail('paused_at_rough_cut', { subGroupId: groupId, userId: flagRow.user_id })
-          } else if (isAutoPath) {
-            const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
-            runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
-          }
+          // Kickoff threw — terminal failure, fire chain (or pause for guided).
+          const { chainAfterRoughCut } = await import('./auto-orchestrator.js')
+          await chainAfterRoughCut(groupId)
         })
     } else if (isAutoPath) {
       // No rough cut requested — fire b-roll chain directly. (Even guided falls

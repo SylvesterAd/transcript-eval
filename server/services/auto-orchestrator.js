@@ -355,6 +355,40 @@ export async function chainAfterClassify(groupId) {
   })
 }
 
+// chainAfterRoughCut — called when rough cut reaches a TERMINAL state for a
+// (sub-)group. For 'guided' paths, sets broll_chain_status='paused_at_rough_cut'
+// and emails the user. For 'hands-off' / 'strategy-only', kicks off the b-roll
+// chain. No-op for null path_id (legacy / manual projects).
+//
+// Safe to call from any rough-cut completion site (rough-cut-runner.js IIFE,
+// or multicam-sync.js for the already_exists / kickoff-failure cases).
+// Idempotent enough: paused_at_rough_cut is a state flip; chain duplicate-fire
+// is guarded by runFullAutoBrollChain's heartbeat lock.
+export async function chainAfterRoughCut(groupId) {
+  const g = await db.prepare(
+    'SELECT user_id, path_id FROM video_groups WHERE id = ?'
+  ).get(groupId)
+  if (!g) return
+  if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
+
+  if (g.path_id === 'guided') {
+    await db.prepare(
+      "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
+    ).run(groupId)
+    try {
+      const { send } = await import('./email-notifier.js')
+      await send('paused_at_rough_cut', { subGroupId: groupId, userId: g.user_id })
+    } catch (err) {
+      console.error(`[chain-after-rough-cut] email failed for group ${groupId}:`, err.message)
+    }
+    return
+  }
+
+  // hands-off or strategy-only — fire chain
+  __orchestratorDeps.runFullAutoBrollChain(groupId)
+    .catch(err => console.error(`[chain] ${err.message}`))
+}
+
 // True if the group already has the broll_runs outputs needed to skip a phase.
 // - 'refs' requires BOTH 'plan_prep' (main video) AND 'main_analysis' (ref videos)
 //   because the next phase (runStrategies) fails without prepPipelineId AND

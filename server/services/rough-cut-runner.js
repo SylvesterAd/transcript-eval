@@ -185,18 +185,38 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
         await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?').run(JSON.stringify(annotations), groupId)
         // If this run was the auto-trigger (rough_cut_status was set), flip to done.
         // Use a conditional UPDATE so a manual-trigger run (status null) stays null.
-        await db.prepare(
+        const r = await db.prepare(
           "UPDATE video_groups SET rough_cut_status = 'done' WHERE id = ? AND rough_cut_status IN ('pending', 'running')"
         ).run(groupId)
+        // Auto-trigger only — fire downstream chain (b-roll for hands-off /
+        // strategy-only, paused_at_rough_cut + email for guided). The status
+        // update above is the source of truth: if it changed a row, this was
+        // the auto path that needs chaining.
+        if (r?.changes) {
+          try {
+            const { chainAfterRoughCut } = await import('./auto-orchestrator.js')
+            await chainAfterRoughCut(groupId)
+          } catch (err) {
+            console.error(`[runAiRoughCut] chainAfterRoughCut failed for group ${groupId}:`, err.message)
+          }
+        }
         return
       } catch (err) {
         console.error(`[runAiRoughCut] Attempt ${attempt} failed for group ${groupId}:`, err.message)
       }
     }
     // All attempts exhausted — mark as failed if this was an auto-trigger.
-    await db.prepare(
+    const r = await db.prepare(
       "UPDATE video_groups SET rough_cut_status = 'failed' WHERE id = ? AND rough_cut_status IN ('pending', 'running')"
     ).run(groupId)
+    if (r?.changes) {
+      try {
+        const { chainAfterRoughCut } = await import('./auto-orchestrator.js')
+        await chainAfterRoughCut(groupId)
+      } catch (err) {
+        console.error(`[runAiRoughCut] chainAfterRoughCut (failure path) failed for group ${groupId}:`, err.message)
+      }
+    }
   })()
 
   return {
