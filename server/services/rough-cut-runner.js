@@ -35,9 +35,12 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
     return { cancelled: true }
   }
 
-  const videos = await db.prepare(
-    'SELECT duration_seconds FROM videos WHERE group_id = ?'
-  ).all(groupId)
+  // Project parents keep the raw upload on a child sub-group whose
+  // parent_group_id points back to us; include both in the duration sum.
+  const videos = await db.prepare(`
+    SELECT duration_seconds FROM videos
+    WHERE group_id = ? OR group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?)
+  `).all(groupId, groupId)
   const totalDuration = videos.reduce((sum, v) => sum + (v.duration_seconds || 0), 0)
   // Estimator returns 0 when duration is unknown (preview-time signal).
   // At deduction time we still charge a 1-token minimum to prevent
@@ -91,18 +94,22 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
     } catch { /* proceed */ }
   }
 
-  // Clean up stale 'pending' Auto runs (>5 min old).
+  // Clean up stale 'pending' Auto runs (>5 min old). Match the project
+  // group AND any sub-groups whose parent_group_id points back here.
   await db.prepare(`
     UPDATE experiment_runs SET status = 'failed'
     WHERE id IN (
       SELECT er.id FROM experiment_runs er
       JOIN experiments e ON e.id = er.experiment_id
-      WHERE er.video_id IN (SELECT id FROM videos WHERE group_id = ?)
+      WHERE er.video_id IN (
+        SELECT id FROM videos
+        WHERE group_id = ? OR group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?)
+      )
         AND er.status = 'pending'
         AND e.name ILIKE 'Auto:%'
         AND er.created_at < NOW() - INTERVAL '5 minutes'
     )
-  `).run(groupId)
+  `).run(groupId, groupId)
 
   const mainStrategy = await db.prepare('SELECT * FROM strategies WHERE is_main = 1').get()
   if (!mainStrategy) return { error: 'no_main_strategy' }
@@ -114,9 +121,10 @@ export async function runAiRoughCut({ groupId, userId, isAdmin = false, force = 
   const video = await db.prepare(`
     SELECT v.* FROM videos v
     JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
-    WHERE v.group_id = ? AND v.video_type = 'raw'
+    WHERE (v.group_id = ? OR v.group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?))
+      AND v.video_type = 'raw'
     ORDER BY v.id LIMIT 1
-  `).get(groupId)
+  `).get(groupId, groupId)
   if (!video) return { error: 'no_video_with_transcript' }
 
   const expResult = await db.prepare(

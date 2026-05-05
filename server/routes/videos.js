@@ -1147,7 +1147,12 @@ router.post('/groups/:id/estimate-ai-roughcut', requireAuth, async (req, res) =>
   const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
-  const videos = await db.prepare('SELECT duration_seconds FROM videos WHERE group_id = ?').all(groupId)
+  // Project parents store the raw upload on a sub-group whose
+  // parent_group_id points back here, so query both for duration.
+  const videos = await db.prepare(`
+    SELECT duration_seconds FROM videos
+    WHERE group_id = ? OR group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?)
+  `).all(groupId, groupId)
   const totalDuration = videos.reduce((sum, v) => sum + (v.duration_seconds || 0), 0)
   const tokenCost = estimateTokenCost(totalDuration)
   const estimatedTimeSeconds = estimateProcessingTime(totalDuration)
