@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isAudioMimeType, isAudioFilename } from '../media-type.js'
+import { isAudioMimeType, isAudioFilename, isAudioFile } from '../media-type.js'
 
 describe('isAudioMimeType', () => {
   it('detects audio/* MIME types', () => {
@@ -27,11 +27,33 @@ describe('isAudioFilename', () => {
     expect(isAudioFilename('test.aac')).toBe(true)
     expect(isAudioFilename('song.flac')).toBe(true)
     expect(isAudioFilename('audio.ogg')).toBe(true)
+    expect(isAudioFilename('voice.opus')).toBe(true)
+    expect(isAudioFilename('podcast.wma')).toBe(true)
   })
   it('rejects video and other extensions', () => {
     expect(isAudioFilename('video.mp4')).toBe(false)
     expect(isAudioFilename('clip.mov')).toBe(false)
     expect(isAudioFilename('file')).toBe(false)
     expect(isAudioFilename('')).toBe(false)
+  })
+})
+
+describe('isAudioFile', () => {
+  it('detects audio via mimetype', () => {
+    expect(isAudioFile({ mimetype: 'audio/mpeg', originalname: 'voice.bin' })).toBe(true)
+  })
+  it('detects audio via extension when mimetype is octet-stream', () => {
+    expect(isAudioFile({ mimetype: 'application/octet-stream', originalname: 'voice.opus' })).toBe(true)
+  })
+  it('detects audio via extension when mimetype is missing', () => {
+    expect(isAudioFile({ originalname: 'clip.m4a' })).toBe(true)
+  })
+  it('rejects video files with non-audio extension', () => {
+    expect(isAudioFile({ mimetype: 'video/mp4', originalname: 'clip.mp4' })).toBe(false)
+  })
+  it('handles null and missing fields', () => {
+    expect(isAudioFile(null)).toBe(false)
+    expect(isAudioFile(undefined)).toBe(false)
+    expect(isAudioFile({})).toBe(false)
   })
 })
