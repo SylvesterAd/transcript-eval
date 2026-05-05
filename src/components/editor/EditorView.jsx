@@ -348,7 +348,11 @@ export default function EditorView() {
 
   // Handler: resume b-roll chain from rough-cut pause to strategy
   const [resumeKickedAt, setResumeKickedAt] = useState(null)
-  const handleResumeFromRoughCut = async () => {
+  const resumeFiredRef = useRef(false)
+
+  const fireResumeFromRoughCut = useCallback(async () => {
+    if (resumeFiredRef.current) return
+    resumeFiredRef.current = true
     // Optimistically reflect "running" so ProcessingModal mounts immediately.
     setResumeKickedAt(Date.now())
     try {
@@ -356,10 +360,28 @@ export default function EditorView() {
     } catch (err) {
       console.error('[resume] failed:', err.message)
       setResumeKickedAt(null)
+      resumeFiredRef.current = false  // allow retry
     }
-    // Navigate to the strategy tab so the panel is visible while loader runs.
+  }, [id])
+
+  // Sidebar B-Roll Strategy click during paused_at_rough_cut: fire resume +
+  // navigate to the strategy tab. The useEffect below is the safety net for
+  // any other entry point (direct URL, BRollPanel auto-redirect, etc.).
+  const handleResumeFromRoughCut = async () => {
+    await fireResumeFromRoughCut()
     navigate(`/editor/${id}/brolls/strategy`)
   }
+
+  // Auto-fire resume whenever the user is at /editor/:id/brolls/* AND the chain
+  // is still paused at rough cut. Covers sidebar clicks that didn't go through
+  // the bespoke handler (props missing, race with groupDetail load, etc.).
+  useEffect(() => {
+    if (resumeFiredRef.current) return
+    if (!groupDetail) return
+    if (groupDetail.broll_chain_status !== 'paused_at_rough_cut') return
+    if (tab !== 'brolls') return
+    fireResumeFromRoughCut()
+  }, [groupDetail, tab, fireResumeFromRoughCut])
 
   // Handler: accept estimation and start pipeline
   const handleAcceptAIRoughCut = useCallback(async () => {
