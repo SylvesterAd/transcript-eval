@@ -3861,6 +3861,32 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   }
 }
 
+// Audio defense-in-depth: drop video-only stage types targeting main_video when
+// the main media is audio. The audio-only seed strategy (Task 5) already
+// excludes these at the seed level — this catches the case where a user
+// manually picks the wrong strategy for an audio group, or a future strategy
+// adds video stages we forget to exclude. video_llm/video_question against
+// main_video would crash on the missing video file; programmatic stages are
+// not covered by this filter (out of scope for Task 7).
+const VIDEO_STAGE_TYPES = new Set(['video_llm', 'video_question'])
+
+function filterStagesForMedia(stages, mediaType) {
+  if (mediaType !== 'audio') return stages
+  return stages.filter(s => {
+    const isVideoStage = VIDEO_STAGE_TYPES.has(s.type)
+    const targetsMain = s.target === 'main_video'
+    if (isVideoStage && targetsMain) {
+      console.log(`[broll-pipeline] Skipping video stage on audio media: ${s.name}`)
+      return false
+    }
+    return true
+  })
+}
+
+// Exported as a __test__ alias so unit tests can exercise the helper without
+// driving the full executePipeline.
+export { filterStagesForMedia as __test__filterStagesForMedia }
+
 export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterPlan = false, stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
   const strategy = await getStrategy(strategyId)
   if (!strategy) throw new Error('Strategy not found')
@@ -3870,6 +3896,18 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
   let planStages = JSON.parse(version.stages_json || '[]')
   if (!planStages.length) throw new Error('No stages defined in this version')
+
+  // Audio guard: drop video stages targeting main_video when main video is audio.
+  // Defense-in-depth — the resolver normally picks an audio-only strategy whose
+  // seed already excludes these stages, but a manual override or future seed
+  // mismatch would otherwise crash on the missing video file.
+  let mainMediaType = 'video'
+  if (videoId) {
+    const v = await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId)
+    mainMediaType = v?.media_type || 'video'
+  }
+  planStages = filterStagesForMedia(planStages, mainMediaType)
+  if (!planStages.length) throw new Error('No stages remain after audio filter')
 
   // Pre-load example videos early (needed for chaining logic)
   let exampleVideos = []
