@@ -139,10 +139,10 @@ vi.mock('../multicam-sync.js', () => ({
 vi.mock('../../routes/broll.js', () => ({
   pathToFlags: (pathId) => {
     switch (pathId) {
-      case 'hands-off':     return { stopAfterStrategy: false, stopAfterPlan: false, autoSelectVariants: true }
-      case 'strategy-only': return { stopAfterStrategy: true,  stopAfterPlan: false, autoSelectVariants: false }
-      case 'guided':        return { stopAfterStrategy: true,  stopAfterPlan: true,  autoSelectVariants: false }
-      default:              return { stopAfterStrategy: true,  stopAfterPlan: false, autoSelectVariants: false }
+      case 'hands-off':     return { stopAfterRoughCut: false, stopAfterStrategy: false, autoSelectVariants: true }
+      case 'strategy-only': return { stopAfterRoughCut: false, stopAfterStrategy: true,  autoSelectVariants: false }
+      case 'guided':        return { stopAfterRoughCut: true,  stopAfterStrategy: true,  autoSelectVariants: false }
+      default:              return { stopAfterRoughCut: false, stopAfterStrategy: true,  autoSelectVariants: false }
     }
   },
 }))

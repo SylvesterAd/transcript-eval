@@ -566,12 +566,6 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     }
     if (await isCancelled(subGroupId)) return
 
-    if (flags.stopAfterPlan) {
-      await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_plan' WHERE id = ?").run(subGroupId)
-      await emailNotifier.send('paused_at_plan', { subGroupId, userId: sg.user_id })
-      return
-    }
-
     // Phase 4: search — always runs (idempotent re-run is safer than skipping).
     // Runs BROLL_SEARCH_BATCHES sequential batches of 10 per variant. Each
     // iteration waits for the GPU worker to drain before the next enqueues,
@@ -635,11 +629,6 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
       if (await isCancelled(subGroupId)) return
 
-      if (sg.path_id === 'guided') {
-        await db.prepare("UPDATE video_groups SET broll_chain_status = 'paused_at_plan' WHERE id = ?").run(subGroupId)
-        await emailNotifier.send('paused_at_plan', { subGroupId, userId: sg.user_id })
-        return
-      }
       await db.prepare("UPDATE video_groups SET broll_chain_substage = 'search' WHERE id = ?").run(subGroupId)
       for (let i = 0; i < BROLL_SEARCH_BATCHES; i++) {
         if (await isCancelled(subGroupId)) return
