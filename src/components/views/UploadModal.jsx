@@ -8,8 +8,9 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
+const AUDIO_EXTS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']
 const SCRIPT_EXTS = ['.docx', '.pdf', '.txt']
-const VIDEO_ACCEPT = VIDEO_EXTS.join(',')
+const VIDEO_ACCEPT = [...VIDEO_EXTS, ...AUDIO_EXTS].join(',')
 const SCRIPT_ACCEPT = SCRIPT_EXTS.join(',')
 const MAX_SIZE = 50 * 1024 * 1024 * 1024 // 50GB
 
@@ -32,20 +33,26 @@ export function probeDuration(file, opts = {}) {
   const _createObjectURL = opts._createObjectURL || ((f) => URL.createObjectURL(f))
   const _revokeObjectURL = opts._revokeObjectURL || ((u) => URL.revokeObjectURL(u))
 
-  return new Promise((resolve) => {
+  const tryWith = (tag) => new Promise((res) => {
     const url = _createObjectURL(file)
-    const v = _createElement('video')
-    v.preload = 'metadata'
-    v.onloadedmetadata = () => {
-      const dur = Number.isFinite(v.duration) ? v.duration : null
+    const el = _createElement(tag)
+    el.preload = 'metadata'
+    el.onloadedmetadata = () => {
+      const dur = el.duration
       _revokeObjectURL(url)
-      resolve(dur)
+      res(Number.isFinite(dur) && dur > 0 ? dur : null)
     }
-    v.onerror = () => {
+    el.onerror = () => {
       _revokeObjectURL(url)
-      resolve(null)
+      res(null)
     }
-    v.src = url
+    el.src = url
+  })
+
+  return tryWith('video').then((d) => {
+    if (d != null) return d
+    // fallback for audio-only containers that <video> can't decode
+    return tryWith('audio')
   })
 }
 

@@ -27,6 +27,10 @@ const TEMPLATES = {
     subject: `Your project "${projectName}" is ready`,
     html: `<p>We've finished processing your project.</p><p><a href="${editorUrl}">Open project →</a></p>`,
   }),
+  paused_at_rough_cut: ({ projectName, editorUrl }) => ({
+    subject: `Review the rough cut for "${projectName}"`,
+    html: `<p>The AI rough cut is ready. Review the cuts and click "B-Roll Strategy" in the sidebar when you're happy with it.</p><p><a href="${editorUrl}">Open project →</a></p>`,
+  }),
   paused_at_strategy: ({ projectName, editorUrl }) => ({
     subject: `Pick a creative strategy for "${projectName}"`,
     html: `<p>Your project's references have been analyzed. Pick the strategy you'd like to run.</p><p><a href="${editorUrl}">Open project →</a></p>`,
@@ -39,6 +43,14 @@ const TEMPLATES = {
     subject: `Something went wrong with "${projectName}"`,
     html: `<p>We hit an error processing your project: ${error || 'unknown'}.</p><p><a href="${editorUrl}">Open project to retry →</a></p>`,
   }),
+}
+
+const ROUTE_BY_TEMPLATE = {
+  paused_at_rough_cut: (id) => `/editor/${id}/roughcut`,
+  paused_at_strategy:  (id) => `/editor/${id}/brolls/strategy/strategy`,
+  paused_at_plan:      (id) => `/editor/${id}/brolls/strategy/plan`,
+  done:                (id) => `/editor/${id}/brolls/edit`,
+  failed:              (id) => `/editor/${id}/sync`,
 }
 
 export async function send(template, { subGroupId, userId, error } = {}) {
@@ -64,7 +76,7 @@ export async function send(template, { subGroupId, userId, error } = {}) {
     const user = await db.prepare('SELECT email FROM auth.users WHERE id = ?').get(userId)
     if (!user?.email) return
 
-    const editorUrl = `${PUBLIC_FRONTEND_URL}/editor/${subGroupId}/sync`
+    const editorUrl = `${PUBLIC_FRONTEND_URL}${ROUTE_BY_TEMPLATE[template](subGroupId)}`
     const { subject, html } = tpl({ projectName: sg.name, editorUrl, error })
 
     await client.emails.send({ from: FROM, to: user.email, subject, html })
