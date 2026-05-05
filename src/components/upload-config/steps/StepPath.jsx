@@ -52,8 +52,8 @@ const PATHS = [
   {
     id: 'guided',
     badge: 'C · FULL CONTROL',
-    title: 'Guided Review',
-    subtitle: 'Review and confirm at every step',
+    title: 'Rough Cut + Strategy',
+    subtitle: 'Review the rough cut, then the b-roll strategy — we run the rest',
     tone: 'primary',
     icon: 'account_tree',
     flow: [
