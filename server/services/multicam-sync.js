@@ -187,6 +187,31 @@ export async function analyzeMulticam(groupId, options = {}) {
   ).get(groupId)
   if (hasAudio) {
     console.log(`[multicam] Skipping group ${groupId}: contains audio media`)
+    if (options.dryRun) return { skipped: true, reason: 'audio_in_group', dryRun: true }
+    // Mark the (sub-)group as assembly_status='done' so downstream stages —
+    // rough cut, b-roll chain, ProcessingModal display — can proceed. Without
+    // this the group sits at 'pending' indefinitely and the pipeline stalls.
+    const audioVideos = await db.prepare(`
+      SELECT v.id, v.title, t.content AS transcript
+      FROM videos v
+      LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+      WHERE v.group_id = ? AND v.video_type = 'raw'
+      ORDER BY v.id
+    `).all(groupId)
+    const primary = audioVideos[0]
+    if (primary) {
+      await updateStatus(groupId, 'done', null, primary.transcript || '', JSON.stringify({
+        segments: audioVideos.map(v => ({
+          videoIds: [v.id],
+          primaryVideoId: v.id,
+          primaryTitle: v.title,
+          isMulticam: false,
+          mediaType: 'audio',
+        })),
+      }))
+    } else {
+      await updateStatus(groupId, 'failed', 'No audio videos found in group')
+    }
     return { skipped: true, reason: 'audio_in_group' }
   }
 

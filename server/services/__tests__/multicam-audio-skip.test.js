@@ -65,19 +65,27 @@ beforeEach(() => {
 })
 
 describe('analyzeMulticam (audio guard)', () => {
-  it('returns early without running ffmpeg when group has any audio video', async () => {
+  it('skips multicam AND marks audio group as done so the pipeline can proceed', async () => {
     state.hasAudioRow = { '?column?': 1 } // SELECT 1 — Postgres returns truthy row
+    state.videoRows = [{ id: 11, title: 'voice.mp3', transcript: 'hello world' }]
 
     const result = await analyzeMulticam(42)
 
     expect(result).toEqual({ skipped: true, reason: 'audio_in_group' })
-    // Load-bearing: the audio-detection SELECT must be the ONLY SQL prepared.
-    // If the guard regresses, analyzeMulticam would prepare the videos-with-
-    // transcripts SELECT next (and many more). Counting prepare calls makes
-    // the regression observable.
-    expect(state.dbCalls).toHaveLength(1)
-    expect(state.dbCalls[0]).toMatch(/media_type = 'audio'/)
-    // No status updates either — the audio group is not "failed", just skipped.
+    // We bail BEFORE the heavy ffmpeg/Gemini work but DO set assembly_status='done'
+    // — without that, audio sub-groups stay at 'pending' and the b-roll chain
+    // never fires.
+    expect(state.dbCalls.some(s => /media_type = 'audio'/.test(s))).toBe(true)
+    expect(state.dbCalls.some(s => /FROM videos v[\s\S]*LEFT JOIN transcripts/.test(s))).toBe(true)
+    expect(state.statusUpdates).toHaveLength(1)
+    // updateStatus binds (status, error, transcript, details_json, groupId)
+    expect(state.statusUpdates[0][0]).toBe('done')
+  })
+
+  it('dryRun returns early without writing status (test ergonomics)', async () => {
+    state.hasAudioRow = { '?column?': 1 }
+    const result = await analyzeMulticam(42, { dryRun: true })
+    expect(result).toMatchObject({ skipped: true, reason: 'audio_in_group', dryRun: true })
     expect(state.statusUpdates).toHaveLength(0)
   })
 
