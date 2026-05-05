@@ -871,8 +871,8 @@ export async function updateStatus(groupId, status, error = null, transcript = n
           }
         })
     } else if (isAutoPath) {
-      // No rough cut requested but path is auto — fire b-roll chain directly
-      // after sync. Fire-and-forget; chain manages its own broll_chain_status.
+      // No rough cut requested — fire b-roll chain directly. (Even guided falls
+      // through here when auto_rough_cut=false; chain pauses at strategy.)
       const { runFullAutoBrollChain } = await import('./auto-orchestrator.js')
       runFullAutoBrollChain(groupId).catch(err => console.error(`[chain] ${err.message}`))
     }

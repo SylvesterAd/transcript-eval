@@ -79,4 +79,22 @@ describe('multicam-sync post-rough-cut pause', () => {
 
     expect(runFullAutoBrollChainMock).toHaveBeenCalledWith(44)
   })
+
+  it('guided: rough-cut failure also pauses at rough cut (no chain fire)', async () => {
+    runAiRoughCutMock.mockRejectedValueOnce(new Error('rough cut blew up'))
+    dbState.rows.set(45, { user_id: 1, auto_rough_cut: 1, path_id: 'guided' })
+
+    await updateStatus(45, 'done')
+    await new Promise(r => setImmediate(r))
+
+    const failedUpdate = dbState.updates.find(u =>
+      u.sql.includes("rough_cut_status = 'failed'")
+    )
+    const pausedUpdate = dbState.updates.find(u =>
+      u.sql.includes("broll_chain_status = 'paused_at_rough_cut'")
+    )
+    expect(failedUpdate).toBeTruthy()
+    expect(pausedUpdate).toBeTruthy()
+    expect(runFullAutoBrollChainMock).not.toHaveBeenCalled()
+  })
 })
