@@ -1226,12 +1226,17 @@ router.post('/groups/:id/rebuild-annotations', requireAuth, async (req, res) => 
 router.get('/groups/:id/word-timestamps', requireAuth, async (req, res) => {
   const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
+  // Match the parent-aware pattern used elsewhere (videos.js:683): the raw
+  // upload often lives on a child sub-group whose parent_group_id points
+  // back here, so without the OR clause /editor/<projectId> returns no
+  // word timestamps and the transcript pane stays empty.
   const rows = await db.prepare(`
     SELECT t.video_id, t.word_timestamps_json
     FROM transcripts t
     JOIN videos v ON v.id = t.video_id
-    WHERE v.group_id = ? AND t.type = 'raw' AND t.word_timestamps_json IS NOT NULL
-  `).all(req.params.id)
+    WHERE (v.group_id = ? OR v.group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?))
+      AND t.type = 'raw' AND t.word_timestamps_json IS NOT NULL
+  `).all(req.params.id, req.params.id)
   const result = {}
   for (const row of rows) {
     try { result[row.video_id] = JSON.parse(row.word_timestamps_json) } catch { /* skip */ }
