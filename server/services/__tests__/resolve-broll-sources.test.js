@@ -52,10 +52,16 @@ describe('resolveSourcesFromGroup (pure helper)', () => {
     expect(resolveSourcesFromGroup({ libraries_json: null, freepik_opt_in: null })).toEqual(['pexels', 'freepik'])
   })
 
-  it('strips "artlist" from libraries (no proxy provider yet)', async () => {
+  it('passes "artlist" through (provider live since 2026-05)', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     expect(resolveSourcesFromGroup({ libraries_json: '["artlist","envato","storyblocks"]', freepik_opt_in: false }))
-      .toEqual(['envato', 'storyblocks', 'pexels'])
+      .toEqual(['artlist', 'envato', 'storyblocks', 'pexels'])
+  })
+
+  it('passes "artlist" through when it is the only library', async () => {
+    const { resolveSourcesFromGroup } = await import('../broll.js')
+    expect(resolveSourcesFromGroup({ libraries_json: '["artlist"]', freepik_opt_in: false }))
+      .toEqual(['artlist', 'pexels'])
   })
 
   it('dedupes — never lists pexels twice if user adds it explicitly', async () => {
@@ -85,10 +91,10 @@ describe('resolveBrollSources — group lookup walks parent', () => {
     dbState.groupRow = null
   })
 
-  it('returns overrides.sources verbatim when provided (without artlist)', async () => {
+  it('returns overrides.sources verbatim when provided', async () => {
     const { resolveBrollSources } = await import('../broll.js')
     const result = await resolveBrollSources('plan-x', { sources: ['envato', 'artlist', 'pexels'] })
-    expect(result).toEqual(['envato', 'pexels'])
+    expect(result).toEqual(['envato', 'artlist', 'pexels'])
     // Should not have hit the database — overrides short-circuit.
     expect(dbCalls.length).toBe(0)
   })

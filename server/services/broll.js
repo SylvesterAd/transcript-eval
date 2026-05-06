@@ -1757,8 +1757,8 @@ async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
 
 // Pure source-list builder, exported for unit tests.
 // Inputs: a row's libraries_json (string | array | null) and freepik_opt_in (bool | null).
-// Output: deduped array of source names with the artlist filter applied
-// and pexels always appended; freepik appended unless explicitly opted out.
+// Output: deduped array of source names; pexels always appended,
+// freepik appended unless explicitly opted out.
 //
 // Exported for unit tests in __tests__/resolve-broll-sources.test.js.
 export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
@@ -1770,16 +1770,15 @@ export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
     } catch {}
   }
   const freepikOptIn = freepik_opt_in !== false  // null → default-on
-  const sources = [...libraries.filter(l => l !== 'artlist'), 'pexels']
+  const sources = [...libraries, 'pexels']
   if (freepikOptIn) sources.push('freepik')
   return Array.from(new Set(sources))
 }
 
 // Resolve which stock libraries to send to the broll proxy for a given plan pipeline.
 // Reads the parent video group's `libraries_json` + `freepik_opt_in` (falling
-// back to the sub-group's own values if there's no parent), filters `artlist`,
-// and always appends `pexels`. `overrides.sources` (if non-empty) wins, with
-// the same artlist filter applied.
+// back to the sub-group's own values if there's no parent), and always appends
+// `pexels`. `overrides.sources` (if non-empty) wins.
 //
 // SQL MUST walk the parent: post-classification, `videos.group_id` points at
 // the sub-group, but library config is configured on the parent project.
@@ -1790,7 +1789,7 @@ export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
 // Exported for unit tests; production callers go through executeBrollSearch.
 export async function resolveBrollSources(planPipelineId, overrides = {}) {
   if (overrides.sources?.length) {
-    return overrides.sources.filter(s => s !== 'artlist')
+    return overrides.sources
   }
 
   let row = { libraries_json: null, freepik_opt_in: null }
