@@ -694,25 +694,33 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
 
   async function handleRunNewPlan() {
     const selected = [...selectedStrategies]
-    if (!prepPipelineId || !selected.length || !videoId) return
+    if (!prepPipelineId || !selected.length || !videoId) {
+      // Surfacing why nothing happened — historically this swallowed the
+      // click silently (no nav, no toast) and made it look like Generate
+      // Plan was broken. Log the missing piece so it's visible in the
+      // browser console for triage.
+      console.warn('[broll] Generate Plan: prereqs missing — staying put', {
+        prepPipelineId, selectedCount: selected.length, videoId,
+      })
+      return
+    }
     setRunningType('plan')
     setError(null)
     setProgress(null)
     setPipelineIds([])
     setPipelineProgresses({})
 
-    // Auto-path projects bounce to the processing modal IMMEDIATELY — the
-    // run-plan API calls below take ~15-30s of Gemini round-trips, and the
-    // user's mental model is "click Generate Plan → watch progress on the
-    // processing page", not "stare at the strategy review tab while plan
-    // generates". Plan + resume-chain still run in the background after
-    // navigation; chain status updates surface through the modal's
-    // StageTimeline. The CTA button's own onClick skips its
-    // /editor/<id>/brolls/strategy/plan navigate when this branch fires
-    // (see steps map below) so we don't fight ourselves on the history
-    // stack.
+    // handleRunNewPlan owns the post-click navigation (the button's onClick
+    // unconditionally skips its own /editor/.../plan navigate for the plan
+    // CTA — see steps map below). Auto-path projects bounce to the
+    // processing modal so the user can watch chain progress; non-auto
+    // projects land on the plan tab to follow in-panel progress. Routing
+    // here (not in the button) means a stale closure on `pathId` can't
+    // make the local /plan navigate win the race against /processing.
     if (AUTO_PATHS.has(pathId)) {
       navigate(`/?step=processing&group=${parentGroupId}`)
+    } else {
+      navigate(`/editor/${id}/brolls/strategy/plan`)
     }
 
     try {
@@ -1004,10 +1012,15 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
                 key={step.key}
                 onClick={isCTA ? () => {
                   step.action()
-                  // 'plan' on auto paths: handleRunNewPlan navigates straight
-                  // to the processing modal, so skip the local tab change to
-                  // avoid two competing entries on the history stack.
-                  if (step.key === 'plan' && AUTO_PATHS.has(pathId)) return
+                  // The 'plan' CTA owns its own navigation: handleRunNewPlan
+                  // routes to /?step=processing for auto paths and to the
+                  // /plan tab otherwise. Always skip the local navigate
+                  // here so we never race a stale closure (the previous
+                  // gate was `step.key === 'plan' && AUTO_PATHS.has(pathId)`
+                  // — when pathId hadn't loaded yet or the JS bundle was
+                  // stale, the gate failed open and /plan won the race
+                  // against the /processing redirect).
+                  if (step.key === 'plan') return
                   navigate(`/editor/${id}/brolls/strategy/${step.key}`)
                 } : canNavigate ? () => navigate(`/editor/${id}/brolls/strategy/${step.key}`) : undefined}
                 disabled={!isCTA && !canNavigate && !isActive}
