@@ -12,12 +12,34 @@ const state = {
   createStrategy: { id: 8 },
   combinedStrategy: { id: 9 },
   analysisStrategy: { id: 5 },
-  analysisVersion: { id: 50 },
+  // Active strategy version: created_at gates cross-main reuse so a
+  // version bump invalidates older cached runs, and stages_json drives
+  // the lastStageIdx lookup (7 stages → final index 6).
+  analysisVersion: {
+    id: 50,
+    created_at: '2026-04-01T00:00:00.000Z',
+    stages_json: JSON.stringify([
+      { name: 'Analyze A-Roll + Chapters & Beats' },
+      { name: 'Build analysis time windows' },
+      { name: 'Analyze B-Roll per minute' },
+      { name: 'Split analysis by chapter' },
+      { name: 'Compute chapter stats' },
+      { name: 'Pattern analysis' },
+      { name: 'Assemble full analysis' },
+    ]),
+  },
   existingPrepRun: null,
   existingCombinedRun: null,
   completedAnalysis: [],
   group: { id: 1, editor_state_json: null },
   existingStratRuns: [],
+  // Cross-main reuse fixtures: candidate is the assemble-stage row of a
+  // prior project's analysis for the same reference video. When set,
+  // sourcePipelineRowsByPid maps the source pipelineId to all of its
+  // broll_runs rows (main stages + sub-runs) that the copy step pulls.
+  crossMainCandidateByRef: {},
+  sourcePipelineRowsByPid: {},
+  insertedBrollRuns: [],
   // Per-pipelineId completion check used by waitForPipelinesComplete's DB
   // fallback. Default null means "no rows yet" — tests can set per-pid
   // shape to simulate "all main stages written" (main_stages >= total_stages).
@@ -62,13 +84,38 @@ vi.mock('../../db.js', () => ({
           }
           // existingCombined lookup (post-e229184): SELECT 1 ... LIMIT 1
           if (/SELECT 1 FROM broll_runs[\s\S]*LIMIT 1/.test(sql)) return state.existingCombinedRun
+          // Cross-main reuse candidate lookup: matches by strategy + version-cutoff
+          // + ref-suffix in pipelineId + last-stage stageIndex. The args we get
+          // are [strategyId, versionCreatedAt, '%-ex<refId>"%', '%"stageIndex":<N>%'].
+          // Mock by pulling refId from the LIKE arg and returning the fixture.
+          if (/SELECT metadata_json FROM broll_runs[\s\S]*AND created_at >= \?[\s\S]*ORDER BY id DESC LIMIT 1/.test(sql)) {
+            const refLike = args[2] || ''
+            const m = String(refLike).match(/-ex(\d+)"/)
+            const refId = m ? Number(m[1]) : null
+            return refId != null ? state.crossMainCandidateByRef[refId] || null : null
+          }
           throw new Error(`unexpected get: ${sql}`)
         },
         async all(...args) {
           if (/FROM broll_runs WHERE strategy_id = \? AND video_id = \?/.test(sql)) return state.completedAnalysis
           // existingStratRuns (post-e229184): WHERE video_id = ? AND strategy_id = ?
           if (/FROM broll_runs[\s\S]*WHERE video_id = \? AND strategy_id = \?/.test(sql)) return state.existingStratRuns
+          // Cross-main reuse: fetch every row for a source pipelineId so the copy
+          // step can re-INSERT them under the new pipelineId.
+          if (/SELECT \* FROM broll_runs WHERE metadata_json LIKE \?/.test(sql)) {
+            const like = args[0] || ''
+            const m = String(like).match(/"pipelineId":"([^"]+)"/)
+            const pid = m ? m[1] : null
+            return pid ? state.sourcePipelineRowsByPid[pid] || [] : []
+          }
           throw new Error(`unexpected all: ${sql}`)
+        },
+        async run(...args) {
+          if (/INSERT INTO broll_runs/i.test(sql)) {
+            state.insertedBrollRuns.push({ sql, args })
+            return { lastInsertRowid: state.insertedBrollRuns.length }
+          }
+          throw new Error(`unexpected run: ${sql}`)
         },
       }
     },
@@ -94,6 +141,9 @@ beforeEach(() => {
   state.existingPrepRun = null
   state.existingCombinedRun = null
   state.completionRowsByPid = {}
+  state.crossMainCandidateByRef = {}
+  state.sourcePipelineRowsByPid = {}
+  state.insertedBrollRuns = []
 })
 
 describe('runAllReferences', () => {
@@ -111,6 +161,87 @@ describe('runAllReferences', () => {
     const r = await runAllReferences({ subGroupId: 1, mainVideoId: 387 })
     expect(r.analysisPipelineIds).toContain('5-387-1234-ex901')
     expect(r.analysisPipelineIds).toHaveLength(2)
+  })
+
+  it('duplicates a prior project\'s analysis when the same reference reappears under a new main video', async () => {
+    // Reference 901 was already analyzed for a different main video (999).
+    // Reference 902 has no prior analysis anywhere.
+    // Expectation:
+    //   - 901: rows are copied across, no new executePipeline call
+    //   - 902: fresh executePipeline fired
+    const sourcePid = '5-999-1700000000000-ex901'
+    state.crossMainCandidateByRef[901] = {
+      metadata_json: JSON.stringify({ pipelineId: sourcePid, stageIndex: 6, stageName: 'Assemble full analysis' }),
+    }
+    state.sourcePipelineRowsByPid[sourcePid] = [
+      { strategy_id: 5, video_id: 999, step_name: 'analysis', status: 'complete', transcript_source: 'raw', resolved_transcript_source: 'raw',
+        analysis_run_id: null, input_text: '', output_text: '{"chapters":[]}', prompt_used: '', system_instruction_used: '', model: 'gemini',
+        params_json: '{}', tokens_in: 100, tokens_out: 200, cost: 0.5, runtime_ms: 1000, error_message: null,
+        metadata_json: JSON.stringify({ pipelineId: sourcePid, stageIndex: 0, stageName: 'Analyze A-Roll + Chapters & Beats' }) },
+      { strategy_id: 5, video_id: 999, step_name: 'analysis', status: 'complete', transcript_source: 'raw', resolved_transcript_source: 'raw',
+        analysis_run_id: null, input_text: '', output_text: '{"assembled":true}', prompt_used: '', system_instruction_used: '', model: 'gemini',
+        params_json: '{}', tokens_in: 50, tokens_out: 75, cost: 0.2, runtime_ms: 500, error_message: null,
+        metadata_json: JSON.stringify({ pipelineId: sourcePid, stageIndex: 6, stageName: 'Assemble full analysis' }) },
+    ]
+
+    const broll = await import('../broll.js')
+    broll.executePipeline.mockClear()
+
+    const r = await runAllReferences({ subGroupId: 1, mainVideoId: 387 })
+
+    // 901 was reused (new pipelineId keyed on mainVideoId=387, suffixed -ex901)
+    // 902 was scheduled fresh
+    expect(r.analysisPipelineIds).toHaveLength(2)
+    const reusedPid = r.analysisPipelineIds.find(p => p.endsWith('-ex901'))
+    const freshPid = r.analysisPipelineIds.find(p => p.endsWith('-ex902'))
+    expect(reusedPid).toMatch(/^5-387-\d+-ex901$/)
+    expect(reusedPid).not.toBe(sourcePid)             // freshly minted, not the original
+    expect(freshPid).toMatch(/^5-387-\d+-ex902$/)
+
+    // executePipeline fired ONLY for 902, not for 901.
+    expect(broll.executePipeline).toHaveBeenCalledTimes(1)
+    const callArgs = broll.executePipeline.mock.calls[0]
+    expect(callArgs[8]).toMatchObject({ exampleVideoId: 902 })
+
+    // Both source rows were duplicated under the new (mainVideoId=387, pipelineId=reusedPid).
+    expect(state.insertedBrollRuns).toHaveLength(2)
+    for (const ins of state.insertedBrollRuns) {
+      const [strategyId, videoId] = ins.args
+      expect(strategyId).toBe(5)
+      expect(videoId).toBe(387)
+      // tokens / cost zeroed — the original run paid for them
+      const [, , , , , , , , , , , , , tokensIn, tokensOut, cost] = ins.args
+      expect(tokensIn).toBe(0)
+      expect(tokensOut).toBe(0)
+      expect(cost).toBe(0)
+      // Rewrites pipelineId + tags copiedFromPipelineId for audit
+      const meta = JSON.parse(ins.args[ins.args.length - 1])
+      expect(meta.pipelineId).toBe(reusedPid)
+      expect(meta.copiedFromPipelineId).toBe(sourcePid)
+    }
+  })
+
+  it('falls back to fresh analysis when cross-main reuse fails (chain unaffected)', async () => {
+    // Candidate exists, but the source-rows fetch returns nothing (e.g. the
+    // pipelineId has been purged). Reuse must abort cleanly and let the
+    // fresh pipeline fire so the chain still completes.
+    const sourcePid = '5-999-1700000000000-ex901'
+    state.crossMainCandidateByRef[901] = {
+      metadata_json: JSON.stringify({ pipelineId: sourcePid, stageIndex: 6 }),
+    }
+    state.sourcePipelineRowsByPid[sourcePid] = []  // empty → reuse aborts
+
+    const broll = await import('../broll.js')
+    broll.executePipeline.mockClear()
+
+    const r = await runAllReferences({ subGroupId: 1, mainVideoId: 387 })
+
+    // Both 901 and 902 fall through to fresh analysis.
+    expect(r.analysisPipelineIds).toHaveLength(2)
+    expect(r.analysisPipelineIds[0]).toMatch(/^5-387-\d+-ex901$/)
+    expect(r.analysisPipelineIds[1]).toMatch(/^5-387-\d+-ex902$/)
+    expect(broll.executePipeline).toHaveBeenCalledTimes(2)
+    expect(state.insertedBrollRuns).toHaveLength(0)
   })
 })
 

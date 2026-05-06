@@ -124,6 +124,101 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
     ).get(analysisStrategy.id)
 
     if (analysisVersion) {
+      // Cross-main reuse: for any reference still missing analysis on THIS
+      // main video, look for a completed analysis from any other main video
+      // for the same reference + same strategy version, then duplicate the
+      // broll_runs rows under a fresh pipelineId keyed on (mainVideoId, refId).
+      // The duplicated rows have status='complete', so the strategy phase's
+      // pipelineId-based lookup (broll.js:executeCreateStrategy) finds them
+      // and skips firing executePipeline for that reference. Token columns
+      // are zeroed — those costs were paid by the original run.
+      //
+      // Verified safe via DB inspection (2026-05-06): every stage of the
+      // active main_analysis version targets `examples` / `text_only`; no
+      // stage reads main_video transcript. Output is a function of the
+      // reference video alone, so reuse across main videos preserves
+      // semantic correctness as long as the strategy version matches —
+      // hence the `created_at >= analysisVersion.created_at` gate.
+      //
+      // Failures abort the copy for that reference and fall through to a
+      // fresh analysis below — chain uploading behaves exactly as before
+      // when reuse can't proceed for any reason.
+      const stillNeeded = readyVideos.filter(v => !alreadyAnalyzedVideoIds.has(v.id))
+      if (stillNeeded.length > 0) {
+        let stages = []
+        try { stages = JSON.parse(analysisVersion.stages_json || '[]') } catch {}
+        const lastStageIdx = stages.length > 0 ? stages.length - 1 : 0
+
+        for (const refVid of stillNeeded) {
+          try {
+            // Find the FINAL stage of the most recent reusable pipeline:
+            //   - same strategy
+            //   - status complete
+            //   - created at-or-after the active version (stale prompts excluded)
+            //   - pipelineId ends with -ex<refId> (closing-quote anchors prevent
+            //     -ex123 colliding with -ex1234)
+            //   - last stage of the version (so the assemble-output exists)
+            //   - not a sub-run row
+            const candidate = await db.prepare(
+              `SELECT metadata_json FROM broll_runs
+                WHERE strategy_id = ?
+                  AND status = 'complete'
+                  AND created_at >= ?
+                  AND metadata_json LIKE ?
+                  AND metadata_json LIKE ?
+                  AND metadata_json NOT LIKE '%"isSubRun":true%'
+                ORDER BY id DESC LIMIT 1`
+            ).get(
+              analysisStrategy.id,
+              analysisVersion.created_at,
+              `%-ex${refVid.id}"%`,
+              `%"stageIndex":${lastStageIdx}%`,
+            )
+            if (!candidate) continue
+
+            let sourcePipelineId
+            try { sourcePipelineId = JSON.parse(candidate.metadata_json).pipelineId } catch { sourcePipelineId = null }
+            if (!sourcePipelineId) continue
+
+            const sourceRows = await db.prepare(
+              `SELECT * FROM broll_runs WHERE metadata_json LIKE ? ORDER BY id`
+            ).all(`%"pipelineId":"${sourcePipelineId}"%`)
+            if (!sourceRows.length) continue
+
+            const newPipelineId = `${analysisStrategy.id}-${mainVideoId}-${Date.now()}-ex${refVid.id}`
+            for (const row of sourceRows) {
+              let meta
+              try { meta = JSON.parse(row.metadata_json || '{}') } catch { meta = {} }
+              meta.pipelineId = newPipelineId
+              meta.copiedFromPipelineId = sourcePipelineId
+              await db.prepare(
+                `INSERT INTO broll_runs (
+                  strategy_id, video_id, step_name, status, transcript_source, resolved_transcript_source,
+                  analysis_run_id, input_text, output_text, prompt_used, system_instruction_used,
+                  model, params_json, tokens_in, tokens_out, cost, runtime_ms, error_message, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              ).run(
+                row.strategy_id, mainVideoId, row.step_name, row.status,
+                row.transcript_source, row.resolved_transcript_source,
+                row.analysis_run_id, row.input_text, row.output_text,
+                row.prompt_used, row.system_instruction_used,
+                row.model, row.params_json,
+                0, 0, 0,
+                row.runtime_ms, row.error_message,
+                JSON.stringify(meta),
+              )
+            }
+
+            allAnalysisIds.push(newPipelineId)
+            alreadyAnalyzedVideoIds.add(refVid.id)
+            console.log(`[broll-runner] Reused analysis for ref video ${refVid.id}: copied ${sourceRows.length} rows from ${sourcePipelineId} → ${newPipelineId}`)
+          } catch (err) {
+            console.error(`[broll-runner] Cross-main reuse failed for ref ${refVid.id}: ${err.message}`)
+            // fall through to fresh analysis below
+          }
+        }
+      }
+
       const newVideos = readyVideos.filter(v => !alreadyAnalyzedVideoIds.has(v.id))
       // Stagger the parallel pipeline starts so CF Stream doesn't get hit with
       // 1 (main) + N (reference) MP4 fetches in the same tick. CF occasionally
