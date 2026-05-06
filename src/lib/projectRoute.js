@@ -77,7 +77,16 @@ export function resolveProjectRoute(project) {
   if (CHAIN_IN_PROGRESS.has(project.broll_chain_status)) {
     return `/?step=processing&group=${id}`
   }
-  if (project.broll_chain_status === 'paused_at_rough_cut') {
+  // All paused_at_* checkpoints route to the processing modal: <StageTimeline>
+  // renders the paused stage with a "Open project to pick" CTA pointing at
+  // the right sub-group review tab. Routing straight to /editor/PARENT/assets
+  // (the older intentional-checkpoint design) drops the user into the parent's
+  // asset list with no signal that strategy/plan review is waiting on them.
+  if (
+    project.broll_chain_status === 'paused_at_rough_cut'
+    || project.broll_chain_status === 'paused_at_strategy'
+    || project.broll_chain_status === 'paused_at_plan'
+  ) {
     return `/?step=processing&group=${id}`
   }
   // Failure routing: hold pre-pause failures on the loader so the user
