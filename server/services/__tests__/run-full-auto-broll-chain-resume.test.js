@@ -25,7 +25,7 @@ vi.mock('../../db.js', () => ({
     prepare(sql) {
       return {
         async get(...args) {
-          if (/SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id/.test(sql)) {
+          if (/SELECT id, user_id, path_id, parent_group_id.* FROM video_groups WHERE id/.test(sql)) {
             return state.subGroup
           }
           // isCancelled probe — never cancelled in these tests.

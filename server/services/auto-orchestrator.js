@@ -449,10 +449,18 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   }, HEARTBEAT_INTERVAL_MS)
 
   const sg = await db.prepare(
-    'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
+    'SELECT id, user_id, path_id, parent_group_id, editor_state_json FROM video_groups WHERE id = ?'
   ).get(subGroupId)
   if (!sg) return
   const flags = pathToFlags(sg.path_id)
+
+  let editorCuts = null
+  if (sg.editor_state_json) {
+    try {
+      const state = JSON.parse(sg.editor_state_json)
+      if (state.cuts?.length) editorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
+    } catch {}
+  }
 
   try {
     const runner = await import('./broll-runner.js')
@@ -561,6 +569,7 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
         subGroupId, mainVideoId: mainVideo.id,
         prepPipelineId: refs.prepPipelineId,
         strategyPipelineIds: strats.strategyPipelineIds,
+        editorCuts,
       })
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
     }
@@ -605,7 +614,7 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
 //   fromStage = 'search'   → user picked plan; run search only
 export async function resumeChain(subGroupId, fromStage, opts = {}) {
   const sg = await db.prepare(
-    'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
+    'SELECT id, user_id, path_id, parent_group_id, editor_state_json FROM video_groups WHERE id = ?'
   ).get(subGroupId)
   if (!sg) return
 
@@ -623,6 +632,14 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
       return
     }
+  }
+
+  let resumeEditorCuts = null
+  if (sg.editor_state_json) {
+    try {
+      const state = JSON.parse(sg.editor_state_json)
+      if (state.cuts?.length) resumeEditorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
+    } catch {}
   }
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
@@ -643,6 +660,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
         subGroupId, mainVideoId: mainVideo.id,
         strategyPipelineIds: opts.strategyPipelineIds || [],
         prepPipelineId: opts.prepPipelineId,
+        editorCuts: resumeEditorCuts,
       })
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
       if (await isCancelled(subGroupId)) return

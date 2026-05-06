@@ -3742,7 +3742,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   }
 }
 
-export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId) {
+export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId, editorCuts = null) {
   // 1. Load create_plan strategy and version
   const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_plan' ORDER BY id LIMIT 1").get()
   if (!strategy) throw new Error('No create_plan strategy found')
@@ -3998,7 +3998,8 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
             abortSignal: pipelineAbort.signal,
           })
 
-          chapterResults[c] = result.text
+          const chapterOutput = await persistPlacementOutput(result.text, editorCuts)
+          chapterResults[c] = chapterOutput
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
           stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
@@ -4008,7 +4009,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
           // Store sub-run — stageName MUST be 'Per-chapter B-Roll plan' for downstream consumers
           await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             strategy.id, videoId, 'analysis', 'complete',
-            ch.transcript.slice(0, 500), result.text, chPrompt, chSystem,
+            ch.transcript.slice(0, 500), chapterOutput, chPrompt, chSystem,
             stage.model || 'gemini-3.1-pro-preview',
             result.tokensIn || 0, result.tokensOut || 0, result.cost || 0, 0,
             JSON.stringify({ pipelineId, stageIndex: i, stageName: 'Per-chapter B-Roll plan', subIndex: c, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}`, isSubRun: true, phase: 'create_plan', prepPipelineId, strategyPipelineId }),

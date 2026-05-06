@@ -1054,10 +1054,26 @@ router.post('/pipeline/run-plan', requireAuth, async (req, res) => {
     if (!prep_pipeline_id || !strategy_pipeline_id || !video_id) {
       return res.status(400).json({ error: 'prep_pipeline_id, strategy_pipeline_id, and video_id required' })
     }
+
+    // Load editor cuts from group in one lookup (mirrors /strategies/:id/versions/:versionId/run)
+    let editorCuts = null
+    if (group_id) {
+      const group = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(group_id)
+      if (group?.editor_state_json) {
+        try {
+          const state = JSON.parse(group.editor_state_json)
+          if (state.cuts?.length) {
+            editorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
+          }
+        } catch {}
+      }
+    }
+
     const { runPlanForEachVariant } = await import('../services/broll-runner.js')
     const r = await runPlanForEachVariant({
       subGroupId: group_id, mainVideoId: video_id,
       prepPipelineId: prep_pipeline_id, strategyPipelineIds: [strategy_pipeline_id],
+      editorCuts,
     })
     res.json({ planPipelineId: r.planPipelineIds[0] || null })
   } catch (err) {

@@ -14,7 +14,7 @@ const state = {
   parentUpdates: [],        // every UPDATE video_groups SET assembly_status call
   analyzeMulticamCalls: [], // analyzeMulticam(subId, opts) invocations
   groupRow: null,           // row returned for SELECT ... FROM video_groups WHERE id = ? (chainAfterClassify)
-  subGroup: null,           // row for SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ? (runFullAutoBrollChain)
+  subGroup: null,           // row for SELECT id, user_id, path_id, parent_group_id, editor_state_json FROM video_groups WHERE id = ? (runFullAutoBrollChain)
   mainVideo: null,          // row for the SELECT v.id FROM videos v JOIN transcripts ... lookup
   brollChainUpdates: [],    // every UPDATE video_groups SET broll_chain_status call
   parentCheckRow: null,     // row for SELECT parent_group_id FROM video_groups WHERE id = ? (guards)
@@ -37,7 +37,7 @@ vi.mock('../../db.js', () => ({
           if (/SELECT id, user_id, path_id, auto_rough_cut, classification_json, assembly_status FROM video_groups WHERE id/.test(sql)) {
             return state.groupRow
           }
-          if (/SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id/.test(sql)) {
+          if (/SELECT id, user_id, path_id, parent_group_id.* FROM video_groups WHERE id/.test(sql)) {
             return state.subGroup
           }
           if (/SELECT parent_group_id FROM video_groups WHERE id/.test(sql)) {
