@@ -95,6 +95,16 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
   const altPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'alt_plan')
   const keywordsStrategy = (strategies || []).find(s => s.strategy_kind === 'keywords')
   const planPrepStrategy = (strategies || []).find(s => s.strategy_kind === 'plan_prep')
+  // plan_prep has multiple bundle variants (e.g. id=7 default + id=12
+  // audio_only). The server picks the right one via resolvePlanStrategyId
+  // based on the main video's media_type — for audio mains the run is
+  // strategy_id=12 while .find() returns id=7. Without an all-IDs set,
+  // completedPrepPipeline below misses the audio run, prepPipelineId stays
+  // null, and handleRunNewPlan early-returns silently when the user clicks
+  // Generate Plan (so the navigate to /?step=processing never fires).
+  const planPrepStrategyIds = new Set(
+    (strategies || []).filter(s => s.strategy_kind === 'plan_prep').map(s => Number(s.id)),
+  )
   const createStrategyKind = (strategies || []).find(s => s.strategy_kind === 'create_strategy')
   const createPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'create_plan')
   // Memoized so reference identity is stable across re-renders (incl. the 10Hz
@@ -228,9 +238,11 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
     pid.startsWith('kw-') && p.status === 'complete'
   )
 
-  // Find completed prep pipeline (strategy_kind === 'plan_prep')
+  // Find completed prep pipeline. Match against EVERY plan_prep strategy ID
+  // (default + audio_only variant) so an audio main video's plan_prep run
+  // — strategy_id=12 — isn't missed when planPrepStrategy.id resolves to 7.
   const completedPrepPipeline = Object.entries(pipelineMap).find(([pid, p]) =>
-    p.status === 'complete' && p.stages.some(s => s.strategy_id === planPrepStrategy?.id || String(s.strategy_id) === String(planPrepStrategy?.id))
+    p.status === 'complete' && p.stages.some(s => planPrepStrategyIds.has(Number(s.strategy_id)))
   )
   const prepPipelineId = completedPrepPipeline?.[0] || null
   const hasCompletedPrep = !!completedPrepPipeline
