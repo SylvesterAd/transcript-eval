@@ -679,9 +679,21 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
   await db.prepare(
-    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = ? WHERE id = ?"
+    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = ?, broll_chain_heartbeat_at = NOW() WHERE id = ?"
   ).run(startSubstage, subGroupId)
   if (await isCancelled(subGroupId)) return
+
+  // Mirror runFullAutoBrollChain's heartbeat keeper. Without this, the
+  // periodic-resume sweep (PR #41) flags this chain as interrupted after
+  // HEARTBEAT_TTL_MS (90 s) and tries to resume it via runFullAutoBrollChain
+  // — which double-fires plan/search and burns tokens. Plan + 3 search
+  // batches typically run for several minutes; a single fresh heartbeat at
+  // the top isn't enough.
+  const heartbeat = setInterval(() => {
+    db.prepare('UPDATE video_groups SET broll_chain_heartbeat_at = NOW() WHERE id = ?')
+      .run(subGroupId)
+      .catch(() => {})
+  }, HEARTBEAT_INTERVAL_MS)
 
   try {
     const runner = await import('./broll-runner.js')
@@ -734,6 +746,8 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
+  } finally {
+    clearInterval(heartbeat)
   }
 }
 

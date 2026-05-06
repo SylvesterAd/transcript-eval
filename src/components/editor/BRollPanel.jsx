@@ -710,26 +710,40 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
     setPipelineIds([])
     setPipelineProgresses({})
 
-    // handleRunNewPlan owns the post-click navigation (the button's onClick
-    // unconditionally skips its own /editor/.../plan navigate for the plan
-    // CTA — see steps map below). Auto-path projects bounce to the
-    // processing modal so the user can watch chain progress; non-auto
-    // projects land on the plan tab to follow in-panel progress. Routing
-    // here (not in the button) means a stale closure on `pathId` can't
-    // make the local /plan navigate win the race against /processing.
+    // Auto paths: hand the entire plan + search advance to the orchestrator
+    // via /resume-chain?from=plan. The orchestrator flips
+    // broll_chain_status='running'/'plan' immediately (with heartbeat
+    // keeper), runs plan, advances substage to search, runs all 3 batches,
+    // marks the chain done, sends the email. The processing modal sees
+    // each status transition and updates StageTimeline in real time —
+    // strategy shows Done + plan shows Active right after the click,
+    // instead of staying paused-at-strategy for the 15-30 s the
+    // per-pipeline run-plan flow took (during which the modal would
+    // mislead the user into thinking nothing was happening).
+    //
+    // Skipping clean-strategy here is intentional: the boot-time full-auto
+    // path (runFullAutoBrollChain → orchestrator's plan phase) doesn't run
+    // it either, and the fields it strips
+    // (matched_reference_chapter / commonalities / match_reason) are an
+    // input-size optimization the plan generator doesn't actually require.
     if (AUTO_PATHS.has(pathId)) {
       navigate(`/?step=processing&group=${parentGroupId}`)
-    } else {
-      navigate(`/editor/${id}/brolls/strategy/plan`)
+      apiPost(`/broll/groups/${groupId}/resume-chain?from=plan`, {
+        prepPipelineId,
+        strategyPipelineIds: selected,
+      }).catch(err => console.error('[resume-chain plan]', err.message))
+      return
     }
 
+    // Non-auto / legacy manual flow: keep the per-strategy clean + run-plan
+    // calls so the in-panel progress UI keeps working. No chain status to
+    // advance for these projects.
+    navigate(`/editor/${id}/brolls/strategy/plan`)
     try {
-      // 1. Clean strategy outputs (strip reference-only fields) for each selected
       await Promise.all(selected.map(stratId =>
         apiPost('/broll/pipeline/clean-strategy', { strategy_pipeline_id: stratId })
       ))
 
-      // 2. Fire plan for each selected strategy
       const planPipelineIds = []
       for (const stratId of selected) {
         const res = await apiPost('/broll/pipeline/run-plan', {
@@ -742,18 +756,6 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
       }
       if (planPipelineIds.length) setPipelineIds(planPipelineIds)
       else if (planPipelineIds[0]) setPipelineId(planPipelineIds[0])
-
-      // 3. Auto-path projects: hand off to the orchestrator's resume-chain
-      // so search runs all 3 batches and broll_chain_status flips to 'done'.
-      // Without this, /broll/pipeline/run-plan returns success but the chain
-      // sits at paused_at_strategy forever — search never auto-fires.
-      // Fire-and-forget: resume-chain runs synchronously on the server and
-      // returns immediately; orchestrator owns subsequent state.
-      if (planPipelineIds.length && AUTO_PATHS.has(pathId)) {
-        apiPost(`/broll/groups/${groupId}/resume-chain?from=search`, {
-          planPipelineIds,
-        }).catch(err => console.error('[resume-chain after plan]', err.message))
-      }
     } catch (err) {
       setError(err.message)
       setRunningType(null)
