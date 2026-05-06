@@ -105,6 +105,35 @@ describe('deriveStages', () => {
     const s = stages.find(s => s.id === 'broll_strategy')
     expect(s.paused).toBe(true)
   })
+
+  // Regression: paused_at_strategy used to leave "References analyzed"
+  // stuck on Pending — `done` was only true when chain was actively
+  // running PAST refs. A chain paused at any later checkpoint has by
+  // definition finished refs, so it should render Done.
+  it('marks broll_refs done when chain is paused_at_strategy', () => {
+    const state = { parent: { auto_rough_cut: false, videos: [] }, subGroups: [{ broll_chain_status: 'paused_at_strategy', broll_chain_substage: 'strategy' }] }
+    const stages = deriveStages(state)
+    const refs = stages.find(s => s.id === 'broll_refs')
+    expect(refs.done).toBe(true)
+    expect(refs.active).toBe(false)
+  })
+
+  it('marks broll_refs + broll_strategy done when chain is paused_at_plan', () => {
+    const state = { parent: { auto_rough_cut: false, videos: [] }, subGroups: [{ broll_chain_status: 'paused_at_plan', broll_chain_substage: 'plan' }] }
+    const stages = deriveStages(state)
+    expect(stages.find(s => s.id === 'broll_refs').done).toBe(true)
+    expect(stages.find(s => s.id === 'broll_strategy').done).toBe(true)
+    expect(stages.find(s => s.id === 'broll_plan').paused).toBe(true)
+    expect(stages.find(s => s.id === 'broll_plan').done).toBe(false)
+  })
+
+  it('keeps refs Pending while chain is genuinely running on refs (not yet finished)', () => {
+    const state = { parent: { auto_rough_cut: false, videos: [] }, subGroups: [{ broll_chain_status: 'running', broll_chain_substage: 'refs' }] }
+    const stages = deriveStages(state)
+    const refs = stages.find(s => s.id === 'broll_refs')
+    expect(refs.done).toBe(false)
+    expect(refs.active).toBe(true)
+  })
   it('marks classify as paused when assembly_status is classified and no sub-groups exist', () => {
     const state = { parent: { assembly_status: 'classified', videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }] }, subGroups: [] }
     const stages = deriveStages(state)
