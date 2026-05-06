@@ -1,5 +1,6 @@
 import { useContext, useState, useCallback } from 'react'
 import { EditorContext } from './EditorView.jsx'
+import { splitAtPlayhead } from './sharedCutLogic.js'
 import { BRollContext } from './useBRollEditorState.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
@@ -75,10 +76,15 @@ export default function PlaybackControls() {
         dispatch({ type: 'ADD_EXCLUSION', payload: { start: t - 0.5, end: t + 0.5 } })
       } else {
         // No existing cut — create a zero-width razor for the user to drag open
-        dispatch({
-          type: 'ADD_CUT',
-          payload: { id: `cut-${Date.now()}`, start: t, end: t, source: 'split', splitPoint: t },
+        const action = splitAtPlayhead({
+          playheadTime: t,
+          cuts: state.cuts,
+          cutExclusions: state.cutExclusions || [],
         })
+        if (action) {
+          // splitAtPlayhead's payload includes splitPoint already; dispatch as-is
+          dispatch(action)
+        }
       }
       return
     }
