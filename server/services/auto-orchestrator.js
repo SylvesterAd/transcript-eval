@@ -442,6 +442,21 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   ).run(subGroupId)
   if (await isCancelled(subGroupId)) return
 
+  // Server-side annotation→cuts sync. Without this, full-auto projects whose
+  // user never opened the editor have empty editor_state_json.cuts even after
+  // the rough-cut runner produced annotations_json. The chain would then run
+  // generate_post_cut_transcript with no cuts → analysis sees raw transcript
+  // (filler, false starts) instead of the rough-cut version.
+  try {
+    const { ensureEditorCutsFromAnnotations } = await import('./cuts-from-annotations.js')
+    const result = await ensureEditorCutsFromAnnotations(subGroupId)
+    if (result.changed) {
+      console.log(`[chain] Synced ${result.derivedAnnCuts} annotation cuts → editor_state_json for group ${subGroupId}`)
+    }
+  } catch (err) {
+    console.warn(`[chain] ensureEditorCutsFromAnnotations failed for group ${subGroupId}:`, err.message)
+  }
+
   const heartbeat = setInterval(() => {
     db.prepare('UPDATE video_groups SET broll_chain_heartbeat_at = NOW() WHERE id = ?')
       .run(subGroupId)
