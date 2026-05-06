@@ -1198,6 +1198,28 @@ export function buildSpecialAudioNote(mediaType) {
 // any future import name. Mirrors __test__filterStagesForMedia (Task 7).
 export { buildSpecialAudioNote as __test__buildSpecialAudioNote }
 
+// Pick the strategy of a given kind, preferring the audio-only variant
+// (bundle_key='audio_only') when mediaType='audio'. Falls through to the
+// first strategy of that kind by id otherwise.
+//
+// Every executor in this file used to do `WHERE strategy_kind = '<kind>' ORDER
+// BY id LIMIT 1` directly — that ignored bundle_key, so cloned audio variants
+// were never picked. Route every strategy lookup through this helper so audio
+// uploads actually run their audio-specific strategies.
+export async function pickStrategyByKind(kind, mediaType) {
+  if (mediaType === 'audio') {
+    const audio = await db.prepare(
+      "SELECT * FROM broll_strategies WHERE strategy_kind = ? AND bundle_key = 'audio_only' ORDER BY id LIMIT 1"
+    ).get(kind)
+    if (audio) return audio
+  }
+  return await db.prepare(
+    "SELECT * FROM broll_strategies WHERE strategy_kind = ? ORDER BY id LIMIT 1"
+  ).get(kind)
+}
+
+export { pickStrategyByKind as __test__pickStrategyByKind }
+
 // Run alt plans for non-favorite reference videos using a completed plan pipeline's data
 export async function executeAltPlans(planPipelineId) {
   // Load the plan pipeline's completed stages
@@ -1217,8 +1239,11 @@ export async function executeAltPlans(planPipelineId) {
   const planStrategy = await getStrategy(strategyId)
   if (!planStrategy?.main_strategy_id) throw new Error('Plan strategy has no linked analysis strategy')
 
-  // Load alt_plan strategy and its latest version
-  const altPlanStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'alt_plan' ORDER BY id LIMIT 1").get()
+  // Resolve alt_plan strategy with audio variant preference. Computed up front
+  // (before the existing mainVideoRow lookup below) so the same media_type
+  // query isn't repeated.
+  const mainVideoRowEarly = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const altPlanStrategy = await pickStrategyByKind('alt_plan', mainVideoRowEarly?.media_type)
   if (!altPlanStrategy) throw new Error('No alt_plan strategy found')
   const altVersion = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(altPlanStrategy.id)
   if (!altVersion) throw new Error('No alt_plan version found')
@@ -1232,7 +1257,8 @@ export async function executeAltPlans(planPipelineId) {
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} expands based on the MAIN video's media_type (the video the
   // alt plan is being generated for), not the reference video being analysed.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses the lookup performed above for pickStrategyByKind.
+  const mainVideoRow = mainVideoRowEarly
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
   const favoriteVideo = exampleVideos.find(v => v.isFavorite) || exampleVideos[0]
   const altVideos = exampleVideos.filter(v => v !== favoriteVideo)
@@ -2540,8 +2566,13 @@ async function _getPendingGpuPlacements(planPipelineId) {
  * This is a convenience wrapper that runs executePipeline with the plan_prep strategy.
  */
 export async function executePlanPrep(videoId, groupId, editorCuts = null, pipelineIdOverride = null) {
-  // Find the plan_prep strategy and its latest version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1").get()
+  // Find the plan_prep strategy, preferring the audio-only variant when the
+  // main video is audio. This is the bug that bit group 286 / video 421:
+  // the plain `WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1` lookup
+  // always returned strategy 7 even when strategy 12 (bundle_key='audio_only')
+  // was the right one.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('plan_prep', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No plan_prep strategy found. Run the split-plan-strategies migration.')
 
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
@@ -2573,8 +2604,9 @@ export async function executePlanPrep(videoId, groupId, editorCuts = null, pipel
 
 // Run per-chapter B-Roll strategy for ONE reference video using completed prep + analysis pipelines
 export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, videoId, groupId, pipelineIdOverride, priorStrategyPipelineIds = []) {
-  // 1. Load create_strategy strategy and version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_strategy' ORDER BY id LIMIT 1").get()
+  // 1. Load create_strategy strategy, preferring audio-only variant when audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('create_strategy', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No create_strategy strategy found')
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
   if (!version) throw new Error('No create_strategy version found')
@@ -2729,7 +2761,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses mainVideoRow from the strategy-resolver lookup at the top of the function.
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_strategy' })
@@ -2985,8 +3017,9 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
 
 // Run per-chapter B-Roll strategy for MULTIPLE reference videos using completed prep + analysis pipelines
 export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipelineIds, videoId, groupId, pipelineIdOverride) {
-  // 1. Load create_combined_strategy strategy and version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy' ORDER BY id LIMIT 1").get()
+  // 1. Load create_combined_strategy strategy, preferring audio-only variant when audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('create_combined_strategy', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No create_combined_strategy strategy found')
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
   if (!version) throw new Error('No create_combined_strategy version found')
@@ -3160,7 +3193,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses mainVideoRow from the strategy-resolver lookup at the top of the function.
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_combined_strategy' })
@@ -3545,8 +3578,9 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
 }
 
 export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId) {
-  // 1. Load create_plan strategy and version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_plan' ORDER BY id LIMIT 1").get()
+  // 1. Load create_plan strategy, preferring audio-only variant when audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('create_plan', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No create_plan strategy found')
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
   if (!version) throw new Error('No create_plan version found')
@@ -3708,7 +3742,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses mainVideoRow from the strategy-resolver lookup at the top of the function.
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Plan', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_plan' })
@@ -3978,9 +4012,9 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     `).get(strategy.main_strategy_id) : null
     const analysisStagesTemplate = analysisVersion ? JSON.parse(analysisVersion.stages_json || '[]') : []
 
-    // Load alt plan strategy stages
+    // Load alt plan strategy stages — prefer audio-only variant when main is audio.
     let altPlanStagesTemplate = []
-    const altPlanStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'alt_plan' ORDER BY id LIMIT 1").get()
+    const altPlanStrategy = await pickStrategyByKind('alt_plan', mainMediaType)
     if (altPlanStrategy) {
       const altVer = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(altPlanStrategy.id)
       if (altVer) altPlanStagesTemplate = JSON.parse(altVer.stages_json || '[]')

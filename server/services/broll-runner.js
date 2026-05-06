@@ -85,9 +85,21 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
       .catch(err => console.error(`[broll-runner] Plan prep failed: ${err.message}`))
   }
 
-  const analysisStrategy = await db.prepare(
-    "SELECT * FROM broll_strategies WHERE strategy_kind = 'main_analysis' ORDER BY id LIMIT 1"
-  ).get()
+  // Resolve analysis strategy with audio variant preference. Mirrors
+  // pickStrategyByKind (in broll.js) — kept inline here to avoid a circular
+  // require, since broll.js dynamically imports from this file.
+  const mainVideoMedia = await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(mainVideoId)
+  let analysisStrategy = null
+  if (mainVideoMedia?.media_type === 'audio') {
+    analysisStrategy = await db.prepare(
+      "SELECT * FROM broll_strategies WHERE strategy_kind = 'main_analysis' AND bundle_key = 'audio_only' ORDER BY id LIMIT 1"
+    ).get()
+  }
+  if (!analysisStrategy) {
+    analysisStrategy = await db.prepare(
+      "SELECT * FROM broll_strategies WHERE strategy_kind = 'main_analysis' ORDER BY id LIMIT 1"
+    ).get()
+  }
   const allAnalysisIds = []
 
   if (analysisStrategy) {
