@@ -39,6 +39,11 @@ vi.mock('../../db.js', () => ({
           // tests — kept here for completeness so future audio-aware tests don't
           // explode on an unhandled SQL.
           if (/bundle_key = 'audio_only'/.test(sql)) return null
+          // Per-video media_type probe added by the audio-aware analysisStrategy
+          // resolver (replaces the original `SELECT * FROM broll_strategies WHERE
+          // strategy_kind = 'main_analysis'` direct lookup). Returns a video row so
+          // the resolver treats this group as video-only and falls through.
+          if (/SELECT media_type FROM videos WHERE id = \?/.test(sql)) return { media_type: 'video' }
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'plan_prep'/.test(sql)) return state.planPrepStrategy
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_strategy'/.test(sql)) return state.createStrategy
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy'/.test(sql)) return state.combinedStrategy
