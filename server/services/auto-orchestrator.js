@@ -527,8 +527,12 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
       if (prepRow) {
         try { refs.prepPipelineId = JSON.parse(prepRow.metadata_json || '{}').pipelineId || null } catch {}
       }
+      // No DISTINCT: Postgres rejects `SELECT DISTINCT x ... ORDER BY y` when
+      // `y` isn't in the SELECT list. The pipelineId Set below dedups
+      // anyway — we just iterate every matching row, which is fine for the
+      // ~10s of rows per group's analysis history.
       const analysisRows = await db.prepare(`
-        SELECT DISTINCT metadata_json FROM broll_runs r
+        SELECT metadata_json FROM broll_runs r
         JOIN broll_strategies s ON s.id = r.strategy_id
         WHERE r.video_id = ? AND s.strategy_kind = 'main_analysis' AND r.status = 'complete'
         ORDER BY r.id DESC
@@ -553,8 +557,9 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     const skipStrategy = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'strategy')
     if (skipStrategy) {
       console.log(`[orchestrator] Skipping strategy phase for group ${subGroupId} — outputs already exist`)
+      // See comment on the analysisRows query above re: DISTINCT vs ORDER BY.
       const stratRows = await db.prepare(`
-        SELECT DISTINCT metadata_json FROM broll_runs r
+        SELECT metadata_json FROM broll_runs r
         JOIN broll_strategies s ON s.id = r.strategy_id
         WHERE r.video_id = ? AND s.strategy_kind IN ('create_strategy', 'create_combined_strategy') AND r.status = 'complete'
         ORDER BY r.id DESC
@@ -588,8 +593,9 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     const skipPlan = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'plan')
     if (skipPlan) {
       console.log(`[orchestrator] Skipping plan phase for group ${subGroupId} — outputs already exist`)
+      // See comment on the analysisRows query above re: DISTINCT vs ORDER BY.
       const planRows = await db.prepare(`
-        SELECT DISTINCT metadata_json FROM broll_runs r
+        SELECT metadata_json FROM broll_runs r
         JOIN broll_strategies s ON s.id = r.strategy_id
         WHERE r.video_id = ? AND s.strategy_kind = 'plan' AND r.status = 'complete'
         ORDER BY r.id DESC
