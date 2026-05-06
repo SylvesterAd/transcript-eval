@@ -1,8 +1,8 @@
-import { useContext, useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { BRollContext } from './useBRollEditorState.js'
 import RoughCutPreview from './RoughCutPreview.jsx'
-import { usePlaybackSkipRegions } from './usePlaybackSkipRegions.js'
+import { computeSkipRegions } from './usePlaybackSkipRegions.js'
 import { Loader2 } from 'lucide-react'
 
 export default function BRollPreview() {
@@ -17,11 +17,13 @@ export default function BRollPreview() {
   const brollRef = useRef(broll); brollRef.current = broll
 
   // Compute skip regions from the editor's cut state (same cuts as the rough-cut
-  // editor — synced via editor_state_json). We pass a dummy ref so the hook only
-  // returns the merged regions; the actual timeupdate listeners are attached below
-  // to every a-roll video element in videoRefs (there can be multiple tracks).
-  const dummyRef = useRef(null)
-  const skipRegions = usePlaybackSkipRegions(dummyRef, state.cuts, state.cutExclusions)
+  // editor — synced via editor_state_json). The actual timeupdate listeners are
+  // attached below to every a-roll video element in videoRefs (there can be
+  // multiple tracks), so we call computeSkipRegions directly instead of the hook.
+  const skipRegions = useMemo(
+    () => computeSkipRegions(state.cuts, state.cutExclusions),
+    [state.cuts, state.cutExclusions],
+  )
   const skipRegionsRef = useRef(skipRegions)
   skipRegionsRef.current = skipRegions
 

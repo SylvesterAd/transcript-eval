@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import { usePlaybackSkipRegions } from '../usePlaybackSkipRegions.js'
+import { computeSkipRegions, usePlaybackSkipRegions } from '../usePlaybackSkipRegions.js'
 
 function makeVideoRef(initialTime = 0) {
   const ref = {
@@ -13,6 +13,37 @@ function makeVideoRef(initialTime = 0) {
   }
   return ref
 }
+
+describe('computeSkipRegions (pure)', () => {
+  it('returns empty array for no cuts', () => {
+    expect(computeSkipRegions([])).toEqual([])
+    expect(computeSkipRegions(null)).toEqual([])
+  })
+
+  it('merges overlapping cuts', () => {
+    const out = computeSkipRegions([
+      { start: 10, end: 20 },
+      { start: 15, end: 30 },
+    ])
+    expect(out).toEqual([{ start: 10, end: 30 }])
+  })
+
+  it('subtracts cutExclusions from merged regions', () => {
+    const out = computeSkipRegions(
+      [{ start: 10, end: 30 }],
+      [{ start: 15, end: 20 }],
+    )
+    expect(out).toEqual([
+      { start: 10, end: 15 },
+      { start: 20, end: 30 },
+    ])
+  })
+
+  it('filters out near-zero-width cuts', () => {
+    const out = computeSkipRegions([{ start: 10, end: 10.005 }])
+    expect(out).toEqual([])
+  })
+})
 
 describe('usePlaybackSkipRegions', () => {
   it('attaches a timeupdate listener on mount', () => {
