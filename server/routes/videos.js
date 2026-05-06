@@ -16,7 +16,7 @@ import { uploadFile, deleteByUrl, deleteFolder, downloadToTemp, uploadFrames, TE
 import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStreamEnabled, waitForStreamReady, enableMp4Downloads, waitForMp4Ready, mp4Url as cfMp4Url, thumbnailUrl as cfThumbnailUrl } from '../services/cloudflare-stream.js'
 import { runAiRoughCut } from '../services/rough-cut-runner.js'
 import { estimateTokenCost, estimateProcessingTime } from '../services/token-pricing.js'
-import { isAudioFile } from '../lib/media-type.js'
+import { isAudioFile, isAudioFilename } from '../lib/media-type.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -1708,7 +1708,12 @@ export async function _registerVideoHandler(req, res) {
     // CF Stream is video-only — reject any audio caller that tried to push
     // through that path. Audio uploads must go through Supabase Storage via
     // /upload, /upload-multiple, or a direct file_url register.
-    if (media_type === 'audio' && cf_stream_uid) {
+    //
+    // Defense-in-depth: a stale UploadModal bundle (loaded before the
+    // audio branch shipped) routes audio MP3s through TUS → CF Stream
+    // and POSTs here with cf_stream_uid set but no media_type. Catch
+    // those by sniffing the filename/title extension. See group 289.
+    if (cf_stream_uid && (media_type === 'audio' || isAudioFilename(filename) || isAudioFilename(title))) {
       return res.status(400).json({ error: 'Audio uploads cannot use Cloudflare Stream' })
     }
 

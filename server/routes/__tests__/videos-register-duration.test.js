@@ -120,3 +120,90 @@ describe('POST /videos/register — duration_seconds handling', () => {
     }
   })
 })
+
+describe('POST /videos/register — audio-via-CF-Stream guard', () => {
+  beforeEach(() => { dbCalls.length = 0 })
+
+  // Defense-in-depth: a stale UploadModal bundle (from before the audio
+  // branch shipped) routes audio MP3s through TUS → Cloudflare Stream
+  // and POSTs to /register with cf_stream_uid set but no media_type.
+  // CF Stream cannot transcode audio, so the upload is doomed; we must
+  // reject at /register so the corrupt row is never inserted. See
+  // group 289 for the bug this guards against.
+  it('rejects audio-extension filenames when cf_stream_uid is supplied', async () => {
+    const { _registerVideoHandler } = await import('../videos.js')
+
+    for (const filename of ['audio.mp3', 'voice.WAV', 'sound.m4a', 'pod (1).mp3']) {
+      dbCalls.length = 0
+      const req = {
+        auth: { userId: 'user-1' },
+        body: {
+          cf_stream_uid: 'cf-uid-doomed',
+          filename,
+          title: filename,
+          group_id: 42,
+          video_type: 'raw',
+          file_size: 1000,
+        },
+      }
+      const res = {
+        status: function (c) { this._status = c; return this },
+        json: function (b) { this._body = b; return this },
+      }
+      await _registerVideoHandler(req, res)
+
+      expect(res._status).toBe(400)
+      expect(res._body?.error || '').toMatch(/audio/i)
+      const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+      expect(insert).toBeUndefined()
+    }
+  })
+
+  it('still allows video-extension filenames with cf_stream_uid', async () => {
+    const { _registerVideoHandler } = await import('../videos.js')
+
+    const req = {
+      auth: { userId: 'user-1' },
+      body: {
+        cf_stream_uid: 'cf-uid-ok',
+        filename: 'movie.mp4',
+        title: 'movie',
+        group_id: 42,
+        video_type: 'raw',
+        file_size: 1000,
+      },
+    }
+    const res = {
+      status: function (c) { this._status = c; return this },
+      json: function (b) { this._body = b; return this },
+    }
+    await _registerVideoHandler(req, res)
+
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeDefined()
+  })
+
+  it('also catches title-only audio filenames when filename param is missing', async () => {
+    const { _registerVideoHandler } = await import('../videos.js')
+
+    const req = {
+      auth: { userId: 'user-1' },
+      body: {
+        cf_stream_uid: 'cf-uid-doomed',
+        title: 'voice memo.mp3',
+        group_id: 42,
+        video_type: 'raw',
+        file_size: 1000,
+      },
+    }
+    const res = {
+      status: function (c) { this._status = c; return this },
+      json: function (b) { this._body = b; return this },
+    }
+    await _registerVideoHandler(req, res)
+
+    expect(res._status).toBe(400)
+    const insert = dbCalls.find(c => /INSERT INTO videos/i.test(c.sql))
+    expect(insert).toBeUndefined()
+  })
+})
