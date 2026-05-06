@@ -1,5 +1,4 @@
 import { matchPlacementsToTranscript } from './brollUtils.js'
-import { ADD_CUT, UPDATE_CUT, REMOVE_CUT } from './sharedCutLogic.js'
 
 // Editor-state action kinds. Each APPLY_ACTION payload is of this shape:
 //   { id: string, ts: number, kind: string, ...action-specific fields }
@@ -426,24 +425,6 @@ export function reducer(state, action) {
     case 'SAVE_SUCCESS': {
       return { ...state, editorStateVersion: action.payload.version, dirty: false }
     }
-    case ADD_CUT:
-      return { ...state, cuts: [...state.cuts, action.payload] }
-    case UPDATE_CUT: {
-      const { id, updates } = action.payload
-      return {
-        ...state,
-        cuts: state.cuts.map(c => c.id === id ? { ...c, ...updates } : c),
-      }
-    }
-    case REMOVE_CUT:
-      return { ...state, cuts: state.cuts.filter(c => c.id !== action.payload) }
-    case 'SET_CUTS_FROM_SERVER':
-      return {
-        ...state,
-        cuts: action.payload.cuts || [],
-        cutExclusions: action.payload.cutExclusions || [],
-        cutsLoaded: true,
-      }
     default:
       return state
   }
@@ -465,8 +446,4 @@ export const initialState = {
   editorStateVersion: 0,       // for optimistic concurrency
   dirty: false,                // true while a debounced save is pending
   editorStateLoaded: false,    // true once LOAD_EDITOR_STATE has populated for the current pipeline
-  // Cuts shared with the rough cut editor via editor_state_json
-  cuts: [],
-  cutExclusions: [],
-  cutsLoaded: false,           // true once initial fetch from /videos/groups/:id/detail resolves
 }
