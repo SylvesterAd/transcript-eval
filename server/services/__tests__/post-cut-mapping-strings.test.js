@@ -71,6 +71,31 @@ describe('formatTimecodeString', () => {
     expect(formatTimecodeString(NaN)).toBe('[00:00:00]')
     expect(formatTimecodeString(Infinity)).toBe('[00:00:00]')
   })
+
+  // Regression: float drift can produce values like 349.99999999 where the
+  // naive (s, cs) split gives s=49 + cs=100 — invalid centiseconds, parses
+  // back as 349.1 instead of 350. The formatter now rounds in centisecond
+  // units first, then derives each field, so the carry to seconds happens
+  // correctly.
+  it('carries cs=100 to seconds when value rounds up', () => {
+    expect(formatTimecodeString(349.999)).toBe('[00:05:50]')
+    expect(formatTimecodeString(349.9999999)).toBe('[00:05:50]')
+    expect(formatTimecodeString(59.999)).toBe('[00:01:00]')
+    expect(formatTimecodeString(3599.999)).toBe('[01:00:00]')
+  })
+
+  it('round-trip is exact for fractional values that are at risk of carry', () => {
+    // These are real-world float-drift values from project 273 mapping.
+    const samples = [349.999, 349.9999, 350 - 1e-9, 60 - 1e-12, 3600 - 1e-12]
+    for (const s of samples) {
+      const formatted = formatTimecodeString(s)
+      // After rounding, parse should give back the rounded value (not drift).
+      const parsed = parseTimecodeString(formatted)
+      // The formatted value rounds to the nearest centisecond.
+      const expected = Math.round(s * 100) / 100
+      expect(parsed).toBeCloseTo(expected, 2)
+    }
+  })
 })
 
 describe('remapPlacementTimesString', () => {

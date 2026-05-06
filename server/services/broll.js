@@ -1206,11 +1206,16 @@ export function parseTimecodeString(s) {
  */
 export function formatTimecodeString(secs) {
   if (typeof secs !== 'number' || !Number.isFinite(secs)) return '[00:00:00]'
-  const total = Math.max(0, secs)
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = Math.floor(total % 60)
-  const cs = Math.round((total % 1) * 100)
+  // Round to centisecond resolution FIRST in integer space, then split into
+  // h/m/s/cs. Without this, a value like 349.99999 (float drift) splits to
+  // s=49 + cs=100 — which is "[00:05:49.100]" (invalid) and parses back as
+  // 349.1 instead of 350. Doing the round in centisecond units (× 100) and
+  // then deriving each field from the integer count avoids the carry bug.
+  const totalCs = Math.round(Math.max(0, secs) * 100)
+  const h = Math.floor(totalCs / 360000)
+  const m = Math.floor((totalCs % 360000) / 6000)
+  const s = Math.floor((totalCs % 6000) / 100)
+  const cs = totalCs % 100
   const base = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
 }
