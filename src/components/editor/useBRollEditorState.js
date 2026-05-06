@@ -382,6 +382,73 @@ export function useBRollEditorState(planPipelineId) {
     return () => window.removeEventListener('beforeunload', handler)
   }, [state.dirty, planPipelineId])
 
+  // --- Cuts sync with shared editor_state_json ---
+
+  const groupId = editorCtx?.state?.groupId || null
+
+  // Load cuts on mount (or when groupId becomes available)
+  useEffect(() => {
+    if (!groupId) return
+    let alive = true
+    ;(async () => {
+      try {
+        const detail = await authFetch(`/videos/groups/${groupId}/detail`)
+        if (!alive) return
+        const editorState = detail?.editor_state
+        dispatch({
+          type: 'SET_CUTS_FROM_SERVER',
+          payload: {
+            cuts: editorState?.cuts || [],
+            cutExclusions: editorState?.cutExclusions || [],
+          },
+        })
+      } catch (err) {
+        console.warn('[useBRollEditorState] Could not load editor_state cuts:', err.message)
+      }
+    })()
+    return () => { alive = false }
+  }, [groupId])
+
+  // Save cuts on change (debounced 500ms). Merges with existing editor_state to avoid clobbering
+  // fields written by the rough cut editor (annotations, tracks, zoom, etc.).
+  useEffect(() => {
+    if (!state.cutsLoaded || !groupId) return
+    const handle = setTimeout(async () => {
+      try {
+        const detail = await authFetch(`/videos/groups/${groupId}/detail`)
+        const merged = {
+          ...(detail?.editor_state || {}),
+          cuts: state.cuts,
+          cutExclusions: state.cutExclusions,
+        }
+        await authPut(`/videos/groups/${groupId}/editor-state`, { editor_state: merged })
+      } catch (err) {
+        console.warn('[useBRollEditorState] Save failed:', err.message)
+      }
+    }, 500)
+    return () => clearTimeout(handle)
+  }, [state.cuts, state.cutExclusions, state.cutsLoaded, groupId])
+
+  // Refetch cuts on window focus (cross-tab sync: rough cut editor may have written new cuts)
+  useEffect(() => {
+    if (!groupId) return
+    const handler = async () => {
+      try {
+        const detail = await authFetch(`/videos/groups/${groupId}/detail`)
+        const editorState = detail?.editor_state
+        dispatch({
+          type: 'SET_CUTS_FROM_SERVER',
+          payload: {
+            cuts: editorState?.cuts || [],
+            cutExclusions: editorState?.cutExclusions || [],
+          },
+        })
+      } catch {}
+    }
+    window.addEventListener('focus', handler)
+    return () => window.removeEventListener('focus', handler)
+  }, [groupId])
+
   const selectPlacement = useCallback((index) => {
     dispatch({ type: 'SELECT_PLACEMENT', payload: index })
   }, [])
