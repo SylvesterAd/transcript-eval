@@ -490,6 +490,7 @@ export default function ProjectsView() {
           initialState={initialConfig}
           onBack={() => setStep('upload', groupId)}
           onComplete={(gid) => setStep('processing', gid)}
+          liveFiles={liveFiles}
         />
       )}
 

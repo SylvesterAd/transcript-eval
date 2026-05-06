@@ -1,5 +1,5 @@
 // src/components/upload-config/UploadConfigFlow.jsx
-import { useReducer, useState } from 'react'
+import { useMemo, useReducer, useState } from 'react'
 import { apiPut } from '../../hooks/useApi.js'
 import Stepper from './Stepper.jsx'
 import StepLibraries from './steps/StepLibraries.jsx'
@@ -50,7 +50,20 @@ function reducer(state, action) {
   }
 }
 
-export default function UploadConfigFlow({ groupId, initialState, onBack, onComplete }) {
+// Sum durations probed locally by UploadModal (UploadModal.jsx#probeDuration)
+// across all video/audio entries in the current batch. Returns null when any
+// entry hasn't reported a duration yet (probe still pending, or probe failed
+// for at least one file) so StepRoughCut can fall back to server-side polling
+// instead of rendering a misleading partial total. Exported for unit tests.
+export function sumProbedDurations(liveFiles) {
+  if (!liveFiles || liveFiles.length === 0) return null
+  const media = liveFiles.filter(f => f.type === 'video' && f.status !== 'error')
+  if (media.length === 0) return null
+  if (media.some(f => f.durationSeconds == null)) return null
+  return media.reduce((sum, f) => sum + f.durationSeconds, 0)
+}
+
+export default function UploadConfigFlow({ groupId, initialState, onBack, onComplete, liveFiles }) {
   const [current, setCurrent] = useReducerStep(0)
   const [submitted, setSubmitted] = useReducerStep(false)
   // Lazy initializer seeds from initialState once on mount. `key={groupId}`
@@ -67,6 +80,10 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   // Latest rough-cut token estimate, lifted up so the footer's Run CTA can
   // show "~N tokens". Null until StepRoughCut polls successfully.
   const [roughCutEstimate, setRoughCutEstimate] = useState(null)
+  // Client-probed duration sum from UploadModal — lets StepRoughCut render
+  // the estimate the moment the browser's <video preload="metadata"> finishes,
+  // instead of waiting for the upload + /register round-trip (~30 s on CF).
+  const clientDurationSeconds = useMemo(() => sumProbedDurations(liveFiles), [liveFiles])
 
   // Persist on step-forward. No-op without a valid groupId so navigation
   // never gets blocked by a doomed PUT (e.g. when the URL has no ?group=).
@@ -126,7 +143,7 @@ export default function UploadConfigFlow({ groupId, initialState, onBack, onComp
   else if (current === 0) body = <StepLibraries state={state} setState={setState} />
   else if (current === 1) body = <StepAudience state={state} setState={setState} />
   else if (current === 2) body = <StepReferences groupId={groupId} onValidityChange={setReferencesValid} />
-  else if (current === 3) body = <StepRoughCut groupId={groupId} state={state} setState={setState} onValidityChange={setRoughCutValid} onEstimate={setRoughCutEstimate} />
+  else if (current === 3) body = <StepRoughCut groupId={groupId} state={state} setState={setState} onValidityChange={setRoughCutValid} onEstimate={setRoughCutEstimate} clientDurationSeconds={clientDurationSeconds} />
   else if (current === 4) body = <StepPath state={state} setState={setState} groupId={groupId} onValidityChange={setPathValid} />
 
   return (
