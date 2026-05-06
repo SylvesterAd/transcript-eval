@@ -73,6 +73,42 @@ const STAGE_TO_DROP = /(analyze\s+a-?roll|export.*post.?cut.*video)/i  // matche
     console.log(`Dropped ${droppedStages.length} stage(s): ${droppedStages.map(s => s.name).join(', ')}`)
   }
 
+  // Remap *StageIndex params on kept stages. Programmatic actions like
+  // `split_by_chapter` reference earlier stages by their ORIGINAL index
+  // via params keys ending in 'StageIndex' (chaptersStageIndex,
+  // aRollStageIndex, elementsStageIndex, etc.). When we drop stages, those
+  // indices go stale and the action looks up undefined → JSON.parse blows
+  // up → "Cannot read properties of null (reading 'chapters')".
+  //
+  // Build old→new index map for kept stages, then rewrite each *StageIndex
+  // value. If the original referent was dropped, null out the param so the
+  // action treats it as "no source" instead of pointing at the wrong stage.
+  const oldIndexOfKept = new Map() // newIdx -> oldIdx
+  const newIndexOfOld = new Map() // oldIdx -> newIdx
+  let kept = 0
+  for (let oldIdx = 0; oldIdx < stages.length; oldIdx++) {
+    if (!STAGE_TO_DROP.test(stages[oldIdx].name || '')) {
+      newIndexOfOld.set(oldIdx, kept)
+      oldIndexOfKept.set(kept, oldIdx)
+      kept++
+    }
+  }
+  for (const stage of keptStages) {
+    const params = stage.params || stage.actionParams
+    if (!params || typeof params !== 'object') continue
+    for (const key of Object.keys(params)) {
+      if (!key.endsWith('StageIndex')) continue
+      const oldVal = params[key]
+      if (typeof oldVal !== 'number') continue
+      if (newIndexOfOld.has(oldVal)) {
+        params[key] = newIndexOfOld.get(oldVal)
+      } else {
+        // referenced stage was dropped — null it out
+        params[key] = null
+      }
+    }
+  }
+
   // Inject {{special_audio_note}} at top of every kept stage's prompt + system_instruction.
   // We add it once if not already present.
   const augmented = keptStages.map(stage => {
