@@ -14,16 +14,18 @@ const VIDEO_ACCEPT = [...VIDEO_EXTS, ...AUDIO_EXTS].join(',')
 const SCRIPT_ACCEPT = SCRIPT_EXTS.join(',')
 const MAX_SIZE = 50 * 1024 * 1024 * 1024 // 50GB
 
-// Probe a video file's duration locally before upload starts. Reads only
-// the moov atom via an HTML5 <video> element + blob URL — no bytes are
-// uploaded, no extra deps. Returns the duration in seconds, or null when
-// the browser can't decode the container (rare formats, corrupted files,
-// or live-style MSE streams that report Infinity until seek).
+// Probe a video file's duration + pixel dimensions locally before upload
+// starts. Reads only the moov atom via an HTML5 <video> element + blob URL
+// — no bytes are uploaded, no extra deps. Returns
+// `{ duration, width, height }` (width/height are null for audio-only
+// containers), or null when the browser can't decode at all (rare
+// formats, corrupted files, or live-style MSE streams that report
+// Infinity until seek).
 //
-// Used by validateAndAddFiles to attach durationSeconds to each file
-// entry; the value is then forwarded to /videos/register so the rough-
-// cut estimator has accurate data from t≈0 instead of waiting ~30-90 s
-// for Cloudflare Stream to report it server-side.
+// Used by validateAndAddFiles to attach durationSeconds + width/height
+// to each file entry; the values are forwarded to /videos/register so
+// (a) the rough-cut estimator can run from t≈0 and (b) the b-roll
+// search has an `orientation` hint immediately.
 //
 // The optional opts arg lets unit tests inject mock factories — see
 // __tests__/UploadModal-probe-duration.test.js. Production callers omit
@@ -39,8 +41,13 @@ export function probeDuration(file, opts = {}) {
     el.preload = 'metadata'
     el.onloadedmetadata = () => {
       const dur = el.duration
+      // videoWidth/videoHeight only exist on HTMLVideoElement — for the
+      // <audio> fallback they're undefined, which we collapse to null so
+      // bucketAspect's audio path picks the landscape default.
+      const w = el.videoWidth || null
+      const h = el.videoHeight || null
       _revokeObjectURL(url)
-      res(Number.isFinite(dur) && dur > 0 ? dur : null)
+      res(Number.isFinite(dur) && dur > 0 ? { duration: dur, width: w, height: h } : null)
     }
     el.onerror = () => {
       _revokeObjectURL(url)
@@ -49,8 +56,8 @@ export function probeDuration(file, opts = {}) {
     el.src = url
   })
 
-  return tryWith('video').then((d) => {
-    if (d != null) return d
+  return tryWith('video').then((r) => {
+    if (r != null) return r
     // fallback for audio-only containers that <video> can't decode
     return tryWith('audio')
   })
@@ -226,6 +233,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         file_size: entry.file.size,
         cf_stream_uid: cfStreamUid,
         duration_seconds: entry.durationSeconds ?? null,
+        width: entry.width ?? null,
+        height: entry.height ?? null,
       })
 
       setFiles(prev => prev.map(f =>
@@ -275,17 +284,27 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
 
     setFiles(prev => [...prev, ...entries])
 
-    // Probe duration in parallel for every video entry in this batch (no I/O,
-    // just local moov-atom read), then start uploads. Probe failures are
-    // non-fatal — the entry uploads with durationSeconds=null and the server-
-    // side ffprobe/CF Stream path fills it in later as a fallback.
+    // Probe duration + dimensions in parallel for every video entry in this
+    // batch (no I/O, just local moov-atom read), then start uploads. Probe
+    // failures are non-fatal — the entry uploads with durationSeconds=null
+    // (and width/height=null) and the server-side ffprobe / CF Stream path
+    // fills the values in later as a fallback.
     ;(async () => {
       await Promise.all(entries.map(async (entry) => {
         if (entry.status !== 'uploading' || entry.type !== 'video') return
-        const dur = await probeDuration(entry.file)
-        if (dur != null) {
-          entry.durationSeconds = Math.round(dur)
-          setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, durationSeconds: entry.durationSeconds } : f))
+        const probed = await probeDuration(entry.file)
+        if (probed != null) {
+          entry.durationSeconds = Math.round(probed.duration)
+          entry.width = probed.width ?? null
+          entry.height = probed.height ?? null
+          setFiles(prev => prev.map(f => f.id === entry.id
+            ? { ...f, durationSeconds: entry.durationSeconds, width: entry.width, height: entry.height }
+            : f))
+        } else {
+          // Diagnostic: rough-cut estimate falls back to server-side polling
+          // (~30s on CF Stream) when this fires; orientation hint also misses
+          // for that entry. Surfaces in the browser console for triage.
+          console.warn('[probe] duration unknown for', entry.file.name, '— rough-cut + orientation will use server fallbacks')
         }
       }))
       for (const entry of entries) {
