@@ -79,8 +79,22 @@ export async function send(template, { subGroupId, userId, error } = {}) {
     const editorUrl = `${PUBLIC_FRONTEND_URL}${ROUTE_BY_TEMPLATE[template](subGroupId)}`
     const { subject, html } = tpl({ projectName: sg.name, editorUrl, error })
 
-    await client.emails.send({ from: FROM, to: user.email, subject, html })
+    // Resend's SDK never throws on delivery failure — it returns
+    // `{ data, error }` on the resolved Promise. Without this check, an
+    // unverified-from-domain (e.g. cutpunk.ai DNS not configured), a
+    // bounce, or any 4xx from Resend looks like a successful send: the
+    // notified_at column gets stamped and the user silently never sees
+    // the mail. Surface the error so chain failures are diagnosable
+    // from Railway logs, and skip the notified_at update so a periodic
+    // sweep resume gets another chance to notify on its next run.
+    const result = await client.emails.send({ from: FROM, to: user.email, subject, html })
+    if (result?.error) {
+      const errMsg = result.error.message || JSON.stringify(result.error)
+      console.error(`[email] resend error for ${template} sub-group ${subGroupId}: ${errMsg}`)
+      return
+    }
     await db.prepare('UPDATE video_groups SET notified_at = NOW() WHERE id = ?').run(subGroupId)
+    console.log(`[email] sent ${template} for sub-group ${subGroupId} to ${user.email} (id=${result?.data?.id || '?'})`)
   } catch (err) {
     console.error('[email] send failed:', err.message)
   }
