@@ -126,19 +126,26 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
     if (analysisVersion) {
       // Cross-main reuse: for any reference still missing analysis on THIS
       // main video, look for a completed analysis from any other main video
-      // for the same reference + same strategy version, then duplicate the
-      // broll_runs rows under a fresh pipelineId keyed on (mainVideoId, refId).
-      // The duplicated rows have status='complete', so the strategy phase's
-      // pipelineId-based lookup (broll.js:executeCreateStrategy) finds them
-      // and skips firing executePipeline for that reference. Token columns
-      // are zeroed — those costs were paid by the original run.
+      // for the same reference, then duplicate the broll_runs rows under a
+      // fresh pipelineId keyed on (mainVideoId, refId). The duplicated rows
+      // have status='complete', so the strategy phase's pipelineId-based
+      // lookup (broll.js:executeCreateStrategy) finds them and skips firing
+      // executePipeline for that reference. Token columns are zeroed — those
+      // costs were paid by the original run.
       //
       // Verified safe via DB inspection (2026-05-06): every stage of the
-      // active main_analysis version targets `examples` / `text_only`; no
-      // stage reads main_video transcript. Output is a function of the
-      // reference video alone, so reuse across main videos preserves
-      // semantic correctness as long as the strategy version matches —
-      // hence the `created_at >= analysisVersion.created_at` gate.
+      // active main_analysis targets `examples` / `text_only`; no stage
+      // reads main_video transcript. Output is a function of the reference
+      // video alone.
+      //
+      // No version gate: matches the existing same-project dedup above
+      // (line ~106-108), which also reuses runs irrespective of the active
+      // strategy version. Strategy-version bumps are infrequent and the
+      // output schema stays backward-compatible across them; gating here
+      // would cause every project after a version bump to silently re-run
+      // analysis on already-analyzed references (which is exactly the bug
+      // we shipped 2026-05-06: "+audio_note" version bump invalidated all
+      // pre-bump runs for cross-main reuse).
       //
       // Failures abort the copy for that reference and fall through to a
       // fresh analysis below — chain uploading behaves exactly as before
@@ -154,7 +161,6 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
             // Find the FINAL stage of the most recent reusable pipeline:
             //   - same strategy
             //   - status complete
-            //   - created at-or-after the active version (stale prompts excluded)
             //   - pipelineId ends with -ex<refId> (closing-quote anchors prevent
             //     -ex123 colliding with -ex1234)
             //   - last stage of the version (so the assemble-output exists)
@@ -163,14 +169,12 @@ export async function runAllReferences({ subGroupId, mainVideoId }) {
               `SELECT metadata_json FROM broll_runs
                 WHERE strategy_id = ?
                   AND status = 'complete'
-                  AND created_at >= ?
                   AND metadata_json LIKE ?
                   AND metadata_json LIKE ?
                   AND metadata_json NOT LIKE '%"isSubRun":true%'
                 ORDER BY id DESC LIMIT 1`
             ).get(
               analysisStrategy.id,
-              analysisVersion.created_at,
               `%-ex${refVid.id}"%`,
               `%"stageIndex":${lastStageIdx}%`,
             )
