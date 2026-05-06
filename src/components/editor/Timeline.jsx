@@ -749,9 +749,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                   <div className="flex-1 relative">
                     {isVideo
                       ? (showVideoFrames
-                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : EMPTY_CUTS} scrollRef={scrollRef} scrollX={scrollX} />
+                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={(isRoughCut || isBroll) ? mergedDisplayCuts : EMPTY_CUTS} scrollRef={scrollRef} scrollX={scrollX} />
                           : <VideoTrack track={track} zoom={state.zoom} />)
-                      : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} scrollRef={scrollRef} scrollX={scrollX} />
+                      : <AudioTrack track={track} zoom={state.zoom} cuts={(isRoughCut || isBroll) ? state.cuts : null} scrollRef={scrollRef} scrollX={scrollX} />
                     }
                   </div>
                 </div>
