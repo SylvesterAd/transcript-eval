@@ -21,8 +21,37 @@
 
 import { Router } from 'express'
 import { requireAuth } from '../auth.js'
+import db from '../db.js'
 import { getExportResult } from '../services/exports.js'
 import { generateXmeml } from '../services/xmeml-generator.js'
+import { computeEffectiveCuts } from '../services/broll.js'
+
+/**
+ * Given a sorted, non-overlapping cuts array (output of computeEffectiveCuts)
+ * and a total duration, return the COMPLEMENT — the list of kept segments
+ * that span [0, totalDuration]. Each segment is {start, end} in seconds.
+ *
+ * Used by the export route to convert cuts → arollSegments for XMEML.
+ *
+ * Examples:
+ *   complementSegments([], 60) → [{start: 0, end: 60}]              // no cuts
+ *   complementSegments([{start: 20, end: 30}], 60)
+ *     → [{start: 0, end: 20}, {start: 30, end: 60}]                 // single cut splits
+ *   complementSegments([{start: 0, end: 10}], 60)
+ *     → [{start: 10, end: 60}]                                       // cut at start
+ *   complementSegments([{start: 50, end: 60}], 60)
+ *     → [{start: 0, end: 50}]                                        // cut at end
+ */
+function complementSegments(cutsArr, totalDuration) {
+  const segs = []
+  let cursor = 0
+  for (const c of cutsArr) {
+    if (c.start > cursor + 0.001) segs.push({ start: cursor, end: c.start })
+    cursor = Math.max(cursor, c.end)
+  }
+  if (cursor < totalDuration - 0.001) segs.push({ start: cursor, end: totalDuration })
+  return segs
+}
 
 const router = Router()
 
@@ -61,6 +90,43 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
     const result = await getExportResult(id, { userId })
     if (!result) {
       return res.status(404).json({ error: 'export not found or not ready' })
+    }
+
+    // Load editor_state_json for cut-aware A-roll segmentation.
+    // The export's plan_pipeline_id encodes the videoId as 'plan-<videoId>-...'.
+    // From videoId we reach video_groups.editor_state_json which holds cuts/cutExclusions.
+    // If the chain fails at any step (legacy pipeline IDs, missing rows) we fall through
+    // gracefully — editorCuts stays [] and the legacy aroll single-clip path is used.
+    let editorCuts = []
+    let editorCutExclusions = []
+    try {
+      const exportRow = await db.prepare(
+        'SELECT plan_pipeline_id FROM exports WHERE id = ?'
+      ).get(id)
+      const planPipelineId = exportRow?.plan_pipeline_id || ''
+      const planMatch = planPipelineId.match(/^plan-(\d+)-/)
+      if (planMatch) {
+        const videoId = parseInt(planMatch[1], 10)
+        const vRow = await db.prepare(
+          'SELECT group_id FROM videos WHERE id = ?'
+        ).get(videoId)
+        const groupId = vRow?.group_id || null
+        if (groupId) {
+          const gRow = await db.prepare(
+            'SELECT editor_state_json FROM video_groups WHERE id = ?'
+          ).get(groupId)
+          if (gRow?.editor_state_json) {
+            const editorState = typeof gRow.editor_state_json === 'string'
+              ? JSON.parse(gRow.editor_state_json)
+              : gRow.editor_state_json
+            editorCuts = editorState.cuts || []
+            editorCutExclusions = editorState.cutExclusions || []
+          }
+        }
+      }
+    } catch (cutLoadErr) {
+      // Non-fatal: cut loading failed, fall back to legacy single-clip A-roll.
+      console.warn('[export-xml] editor cut load failed; using legacy aroll:', cutLoadErr.message)
     }
 
     // Index variants by label for O(1) lookup; reject any requested
@@ -105,10 +171,33 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       // separately on V1 by generateXmeml's `aroll` arg, not as a regular
       // b-roll clipitem.
       const brollPlacements = allPlacements.filter((p) => !p || (p.source !== 'aroll' && p.seq !== 0))
+
+      // Build arollSegments from editor cuts when cuts are present.
+      // If no cuts (empty array), pass null so generateXmeml uses the legacy
+      // aroll single-clip path — preserves behaviour for projects without cuts.
+      let arollSegments = null
+      if (editorCuts.length > 0 && aroll) {
+        const arollDurationSeconds = aroll.sourceDurationSeconds
+        if (Number.isFinite(arollDurationSeconds) && arollDurationSeconds > 0) {
+          const effective = computeEffectiveCuts(editorCuts, editorCutExclusions)
+          const keptSegments = complementSegments(effective, arollDurationSeconds)
+          arollSegments = keptSegments.map(s => ({
+            filename: aroll.filename,
+            start: s.start,
+            end: s.end,
+            sourceFrameRate: aroll.frameRate,
+            sourceDurationSeconds: arollDurationSeconds,
+            width: aroll.width,
+            height: aroll.height,
+          }))
+        }
+      }
+
       xml_by_variant[label] = generateXmeml({
         sequenceName: v.sequenceName || `Variant ${label}`,
         placements: brollPlacements,
         aroll,
+        arollSegments,
         mediaFolderAbsolute,
         // frameRate + sequenceSize fall through to generator defaults;
         // future manifest fields could override here.
