@@ -3,6 +3,7 @@ import { EditorContext } from './EditorView.jsx'
 import { BRollContext } from './useBRollEditorState.js'
 import RoughCutPreview from './RoughCutPreview.jsx'
 import { Loader2 } from 'lucide-react'
+import { attachVideoSource, detachVideoSource } from '../../hooks/useHlsSource.js'
 
 export default function BRollPreview() {
   const { state } = useContext(EditorContext)
@@ -29,11 +30,14 @@ export default function BRollPreview() {
         if (brollVideoRef.current) {
           const v = brollVideoRef.current
           const urlChain = [activeResult.preview_url, activeResult.preview_url_hq, activeResult.url].filter(Boolean)
-          const url = urlChain[fallbackIdxRef.current] || urlChain[0]
-          if (v.src !== url) {
+          const desired = urlChain[0] || ''
+          // Compare via the helper's tracked URL — for HLS, hls.js sets v.src
+          // to an internal blob: URL so a `v.src !== url` check always
+          // mismatches and would re-attach every frame.
+          if (v._currentSourceUrl !== desired) {
             fallbackIdxRef.current = 0
             setVideoLoadState('loading')
-            v.src = urlChain[0] || url
+            attachVideoSource(v, desired)
           }
           const localTime = s.currentTime - activePlacement.timelineStart
           const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
@@ -52,6 +56,15 @@ export default function BRollPreview() {
     return () => cancelAnimationFrame(rafId)
   }, [showBRoll])
 
+  // Cleanup any active hls.js instance when the component unmounts. Without
+  // this, switching projects leaves the previous Hls Worker alive in
+  // memory (small leak, but compounds across navigations).
+  useEffect(() => {
+    return () => {
+      if (brollVideoRef.current) detachVideoSource(brollVideoRef.current)
+    }
+  }, [])
+
   const handleLoadedData = () => setVideoLoadState('ready')
   const handleError = () => {
     const b = brollRef.current
@@ -65,7 +78,7 @@ export default function BRollPreview() {
       console.log('[broll-preview] URL failed, trying fallback', fallbackIdxRef.current, chain[fallbackIdxRef.current])
       if (brollVideoRef.current) {
         setVideoLoadState('loading')
-        brollVideoRef.current.src = chain[fallbackIdxRef.current]
+        attachVideoSource(brollVideoRef.current, chain[fallbackIdxRef.current])
       }
     } else {
       console.log('[broll-preview] all URL fallbacks exhausted')

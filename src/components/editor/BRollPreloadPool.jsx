@@ -11,10 +11,19 @@ import { useEffect, useMemo } from 'react'
 // expectation; inactive variants need only one so a quick variant-switch
 // doesn't show a cold load).
 
+// HLS .m3u8 playlists can't be warmed via a hidden <video preload="auto">
+// — Chrome won't fetch the segments until hls.js is attached, which only
+// happens for the active player. Filter them out here; the main BRollPreview
+// loads them on demand. MP4 / Pexels / Storyblocks etc. still preload as
+// before.
+const HLS_RE = /\.m3u8(\?|$)/i
+
 function pickUrl(p, selectedResultsByIndex) {
   const ri = selectedResultsByIndex[p.index] ?? p.persistedSelectedResult ?? 0
   const r = p.results?.[ri]
-  return r?.preview_url || r?.preview_url_hq || r?.url || null
+  const url = r?.preview_url || r?.preview_url_hq || r?.url || null
+  if (!url || HLS_RE.test(url)) return null
+  return url
 }
 
 export default function BRollPreloadPool({
