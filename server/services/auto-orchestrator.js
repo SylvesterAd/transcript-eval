@@ -737,6 +737,13 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
 // chains, uses smart per-pipeline resume + advance-from-substage rather than
 // re-firing the whole chain (which previously caused 50+ spurious analysis runs).
 // See spec docs/superpowers/specs/2026-04-29-broll-auto-resume-design.md.
+//
+// The stuck-chain branch (status IS NULL) is intentionally boot-only — pairs
+// with the periodic resumeInterruptedFullAutoChains sweep wired in
+// server/index.js. NULL status can mean "manually cleared by /retry-chain"
+// or "user paused", and a periodic sweep that re-fires those would race the
+// user. Only boot retries them, on the assumption that any in-flight worker
+// from the previous container is dead.
 export async function resumeStuckFullAutoChains() {
   const stuck = await db.prepare(`
     SELECT id FROM video_groups
@@ -750,11 +757,26 @@ export async function resumeStuckFullAutoChains() {
     setTimeout(() => __orchestratorDeps.runFullAutoBrollChain(sg.id), 3000)
   }
 
-  // Skip chains whose heartbeat was updated within HEARTBEAT_TTL_MS — those
-  // belong to a still-live driver process (e.g., a previous container that
-  // overlaps with this boot during a rolling Vercel/Railway deploy, or a
-  // dev nodemon hot-reload race). Resuming a live chain spawns parallel
-  // runAllReferences calls and double-billed token usage.
+  const { resumedPipelinesCount, advancedChainsCount, interruptedCount } =
+    await resumeInterruptedFullAutoChains({ logSource: 'startup' })
+
+  console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interruptedCount} chains; advanced ${advancedChainsCount} chains from substage`)
+}
+
+// Sweeps chains in 'running' state whose heartbeat hasn't ticked within
+// HEARTBEAT_TTL_MS — those belong to a worker that died without writing a
+// failed status (OOM, container restart between heartbeats, unhandled
+// rejection on an LLM stream). The TTL gate makes this safe to call while
+// the server is up: live workers update the heartbeat every
+// HEARTBEAT_INTERVAL_MS, so they're never picked up here.
+//
+// Resuming a live chain would spawn parallel runAllReferences calls and
+// double-bill tokens — the heartbeat staleness check is the only thing
+// preventing that, so don't relax it.
+//
+// Returns { resumedPipelinesCount, advancedChainsCount, interruptedCount }
+// so the boot-time caller can collapse to a single summary line.
+export async function resumeInterruptedFullAutoChains({ logSource = 'periodic-resume' } = {}) {
   const heartbeatTtlSeconds = Math.ceil(HEARTBEAT_TTL_MS / 1000)
   const interrupted = await db.prepare(
     `SELECT id FROM video_groups
@@ -788,13 +810,12 @@ export async function resumeStuckFullAutoChains() {
           await executePromise
           resumedPipelinesCount++
         } catch (err) {
-          console.error(`[startup] resumePipeline(${pid}) failed for group ${sg.id}: ${err.message}`)
+          console.error(`[${logSource}] resumePipeline(${pid}) failed for group ${sg.id}: ${err.message}`)
         }
       }
 
-      // Step 2: advance the chain. Use setTimeout(... 3000) to mirror the
-      // first loop's startup delay — gives the rest of the boot path a moment
-      // to settle before kicking off chain advancement.
+      // Step 2: advance the chain. setTimeout(... 3000) gives the rest of the
+      // event loop a moment to settle before kicking off chain advancement.
       if (substage === 'plan' || substage === 'search') {
         setTimeout(() => __orchestratorDeps.resumeChain(sg.id, substage), 3000)
       } else {
@@ -806,11 +827,15 @@ export async function resumeStuckFullAutoChains() {
       }
       advancedChainsCount++
     } catch (err) {
-      console.error(`[startup] resume failed for group ${sg.id}: ${err.message}`)
+      console.error(`[${logSource}] resume failed for group ${sg.id}: ${err.message}`)
     }
   }
 
-  console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interrupted.length} chains; advanced ${advancedChainsCount} chains from substage`)
+  if (logSource === 'periodic-resume' && interrupted.length > 0) {
+    console.log(`[${logSource}] resumed ${resumedPipelinesCount} pipelines across ${interrupted.length} interrupted chains; advanced ${advancedChainsCount}`)
+  }
+
+  return { resumedPipelinesCount, advancedChainsCount, interruptedCount: interrupted.length }
 }
 
 // Boot-time recovery for YouTube reference downloads. downloadYouTubeVideo
