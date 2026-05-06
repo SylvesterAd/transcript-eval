@@ -8,6 +8,27 @@ import { mp4Url } from './cloudflare-stream.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
 import { extractYouTubeId } from './youtube.js'
 import { formatAudience } from './audience-formatter.js'
+import { bucketAspect } from '../lib/aspect.js'
+
+// Resolve the b-roll search `orientation` hint from a main video's
+// stored media_info_json. Returns 'landscape' on any miss/parse error so
+// adpunk.ssh's Pexels/Freepik adapters get a usable default — same
+// fallback the proxy uses when `orientation` is absent.
+async function resolveOrientation(videoId) {
+  if (!videoId) return 'landscape'
+  try {
+    const v = await db.prepare(
+      'SELECT media_type, media_info_json FROM videos WHERE id = ?',
+    ).get(videoId)
+    let info = {}
+    if (v?.media_info_json) {
+      try { info = JSON.parse(v.media_info_json) } catch {}
+    }
+    return bucketAspect({ width: info.width, height: info.height, mediaType: v?.media_type })
+  } catch {
+    return 'landscape'
+  }
+}
 import {
   loadPriorChapterStrategies,
   assertNoSelfReference,
@@ -1821,6 +1842,8 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   const videoId = planRuns[0].video_id
   const firstMeta = JSON.parse(planRuns[0].metadata_json || '{}')
   const groupId = firstMeta.groupId || null
+  // One per main video — used on every per-placement /broll/search request below.
+  const orientation = await resolveOrientation(videoId)
 
   // Find or create broll_search strategy
   let searchStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'broll_search' ORDER BY id LIMIT 1").get()
@@ -1975,6 +1998,7 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
         brief,
         sources: resolvedSources,
         max_results: 10,
+        orientation,
       }
 
       let results = []
@@ -6207,6 +6231,7 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
 
   const videoId = planRuns[0]?.video_id
   if (!videoId) throw new Error('No video found for pipeline')
+  const orientation = await resolveOrientation(videoId)
 
   const chapterRuns = planRuns.filter(r => {
     try { const m = JSON.parse(r.metadata_json || '{}'); return m.isSubRun && m.stageName === 'Per-chapter B-Roll plan' }
@@ -6291,6 +6316,7 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
     brief,
     sources,
     max_results: 10,
+    orientation,
   }
 
   // Find or create broll_search strategy
@@ -6474,7 +6500,15 @@ export async function searchUserPlacement(planPipelineId, userPlacementId, overr
   ].filter(Boolean).join('\n')
 
   const sources = await resolveBrollSources(planPipelineId, overrides)
-  const requestBody = { keywords: [], brief, sources, max_results: 10 }
+  // Resolve the main video for orientation — searchUserPlacement is the
+  // only call site that doesn't pre-load videoId, so do it inline. Same
+  // pipelineId-LIKE lookup the other two paths use.
+  const planRunsForOrient = await db.prepare(
+    `SELECT video_id FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id LIMIT 1`,
+  ).all(`%"pipelineId":"${planPipelineId}"%`)
+  const videoIdForOrient = planRunsForOrient[0]?.video_id
+  const orientation = await resolveOrientation(videoIdForOrient)
+  const requestBody = { keywords: [], brief, sources, max_results: 10, orientation }
 
   const res = await fetch(GPU_URL, {
     method: 'POST',

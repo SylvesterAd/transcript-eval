@@ -1743,12 +1743,20 @@ export async function _registerVideoHandler(req, res) {
       }
     }
 
-    // Insert video record. duration_seconds is set from the client probe when
-    // provided (instant); processVideoMetadata later overwrites with the
-    // authoritative ffprobe/CF Stream value.
+    // Insert video record. duration_seconds + width/height are set from the
+    // client probe when provided (instant); processVideoMetadata later
+    // overwrites media_info_json with the authoritative ffprobe / CF Stream
+    // value. Client-supplied width/height are an early estimate used by
+    // bucketAspect (server/lib/aspect.js) so the b-roll search can send an
+    // `orientation` hint before ffprobe finishes.
+    const mi = {}
+    if (file_size) mi.filesize = file_size
+    if (Number.isFinite(Number(req.body.width)) && Number(req.body.width) > 0) mi.width = Number(req.body.width)
+    if (Number.isFinite(Number(req.body.height)) && Number(req.body.height) > 0) mi.height = Number(req.body.height)
+    const mediaInfoJson = Object.keys(mi).length ? JSON.stringify(mi) : null
     const result = await db.prepare(
       'INSERT INTO videos (title, file_path, video_type, group_id, media_info_json, cf_stream_uid, duration_seconds, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(videoName, effectiveFileUrl, video_type, finalGroupId, file_size ? JSON.stringify({ filesize: file_size }) : null, cf_stream_uid || null, cleanDuration, effectiveMediaType)
+    ).run(videoName, effectiveFileUrl, video_type, finalGroupId, mediaInfoJson, cf_stream_uid || null, cleanDuration, effectiveMediaType)
 
     const videoId = result.lastInsertRowid
     console.log(`[register] Video registered: id=${videoId}, title="${videoName}", cf_stream=${cf_stream_uid || 'none'}, duration=${cleanDuration ?? 'unknown'}s, media_type=${effectiveMediaType}`)
