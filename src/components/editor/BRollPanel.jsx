@@ -688,6 +688,21 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
     setProgress(null)
     setPipelineIds([])
     setPipelineProgresses({})
+
+    // Auto-path projects bounce to the processing modal IMMEDIATELY — the
+    // run-plan API calls below take ~15-30s of Gemini round-trips, and the
+    // user's mental model is "click Generate Plan → watch progress on the
+    // processing page", not "stare at the strategy review tab while plan
+    // generates". Plan + resume-chain still run in the background after
+    // navigation; chain status updates surface through the modal's
+    // StageTimeline. The CTA button's own onClick skips its
+    // /editor/<id>/brolls/strategy/plan navigate when this branch fires
+    // (see steps map below) so we don't fight ourselves on the history
+    // stack.
+    if (AUTO_PATHS.has(pathId)) {
+      navigate(`/?step=processing&group=${parentGroupId}`)
+    }
+
     try {
       // 1. Clean strategy outputs (strip reference-only fields) for each selected
       await Promise.all(selected.map(stratId =>
@@ -711,19 +726,13 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
       // 3. Auto-path projects: hand off to the orchestrator's resume-chain
       // so search runs all 3 batches and broll_chain_status flips to 'done'.
       // Without this, /broll/pipeline/run-plan returns success but the chain
-      // sits at paused_at_strategy forever — search never auto-fires and the
-      // home/processing badges stay misleading until the user manually clicks
-      // "Search B-Roll", which only runs one batch via the direct endpoint.
+      // sits at paused_at_strategy forever — search never auto-fires.
       // Fire-and-forget: resume-chain runs synchronously on the server and
-      // returns immediately; orchestrator owns subsequent state. After firing,
-      // bounce to the processing modal so the user watches StageTimeline
-      // progress through search rather than staring at the strategy review
-      // page (which is no longer the active stage).
+      // returns immediately; orchestrator owns subsequent state.
       if (planPipelineIds.length && AUTO_PATHS.has(pathId)) {
         apiPost(`/broll/groups/${groupId}/resume-chain?from=search`, {
           planPipelineIds,
         }).catch(err => console.error('[resume-chain after plan]', err.message))
-        navigate(`/?step=processing&group=${parentGroupId}`)
       }
     } catch (err) {
       setError(err.message)
@@ -981,7 +990,14 @@ export default function BRollPanel({ groupId, videoId, sub, detail, pathId, pare
             return (
               <button
                 key={step.key}
-                onClick={isCTA ? () => { step.action(); navigate(`/editor/${id}/brolls/strategy/${step.key}`) } : canNavigate ? () => navigate(`/editor/${id}/brolls/strategy/${step.key}`) : undefined}
+                onClick={isCTA ? () => {
+                  step.action()
+                  // 'plan' on auto paths: handleRunNewPlan navigates straight
+                  // to the processing modal, so skip the local tab change to
+                  // avoid two competing entries on the history stack.
+                  if (step.key === 'plan' && AUTO_PATHS.has(pathId)) return
+                  navigate(`/editor/${id}/brolls/strategy/${step.key}`)
+                } : canNavigate ? () => navigate(`/editor/${id}/brolls/strategy/${step.key}`) : undefined}
                 disabled={!isCTA && !canNavigate && !isActive}
                 className={`relative flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex-1 justify-center disabled:opacity-30 ${
                   isCTA
