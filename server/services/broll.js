@@ -3937,7 +3937,12 @@ const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set(['export_post_cut_video'])
 
 function filterStagesForMedia(stages, mediaType) {
   if (mediaType !== 'audio') return stages
-  return stages.filter(s => {
+
+  // Mark which stages survive the filter, then remap *StageIndex params.
+  // Without remapping, programmatic actions like split_by_chapter point at
+  // the wrong (or undefined) earlier stage output and crash with
+  // "Cannot read properties of null (reading 'chapters')".
+  const keep = stages.map(s => {
     const isVideoStage = VIDEO_STAGE_TYPES.has(s.type)
     const targetsMain = s.target === 'main_video'
     if (isVideoStage && targetsMain) {
@@ -3950,6 +3955,34 @@ function filterStagesForMedia(stages, mediaType) {
     }
     return true
   })
+
+  const newIndexOfOld = new Map()
+  let nextNew = 0
+  for (let i = 0; i < keep.length; i++) {
+    if (keep[i]) {
+      newIndexOfOld.set(i, nextNew++)
+    }
+  }
+
+  const result = []
+  for (let i = 0; i < stages.length; i++) {
+    if (!keep[i]) continue
+    const stage = { ...stages[i] }
+    const params = stage.params || stage.actionParams
+    if (params && typeof params === 'object') {
+      const remapped = { ...params }
+      for (const key of Object.keys(remapped)) {
+        if (!key.endsWith('StageIndex')) continue
+        const oldVal = remapped[key]
+        if (typeof oldVal !== 'number') continue
+        remapped[key] = newIndexOfOld.has(oldVal) ? newIndexOfOld.get(oldVal) : null
+      }
+      if (stage.params) stage.params = remapped
+      else stage.actionParams = remapped
+    }
+    result.push(stage)
+  }
+  return result
 }
 
 // Exported as a __test__ alias so unit tests can exercise the helper without
