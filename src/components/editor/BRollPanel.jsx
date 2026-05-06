@@ -64,7 +64,9 @@ export function filterVariantsWithPlacements(variants) {
   return variants.filter(v => Number.isFinite(v?.totalPlacements) && v.totalPlacements > 0)
 }
 
-export default function BRollPanel({ groupId, videoId, sub, detail }) {
+const AUTO_PATHS = new Set(['hands-off', 'strategy-only', 'guided'])
+
+export default function BRollPanel({ groupId, videoId, sub, detail, pathId, parentGroupId }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const { data: strategies } = useApi('/broll/strategies')
@@ -705,6 +707,24 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
       }
       if (planPipelineIds.length) setPipelineIds(planPipelineIds)
       else if (planPipelineIds[0]) setPipelineId(planPipelineIds[0])
+
+      // 3. Auto-path projects: hand off to the orchestrator's resume-chain
+      // so search runs all 3 batches and broll_chain_status flips to 'done'.
+      // Without this, /broll/pipeline/run-plan returns success but the chain
+      // sits at paused_at_strategy forever — search never auto-fires and the
+      // home/processing badges stay misleading until the user manually clicks
+      // "Search B-Roll", which only runs one batch via the direct endpoint.
+      // Fire-and-forget: resume-chain runs synchronously on the server and
+      // returns immediately; orchestrator owns subsequent state. After firing,
+      // bounce to the processing modal so the user watches StageTimeline
+      // progress through search rather than staring at the strategy review
+      // page (which is no longer the active stage).
+      if (planPipelineIds.length && AUTO_PATHS.has(pathId)) {
+        apiPost(`/broll/groups/${groupId}/resume-chain?from=search`, {
+          planPipelineIds,
+        }).catch(err => console.error('[resume-chain after plan]', err.message))
+        navigate(`/?step=processing&group=${parentGroupId}`)
+      }
     } catch (err) {
       setError(err.message)
       setRunningType(null)
@@ -1413,52 +1433,54 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
             })}
 
             {/* Manual creation card */}
-            <div className="bg-zinc-900 rounded-xl overflow-hidden flex flex-col group transition-all border-2 border-transparent hover:border-zinc-700/50">
-              <div className="flex items-start justify-between gap-4 p-5 pb-3">
-                <div className="flex items-start gap-3 flex-1 min-w-0">
-                  {/* Empty checkbox slot for alignment */}
-                  <div className="mt-0.5 w-5 h-5 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-base font-bold text-zinc-100 truncate">Manual Creation</p>
-                    <div className="flex items-center gap-2 mt-1.5">
-                      <span className="material-symbols-outlined text-zinc-400 shrink-0" style={{ fontSize: '13px' }}>upload_file</span>
-                      <span className="text-[11px] text-zinc-500">Upload your own strategy document</span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-2">
-                      <span className="text-[9px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-bold uppercase tracking-wide">Custom</span>
+            {false && (
+              <div className="bg-zinc-900 rounded-xl overflow-hidden flex flex-col group transition-all border-2 border-transparent hover:border-zinc-700/50">
+                <div className="flex items-start justify-between gap-4 p-5 pb-3">
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                    {/* Empty checkbox slot for alignment */}
+                    <div className="mt-0.5 w-5 h-5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-base font-bold text-zinc-100 truncate">Manual Creation</p>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <span className="material-symbols-outlined text-zinc-400 shrink-0" style={{ fontSize: '13px' }}>upload_file</span>
+                        <span className="text-[11px] text-zinc-500">Upload your own strategy document</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className="text-[9px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-bold uppercase tracking-wide">Custom</span>
+                      </div>
                     </div>
                   </div>
+                  <div className="w-[120px] h-[84px] rounded-lg overflow-hidden shrink-0 bg-zinc-950 flex items-center justify-center">
+                    <span className="material-symbols-outlined text-zinc-700 text-3xl">edit_document</span>
+                  </div>
                 </div>
-                <div className="w-[120px] h-[84px] rounded-lg overflow-hidden shrink-0 bg-zinc-950 flex items-center justify-center">
-                  <span className="material-symbols-outlined text-zinc-700 text-3xl">edit_document</span>
-                </div>
-              </div>
 
-              <div className="px-5 pb-5">
-                <div
-                  onClick={() => document.getElementById('manual-strategy-file')?.click()}
-                  className="rounded-lg p-6 bg-zinc-950/50 border-2 border-dashed border-zinc-800 flex flex-col items-center justify-center gap-3 hover:bg-zinc-950 hover:border-zinc-700 transition-colors cursor-pointer group/drop min-h-[100px]"
-                >
-                  <span className="material-symbols-outlined text-[#cefc00]/50 group-hover/drop:text-[#cefc00]/70 transition-colors text-3xl">upload_file</span>
-                  <div className="text-center">
-                    <span className="text-xs font-medium text-zinc-400 group-hover/drop:text-zinc-300 block">Click to upload</span>
-                    <span className="text-[10px] text-zinc-600 mt-0.5 block">.docx, .txt, or spreadsheet</span>
+                <div className="px-5 pb-5">
+                  <div
+                    onClick={() => document.getElementById('manual-strategy-file')?.click()}
+                    className="rounded-lg p-6 bg-zinc-950/50 border-2 border-dashed border-zinc-800 flex flex-col items-center justify-center gap-3 hover:bg-zinc-950 hover:border-zinc-700 transition-colors cursor-pointer group/drop min-h-[100px]"
+                  >
+                    <span className="material-symbols-outlined text-[#cefc00]/50 group-hover/drop:text-[#cefc00]/70 transition-colors text-3xl">upload_file</span>
+                    <div className="text-center">
+                      <span className="text-xs font-medium text-zinc-400 group-hover/drop:text-zinc-300 block">Click to upload</span>
+                      <span className="text-[10px] text-zinc-600 mt-0.5 block">.docx, .txt, or spreadsheet</span>
+                    </div>
+                    <input
+                      id="manual-strategy-file"
+                      type="file"
+                      accept=".docx,.txt,.csv,.xlsx,.xls"
+                      className="hidden"
+                      onChange={(e) => {
+                        // TODO: handle manual strategy file upload
+                        const file = e.target.files?.[0]
+                        if (file) console.log('[manual-strategy] File selected:', file.name)
+                        e.target.value = ''
+                      }}
+                    />
                   </div>
-                  <input
-                    id="manual-strategy-file"
-                    type="file"
-                    accept=".docx,.txt,.csv,.xlsx,.xls"
-                    className="hidden"
-                    onChange={(e) => {
-                      // TODO: handle manual strategy file upload
-                      const file = e.target.files?.[0]
-                      if (file) console.log('[manual-strategy] File selected:', file.name)
-                      e.target.value = ''
-                    }}
-                  />
                 </div>
               </div>
-            </div>
+            )}
           </section>
         )}
 

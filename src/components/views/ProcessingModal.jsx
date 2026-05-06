@@ -41,10 +41,16 @@ export function deriveMode({ parent, files = [], subGroups = [] }) {
   const transcribed = parent?.videos?.every(v => v.transcription_status === 'done' || v.transcription_status === 'failed')
   if (!transcribed) return 'pipeline'
   if (subGroups?.length === 0) return 'pipeline'
+  // paused_at_* are NOT terminal for the modal — they're explicit hand-offs
+  // to the user (rough-cut review, strategy review, plan review) that need
+  // the StageTimeline's per-stage CTAs to render. Bucketing them with
+  // 'done'/'failed' here flips the modal into <DoneView>, hides the CTAs,
+  // and the editor's auto-resume effect then advances past the pause on
+  // the user's first click.
   const allTerminal = subGroups.every(sg =>
     (sg.assembly_status === 'done' || sg.assembly_status === 'error') &&
     (parent.auto_rough_cut === false || sg.rough_cut_status === 'done' || sg.rough_cut_status === 'failed' || sg.rough_cut_status === 'insufficient_tokens') &&
-    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed' || sg.broll_chain_status === 'paused_at_rough_cut' || sg.broll_chain_status === 'paused_at_strategy' || sg.broll_chain_status === 'paused_at_plan')
+    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed')
   )
   if (!allTerminal) return 'pipeline'
   // Promote the pre-pause failure to its own mode so the loader can
@@ -63,10 +69,14 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
 
   const classifyDone = parent.assembly_status === 'confirmed' || parent.assembly_status === 'done' || subGroups.length > 0
   const classifying = parent.assembly_status === 'classifying'
-  // 'classified' = backend finished classification but no sub-groups exist yet
-  // (auto-confirm only fires for path_id === 'hands-off'; everyone else must
-  // confirm in AssetsView). Surface as paused-for-review so the user has a CTA.
-  const classifyPaused = parent.assembly_status === 'classified' && subGroups.length === 0
+  // 'classified' = backend finished classification but no sub-groups exist yet.
+  // Any auto path (hands-off / strategy-only / guided) auto-confirms within
+  // milliseconds via chainAfterClassify, so suppress the "needs review" flash
+  // for those — only legacy/manual paths actually require a user click.
+  const AUTO_PATHS = new Set(['hands-off', 'strategy-only', 'guided'])
+  const classifyPaused = parent.assembly_status === 'classified'
+    && subGroups.length === 0
+    && !AUTO_PATHS.has(parent.path_id)
 
   const sgDone = (sg) => sg.assembly_status === 'done' || sg.assembly_status === 'error'
   const syncDone = subGroups.length > 0 && subGroups.every(sgDone)

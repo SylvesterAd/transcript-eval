@@ -280,28 +280,30 @@ export default function StepReferences({ groupId, onValidityChange }) {
         )}
       </div>
 
-      <div
-        onClick={() => fileRef.current?.click()}
-        onDragOver={e => e.preventDefault()}
-        onDrop={e => { e.preventDefault(); handleFileUpload({ target: { files: e.dataTransfer.files, value: '' } }) }}
-        className="bg-black p-6 rounded-xl cursor-pointer ring-1 ring-inset ring-border-subtle/10 hover:ring-lime/30 transition-all"
-      >
-        <div className="border-2 border-dashed border-border-subtle/25 rounded-[10px] py-7 px-5 text-center">
-          <div className="w-12 h-12 rounded-full mx-auto mb-3 bg-surface-container-high text-lime flex items-center justify-center">
-            <span className="material-symbols-outlined text-[22px]">upload_file</span>
+      {false && (
+        <div
+          onClick={() => fileRef.current?.click()}
+          onDragOver={e => e.preventDefault()}
+          onDrop={e => { e.preventDefault(); handleFileUpload({ target: { files: e.dataTransfer.files, value: '' } }) }}
+          className="bg-black p-6 rounded-xl cursor-pointer ring-1 ring-inset ring-border-subtle/10 hover:ring-lime/30 transition-all"
+        >
+          <div className="border-2 border-dashed border-border-subtle/25 rounded-[10px] py-7 px-5 text-center">
+            <div className="w-12 h-12 rounded-full mx-auto mb-3 bg-surface-container-high text-lime flex items-center justify-center">
+              <span className="material-symbols-outlined text-[22px]">upload_file</span>
+            </div>
+            <div className="text-sm font-bold text-on-surface font-['Inter'] mb-1">Local Reference Files</div>
+            <div className="text-xs text-on-surface-variant font-['Inter']">
+              Drag and drop <span className="text-on-surface font-mono">.mp4</span> or{' '}
+              <span className="text-on-surface font-mono">.mov</span> files here
+            </div>
+            <div className="mt-3.5 flex gap-2 justify-center">
+              <span className="px-2.5 py-1 rounded bg-surface-container-high text-[10px] font-bold uppercase text-on-surface-variant font-['Inter']">H.264 / HEVC</span>
+              <span className="px-2.5 py-1 rounded bg-surface-container-high text-[10px] font-bold uppercase text-on-surface-variant font-['Inter']">Max 2GB per file</span>
+            </div>
           </div>
-          <div className="text-sm font-bold text-on-surface font-['Inter'] mb-1">Local Reference Files</div>
-          <div className="text-xs text-on-surface-variant font-['Inter']">
-            Drag and drop <span className="text-on-surface font-mono">.mp4</span> or{' '}
-            <span className="text-on-surface font-mono">.mov</span> files here
-          </div>
-          <div className="mt-3.5 flex gap-2 justify-center">
-            <span className="px-2.5 py-1 rounded bg-surface-container-high text-[10px] font-bold uppercase text-on-surface-variant font-['Inter']">H.264 / HEVC</span>
-            <span className="px-2.5 py-1 rounded bg-surface-container-high text-[10px] font-bold uppercase text-on-surface-variant font-['Inter']">Max 2GB per file</span>
-          </div>
+          <input ref={fileRef} type="file" accept=".mp4,.mov" multiple className="hidden" onChange={handleFileUpload} />
         </div>
-        <input ref={fileRef} type="file" accept=".mp4,.mov" multiple className="hidden" onChange={handleFileUpload} />
-      </div>
+      )}
 
       <div className="mt-[18px] px-4 py-3 rounded-lg bg-surface-container-low ring-1 ring-inset ring-border-subtle/8 flex items-center justify-between">
         <div className="flex items-center gap-2.5">

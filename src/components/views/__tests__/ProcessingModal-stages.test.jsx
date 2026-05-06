@@ -52,6 +52,38 @@ describe('deriveMode', () => {
     }
     expect(deriveMode(state)).toBe('done')
   })
+
+  // Regression: paused_at_* used to count as terminal, flipping the modal
+  // into <DoneView> the moment the chain paused for review. The "Open
+  // project" button there hard-codes /sync, herding the user past the
+  // review point — and the editor's auto-resume effect then advances the
+  // chain on first click.
+  it('returns "pipeline" (not "done") when sub-group is paused_at_rough_cut for guided review', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'guided', auto_rough_cut: true },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: 'done', broll_chain_status: 'paused_at_rough_cut', path_id: 'guided' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('pipeline')
+  })
+
+  it('returns "pipeline" when sub-group is paused_at_strategy', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'strategy-only', auto_rough_cut: false },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: null, broll_chain_status: 'paused_at_strategy', path_id: 'strategy-only' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('pipeline')
+  })
+
+  it('returns "pipeline" when sub-group is paused_at_plan', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'guided', auto_rough_cut: true },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: 'done', broll_chain_status: 'paused_at_plan', path_id: 'guided' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('pipeline')
+  })
 })
 
 describe('deriveStages', () => {

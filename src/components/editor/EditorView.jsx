@@ -128,6 +128,23 @@ export default function EditorView() {
       navigate(`/?step=processing&group=${id}`, { replace: true })
     }
   }, [groupDetail, id, navigate])
+
+  // Paused-for-review chains: when the URL has no explicit tab and the
+  // chain is awaiting human input (rough-cut / strategy / plan review),
+  // bounce to the processing modal so the StageTimeline's "Review …"
+  // CTA is what handles the next step. The activeTab fallback below
+  // would otherwise default to 'sync' for a sub-group with
+  // assembly_status='done', dropping the user into multicam past their
+  // actual review point — and the auto-resume effect would then flip
+  // broll_chain_status from paused_at_rough_cut → running on first click.
+  useEffect(() => {
+    if (!groupDetail) return
+    if (tab) return
+    const PAUSED_FOR_REVIEW = ['paused_at_rough_cut', 'paused_at_strategy', 'paused_at_plan']
+    if (!PAUSED_FOR_REVIEW.includes(groupDetail.broll_chain_status)) return
+    const targetGroup = groupDetail.parent_group_id || id
+    navigate(`/?step=processing&group=${targetGroup}`, { replace: true })
+  }, [groupDetail, tab, id, navigate])
   const { state, dispatch, totalDuration, formatTime } = useEditorState()
   const [showRoughCutWarning, setShowRoughCutWarning] = useState(false)
   const [flowRunState, setFlowRunState] = useState(null)
@@ -1058,7 +1075,7 @@ export default function EditorView() {
           {activeTab === 'assets' ? (
             <AssetsView />
           ) : activeTab === 'brolls' ? (
-            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} sub={sub} detail={detail} />
+            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} sub={sub} detail={detail} pathId={groupDetail?.path_id} parentGroupId={groupDetail?.parent_group_id || Number(id)} />
           ) : (
             <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} isMainMode={activeTab === 'roughcut' && state.roughCutTrackMode === 'main'} />
           )}
