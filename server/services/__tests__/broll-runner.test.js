@@ -84,12 +84,14 @@ vi.mock('../../db.js', () => ({
           }
           // existingCombined lookup (post-e229184): SELECT 1 ... LIMIT 1
           if (/SELECT 1 FROM broll_runs[\s\S]*LIMIT 1/.test(sql)) return state.existingCombinedRun
-          // Cross-main reuse candidate lookup: matches by strategy + version-cutoff
-          // + ref-suffix in pipelineId + last-stage stageIndex. The args we get
-          // are [strategyId, versionCreatedAt, '%-ex<refId>"%', '%"stageIndex":<N>%'].
-          // Mock by pulling refId from the LIKE arg and returning the fixture.
-          if (/SELECT metadata_json FROM broll_runs[\s\S]*AND created_at >= \?[\s\S]*ORDER BY id DESC LIMIT 1/.test(sql)) {
-            const refLike = args[2] || ''
+          // Cross-main reuse candidate lookup: matches by strategy + ref-suffix
+          // in pipelineId + last-stage stageIndex. Args are
+          // [strategyId, '%-ex<refId>"%', '%"stageIndex":<N>%'].
+          // No created_at gate — matches the existing same-project dedup's
+          // version-agnostic policy (post-2026-05-06 hotfix; pre-hotfix this
+          // gated by analysisVersion.created_at and missed pre-bump runs).
+          if (/SELECT metadata_json FROM broll_runs[\s\S]*WHERE strategy_id = \?[\s\S]*AND metadata_json LIKE \?[\s\S]*AND metadata_json LIKE \?[\s\S]*ORDER BY id DESC LIMIT 1/.test(sql)) {
+            const refLike = args[1] || ''
             const m = String(refLike).match(/-ex(\d+)"/)
             const refId = m ? Number(m[1]) : null
             return refId != null ? state.crossMainCandidateByRef[refId] || null : null
@@ -219,6 +221,41 @@ describe('runAllReferences', () => {
       expect(meta.pipelineId).toBe(reusedPid)
       expect(meta.copiedFromPipelineId).toBe(sourcePid)
     }
+  })
+
+  it('reuses analysis even when source rows predate the active strategy version (post-hotfix)', async () => {
+    // Regression for the 2026-05-06 ship: the version "Version 2 +audio_note"
+    // was published 07:10 UTC. Prior project runs from 2026-05-04 12:57
+    // were the obvious reuse candidates for the next day's projects, but
+    // the original cross-main code gated on `created_at >= version.created_at`
+    // and silently re-ran every analysis. Hotfix removed the gate — this
+    // test pins that behavior so a future "stricter" rewrite can't sneak
+    // it back without a deliberate decision.
+    const sourcePid = '5-413-1777888547460-ex901'  // arbitrary pre-version-bump pipeline
+    state.crossMainCandidateByRef[901] = {
+      metadata_json: JSON.stringify({ pipelineId: sourcePid, stageIndex: 6 }),
+    }
+    state.sourcePipelineRowsByPid[sourcePid] = [
+      { strategy_id: 5, video_id: 413, step_name: 'analysis', status: 'complete',
+        transcript_source: 'raw', resolved_transcript_source: 'raw',
+        analysis_run_id: null, input_text: '', output_text: '{"assembled":true}',
+        prompt_used: 'old-prompt', system_instruction_used: '', model: 'gemini',
+        params_json: '{}', tokens_in: 50, tokens_out: 75, cost: 0.2, runtime_ms: 500, error_message: null,
+        metadata_json: JSON.stringify({ pipelineId: sourcePid, stageIndex: 6, stageName: 'Assemble full analysis' }) },
+    ]
+
+    const broll = await import('../broll.js')
+    broll.executePipeline.mockClear()
+
+    const r = await runAllReferences({ subGroupId: 1, mainVideoId: 387 })
+
+    const reusedPid = r.analysisPipelineIds.find(p => p.endsWith('-ex901'))
+    expect(reusedPid).toMatch(/^5-387-\d+-ex901$/)
+    // executePipeline should fire ONCE (for ref 902 which has no candidate),
+    // not twice — proving 901 hit the reuse path despite the timestamp.
+    expect(broll.executePipeline).toHaveBeenCalledTimes(1)
+    expect(broll.executePipeline.mock.calls[0][8]).toMatchObject({ exampleVideoId: 902 })
+    expect(state.insertedBrollRuns).toHaveLength(1)
   })
 
   it('falls back to fresh analysis when cross-main reuse fails (chain unaffected)', async () => {
