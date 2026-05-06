@@ -2,10 +2,11 @@ import { useContext, useEffect, useRef, useState } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { BRollContext } from './useBRollEditorState.js'
 import RoughCutPreview from './RoughCutPreview.jsx'
+import { usePlaybackSkipRegions } from './usePlaybackSkipRegions.js'
 import { Loader2 } from 'lucide-react'
 
 export default function BRollPreview() {
-  const { state } = useContext(EditorContext)
+  const { state, videoRefs } = useContext(EditorContext)
   const broll = useContext(BRollContext)
   const brollVideoRef = useRef(null)
   const [showBRoll, setShowBRoll] = useState(false)
@@ -14,6 +15,43 @@ export default function BRollPreview() {
 
   const stateRef = useRef(state); stateRef.current = state
   const brollRef = useRef(broll); brollRef.current = broll
+
+  // Compute skip regions from the editor's cut state (same cuts as the rough-cut
+  // editor — synced via editor_state_json). We pass a dummy ref so the hook only
+  // returns the merged regions; the actual timeupdate listeners are attached below
+  // to every a-roll video element in videoRefs (there can be multiple tracks).
+  const dummyRef = useRef(null)
+  const skipRegions = usePlaybackSkipRegions(dummyRef, state.cuts, state.cutExclusions)
+  const skipRegionsRef = useRef(skipRegions)
+  skipRegionsRef.current = skipRegions
+
+  useEffect(() => {
+    const videoRefsMap = videoRefs.current
+    if (!skipRegionsRef.current.length) return
+    const handlers = []
+    const attach = () => {
+      Object.values(videoRefsMap).forEach(el => {
+        if (!el) return
+        const handleTimeupdate = () => {
+          const t = el.currentTime
+          for (const r of skipRegionsRef.current) {
+            if (t >= r.start && t < r.end) {
+              el.currentTime = r.end + 0.001
+              return
+            }
+          }
+        }
+        el.addEventListener('timeupdate', handleTimeupdate)
+        handlers.push({ el, handleTimeupdate })
+      })
+    }
+    attach()
+    return () => {
+      handlers.forEach(({ el, handleTimeupdate }) =>
+        el.removeEventListener('timeupdate', handleTimeupdate)
+      )
+    }
+  }, [videoRefs, skipRegions])
 
   useEffect(() => {
     let rafId = 0
