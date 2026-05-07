@@ -23,7 +23,7 @@ function brollHeuristicTokens(durationSeconds, refCount) {
 // When autoRoughCut=false the cards drop the "+ Rough Cut" suffix.
 export function buildPaths(autoRoughCut) {
   const handsOffFlow = [
-    ...(autoRoughCut ? [{ label: 'Rough cut review', status: 'review' }] : []),
+    ...(autoRoughCut ? [{ label: 'Rough cut review', status: 'review', optional: true }] : []),
     { label: 'References analyzed', status: 'auto' },
     { label: 'Strategy proposal',   status: 'auto' },
     { label: 'B-roll plan',         status: 'auto' },
@@ -120,36 +120,39 @@ function PathCard({ path, active, onSelect }) {
       </div>
 
       <div className="flex flex-col gap-1.5 mt-1">
-        {path.flow.map((f, i) => (
-          <div key={i} className={[
-            'flex items-center gap-2.5 px-2.5 py-[7px] rounded-md',
-            f.checkpoint ? checkpointBg : 'bg-transparent',
-          ].join(' ')}>
-            <div className={[
-              'w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center',
-              f.status === 'review'
-                ? (path.tone === 'primary' ? 'bg-lime text-on-primary-container'
-                  : path.tone === 'tertiary' ? 'bg-teal text-[#00201c]'
-                  : 'bg-purple-accent text-[#33005b]')
-                : 'bg-surface-container-high text-on-surface-variant',
+        {path.flow.map((f, i) => {
+          const highlighted = f.checkpoint || f.optional
+          return (
+            <div key={i} className={[
+              'flex items-center gap-2.5 px-2.5 py-[7px] rounded-md',
+              highlighted ? checkpointBg : 'bg-transparent',
             ].join(' ')}>
-              <span className="material-symbols-outlined text-[11px]" style={{ fontVariationSettings: '"wght" 700' }}>
-                {f.status === 'review' ? 'visibility' : 'auto_mode'}
+              <div className={[
+                'w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center',
+                f.status === 'review'
+                  ? (path.tone === 'primary' ? 'bg-lime text-on-primary-container'
+                    : path.tone === 'tertiary' ? 'bg-teal text-[#00201c]'
+                    : 'bg-purple-accent text-[#33005b]')
+                  : 'bg-surface-container-high text-on-surface-variant',
+              ].join(' ')}>
+                <span className="material-symbols-outlined text-[11px]" style={{ fontVariationSettings: '"wght" 700' }}>
+                  {f.status === 'review' ? 'visibility' : 'auto_mode'}
+                </span>
+              </div>
+              <span className={[
+                'flex-1 text-[11px] font-["Inter"]',
+                highlighted ? 'text-on-surface font-semibold' : 'text-on-surface-variant font-medium',
+              ].join(' ')}>
+                {f.label}
               </span>
+              {(f.checkpoint || f.optional) && (
+                <span className={`text-[9px] font-bold uppercase tracking-[0.15em] font-['Inter'] ${accent}`}>
+                  {f.checkpoint ? 'You review' : 'Optional review'}
+                </span>
+              )}
             </div>
-            <span className={[
-              'flex-1 text-[11px] font-["Inter"]',
-              f.checkpoint ? 'text-on-surface font-semibold' : 'text-on-surface-variant font-medium',
-            ].join(' ')}>
-              {f.label}
-            </span>
-            {f.checkpoint && (
-              <span className={`text-[9px] font-bold uppercase tracking-[0.15em] font-['Inter'] ${accent}`}>
-                You review
-              </span>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className="mt-auto pt-3.5 ring-[0.5px] ring-inset ring-white/3 flex flex-col gap-2">

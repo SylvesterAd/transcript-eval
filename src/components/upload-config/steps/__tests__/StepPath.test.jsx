@@ -26,12 +26,13 @@ describe('buildPaths', () => {
     expect(paths[1].title).toBe('Strategy')
   })
 
-  it('hands-off includes a non-checkpoint rough cut review step when autoRoughCut=true', () => {
+  it('hands-off marks rough cut review as optional (highlighted but non-blocking) when autoRoughCut=true', () => {
     const paths = buildPaths(true)
     const handsOff = paths[0]
     const reviewStep = handsOff.flow.find(s => s.label === 'Rough cut review')
     expect(reviewStep).toBeDefined()
     expect(reviewStep.checkpoint).toBeFalsy()
+    expect(reviewStep.optional).toBe(true)
   })
 
   it('strategy-only includes a checkpoint rough cut review step when autoRoughCut=true', () => {
