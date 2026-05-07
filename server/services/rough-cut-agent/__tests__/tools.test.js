@@ -19,10 +19,10 @@ function makeState() {
 }
 
 describe('TOOL_SCHEMAS', () => {
-  it('exports all 12 tool schemas with Anthropic-compatible shape', () => {
+  it('exports all 13 tool schemas with Anthropic-compatible shape', () => {
     const expected = ['get_transcript', 'get_chapters', 'get_silences', 'get_audio_events',
       'search_transcript', 'find_interruption_clusters', 'propose_cut', 'mark_uncertain',
-      'remove_cut', 'adjust_cut', 'preview_diff', 'finish']
+      'remove_cut', 'adjust_cut', 'preview_diff', 'commit_chunk', 'finish']
     const names = TOOL_SCHEMAS.map(t => t.name)
     for (const e of expected) expect(names).toContain(e)
     for (const t of TOOL_SCHEMAS) {
@@ -159,6 +159,41 @@ describe('dispatchTool', () => {
     expect(r.preview).not.toContain('Um,')
     expect(r.preview).toContain('Nice.')
     expect(r.preview).not.toContain('Hello world.')
+  })
+
+  it('commit_chunk returns match_percent and actual_text', async () => {
+    const state = makeState()
+    await dispatchTool('propose_cut', {
+      start: 3, end: 3.4, category: 'filler_word', reason: '', confidence: 0.9, evidence: []
+    }, state)
+    const r = await dispatchTool('commit_chunk', {
+      scope: { start: 0, end: 7 },
+      expected_text_after_cuts: 'Hello world. Nice.',
+    }, state)
+    expect(typeof r.match_percent).toBe('number')
+    expect(r.match_percent).toBeGreaterThan(0.6)
+    expect(r.actual_text).toContain('Hello world.')
+    expect(r.actual_text).toContain('Nice.')
+    expect(r.actual_text).not.toContain('Um,')
+  })
+
+  it('commit_chunk flags low match when prediction diverges from cuts', async () => {
+    const state = makeState()
+    // Predict "Hello world." surviving, but cut nothing — actual will include Um and Nice.
+    const r = await dispatchTool('commit_chunk', {
+      scope: { start: 0, end: 7 },
+      expected_text_after_cuts: 'Hello world.',
+    }, state)
+    expect(r.match_percent).toBeLessThan(0.7)
+    expect(Array.isArray(r.mismatches)).toBe(true)
+    expect(r.mismatches.length).toBeGreaterThan(0)
+  })
+
+  it('commit_chunk requires scope and expected_text_after_cuts', async () => {
+    const state = makeState()
+    await expect(dispatchTool('commit_chunk', {}, state)).rejects.toThrow(/scope/i)
+    await expect(dispatchTool('commit_chunk', { scope: { start: 0, end: 1 } }, state))
+      .rejects.toThrow(/expected_text/i)
   })
 
   it('finish returns summary stats', async () => {

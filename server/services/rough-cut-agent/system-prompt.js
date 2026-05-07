@@ -67,7 +67,15 @@ WORKFLOW — work in chunks, not one shot:
    c. Identify candidates. propose_cut / mark_uncertain.
    d. preview_diff({ scope }) — re-read what remains in the chunk.
       If it sounds wrong, remove or adjust cuts before advancing.
-   e. Move to the next chunk. DO NOT backtrack.
+   e. commit_chunk({ scope, expected_text_after_cuts }) — predict
+      in 1–3 sentences what the chunk should READ LIKE after your
+      cuts apply. The system reports match_percent.
+      - match_percent < 0.70 means your cuts and your understanding
+        of them disagree. Either your prediction was wrong, or
+        your cuts are wrong. Re-read preview_diff and fix.
+      - Only advance once match_percent >= 0.70 OR you are sure
+        the mismatch is harmless (e.g., paraphrase divergence).
+   f. Move to the next chunk. DO NOT backtrack.
 
 3. After all chunks: ONE final pass — preview_diff() over the WHOLE
    transcript. Look for:
@@ -83,7 +91,8 @@ prevent the "delete every discourse marker because they look the
 same" failure mode.
 
 LOOP DISCIPLINE:
-- Maximum 60 tool calls per video.
+- Maximum 100 tool calls per video. Chunked workflow uses ~5-7
+  calls per chunk; budget for ~14 chunks plus final pass.
 - Call preview_diff at least once before finish to verify your work
   reads coherently.
 - Call finish when no more cuts to propose.`

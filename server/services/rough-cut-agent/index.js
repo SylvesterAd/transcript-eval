@@ -1,14 +1,18 @@
 // server/services/rough-cut-agent/index.js
 //
 // Anthropic tool-use loop. Drives the model through propose_cut/finish until
-// stop_reason='end_turn' OR the agent calls 'finish' OR the 60-call cap is hit.
+// stop_reason='end_turn' OR the agent calls 'finish' OR the call cap is hit.
 
 import Anthropic from '@anthropic-ai/sdk'
 import { TOOL_SCHEMAS, dispatchTool } from './tools.js'
 import { createState } from './state.js'
 import { SYSTEM_PROMPT } from './system-prompt.js'
 
-const MAX_TOOL_CALLS = 60
+// Chunked workflow uses ~5-7 calls per chunk (get_transcript, clusters,
+// 1-2 propose_cut, preview_diff, commit_chunk) plus a final whole-video
+// pass. 100 covers ~14 chunks comfortably; the token budget regression
+// test (200K in / 50K out) is the hard ceiling on cost.
+const MAX_TOOL_CALLS = 100
 const DEFAULT_MAX_TOKENS = 4096
 
 let _client = null

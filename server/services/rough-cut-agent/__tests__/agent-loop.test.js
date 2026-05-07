@@ -73,7 +73,7 @@ describe('runAgent', () => {
     expect(messagesCreateMock).toHaveBeenCalledTimes(2)
   })
 
-  it('hard-caps at 60 tool calls', async () => {
+  it('hard-caps at 100 tool calls', async () => {
     // Always return a propose_cut, never finish — would loop forever without the cap.
     messagesCreateMock.mockResolvedValue({
       content: [
@@ -92,7 +92,7 @@ describe('runAgent', () => {
       model: 'claude-opus-4-7',
     })
     expect(r.stopReason).toBe('tool_call_limit')
-    expect(messagesCreateMock.mock.calls.length).toBeLessThanOrEqual(61)
+    expect(messagesCreateMock.mock.calls.length).toBeLessThanOrEqual(101)
   })
 
   it('passes TOOL_SCHEMAS, cached system blocks, and cached transcript on first call', async () => {

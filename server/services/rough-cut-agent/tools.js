@@ -137,6 +137,18 @@ export const TOOL_SCHEMAS = [
     },
   },
   {
+    name: 'commit_chunk',
+    description: 'Lock in cuts for a chunk. Emit your prediction of what the chunk should READ LIKE after your cuts apply. The system applies the cuts, computes the actual surviving text, and reports match_percent + mismatches. If the score is low, your cuts and your understanding of them disagree — re-read preview_diff and fix before advancing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+        expected_text_after_cuts: { type: 'string', description: '1–3 sentences predicting what survives in the chunk after your cuts apply.' },
+      },
+      required: ['scope', 'expected_text_after_cuts'],
+    },
+  },
+  {
     name: 'finish',
     description: 'Terminate the agent loop. Persists current cuts.',
     input_schema: {
@@ -308,6 +320,72 @@ async function preview_diff(params, state) {
   return { preview: out.join('\n') }
 }
 
+function normalizeForCompare(text) {
+  return text
+    .toLowerCase()
+    .replace(/\[.*?\]/g, ' ')         // strip bracketed tokens (audio events, timecodes)
+    .replace(/[^\p{L}\p{N}\s']/gu, ' ') // strip punctuation, keep apostrophes
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function jaccardWordSimilarity(a, b) {
+  if (a.length === 0 && b.length === 0) return 1
+  if (a.length === 0 || b.length === 0) return 0
+  // multiset intersection / union
+  const countA = new Map()
+  const countB = new Map()
+  for (const w of a) countA.set(w, (countA.get(w) || 0) + 1)
+  for (const w of b) countB.set(w, (countB.get(w) || 0) + 1)
+  let inter = 0
+  for (const [w, c] of countA) {
+    const cb = countB.get(w) || 0
+    inter += Math.min(c, cb)
+  }
+  const union = a.length + b.length - inter
+  return union === 0 ? 1 : inter / union
+}
+
+async function commit_chunk(params, state) {
+  if (!params?.scope || typeof params.scope.start !== 'number' || typeof params.scope.end !== 'number') {
+    throw new Error('commit_chunk: scope { start, end } is required')
+  }
+  if (typeof params.expected_text_after_cuts !== 'string') {
+    throw new Error('commit_chunk: expected_text_after_cuts (string) is required')
+  }
+  const { scope, expected_text_after_cuts } = params
+
+  const cutRanges = state.cuts.map(c => [c.start, c.end])
+  const isCut = (wStart, wEnd) =>
+    cutRanges.some(([cs, ce]) => wStart < ce && wEnd > cs)
+
+  // Surviving words inside the chunk window.
+  const surviving = state.wordTimestamps.filter(w =>
+    inScope(w.start, w.end, scope) && !isCut(w.start, w.end)
+  )
+  const actual_text = surviving.map(w => w.word).join(' ').trim()
+
+  const actualTokens = normalizeForCompare(actual_text)
+  const expectedTokens = normalizeForCompare(expected_text_after_cuts)
+  const match_percent = jaccardWordSimilarity(actualTokens, expectedTokens)
+
+  // Cheap mismatch report: surviving content words the prediction missed,
+  // and predicted content words that aren't actually present.
+  const expectedSet = new Set(expectedTokens)
+  const actualSet = new Set(actualTokens)
+  const mismatches = []
+  const unexpected_survival = actualTokens.filter(w => !expectedSet.has(w))
+  const expected_but_missing = expectedTokens.filter(w => !actualSet.has(w))
+  if (unexpected_survival.length > 0) {
+    mismatches.push({ kind: 'unexpected_survival', words: unexpected_survival.slice(0, 10) })
+  }
+  if (expected_but_missing.length > 0) {
+    mismatches.push({ kind: 'expected_but_missing', words: expected_but_missing.slice(0, 10) })
+  }
+
+  return { match_percent, actual_text, mismatches }
+}
+
 async function finish(params, state) {
   return {
     cuts_emitted: state.cuts.length,
@@ -328,6 +406,7 @@ const TOOLS = {
   remove_cut,
   adjust_cut,
   preview_diff,
+  commit_chunk,
   finish,
 }
 
