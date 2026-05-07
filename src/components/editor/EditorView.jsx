@@ -1338,10 +1338,11 @@ function SyncingScreen({ groupId, status, onDone }) {
 }
 
 function applyConfigDefaults(config, dispatch) {
-  // Deletion categories default OFF — annotations still highlight in the transcript
-  // (deletion-type annotations always render their category bg color), no cut performed.
+  // Deletion categories (false_starts/filler_words/meta_commentary) default OFF — annotations
+  // still highlight in the transcript via their category bg color, but no cut is performed.
+  // Silences default ON (dead-air gaps, not LLM-tagged content).
   dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: {
-    silences: config?.silences ?? false,
+    silences: config?.silences ?? true,
     false_starts: config?.false_starts ?? false,
     filler_words: config?.filler_words ?? false,
     meta_commentary: config?.meta_commentary ?? false,
