@@ -23,6 +23,7 @@ import AssetsView from './AssetsView.jsx'
 import BRollPanel from './BRollPanel.jsx'
 import EstimationModal from './EstimationModal.jsx'
 import ProcessingModal from '../views/ProcessingModal.jsx'
+import InspectingBanner from './InspectingBanner.jsx'
 
 export const EditorContext = createContext(null)
 
@@ -1001,6 +1002,7 @@ export default function EditorView() {
   return (
     <EditorContext.Provider value={editorContextValue}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
+        <InspectingBanner />
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
           <div className="flex items-center gap-8">
@@ -1336,12 +1338,14 @@ function SyncingScreen({ groupId, status, onDone }) {
 }
 
 function applyConfigDefaults(config, dispatch) {
-  // When no config exists, default all deletion categories ON — the LLM found
-  // things to cut, so they should be applied as cuts by default
+  // Deletion categories (false_starts/filler_words/meta_commentary) default OFF — annotations
+  // still highlight in the transcript via their category bg color, but no cut is performed.
+  // Silences default ON (dead-air gaps, not LLM-tagged content).
   dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: {
-    false_starts: config?.false_starts ?? true,
-    filler_words: config?.filler_words ?? true,
-    meta_commentary: config?.meta_commentary ?? true,
+    silences: config?.silences ?? true,
+    false_starts: config?.false_starts ?? false,
+    filler_words: config?.filler_words ?? false,
+    meta_commentary: config?.meta_commentary ?? false,
   }})
   dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: {
     repetition: config?.repetition ?? true,

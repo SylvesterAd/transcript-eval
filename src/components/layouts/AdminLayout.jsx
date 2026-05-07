@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Outlet, NavLink } from 'react-router-dom'
-import { Database, Video, FlaskConical, LayoutDashboard, DollarSign, Play, Film, Key, ScrollText, Cpu, Download, LifeBuoy } from 'lucide-react'
+import { Database, Video, FlaskConical, LayoutDashboard, DollarSign, Play, Film, Key, ScrollText, Cpu, Download, LifeBuoy, Users, Sparkles } from 'lucide-react'
 import { useRole } from '../../contexts/RoleContext.jsx'
 import AuthDropdown from '../auth/AuthDropdown.jsx'
 import { supabase } from '../../lib/supabaseClient.js'
@@ -9,6 +9,7 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 const navItems = [
   { to: '/admin', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/admin/users', icon: Users, label: 'Users' },
   { to: '/admin/videos', icon: Video, label: 'Videos' },
   { to: '/admin/strategies', icon: Database, label: 'Rough Cut Strategies' },
   { to: '/admin/broll', icon: Film, label: 'B-Roll Strategies' },
@@ -19,6 +20,7 @@ const navItems = [
   { to: '/admin/api-logs', icon: ScrollText, label: 'API Logs' },
   { to: '/admin/gpu', icon: Cpu, label: 'GPU Pipeline' },
   { to: '/admin/exports', icon: Download, label: 'Exports' },
+  { to: '/admin/motion-graphics', icon: Sparkles, label: 'Motion Graphics' },
   { to: '/admin/support', icon: LifeBuoy, label: 'Support' },
 ]
 

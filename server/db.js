@@ -250,6 +250,52 @@ try {
       )
       console.log(`[db] idx_broll_runs_pipeline_id ${rows.length ? 'present' : 'MISSING — getBRollEditorData() will be slow'}`)
     } catch {}
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS graphics_sessions (
+        id              SERIAL PRIMARY KEY,
+        user_id         TEXT NOT NULL,
+        user_email      TEXT NOT NULL,
+        title           TEXT,
+        spec_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        status          TEXT NOT NULL DEFAULT 'briefing',
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_graphics_sessions_user ON graphics_sessions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_graphics_sessions_status ON graphics_sessions(status);
+
+      CREATE TABLE IF NOT EXISTS graphics_messages (
+        id               SERIAL PRIMARY KEY,
+        session_id       INTEGER NOT NULL REFERENCES graphics_sessions(id) ON DELETE CASCADE,
+        role             TEXT NOT NULL,
+        content          TEXT NOT NULL,
+        tool_calls_json  JSONB,
+        model_used       TEXT,
+        tokens_in        INTEGER NOT NULL DEFAULT 0,
+        tokens_out       INTEGER NOT NULL DEFAULT 0,
+        cost_cents       INTEGER NOT NULL DEFAULT 0,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_graphics_messages_session ON graphics_messages(session_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS graphics_renders (
+        id                  SERIAL PRIMARY KEY,
+        session_id          INTEGER NOT NULL REFERENCES graphics_sessions(id) ON DELETE CASCADE,
+        iteration           INTEGER NOT NULL,
+        spec_snapshot_json  JSONB NOT NULL,
+        template            TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'queued',
+        output_url          TEXT,
+        preview_url         TEXT,
+        duration_ms         INTEGER,
+        cost_cents          INTEGER NOT NULL DEFAULT 0,
+        error_message       TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_graphics_renders_session ON graphics_renders(session_id, iteration);
+      CREATE INDEX IF NOT EXISTS idx_graphics_renders_status ON graphics_renders(status) WHERE status IN ('queued', 'running');
+    `)
+    console.log('[migrate] graphics_* tables ready')
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
