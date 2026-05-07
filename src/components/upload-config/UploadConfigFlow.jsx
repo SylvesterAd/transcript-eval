@@ -34,7 +34,7 @@ const DEFAULT_STATE = {
     region: '',
     notes: '',
   },
-  pathId: 'strategy-only',
+  pathId: 'hands-off',
   autoRoughCut: false,
 }
 
