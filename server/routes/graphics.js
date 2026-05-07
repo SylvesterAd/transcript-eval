@@ -99,4 +99,39 @@ router.get('/renders/:id', async (req, res) => {
   res.json(render);
 });
 
+// GET /api/graphics/renders/:id/iterations
+router.get('/renders/:id/iterations', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'bad id' });
+  const owner = await db
+    .prepare(
+      `SELECT r.id FROM graphics_renders r
+       JOIN graphics_sessions s ON s.id = r.session_id
+       WHERE r.id = ? AND s.user_id = ?`
+    )
+    .get(id, req.auth.userId);
+  if (!owner) return res.status(404).json({ error: 'not found' });
+  const rows = await db
+    .prepare(
+      `SELECT id, render_id, iteration_index, frame_urls_json,
+              critic_score, critic_criteria_json, critic_feedback, created_at
+       FROM graphics_render_iterations
+       WHERE render_id = ?
+       ORDER BY iteration_index ASC`
+    )
+    .all(id);
+  res.json(
+    rows.map((r) => ({
+      id: r.id,
+      render_id: r.render_id,
+      iteration_index: r.iteration_index,
+      frame_urls: typeof r.frame_urls_json === 'string' ? JSON.parse(r.frame_urls_json) : r.frame_urls_json || [],
+      critic_score: r.critic_score,
+      critic_criteria: typeof r.critic_criteria_json === 'string' ? JSON.parse(r.critic_criteria_json) : r.critic_criteria_json,
+      critic_feedback: r.critic_feedback,
+      created_at: r.created_at,
+    }))
+  );
+});
+
 export default router;
