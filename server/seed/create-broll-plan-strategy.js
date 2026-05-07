@@ -146,7 +146,7 @@ Output ONLY valid JSON.`,
 ## Cut ranges removed from the new video (do not place anything inside these):
 {{cut_ranges}}
 
-## New video transcript (cut text removed; timecodes are original):
+## New video transcript (cut text already removed; timecodes are in the original video):
 {{transcript}}
 
 For each chapter, define:
@@ -199,7 +199,7 @@ Return JSON:
     type: 'programmatic',
     target: 'text_only',
     action: 'split_by_chapter',
-    actionParams: { chaptersStageIndex: 2 },
+    actionParams: { chaptersStageIndex: 1 },
     description: 'Prepare per-chapter data (transcript slices, beats, context) for per-chapter plan generation',
   },
 
