@@ -5,13 +5,54 @@ import { VideoTrack, AudioTrack, CompositeAudioTrack } from './TimelineTrack.jsx
 import VideoFrameTrack, { CompositeFrameTrack } from './VideoFrameTrack.jsx'
 import BRollTrack, { BROLL_TRACK_H } from './BRollTrack.jsx'
 import { BRollContext } from './useBRollEditorState.js'
+import CutBar from './CutBar.jsx'
+import { computeSkipRegions } from './usePlaybackSkipRegions.js'
+import { postCutTime, unshiftPostCutTime } from '../../lib/timeTranslation.js'
+import { getTrackPostCutLayout } from '../../lib/postCutTimeline.js'
 
 const COMPOSITE_H = 80
 const COMPOSITE_AUDIO_H = 56
 
 export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop, onCrossPaste }) {
-  const { state, dispatch, totalDuration, playbackEngine, playheadRef } = useContext(EditorContext)
+  const { state, dispatch, totalDuration, playbackEngine, playheadRef, expandedCutAnchor, setExpandedCutAnchor, cutDragRef, selectedSegmentKey } = useContext(EditorContext)
   const isBroll = state.activeTab === 'brolls'
+
+  // Drag the START of the cut following a selected segment (b-roll editor's
+  // segment-edge drag). Direct UPDATE_CUT during drag; clamped to [0, cutEnd]
+  // so the live state always has a valid cut. On release, three cases:
+  //   - dragged past cutEnd → REMOVE_CUT + ADD_EXCLUSION (lock against AI regen)
+  //   - finalStart > original (cut shrunk) → ADD_EXCLUSION over (original, final)
+  //   - finalStart < original (cut grew leftward) → no extra dispatch
+  //     (manuallyEdited:true on the UPDATE_CUT already prevents AI regen)
+  const handleFollowingCutDrag = useCallback((cut, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const startStart = cut.start
+    const cutEnd = cut.end
+    const cutId = cut.id
+    if (cutDragRef) cutDragRef.current = true
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX
+      const newStart = Math.max(0, Math.min(cutEnd, startStart + dx / state.zoom))
+      dispatch({ type: 'UPDATE_CUT', payload: { id: cutId, updates: { start: newStart } } })
+    }
+    const onUp = (ev) => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      if (cutDragRef) cutDragRef.current = false
+      const finalDx = ev.clientX - startX
+      const finalStart = Math.max(0, startStart + finalDx / state.zoom)
+      if (finalStart >= cutEnd - 0.05) {
+        dispatch({ type: 'REMOVE_CUT', payload: cutId })
+        dispatch({ type: 'ADD_EXCLUSION', payload: { start: startStart, end: cutEnd } })
+      } else if (finalStart > startStart + 0.05) {
+        dispatch({ type: 'ADD_EXCLUSION', payload: { start: startStart, end: finalStart } })
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [state.zoom, dispatch, cutDragRef])
   const scrollRef = useRef(null)
   const rulerRef = useRef(null)
   const [scrollX, setScrollX] = useState(0)
@@ -57,6 +98,61 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     return [...merged, ...zeroWidth]
   }, [state.cuts, state.tracks])
 
+  // B-roll editor: cuts collapse to thin purple bars. Clicking a bar expands
+  // that one cut as a popover overlay (rough-cut style dark gap + draggable
+  // edges + transcript) sitting on top of the post-cut timeline. The layout
+  // is stable: the popover OVERLAPS content to its right rather than pushing
+  // it. This keeps the ruler labels and b-roll positions fixed when the user
+  // drills in to inspect a cut.
+  //
+  // - effectiveCuts: cuts minus exclusions (every join in original-time);
+  //   drives layout (postCutDuration, postCutTime calls, ruler, playhead,
+  //   track outer size, transcript/frame/waveform filters, BRollTrack
+  //   placements). Includes the expanded cut — the popover sits on top.
+  // - expandedCut:   the cut currently rendered as a popover (or null),
+  //   resolved by anchor-contains lookup.
+  const effectiveCuts = useMemo(
+    () => isBroll ? computeSkipRegions(state.cuts, state.cutExclusions) : [],
+    [isBroll, state.cuts, state.cutExclusions]
+  )
+  // expandedCutAnchor is an original-time timestamp (typically the cut's
+  // center at click). Resolve to the effective cut whose interval contains
+  // it. Anchor identity survives edge-resize drags that change cut bounds
+  // mid-drag, which a `${start}-${end}` key would not.
+  const expandedCut = useMemo(() => {
+    if (expandedCutAnchor == null) return null
+    return effectiveCuts.find(c => c.start - 0.01 <= expandedCutAnchor && expandedCutAnchor <= c.end + 0.01) || null
+  }, [effectiveCuts, expandedCutAnchor])
+
+  const primaryAudioWords = useMemo(() => {
+    if (!isBroll) return []
+    const primaryAudio = state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    if (!primaryAudio?.transcriptWords) return []
+    const off = primaryAudio.offset || 0
+    return primaryAudio.transcriptWords.map(w => ({
+      word: w.word,
+      start: w.start + off,
+      end: w.end + off,
+    }))
+  }, [isBroll, state.tracks])
+
+  // Total cut duration → post-cut duration. Drives contentWidth,
+  // playhead translation, and ruler positions in b-roll mode.
+  const postCutDuration = useMemo(() => {
+    if (!isBroll) return totalDuration
+    const total = effectiveCuts.reduce((s, c) => s + (c.end - c.start), 0)
+    return Math.max(0.001, totalDuration - total)
+  }, [isBroll, effectiveCuts, totalDuration])
+
+  // Translate original-time → on-screen x in b-roll mode (cuts collapse).
+  // Rough-cut mode is a passthrough (postCutTime returns input when
+  // effectiveCuts is empty).
+  const tToX = useCallback((t) => (
+    isBroll ? postCutTime(t, effectiveCuts) * state.zoom : t * state.zoom
+  ), [isBroll, effectiveCuts, state.zoom])
+
   // Track horizontal scroll for virtualized tick rendering
   useEffect(() => {
     const el = scrollRef.current
@@ -81,6 +177,10 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     return () => ro.disconnect()
   }, [])
 
+  // contentWidth uses totalDuration in both modes. In b-roll mode the a-roll
+  // tracks collapse to postCutDuration, but b-rolls render at original-time
+  // positions (timelineStart * zoom — no postCutTime translation) so the
+  // scroll content must extend to totalDuration*zoom to accommodate them.
   const contentWidth = Math.max(totalDuration * state.zoom, 800)
 
   // Adaptive 3-tier interval selection: major (labeled) → minor → sub-minor
@@ -107,28 +207,34 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     }
     const minorPx = iv.minor * state.zoom
     const subPx = iv.sub * state.zoom
+    const rulerDuration = isBroll ? postCutDuration : totalDuration
     const visStartTime = Math.max(0, (scrollX - 300) / state.zoom)
     const visEndTime = (scrollX + viewW + 300) / state.zoom
     const firstMajor = Math.floor(visStartTime / iv.major) * iv.major
     const lastMajor = Math.ceil(visEndTime / iv.major) * iv.major
     const marks = []
-    for (let t = firstMajor; t <= Math.min(lastMajor, totalDuration + iv.major); t += iv.major) {
+    // In b-roll: ticks/labels denote post-cut seconds, positioned at t * zoom.
+    // In rough cut: original-time, same formula.
+    for (let t = firstMajor; t <= Math.min(lastMajor, rulerDuration + iv.major); t += iv.major) {
       const time = Math.round(t * 1000) / 1000
       marks.push({ time, label: formatTimeRuler(time, iv.major), x: time * state.zoom })
     }
     return { iv, minorPx, subPx, majorMarks: marks }
-  }, [state.zoom, scrollX, totalDuration, viewW])
+  }, [state.zoom, scrollX, totalDuration, postCutDuration, isBroll, viewW])
 
-  // Scrub on ruler click
+  // Scrub on ruler click. In b-roll the ruler is in post-cut space, so the
+  // pixel-to-time conversion produces a post-cut second; un-shift back to
+  // original-time before dispatching (state.currentTime stays original-time).
   const handleRulerClick = useCallback((e) => {
     const rect = rulerRef.current?.getBoundingClientRect()
     if (!rect) return
     // getBoundingClientRect already accounts for scroll — no scrollLeft needed.
     const x = e.clientX - rect.left
-    const time = Math.max(0, x / state.zoom)
+    const tDisplay = Math.max(0, x / state.zoom)
+    const time = isBroll ? unshiftPostCutTime(tDisplay, effectiveCuts, 'start') : tDisplay
     dispatch({ type: 'SET_CURRENT_TIME', payload: time })
     playbackEngine.current?.seek(time)
-  }, [state.zoom, dispatch, playbackEngine])
+  }, [state.zoom, isBroll, effectiveCuts, dispatch, playbackEngine])
 
   // Zoom with Ctrl+wheel — non-passive listener to block browser page zoom
   const zoomRef = useRef(state.zoom)
@@ -177,18 +283,22 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       // B-roll editor leaves scrollLeft alone — user explicitly does not want recentering.
       const viewW = el.clientWidth
       el.scrollLeft = state.currentTime * state.zoom - viewW / 2 + labelW
-    }
+    } /* b-roll: scroll preserved across zoom (matches existing UX). */
   }, [state.zoom])
 
   // Own the playhead transform for render-driven updates (mount, zoom change, paused seek).
   // During playback the rAF engine in EditorView writes transform directly at 60fps — this
   // effect must NOT fire then, or it would overwrite the live value with a 10Hz-stale one
   // (the same class of bug this task was created to fix).
+  // In b-roll mode currentTime stays original-time; render translates through postCutTime.
   useLayoutEffect(() => {
     if (!playheadRef.current) return
     if (state.isPlaying) return
-    playheadRef.current.style.transform = `translateX(${state.currentTime * state.zoom}px)`
-  }, [state.zoom, state.currentTime, state.isPlaying, playheadRef])
+    const x = isBroll
+      ? postCutTime(state.currentTime, effectiveCuts) * state.zoom
+      : state.currentTime * state.zoom
+    playheadRef.current.style.transform = `translateX(${x}px)`
+  }, [state.zoom, state.currentTime, state.isPlaying, isBroll, effectiveCuts, playheadRef])
 
   // Auto-scroll during playback — smooth follow, playhead stays at ~1/5 from left
   const currentTimeRef = useRef(state.currentTime)
@@ -357,14 +467,20 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
 
   const visibleLayout = useMemo(() => {
     const items = []
-    const compositeAudioH = state.compositeShowTranscript ? 112 : 56
+    const compositeAudioH = state.compositeShowTranscript ? 48 : 24
     let y = isMainMode ? COMPOSITE_H + compositeAudioH : 0
     let trackSlot = 0 // counts visible track slots for B-Roll insertion
     let brollInserted = false
-    for (let i = 0; i < state.tracks.length; i++) {
+    // Track which indices have been consumed by a pair so they aren't rendered
+    // a second time as a solo row. Pairs match V+A by videoId regardless of
+    // their order or how many tracks (or b-roll inserts) sit between them.
+    const consumedIdx = new Set()
+    let i = 0
+    while (i < state.tracks.length) {
+      if (consumedIdx.has(i)) { i++; continue }
       const t = state.tracks[i]
-      if (t.type === 'video' && ((!isRoughCut && state.audioOnly) || isMainMode)) continue
-      if (t.type === 'audio' && isMainMode) continue
+      if (t.type === 'video' && ((!isRoughCut && state.audioOnly) || isMainMode)) { i++; continue }
+      if (t.type === 'audio' && isMainMode) { i++; continue }
       // Insert B-Roll rows before this track if position matches
       if (!brollInserted && hasBrollTrack && resolvedBrollPosition <= i) {
         for (let vi = 0; vi < brollVariantCount; vi++) {
@@ -373,10 +489,40 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
         }
         brollInserted = true
       }
-      const h = t.type === 'video' ? (showVideoFrames ? 80 : 24) : (t.showTranscript ? 112 : 56)
+      // Pair detection: V + A for the same videoId, regardless of order or
+      // distance in state.tracks. The pair renders at the FIRST track's
+      // position. The first track in state.tracks order goes on TOP of the
+      // combined block (so a [A, V] state shows A on top, V on bottom — and
+      // vice versa). This makes V+A read as one combined CapCut-style clip
+      // block while still respecting the user's track ordering.
+      if (!isMainMode && (t.type === 'video' || t.type === 'audio')) {
+        const matchType = t.type === 'video' ? 'audio' : 'video'
+        const matchIdx = state.tracks.findIndex((mt, mi) => (
+          mi !== i && !consumedIdx.has(mi) && mt.type === matchType && mt.videoId === t.videoId
+        ))
+        if (matchIdx >= 0) {
+          const videoIdx = t.type === 'video' ? i : matchIdx
+          const audioIdx = t.type === 'audio' ? i : matchIdx
+          const audioTrack = state.tracks[audioIdx]
+          const vH = showVideoFrames ? 40 : 24
+          const aH = audioTrack.showTranscript ? 48 : 24
+          const h = vH + aH
+          // Render order follows state.tracks order (smaller index = on top).
+          const topIsVideo = videoIdx < audioIdx
+          items.push({ absIdx: i, videoAbsIdx: videoIdx, audioAbsIdx: audioIdx, y, h, isPair: true, vH, aH, topIsVideo })
+          y += h
+          trackSlot++
+          consumedIdx.add(videoIdx)
+          consumedIdx.add(audioIdx)
+          i++
+          continue
+        }
+      }
+      const h = t.type === 'video' ? (showVideoFrames ? 40 : 24) : (t.showTranscript ? 48 : 24)
       items.push({ absIdx: i, y, h })
       y += h
       trackSlot++
+      i++
     }
     // B-Roll at the end if not yet inserted
     if (!brollInserted && hasBrollTrack) {
@@ -671,6 +817,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                         zoom={state.zoom}
                         viewW={viewW}
                         scrollX={scrollX}
+                        postCutCuts={null}
                         isActive={isActiveVariant}
                         onActivate={variantActivators[vi]}
                         overridePlacements={!isActiveVariant ? inactiveVariantPlacements?.[variants?.[vi]?.id] : undefined}
@@ -687,12 +834,174 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
               )
             }
 
+            // Pair row: V+A for the same source rendered inside one flex-1
+            // container so they read as a single CapCut-style clip block.
+            // Stacking order respects state.tracks order — whichever index is
+            // smaller goes on top (item.topIsVideo === true means V comes
+            // first; false means A comes first and goes on top).
+            if (item.isPair) {
+              const videoTrack = state.tracks[item.videoAbsIdx]
+              const audioTrack = state.tracks[item.audioAbsIdx]
+              if (!videoTrack || !audioTrack) return null
+              const vSelected = state.selectedTrackIds.has(videoTrack.id)
+              const aSelected = state.selectedTrackIds.has(audioTrack.id)
+              const vNum = trackNumber(videoTrack)
+              const aNum = trackNumber(audioTrack)
+              const videoEl = (
+                showVideoFrames
+                  ? <VideoFrameTrack track={videoTrack} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : EMPTY_CUTS} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={item.topIsVideo} groupedAbove={!item.topIsVideo} />
+                  : <VideoTrack track={videoTrack} zoom={state.zoom} />
+              )
+              const audioEl = (
+                <AudioTrack track={audioTrack} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={!item.topIsVideo} groupedAbove={item.topIsVideo} />
+              )
+              const videoLabel = (
+                <div
+                  onMouseDown={(e) => handleTrackDragStart(e, item.videoAbsIdx)}
+                  style={{ height: `${item.vH}px` }}
+                  className={`border-r border-white/10 flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none ${vSelected ? 'text-primary-fixed bg-primary-container/5' : 'text-on-surface-variant'}`}
+                >
+                  <span className="material-symbols-outlined text-[12px] shrink-0 opacity-30">drag_indicator</span>
+                  <span className="w-5 shrink-0">V{vNum}</span>
+                  <div className={`h-3 w-[1px] shrink-0 ${vSelected ? 'bg-primary-fixed/30' : 'bg-white/30'}`} />
+                  <button
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); dispatch({ type: 'TOGGLE_VISIBILITY', payload: videoTrack.id }) }}
+                    className="material-symbols-outlined text-[9px] shrink-0"
+                    style={videoTrack.visible ? { fontVariationSettings: '"FILL" 1', color: '#cefc00' } : { opacity: 0.4 }}
+                  >
+                    {videoTrack.visible ? 'visibility' : 'visibility_off'}
+                  </button>
+                </div>
+              )
+              const audioLabel = (
+                <div
+                  onMouseDown={(e) => handleTrackDragStart(e, item.audioAbsIdx)}
+                  style={{ height: `${item.aH}px` }}
+                  className={`border-r border-white/5 flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none ${aSelected ? 'text-primary-fixed bg-primary-container/5' : 'text-on-surface-variant'}`}
+                >
+                  <span className="material-symbols-outlined text-[12px] shrink-0 opacity-30">drag_indicator</span>
+                  <span className="w-5 shrink-0">A{aNum}</span>
+                  <div className={`h-3 w-[1px] shrink-0 ${aSelected ? 'bg-primary-fixed/30' : 'bg-white/30'}`} />
+                  <button
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); dispatch({ type: 'TOGGLE_MUTE', payload: audioTrack.id }) }}
+                    className="material-symbols-outlined text-[9px] shrink-0"
+                    style={!audioTrack.muted ? { fontVariationSettings: '"FILL" 1', color: '#cefc00' } : { opacity: 0.4 }}
+                  >
+                    {audioTrack.muted ? 'volume_off' : 'volume_up'}
+                  </button>
+                  <div className={`h-3 w-[1px] shrink-0 ${aSelected ? 'bg-primary-fixed/30' : 'bg-white/30'}`} />
+                  <button
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); dispatch({ type: 'TOGGLE_TRANSCRIPT', payload: audioTrack.id }) }}
+                    className="material-symbols-outlined text-[9px] shrink-0"
+                    style={audioTrack.showTranscript ? { fontVariationSettings: '"FILL" 1', color: '#cefc00' } : { opacity: 0.4 }}
+                  >
+                    text_fields
+                  </button>
+                </div>
+              )
+              // CapCut-style cut-edge dragging on the selected segment.
+              // pairLayout has segments {x, w, origStart, origEnd} in track-local
+              // post-cut pixels; segKey = audioTrack.offset + seg.origStart is the
+              // canonical cross-track selection key (V and A share track.offset).
+              // Each segment "owns" the cut that follows it (a-roll #N + cut #N is
+              // one unit) — only the right edge is draggable. The left edge is
+              // owned by the previous a-roll, so clicking a-roll #2 doesn't let
+              // you drag back into cut #1.
+              const pairLayout = isBroll
+                ? getTrackPostCutLayout(audioTrack.offset, audioTrack.duration, effectiveCuts, state.zoom)
+                : null
+              const pairOuterLeft = pairLayout
+                ? postCutTime(audioTrack.offset, effectiveCuts) * state.zoom
+                : 0
+              const selectedSeg = (pairLayout && selectedSegmentKey != null)
+                ? pairLayout.segments.find(s => Math.abs(audioTrack.offset + s.origStart - selectedSegmentKey) < 0.01)
+                : null
+              const segGlobalEnd = selectedSeg ? audioTrack.offset + selectedSeg.origEnd : null
+              const followingCut = selectedSeg
+                ? state.cuts.find(c => Math.abs(c.start - segGlobalEnd) < 0.05 && c.end > c.start)
+                : null
+              return (
+                <div
+                  key={`pair-${videoTrack.id}-${audioTrack.id}`}
+                  className="relative"
+                  style={isDragSource ? { opacity: 0.5, zIndex: 30, transform: `translateY(${dragState.dy}px)`, pointerEvents: 'none' } : undefined}
+                >
+                  {showInsertBefore && (
+                    <div className="absolute top-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />
+                  )}
+                  <div className="flex">
+                    {/* Sticky label area — top label is whichever track is first
+                        in state.tracks; bottom is the other. */}
+                    <div className="sticky left-0 w-36 shrink-0 z-30 bg-surface-container border-b border-white/5">
+                      {item.topIsVideo ? videoLabel : audioLabel}
+                      {item.topIsVideo ? audioLabel : videoLabel}
+                    </div>
+                    {/* Combined content stacked in matching order */}
+                    <div className="flex-1 relative">
+                      {item.topIsVideo ? videoEl : audioEl}
+                      {item.topIsVideo ? audioEl : videoEl}
+                      {/* Selection border overlay — wraps the whole V+A clip
+                          uniformly (top of V, sides, bottom of A or transcript).
+                          Rendered at pair-row level so V is always highlighted
+                          even if videoTrack.offset differs slightly from
+                          audioTrack.offset. pointer-events:none lets clicks
+                          pass through to the per-segment accents below. */}
+                      {selectedSeg && (
+                        <div
+                          className="absolute pointer-events-none z-[10]"
+                          style={{
+                            left: `${pairOuterLeft + selectedSeg.x + 2}px`,
+                            top: 0,
+                            width: `${Math.max(selectedSeg.w - 4, 2)}px`,
+                            height: `${item.h}px`,
+                            border: '2px solid rgba(255,255,255,0.9)',
+                            borderRadius: '6px',
+                            boxSizing: 'border-box',
+                          }}
+                        />
+                      )}
+                      {/* Cut-edge drag handle on the selected segment's right
+                          edge. Drags the START of the following cut (the cut
+                          this a-roll "owns"). Dragging right past the cut's
+                          end removes it entirely. The left edge is intentionally
+                          not draggable — that boundary belongs to the previous
+                          a-roll's drag handle. */}
+                      {selectedSeg && followingCut && (
+                        <div
+                          data-testid="seg-drag-cut-start"
+                          title="Drag to adjust cut"
+                          className="absolute cursor-col-resize z-[15] group"
+                          style={{
+                            left: `${pairOuterLeft + selectedSeg.x + selectedSeg.w - 5}px`,
+                            top: 0,
+                            height: `${item.h}px`,
+                            width: '10px',
+                          }}
+                          onMouseDown={(e) => handleFollowingCutDrag(followingCut, e)}
+                        >
+                          <div className="absolute inset-0 group-hover:bg-primary-fixed/15 transition-colors" />
+                          <div className="absolute top-1 bottom-1 left-1/2 w-[3px] -translate-x-1/2 rounded-full bg-primary-fixed shadow-[0_0_6px_rgba(206,252,0,0.7)] group-hover:w-[4px] transition-all" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {showInsertAfter && (
+                    <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />
+                  )}
+                </div>
+              )
+            }
+
             // Regular audio/video track row
             const track = state.tracks[absIdx]
             if (!track) return null
             const selected = state.selectedTrackIds.has(track.id)
             const num = trackNumber(track)
             const isVideo = track.type === 'video'
+            const groupedBelow = item.groupedBelow
 
             return (
               <div
@@ -704,11 +1013,14 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                   <div className="absolute top-0 left-0 right-0 h-[3px] bg-primary-fixed z-20 shadow-[0_0_8px_rgba(206,252,0,0.7)] rounded-full" />
                 )}
                 <div className="flex">
-                  {/* Sticky label — drag to reorder */}
+                  {/* Sticky label — drag to reorder. Bottom border is suppressed
+                      when this track is grouped above its sibling (paired
+                      audio+video for the same source) so the row reads as one
+                      CapCut-style clip instead of two separate tracks. */}
                   <div
                     onMouseDown={(e) => handleTrackDragStart(e, absIdx)}
-                    style={isVideo ? { height: '80px' } : { height: track.showTranscript ? '112px' : '56px' }}
-                    className={`sticky left-0 w-36 shrink-0 ${isVideo ? 'border-b border-r border-white/10' : 'border-b border-r border-white/5'} flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none z-30 bg-surface-container ${
+                    style={isVideo ? { height: '40px' } : { height: track.showTranscript ? '48px' : '24px' }}
+                    className={`sticky left-0 w-36 shrink-0 border-r ${isVideo ? 'border-white/10' : 'border-white/5'} ${groupedBelow ? '' : (isVideo ? 'border-b border-white/10' : 'border-b border-white/5')} flex items-center pl-2 pr-3 text-[10px] font-bold gap-1.5 cursor-grab active:cursor-grabbing select-none z-30 bg-surface-container ${
                       selected ? 'text-primary-fixed bg-primary-container/5' : 'text-on-surface-variant'
                     } ${isDragSource ? 'ring-1 ring-primary-fixed bg-primary-fixed/10' : ''}`}
                   >
@@ -749,9 +1061,9 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                   <div className="flex-1 relative">
                     {isVideo
                       ? (showVideoFrames
-                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={(isRoughCut || isBroll) ? mergedDisplayCuts : EMPTY_CUTS} scrollRef={scrollRef} scrollX={scrollX} />
+                          ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : EMPTY_CUTS} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={groupedBelow} groupedAbove={item.groupedAbove} />
                           : <VideoTrack track={track} zoom={state.zoom} />)
-                      : <AudioTrack track={track} zoom={state.zoom} cuts={(isRoughCut || isBroll) ? state.cuts : null} scrollRef={scrollRef} scrollX={scrollX} />
+                      : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={groupedBelow} groupedAbove={item.groupedAbove} />
                     }
                   </div>
                 </div>
@@ -761,6 +1073,11 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
               </div>
             )
           })}
+
+          {/* Cuts are no longer drawn as a separate purple junction bar — each
+              kept segment of V/A renders with its own rounded corners (per-segment
+              accent in VideoFrameTrack/AudioTrack), so cut joins are visible as
+              the gap between adjacent rounded clip blocks. */}
 
           {/* Unified playhead — spans ruler + all tracks.
               Transform is owned exclusively by the rAF playback engine (EditorView tick + seek)

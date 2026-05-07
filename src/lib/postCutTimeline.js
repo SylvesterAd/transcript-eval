@@ -69,3 +69,65 @@ export function layoutPostCut(originalDuration, effectiveCuts, timelineWidthPx) 
 
   return { segments, cutBars, postCutDuration, pxPerSecond }
 }
+
+/**
+ * Compute kept segments + total post-cut width for a single track, in
+ * track-local coordinates (relative to track.offset).
+ *
+ * Used by VideoFrameTrack / AudioTrack / TranscriptTrack to render only the
+ * portions of their content that survive the cuts, positioned at post-cut
+ * local x. Cuts are passed in global (track-shared) original-time space and
+ * translated into the track's local origin here.
+ *
+ * @param {number} trackOffset - track.offset in seconds (global original-time)
+ * @param {number} trackDuration - track.duration in seconds
+ * @param {Array<{start:number,end:number}>} effectiveCuts - cuts in global original-time
+ * @param {number} pxPerSecond - same scale used by the rest of the timeline
+ * @returns {{segments: Array, postCutDuration: number, width: number}}
+ */
+export function getTrackPostCutLayout(trackOffset, trackDuration, effectiveCuts, pxPerSecond) {
+  const localCuts = (effectiveCuts || [])
+    .map(c => ({
+      start: Math.max(0, c.start - trackOffset),
+      end: Math.min(trackDuration, c.end - trackOffset),
+    }))
+    .filter(c => c.end > c.start + 0.001)
+    .sort((a, b) => a.start - b.start)
+
+  const segments = []
+  let cursorOrig = 0
+  let cursorPost = 0
+  for (const c of localCuts) {
+    if (c.start > cursorOrig) {
+      const segLen = c.start - cursorOrig
+      segments.push({
+        origStart: cursorOrig,
+        origEnd: c.start,
+        postStart: cursorPost,
+        postEnd: cursorPost + segLen,
+        x: cursorPost * pxPerSecond,
+        w: segLen * pxPerSecond,
+      })
+      cursorPost += segLen
+    }
+    cursorOrig = c.end
+  }
+  if (cursorOrig < trackDuration) {
+    const segLen = trackDuration - cursorOrig
+    segments.push({
+      origStart: cursorOrig,
+      origEnd: trackDuration,
+      postStart: cursorPost,
+      postEnd: cursorPost + segLen,
+      x: cursorPost * pxPerSecond,
+      w: segLen * pxPerSecond,
+    })
+    cursorPost += segLen
+  }
+
+  return {
+    segments,
+    postCutDuration: cursorPost,
+    width: cursorPost * pxPerSecond,
+  }
+}

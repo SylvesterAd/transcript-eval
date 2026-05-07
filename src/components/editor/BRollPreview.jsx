@@ -3,6 +3,7 @@ import { EditorContext } from './EditorView.jsx'
 import { BRollContext } from './useBRollEditorState.js'
 import RoughCutPreview from './RoughCutPreview.jsx'
 import { computeSkipRegions } from './usePlaybackSkipRegions.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 import { Loader2 } from 'lucide-react'
 import { attachVideoSource, detachVideoSource } from '../../hooks/useHlsSource.js'
 
@@ -79,7 +80,12 @@ export default function BRollPreview() {
             setVideoLoadState('loading')
             attachVideoSource(v, desired)
           }
-          const localTime = s.currentTime - activePlacement.timelineStart
+          // Visual time = where the playhead sits on the post-cut ruler. Each
+          // placement's timelineStart/End are in those same post-cut seconds
+          // (b-rolls render at `timelineStart * zoom` with no translation), so
+          // the elapsed-within-clip is `visualTime - placement.timelineStart`.
+          const visualTime = postCutTime(s.currentTime, skipRegionsRef.current)
+          const localTime = visualTime - activePlacement.timelineStart
           const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
           if (Math.abs(v.currentTime - clampedTime) > 0.5) v.currentTime = clampedTime
           if (s.isPlaying && v.paused) v.play().catch(() => {})
