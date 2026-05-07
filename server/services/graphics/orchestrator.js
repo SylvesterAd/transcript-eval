@@ -50,6 +50,7 @@ export async function runChatTurn({ sessionId, userMessage }) {
     system: BRIEF_SYSTEM_PROMPT,
     messages: history,
     thinkingLevel: 'low',
+    tools: [{ googleSearch: {} }],
   });
   emit({ sessionId, step: 'brief_replied', label: 'Reply received' })
   const specUpdate = extractSpec(briefResp.text);

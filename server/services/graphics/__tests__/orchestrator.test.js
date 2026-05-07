@@ -41,4 +41,20 @@ describe('orchestrator', () => {
     expect(result.assistantText).not.toContain('[SPEC]');  // strip check
     expect(result.specUpdate).toEqual({ template: 'lower-third' });
   });
+
+  it('passes Google Search grounding tools on the brief callGemini call', async () => {
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+    callGemini.mockResolvedValue({
+      text: '[SPEC]{"template":"lower-third"}',
+      toolUses: [],
+      tokens: { in: 100, out: 10 },
+      stop: 'STOP',
+    })
+    const { runChatTurn } = await import('../orchestrator.js')
+    await runChatTurn({ sessionId: 1, userMessage: 'use the WSJ logo' })
+    const lastCall = callGemini.mock.calls.at(-1)[0]
+    expect(lastCall.tools).toEqual([{ googleSearch: {} }])
+    expect(lastCall.model).toBe('gemini-3-flash-preview')
+  })
 });
