@@ -6,7 +6,12 @@
 // maxGapSec; emit the expanded span.
 
 const SHORT_UTTERANCE_SEC = 3
-const DEFAULT_MAX_GAP = 5
+// 6 (not 5) because the run-166 fixture has a 5.18s gap between the
+// [keyboard clacking] audio event (ends 7:14.18) and the next short
+// utterance "Nice." (starts 7:19.36). 5s is too tight; 6s comfortably
+// covers this case while still rejecting genuinely separate clusters
+// (clusters.test.js Test 3 uses 28s gaps to verify separation).
+const DEFAULT_MAX_GAP = 6
 
 // Audio events come in two shapes depending on data source:
 //  - Unit-test fixtures: explicit { type: 'audio_event' }

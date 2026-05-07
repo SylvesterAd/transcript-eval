@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -34,11 +34,16 @@ const STUB_AGENT_RESPONSE = {
   toolCalls: 7,
 }
 
-if (!liveMode) {
-  vi.mock('../index.js', () => ({
-    runAgent: vi.fn().mockResolvedValue(STUB_AGENT_RESPONSE),
-  }))
-}
+// vi.mock would be hoisted above this `if`, silently mocking even in live
+// mode. Use `vi.doMock` (executed at runtime, not hoisted) inside beforeAll
+// to honor the ANTHROPIC_AGENT_LIVE env var.
+beforeAll(async () => {
+  if (!liveMode) {
+    vi.doMock('../index.js', () => ({
+      runAgent: vi.fn().mockResolvedValue(STUB_AGENT_RESPONSE),
+    }))
+  }
+})
 
 // Helper: derive the text being cut by finding all words whose [start,end]
 // falls inside the cut span, then strip punctuation.
