@@ -17,9 +17,13 @@ import { uploadRender } from './uploader.js';
 import { callAnthropic } from '../../lib/llm/anthropic.js';
 import { MODEL_FOR, costCents } from './models.js';
 import { CREATE_SYSTEM_PROMPT } from './create-prompt.js';
+import { runCritic } from './critic/critic-runner.js';
+import { buildRetryPrompt } from './retry-prompt.js';
 
 const POLL_INTERVAL_MS = 2000;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
+const MAX_ITERATIONS = 3;       // initial + 2 retries
+const SCORE_THRESHOLD = 0.7;
 let running = false;
 
 async function claimNextRender() {
@@ -64,26 +68,73 @@ export async function drainOnce() {
   let row;
   while ((row = await claimNextRender())) {
     try {
-      const { vars, cost } = await specToVars(row.spec_snapshot_json);
-      const result = await renderTemplate({
-        template: row.template,
-        vars,
-        renderId: row.id,
+      const { vars: initialVars, cost } = await specToVars(row.spec_snapshot_json);
+      let currentVars = initialVars;
+      let currentResult = await renderTemplate({ template: row.template, vars: currentVars, renderId: row.id });
+      let currentUpload = await uploadRender({
+        renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
       });
-      const upload = await uploadRender({
-        renderId: row.id,
-        sessionId: row.session_id,
-        localPath: result.outputPath,
-      });
+
+      let bestAttempt = null;
+      let iteration = 1;
+
+      while (iteration <= MAX_ITERATIONS) {
+        const critique = await runCritic({
+          renderId: row.id,
+          iterationIndex: iteration,
+          mp4Path: currentResult.outputPath,
+          durationSec: row.spec_snapshot_json.duration || 5,
+          spec: row.spec_snapshot_json,
+          sessionId: row.session_id,
+        });
+
+        const attempt = {
+          iteration,
+          score: critique.score,
+          upload: currentUpload,
+          durationMs: currentResult.durationMs,
+        };
+        if (!bestAttempt || attempt.score > bestAttempt.score) bestAttempt = attempt;
+
+        // Ship if quality is acceptable
+        if (!critique.retry_recommended || critique.score >= SCORE_THRESHOLD) break;
+        // Budget exhausted
+        if (iteration >= MAX_ITERATIONS) break;
+
+        // Retry: build new vars from critique feedback
+        const retrySys = buildRetryPrompt({ priorCritique: critique, priorVars: currentVars });
+        const retryResp = await callAnthropic({
+          model: MODEL_FOR.create,
+          system: retrySys,
+          messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(row.spec_snapshot_json)}` }],
+          max_tokens: 1024,
+        });
+        const retryText = retryResp.text.trim().replace(/^```json\s*/i, '').replace(/```$/, '');
+        currentVars = JSON.parse(retryText);
+        iteration += 1;
+        currentResult = await renderTemplate({ template: row.template, vars: currentVars, renderId: row.id });
+        currentUpload = await uploadRender({
+          renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
+        });
+      }
+
       // Wrap completion writes in a transaction for atomicity
       await db.transaction(async (tx) => {
         await tx
           .prepare(
             `UPDATE graphics_renders
-             SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?
+             SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?,
+                 iteration_count = ?, final_score = ?
              WHERE id = ?`
           )
-          .run(upload.url, result.durationMs, cost, row.id);
+          .run(
+            bestAttempt.upload.url,
+            bestAttempt.durationMs,
+            cost,
+            iteration,
+            bestAttempt.score,
+            row.id
+          );
         await tx
           .prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`)
           .run(row.session_id);
