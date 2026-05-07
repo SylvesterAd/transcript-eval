@@ -4,7 +4,7 @@
 //   1. Extract N frames from the rendered MP4
 //   2. Upload frames to Supabase
 //   3. Call VLM evaluator
-//   4. Persist iteration row
+//   4. Persist iteration row (with optional scene_index for multi-scene renders)
 //   5. Return critique + retry decision
 
 import path from 'node:path'
@@ -16,40 +16,29 @@ import { emit } from '../events/emitter.js'
 
 const FRAME_COUNT = 4
 
-export async function runCritic({ renderId, iterationIndex, mp4Path, durationSec, spec, sessionId }) {
+export async function runCritic({ renderId, iterationIndex, mp4Path, durationSec, spec, sessionId, sceneIndex = null }) {
   const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders'
-  const frameDir = path.join(baseDir, String(renderId), `iter-${iterationIndex}-frames`)
+  const sceneSuffix = sceneIndex !== null ? `scene-${sceneIndex}-` : ''
+  const frameDir = path.join(baseDir, String(renderId), `${sceneSuffix}iter-${iterationIndex}-frames`)
 
-  const localFramePaths = await extractFrames({
-    mp4Path,
-    durationSec,
-    count: FRAME_COUNT,
-    outDir: frameDir,
-  })
-  emit({ sessionId, step: 'frames_captured', label: 'Frames captured', renderId, iteration: iterationIndex })
-  const frameUrls = await uploadFrames({ renderId, iterationIndex, framePaths: localFramePaths })
+  const localFramePaths = await extractFrames({ mp4Path, durationSec, count: FRAME_COUNT, outDir: frameDir })
+  emit({ sessionId, step: 'frames_captured', label: 'Frames captured', renderId, iteration: iterationIndex, sceneIndex })
+  const frameUrls = await uploadFrames({ renderId, iterationIndex: `${sceneSuffix}${iterationIndex}`, framePaths: localFramePaths })
   const critique = await evaluateFrames({ framePaths: localFramePaths, spec })
 
   await db.prepare(
     `INSERT INTO graphics_render_iterations
-       (render_id, iteration_index, mp4_path, frame_urls_json, critic_score, critic_criteria_json, critic_feedback)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+       (render_id, iteration_index, scene_index, mp4_path, frame_urls_json, critic_score, critic_criteria_json, critic_feedback)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    renderId,
-    iterationIndex,
-    mp4Path,
-    JSON.stringify(frameUrls),
-    critique.score,
-    JSON.stringify(critique.criteria),
-    critique.feedback
+    renderId, iterationIndex, sceneIndex, mp4Path,
+    JSON.stringify(frameUrls), critique.score,
+    JSON.stringify(critique.criteria), critique.feedback
   )
 
   return {
-    score: critique.score,
-    criteria: critique.criteria,
-    feedback: critique.feedback,
-    retry_recommended: critique.retry_recommended,
-    frameUrls,
-    tokens: critique.tokens,
+    score: critique.score, criteria: critique.criteria,
+    feedback: critique.feedback, retry_recommended: critique.retry_recommended,
+    frameUrls, tokens: critique.tokens,
   }
 }
