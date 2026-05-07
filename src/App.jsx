@@ -206,6 +206,7 @@ export default function App() {
         <Route path="exports" element={<ExportsList />} />
         <Route path="exports/:id" element={<ExportDetail />} />
         <Route path="motion-graphics" element={<MotionGraphicsView />} />
+        <Route path="motion-graphics/:sessionId" element={<MotionGraphicsView />} />
         <Route path="support" element={<SupportBundle />} />
         <Route path="users" element={<AdminUsersView />} />
         <Route path="users/:userId" element={<AdminUserDetailView />} />
