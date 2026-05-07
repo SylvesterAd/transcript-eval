@@ -13,6 +13,8 @@ import pexelsRouter from './routes/pexels.js'
 import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
 import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter, freepikUrlRouter } from './routes/exports.js'
+import graphicsRouter from './routes/graphics.js'
+import { startWorker as startGraphicsWorker } from './services/graphics/render-worker.js'
 import adminExportsRouter from './routes/admin/exports.js'
 import adminSupportBundlesRouter from './routes/admin/support-bundles.js'
 import adminUsersRouter from './routes/admin/users.js'
@@ -77,6 +79,7 @@ app.use('/api/diffs', diffsRouter)
 app.use('/api/rankings', rankingsRouter)
 app.use('/api/broll', brollRouter)
 app.use('/api/broll-searches', brollSearchesRouter)
+app.use('/api/graphics', graphicsRouter)
 app.use('/api/storyblocks', storyblocksRouter)
 app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)
@@ -115,6 +118,7 @@ app.listen(PORT, async () => {
   }
   startGpuFailurePoller()
   startBrollSearchWorker().catch(err => console.error('[startup] broll-search-worker failed:', err.message))
+  startGraphicsWorker().catch(e => console.error('[graphics-worker]', e))
 })
 
 let isShuttingDown = false
