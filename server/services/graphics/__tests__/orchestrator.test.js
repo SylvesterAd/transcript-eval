@@ -12,16 +12,20 @@ vi.mock('../../../lib/llm/gemini.js', () => ({
 vi.mock('../../../lib/llm/anthropic.js', () => ({
   callAnthropic: vi.fn(),
 }));
-// Correction #2: db.js default export — mock with { default: { prepare } }
-vi.mock('../../../db.js', () => ({
-  default: {
-    prepare: vi.fn(() => ({
-      run: vi.fn().mockResolvedValue({ lastInsertRowid: 1, changes: 1 }),
-      get: vi.fn().mockResolvedValue({ id: 1, spec_json: {}, status: 'briefing' }),
-      all: vi.fn().mockResolvedValue([]),
-    })),
-  },
-}));
+// Correction #2: db.js default export — mock with { default: { prepare, transaction } }
+vi.mock('../../../db.js', () => {
+  const prepareMock = vi.fn(() => ({
+    run: vi.fn().mockResolvedValue({ lastInsertRowid: 1, changes: 1 }),
+    get: vi.fn().mockResolvedValue({ id: 1, spec_json: {}, status: 'briefing' }),
+    all: vi.fn().mockResolvedValue([]),
+  }));
+  return {
+    default: {
+      prepare: prepareMock,
+      transaction: vi.fn(async (fn) => fn({ prepare: prepareMock })),
+    },
+  };
+});
 
 beforeEach(() => {
   process.env.GOOGLE_GENERATIVE_AI_API_KEY = 'g-test';

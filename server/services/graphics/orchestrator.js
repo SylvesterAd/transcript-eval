@@ -25,26 +25,24 @@ async function loadSession(sessionId) {
   return await db.prepare('SELECT id, spec_json, status FROM graphics_sessions WHERE id = ?').get(sessionId);
 }
 
+// Bug 2 fix: load most recent 50, then reverse for chronological order
 async function loadHistory(sessionId, limit = 50) {
   const rows = await db
-    .prepare('SELECT role, content FROM graphics_messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?')
+    .prepare('SELECT role, content FROM graphics_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?')
     .all(sessionId, limit);
-  return rows.map((r) => ({ role: r.role, content: r.content }));
+  return rows.reverse().map((r) => ({ role: r.role, content: r.content }));
 }
 
 export async function runChatTurn({ sessionId, userMessage }) {
+  // Reads stay outside the transaction (no long-running lock needed)
   const session = await loadSession(sessionId);
   if (!session) throw new Error(`session ${sessionId} not found`);
 
-  // Persist user message
-  await db.prepare(
-    'INSERT INTO graphics_messages (session_id, role, content) VALUES (?, ?, ?)'
-  ).run(sessionId, 'user', userMessage);
-
+  // Bug 1 fix: load history BEFORE inserting user message, then push in-memory
   const history = await loadHistory(sessionId);
   history.push({ role: 'user', content: userMessage });
 
-  // Brief phase
+  // LLM call stays outside the transaction (long network call must not hold a connection)
   const briefResp = await callGemini({
     model: MODEL_FOR.brief,
     system: BRIEF_SYSTEM_PROMPT,
@@ -54,34 +52,49 @@ export async function runChatTurn({ sessionId, userMessage }) {
   const specUpdate = extractSpec(briefResp.text);
   const visibleText = stripSpecBlock(briefResp.text);
 
+  // Minor 7: fallback for empty visibleText (e.g. reply is only a [SPEC] block)
+  const safeText = visibleText || '(updating…)';
+
   const cost = costCents(MODEL_FOR.brief, briefResp.tokens);
-  await db.prepare(
-    `INSERT INTO graphics_messages
-     (session_id, role, content, model_used, tokens_in, tokens_out, cost_cents)
-     VALUES (?, 'assistant', ?, ?, ?, ?, ?)`
-  ).run(sessionId, visibleText, MODEL_FOR.brief, briefResp.tokens.in, briefResp.tokens.out, cost);
-
   const newSpec = mergeSpec(session.spec_json || {}, specUpdate);
-  await db.prepare(
-    'UPDATE graphics_sessions SET spec_json = ?, updated_at = NOW() WHERE id = ?'
-  ).run(JSON.stringify(newSpec), sessionId);
 
-  // Enqueue render if spec is complete
-  let renderId = null;
-  if (isSpecComplete(newSpec) && session.status === 'briefing') {
-    const iteration = 1;
-    const inserted = await db
-      .prepare(
-        `INSERT INTO graphics_renders (session_id, iteration, spec_snapshot_json, template, status)
-         VALUES (?, ?, ?, ?, 'queued') RETURNING id`
-      )
-      .get(sessionId, iteration, JSON.stringify(newSpec), newSpec.template);
-    renderId = inserted.id;
-    await db.prepare("UPDATE graphics_sessions SET status = 'rendering' WHERE id = ?").run(sessionId);
-  }
+  // Bug 3 fix: wrap all writes in a single atomic transaction
+  const renderId = await db.transaction(async (tx) => {
+    // INSERT user message (moved inside tx — was previously before loadHistory)
+    await tx.prepare(
+      'INSERT INTO graphics_messages (session_id, role, content) VALUES (?, ?, ?)'
+    ).run(sessionId, 'user', userMessage);
+
+    // INSERT assistant message
+    await tx.prepare(
+      `INSERT INTO graphics_messages
+       (session_id, role, content, model_used, tokens_in, tokens_out, cost_cents)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?)`
+    ).run(sessionId, safeText, MODEL_FOR.brief, briefResp.tokens.in, briefResp.tokens.out, cost);
+
+    // UPDATE spec_json on session
+    await tx.prepare(
+      'UPDATE graphics_sessions SET spec_json = ?, updated_at = NOW() WHERE id = ?'
+    ).run(JSON.stringify(newSpec), sessionId);
+
+    // Enqueue render if spec is complete and session is still in briefing state
+    if (isSpecComplete(newSpec) && session.status === 'briefing') {
+      const iteration = 1;
+      const inserted = await tx
+        .prepare(
+          `INSERT INTO graphics_renders (session_id, iteration, spec_snapshot_json, template, status)
+           VALUES (?, ?, ?, ?, 'queued') RETURNING id`
+        )
+        .get(sessionId, iteration, JSON.stringify(newSpec), newSpec.template);
+      await tx.prepare("UPDATE graphics_sessions SET status = 'rendering' WHERE id = ?").run(sessionId);
+      return inserted.id;
+    }
+
+    return null;
+  });
 
   return {
-    assistantText: visibleText,
+    assistantText: safeText,
     specUpdate,
     newSpec,
     renderId,
