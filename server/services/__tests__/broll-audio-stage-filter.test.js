@@ -7,7 +7,7 @@
 // forget to drop. The audio-only seed strategy (Task 5) already excludes
 // these stages — this filter catches the cases that slip through.
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // broll.js → llm-runner.js / db imports require a live DATABASE_URL at module
 // load. Mock the db module so module load succeeds in unit tests. Mirrors the
@@ -22,9 +22,23 @@ vi.mock('../../db.js', () => ({
   },
 }))
 
-import { __test__filterStagesForMedia as filterStagesForMedia } from '../broll.js'
+import { __test__filterStagesForMedia as filterStagesForMedia, __test__VIDEO_ONLY_PROGRAMMATIC_ACTIONS as VIDEO_ONLY_PROGRAMMATIC_ACTIONS } from '../broll.js'
+
+// Synthetic action name used to exercise the video-only programmatic filter.
+// 'export_post_cut_video' was removed from VIDEO_ONLY_PROGRAMMATIC_ACTIONS when
+// LLM stages switched to the original raw video (Task 7). The Set is currently
+// empty in production; we temporarily add a synthetic name here so the filter
+// logic path is still covered by these tests.
+const SYNTHETIC_VIDEO_ACTION = 'video_only_test_action'
 
 describe('filterStagesForMedia (audio)', () => {
+  beforeEach(() => {
+    VIDEO_ONLY_PROGRAMMATIC_ACTIONS.add(SYNTHETIC_VIDEO_ACTION)
+  })
+  afterEach(() => {
+    VIDEO_ONLY_PROGRAMMATIC_ACTIONS.delete(SYNTHETIC_VIDEO_ACTION)
+  })
+
   it('drops video_llm/video_question stages targeting main_video when audio', () => {
     const stages = [
       { name: '1. Segment', type: 'programmatic', target: 'text_only' },
@@ -47,7 +61,7 @@ describe('filterStagesForMedia (audio)', () => {
 
   it('drops programmatic stages with video-only actions when audio', () => {
     const stages = [
-      { name: 'Export post-cut video', type: 'programmatic', target: 'text_only', action: 'export_post_cut_video' },
+      { name: 'Export post-cut video', type: 'programmatic', target: 'text_only', action: SYNTHETIC_VIDEO_ACTION },
       { name: 'Segment transcript', type: 'programmatic', target: 'text_only', action: 'segment' },
     ]
     const out = filterStagesForMedia(stages, 'audio')
@@ -56,7 +70,7 @@ describe('filterStagesForMedia (audio)', () => {
 
   it('keeps all programmatic stages for video', () => {
     const stages = [
-      { name: 'Export post-cut video', type: 'programmatic', target: 'text_only', action: 'export_post_cut_video' },
+      { name: 'Export post-cut video', type: 'programmatic', target: 'text_only', action: SYNTHETIC_VIDEO_ACTION },
       { name: 'Segment transcript', type: 'programmatic', target: 'text_only', action: 'segment' },
     ]
     const out = filterStagesForMedia(stages, 'video')
@@ -64,12 +78,12 @@ describe('filterStagesForMedia (audio)', () => {
   })
 
   it('remaps *StageIndex params on kept stages when audio drops earlier stages', () => {
-    // Mirrors strategy 7's structure: drop indices 1 (Export post-cut video)
+    // Mirrors strategy 7's structure: drop indices 1 (video-only programmatic)
     // and 2 (Analyze A-Roll). The split_by_chapter stage's params reference
     // those original indices and must be remapped or nulled.
     const stages = [
       { name: '0 transcript', type: 'programmatic', target: 'text_only', action: 'generate_post_cut_transcript', params: {} },
-      { name: '1 export-video', type: 'programmatic', target: 'text_only', action: 'export_post_cut_video', params: {} },
+      { name: '1 export-video', type: 'programmatic', target: 'text_only', action: SYNTHETIC_VIDEO_ACTION, params: {} },
       { name: '2 a-roll', type: 'video_question', target: 'main_video', params: {} },
       { name: '3 chapters', type: 'transcript_question', target: 'main_video', params: {} },
       { name: '4 split', type: 'programmatic', target: 'text_only', action: 'split_by_chapter', params: { chaptersStageIndex: 3, aRollStageIndex: 2 } },

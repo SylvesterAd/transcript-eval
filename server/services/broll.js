@@ -4074,7 +4074,12 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
 // main_video would crash on the missing video file; programmatic stages are
 // not covered by this filter (out of scope for Task 7).
 const VIDEO_STAGE_TYPES = new Set(['video_llm', 'video_question'])
-const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set(['export_post_cut_video'])
+// Programmatic stages that need a video file (the audio-defense filter drops them
+// when main video is audio-only). Empty for now — `export_post_cut_video` was
+// removed when LLM stages switched to the original raw video. Kept as an empty
+// Set so the filter logic still has a stable surface for future video-only
+// programmatic actions.
+const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set()
 
 function filterStagesForMedia(stages, mediaType) {
   if (mediaType !== 'audio') return stages
@@ -4126,9 +4131,11 @@ function filterStagesForMedia(stages, mediaType) {
   return result
 }
 
-// Exported as a __test__ alias so unit tests can exercise the helper without
-// driving the full executePipeline.
+// Exported as __test__ aliases so unit tests can exercise the helpers without
+// driving the full executePipeline. The Set export lets tests temporarily add
+// synthetic action names to exercise the video-only filter path.
 export { filterStagesForMedia as __test__filterStagesForMedia }
+export { VIDEO_ONLY_PROGRAMMATIC_ACTIONS as __test__VIDEO_ONLY_PROGRAMMATIC_ACTIONS }
 
 export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
   const strategy = await getStrategy(strategyId)
@@ -5352,50 +5359,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
               await db.prepare("DELETE FROM transcripts WHERE video_id = ? AND type = 'rough_cut_adjusted'").run(videoId)
               await db.prepare("INSERT INTO transcripts (video_id, type, content) VALUES (?, 'rough_cut_adjusted', ?)").run(videoId, postCutTranscript)
             } catch (e) { console.warn('[broll-pipeline] Could not persist rough_cut_adjusted transcript:', e.message) }
-          }
-        } else if (action === 'export_post_cut_video') {
-          // Export post-cut 360p video, upload to Supabase for persistence across deploys
-          if (!editorCuts?.cuts?.length) {
-            // No cuts — skip video export, use original video
-            console.log('[broll-pipeline] No editor cuts — skipping post-cut video export')
-            output = 'No editor cuts — using original video'
-          } else {
-            const storagePath = `temp/postcut-${pipelineId}.mp4`
-            let postCutPath = null
-
-            // On resume: try downloading cached post-cut from Supabase (seconds vs minutes of FFmpeg)
-            if (isResumedStage) {
-              try {
-                const cachedUrl = getPublicUrl('videos', storagePath)
-                postCutPath = await downloadToTemp(cachedUrl, `postcut-${pipelineId}.mp4`)
-                console.log(`[broll-pipeline] Resume: reused cached post-cut from storage (skipped FFmpeg)`)
-                output = resumeData.completedStages[i] || `Post-cut video restored from cache`
-              } catch (e) {
-                console.warn(`[broll-pipeline] Resume: cached post-cut not available, falling back to FFmpeg: ${e.message}`)
-                postCutPath = null
-              }
-            }
-
-            // Initial run or resume fallback: run FFmpeg
-            if (!postCutPath) {
-              const { exportPostCutVideo } = await import('./video-processor.js')
-              const { getVideoDuration } = await import('./video-processor.js')
-              const originalPath = await getVideoFilePath(videoId)
-              const duration = await getVideoDuration(originalPath) || 600
-              const effectiveCuts = computeEffectiveCuts(editorCuts.cuts, editorCuts.cutExclusions || [])
-              postCutPath = await exportPostCutVideo(originalPath, effectiveCuts, duration)
-              // Upload to Supabase — kept for future resumes (not added to cleanup list)
-              try {
-                const url = await uploadFile('videos', storagePath, postCutPath)
-                console.log(`[broll-pipeline] Post-cut uploaded to storage: ${url}`)
-                output = `Post-cut video exported (360p) and uploaded: ${url}`
-              } catch (e) {
-                console.warn(`[broll-pipeline] Post-cut upload failed (using local): ${e.message}`)
-                output = `Post-cut video exported (360p, local only): ${postCutPath}`
-              }
-            }
-
-            mainVideoFilePath = postCutPath
           }
         } else if (action === 'assemble_broll_plan') {
           // Merge per-chapter B-Roll plan outputs into one document
