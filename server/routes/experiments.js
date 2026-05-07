@@ -480,7 +480,7 @@ router.post('/runs/:runId/restart-from/:stageIndex', requireAuth, async (req, re
     if (succeeded && groupId) {
       try {
         const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await import('../services/annotation-mapper.js')
-        let wordTimestamps = getTimelineWordTimestamps(groupId)
+        let wordTimestamps = await getTimelineWordTimestamps(groupId)
         if (!wordTimestamps?.length) {
           const transcript = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(completedRun.video_id)
           if (transcript?.word_timestamps_json) {
@@ -489,7 +489,7 @@ router.post('/runs/:runId/restart-from/:stageIndex', requireAuth, async (req, re
         }
         if (wordTimestamps?.length) {
           const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
-          const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
+          const annotations = await buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
           await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
             .run(JSON.stringify(annotations), groupId)
           console.log(`[restart] Rebuilt ${annotations.items.length} annotations for group ${groupId}`)
