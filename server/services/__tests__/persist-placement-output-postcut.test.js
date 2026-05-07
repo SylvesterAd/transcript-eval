@@ -117,4 +117,23 @@ describe('persistPlacementOutput (original→post-cut shift)', () => {
     const out = await persistPlacementOutput(stageOutput, editorCuts)
     expect(out).toBe(stageOutput)
   })
+
+  it('shifts a placement that straddles a cut boundary by independently shifting each endpoint', async () => {
+    // Cut [15, 17] removes 2s. Placement runs from original 12 to 20:
+    //   start=12 has 0 preceding cut → post-cut start = 12
+    //   end=20 has the full cut [15,17] preceding it → post-cut end = 20 - 2 = 18
+    // Result: placement spans [12, 18] in post-cut, collapsing across the cut as if it weren't there.
+    const cuts = { cuts: [{ start: 15, end: 17 }], cutExclusions: [] }
+    const stageOutput = JSON.stringify({
+      placements: [{
+        start: '[00:00:12]', end: '[00:00:20]',
+        start_seconds: 12, end_seconds: 20,
+        audio_anchor: 'There is a bad piece',
+      }],
+    })
+    const out = await persistPlacementOutput(stageOutput, cuts, 449)
+    const p = JSON.parse(out).placements[0]
+    expect(p.start_seconds).toBeCloseTo(12, 2)
+    expect(p.end_seconds).toBeCloseTo(18, 2)
+  })
 })

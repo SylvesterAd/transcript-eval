@@ -359,13 +359,13 @@ const existingVer = await db.prepare("SELECT id FROM broll_strategy_versions WHE
 let ver
 if (existingVer) {
   await db.prepare('UPDATE broll_strategy_versions SET stages_json = ?, notes = ? WHERE id = ?')
-    .run(JSON.stringify(stages), '6-stage B-Roll planning pipeline for post-rough-cut videos', existingVer.id)
+    .run(JSON.stringify(stages), '6-stage B-Roll planning pipeline for raw video, with cut ranges injected into prompts', existingVer.id)
   ver = { lastInsertRowid: existingVer.id }
 } else {
   ver = await db.prepare(`
     INSERT INTO broll_strategy_versions (strategy_id, name, notes, stages_json)
     VALUES ($1, $2, $3, $4)
-  `).run(stratId, 'Version 1', '6-stage B-Roll planning pipeline for post-rough-cut videos', JSON.stringify(stages))
+  `).run(stratId, 'Version 1', '6-stage B-Roll planning pipeline for raw video, with cut ranges injected into prompts', JSON.stringify(stages))
 }
 
 console.log('Version:', ver.lastInsertRowid)

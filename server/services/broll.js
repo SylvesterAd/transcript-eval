@@ -1080,7 +1080,7 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
     const h = String(Math.floor(s / 3600)).padStart(2, '0')
     const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
     const sec = String(Math.floor(s % 60)).padStart(2, '0')
-    const cs = Math.round((s % 1) * 100)
+    const cs = Math.min(99, Math.round((s % 1) * 100))
     const base = `${h}:${m}:${sec}`
     return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
   }
@@ -1202,7 +1202,7 @@ export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
     const h = String(Math.floor(s / 3600)).padStart(2, '0')
     const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
     const sec = String(Math.floor(s % 60)).padStart(2, '0')
-    const cs = Math.round((s % 1) * 100)
+    const cs = Math.min(99, Math.round((s % 1) * 100))
     const base = `${h}:${m}:${sec}`
     return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
   }
@@ -5345,7 +5345,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             chapters,
           }, null, 2)
         } else if (action === 'generate_post_cut_transcript') {
-          // Generate transcript with timecodes adjusted for rough cut
+          // Generate transcript with cut text removed; kept words preserve original timecodes
           if (!editorCuts?.cuts?.length) {
             // No cuts — use raw transcript as-is (plan prep without rough cut)
             console.log('[broll-pipeline] No editor cuts — using raw transcript')
