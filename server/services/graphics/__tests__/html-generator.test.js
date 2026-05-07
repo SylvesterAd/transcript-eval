@@ -72,4 +72,42 @@ describe('specToHtml', () => {
       specToHtml({ spec: { template: 'lower-third', duration: 5 } })
     ).rejects.toThrow(/missing.*data-composition-id="main"/i)
   })
+
+  it('system prompt includes asset-usage guidance', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Asset usage/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/spec\.assets/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/<img src=/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).not.toMatch(/Stay close to this style for now/)
+  })
+
+  it('passes assets array to the LLM via the user message', async () => {
+    const { callAnthropic } = await import('../../../lib/llm/anthropic.js')
+    callAnthropic.mockClear()
+    callAnthropic.mockResolvedValueOnce({
+      text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080"></div></body></html>',
+      toolUses: [],
+      tokens: { in: 0, out: 0 },
+      stop: 'end_turn',
+    })
+    const { specToHtml } = await import('../html-generator.js')
+    await specToHtml({
+      spec: {
+        template: 'lower-third',
+        aspectRatio: '16:9',
+        duration: 8,
+        mainText: 'Anna Rivera',
+        subText: 'Senior journalist',
+        tone: 'neutral',
+        assets: [
+          { role: 'logo', url: 'https://example.com/wsj.svg', alt: 'WSJ logo', source: 'wikimedia.org' },
+        ],
+      },
+    })
+    const lastCall = callAnthropic.mock.calls.at(-1)[0]
+    const userMsg = lastCall.messages[0].content
+    expect(userMsg).toContain('"assets":')
+    expect(userMsg).toContain('https://example.com/wsj.svg')
+    expect(userMsg).toContain('"role": "logo"')
+  })
 })
