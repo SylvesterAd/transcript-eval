@@ -58,3 +58,15 @@ describe('orchestrator', () => {
     expect(lastCall.model).toBe('gemini-3-flash-preview')
   })
 });
+
+describe('BRIEF_SYSTEM_PROMPT documents available adapters', () => {
+  it('lists gsap, lottie, three, animejs, waapi, css-animations as adapter options', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/gsap/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/lottie/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/three/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/animejs|anime\.js/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/waapi|web animations/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/css-animations|css animation/i)
+  })
+})

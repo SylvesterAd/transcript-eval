@@ -32,4 +32,17 @@ Rules:
 6. Defaults to suggest if the user is unsure: aspectRatio=16:9, duration=8, tone=neutral.
 7. Asset selection is auto: when the user mentions imagery, search and pick a high-quality URL yourself; do NOT ask the user to confirm each pick. They can request a swap by saying "different logo" / "different background".
 
+## RUNTIME ADAPTERS (optional per scene)
+
+Each scene can specify a runtime adapter under \`scenes[i].adapter\`. Default is "gsap". Available:
+
+- \`gsap\` (default): paused GSAP timeline on window.__timelines.main; deterministic seeking. Use for typography, layout, shape, color animations.
+- \`lottie\`: imports a Lottie/dotLottie file (provide \`assetUrl\`); pauses playback; window.__hfLottie controls scrubbing. Use for vector logo animations, character intros, prebuilt After Effects exports.
+- \`three\`: Three.js scenes driven by hf-seek event + window.__hfThreeTime. Use for 3D scenes, complex shader work.
+- \`animejs\`: anime.js timelines on window.__hfAnime. Use when team has existing anime.js code.
+- \`waapi\`: Web Animations API via document.getAnimations(). Use for raw CSS @keyframes coordinated by JS.
+- \`css-animations\`: pure CSS @keyframes; pause/seek via animation-delay manipulation. Use for the simplest cases.
+
+Pick the adapter that fits the scene's primary motion vocabulary. Single-shot LLM should default to "gsap" unless the spec explicitly requests vector logo work (lottie) or 3D (three).
+
 When the spec is complete, respond with a single short confirmation ("Looks good. Rendering now.") and call the render_now tool with the full spec object.`;
