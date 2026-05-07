@@ -67,4 +67,18 @@ describe('findInterruptionClusters', () => {
     expect(clusters.length).toBe(1)
     expect(clusters[0].start).toBeLessThan(50)
   })
+
+  it('detects bracketed-word audio events without a type field (production format)', () => {
+    const words = [
+      { word: 'speaker', start: 0, end: 0.5 },
+      { word: 'pauses.', start: 0.5, end: 1 },
+      { word: '[keyboard clacking]', start: 2, end: 8 },
+      { word: 'Okay,', start: 8.2, end: 8.5 },
+      { word: 'continuing', start: 12, end: 13 },
+    ]
+    const clusters = findInterruptionClusters(words, { maxGapSec: 5 })
+    expect(clusters.length).toBe(1)
+    expect(clusters[0].suggested_category).toBe('meta_commentary')
+    expect(clusters[0].elements.some(e => /^\[/.test(e.word))).toBe(true)
+  })
 })

@@ -178,7 +178,10 @@ async function get_silences(params, state) {
 
 async function get_audio_events(params, state) {
   const { scope, types } = params || {}
-  let events = state.wordTimestamps.filter(w => w.type === 'audio_event')
+  // Detect both the unit-test shape ({type: 'audio_event'}) and the
+  // production shape (bracketed word text, no type field).
+  const isAudioEvent = (w) => w.type === 'audio_event' || (typeof w.word === 'string' && /^\[.*\]$/.test(w.word.trim()))
+  let events = state.wordTimestamps.filter(isAudioEvent)
   if (scope) events = events.filter(w => inScope(w.start, w.end, scope))
   if (types?.length) {
     const wantedSet = new Set(types.map(t => t.toLowerCase()))

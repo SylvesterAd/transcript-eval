@@ -8,8 +8,12 @@
 const SHORT_UTTERANCE_SEC = 3
 const DEFAULT_MAX_GAP = 5
 
+// Audio events come in two shapes depending on data source:
+//  - Unit-test fixtures: explicit { type: 'audio_event' }
+//  - Production word_timestamps: word text wrapped in square brackets, no type field
 function isAudioEvent(word) {
-  return word.type === 'audio_event'
+  if (word.type === 'audio_event') return true
+  return typeof word.word === 'string' && /^\[.*\]$/.test(word.word.trim())
 }
 
 function isShortUtterance(word) {

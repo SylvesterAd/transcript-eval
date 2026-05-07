@@ -146,4 +146,16 @@ describe('dispatchTool', () => {
   it('throws on unknown tool name', async () => {
     await expect(dispatchTool('does_not_exist', {}, makeState())).rejects.toThrow(/unknown/i)
   })
+
+  it('get_audio_events detects bracketed-word audio events without type field', async () => {
+    const words = [
+      { word: 'hi', start: 0, end: 1 },
+      { word: '[keyboard clacking]', start: 5, end: 7 },
+      { word: '[door slam]', start: 10, end: 11 },
+    ]
+    const state = createState({ assembledTranscript: '', wordTimestamps: words })
+    const r = await dispatchTool('get_audio_events', {}, state)
+    expect(r.events.length).toBe(2)
+    expect(r.events[0].tc).toBe('[keyboard clacking]')
+  })
 })
