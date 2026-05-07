@@ -670,6 +670,9 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
                   <div className="text-sm font-bold text-on-surface">Rough cut ready — review while we keep working</div>
                   <div className="text-xs text-on-surface-variant mt-0.5">Your b-roll search is still running. Open the rough cut to make adjustments.</div>
                 </div>
+                {/* Hands-off projects produce a single sub-group for rough-cut review,
+                    so [0] is the rough-cut target. If multi-sub-group support arrives,
+                    this needs a sub-group picker. */}
                 <button
                   onClick={() => navigate(`/editor/${subGroups[0].id}/roughcut`)}
                   className="px-4 py-1.5 rounded-md text-xs font-bold bg-lime text-black hover:opacity-90"
