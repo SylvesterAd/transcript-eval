@@ -22,6 +22,7 @@ import ProjectsView from './components/views/ProjectsView.jsx'
 import ExportsList from './pages/admin/ExportsList.jsx'
 import ExportDetail from './pages/admin/ExportDetail.jsx'
 import SupportBundle from './pages/admin/SupportBundle.jsx'
+import MotionGraphicsView from './pages/admin/MotionGraphicsView.jsx'
 import EditorView from './components/editor/EditorView.jsx'
 import ExportPage from './pages/ExportPage.jsx'
 
@@ -204,6 +205,7 @@ export default function App() {
         <Route path="experiments/:experimentId/stability" element={<StabilityView />} />
         <Route path="exports" element={<ExportsList />} />
         <Route path="exports/:id" element={<ExportDetail />} />
+        <Route path="motion-graphics" element={<MotionGraphicsView />} />
         <Route path="support" element={<SupportBundle />} />
         <Route path="users" element={<AdminUsersView />} />
         <Route path="users/:userId" element={<AdminUserDetailView />} />

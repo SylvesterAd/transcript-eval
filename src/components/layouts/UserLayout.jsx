@@ -1,5 +1,5 @@
 import { Outlet } from 'react-router-dom'
-import { Search, HelpCircle, MessageSquare, Database } from 'lucide-react'
+import { HelpCircle, MessageSquare, Database } from 'lucide-react'
 import { useRole } from '../../contexts/RoleContext.jsx'
 import AuthDropdown from '../auth/AuthDropdown.jsx'
 
@@ -10,18 +10,7 @@ export default function UserLayout() {
     <div className="min-h-screen bg-obsidian text-gray-100 flex flex-col">
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-4 bg-surface-dark border-b border-border-subtle">
-        <div className="flex items-center flex-1">
-          <div className="relative w-full max-w-2xl">
-            <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search size={16} className="text-muted" />
-            </span>
-            <input
-              className="w-full bg-surface text-sm rounded-md pl-10 pr-4 py-2 border border-transparent focus:bg-surface-dark focus:border-lime focus:ring-1 focus:ring-lime outline-none transition-colors text-white placeholder-muted"
-              placeholder="Search projects"
-              type="text"
-            />
-          </div>
-        </div>
+        <div className="flex items-center flex-1"></div>
         <div className="flex items-center space-x-4 ml-6">
           {/* Credits badge */}
           <div className="flex items-center bg-surface rounded-md border border-border-subtle p-1 text-sm px-1">
