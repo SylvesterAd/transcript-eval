@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width={{width}}, height={{height}}" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700;900&family=JetBrains+Mono:wght@400&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        width: {{width}}px;
+        height: {{height}}px;
+        background: transparent;
+        overflow: hidden;
+        font-family: "Roboto Condensed", sans-serif;
+      }
+      .lt-bar {
+        position: absolute;
+        bottom: {{barBottom}}px;
+        left: {{barLeft}}px;
+        height: {{barHeight}}px;
+        background: rgba(0, 0, 0, 0.78);
+        border-left: 4px solid {{accent}};
+        padding: 14px 22px;
+        opacity: 0;
+        display: flex; flex-direction: column; justify-content: center;
+        max-width: {{barMaxWidth}}px;
+      }
+      .lt-main {
+        font-weight: 700;
+        font-size: {{mainSize}}px;
+        color: #fafaf5;
+        letter-spacing: 0.01em;
+        line-height: 1.05;
+        white-space: nowrap;
+      }
+      .lt-sub {
+        margin-top: 6px;
+        font-family: "JetBrains Mono", monospace;
+        font-weight: 400;
+        font-size: {{subSize}}px;
+        color: {{accent}};
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage" data-composition-id="main" data-start="0" data-duration="{{duration}}" data-width="{{width}}" data-height="{{height}}">
+      <div class="lt-bar" id="lt-bar">
+        <div class="lt-main" id="lt-main">{{mainText}}</div>
+        <div class="lt-sub" id="lt-sub">{{subText}}</div>
+      </div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo("#lt-bar", { opacity: 0, x: -60 }, { opacity: 1, x: 0, duration: 0.6, ease: "expo.out" }, 0.1);
+      tl.fromTo("#lt-main", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.5 }, 0.4);
+      tl.fromTo("#lt-sub", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.5 }, 0.6);
+      // Hold, then exit slightly before clip end
+      tl.to("#lt-bar", { opacity: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, {{duration}} - 0.7));
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
