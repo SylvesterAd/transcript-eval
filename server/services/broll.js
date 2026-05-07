@@ -1061,42 +1061,17 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
   if (!t?.word_timestamps_json) throw new Error(`No word timestamps for video ${videoId}`)
   const words = JSON.parse(t.word_timestamps_json)
 
-  // 1. Compute effective cuts: merge cuts, subtract exclusions
   const effectiveCuts = computeEffectiveCuts(cuts, cutExclusions)
 
-  // 2. Filter out words whose midpoint falls inside any cut
+  // Filter out words whose midpoint falls inside any cut. Kept words keep
+  // their ORIGINAL start/end timestamps — no shifting. Cut text vanishes from
+  // the transcript but timecodes remain in the original-video domain so
+  // downstream LLM stages can anchor placements directly to the raw video.
   const keptWords = words.filter(w => {
     const mid = (w.start + w.end) / 2
     return !effectiveCuts.some(c => mid >= c.start && mid < c.end)
   })
 
-  // 3. Pre-compute cumulative cut durations for offset calculation
-  const sortedCuts = [...effectiveCuts].sort((a, b) => a.start - b.start)
-  const cutEnds = sortedCuts.map(c => c.end)
-  const cutDurations = sortedCuts.map(c => c.end - c.start)
-  const cumDurations = []
-  let cum = 0
-  for (const d of cutDurations) { cum += d; cumDurations.push(cum) }
-
-  function getOffset(time) {
-    // Binary search: sum of cut durations for all cuts ending before this time
-    let lo = 0, hi = cutEnds.length
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (cutEnds[mid] <= time) lo = mid + 1
-      else hi = mid
-    }
-    return lo > 0 ? cumDurations[lo - 1] : 0
-  }
-
-  // 4. Adjust timecodes
-  const adjusted = keptWords.map(w => ({
-    word: w.word,
-    start: w.start - getOffset(w.start),
-    end: w.end - getOffset(w.end),
-  }))
-
-  // 5. Format as [HH:MM:SS] timecoded transcript
   const toTC = (s) => {
     const h = String(Math.floor(s / 3600)).padStart(2, '0')
     const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
@@ -1111,13 +1086,13 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
   let lineStartTime = null
   let prevLineEnd = null
 
-  for (let i = 0; i < adjusted.length; i++) {
-    const w = adjusted[i]
+  for (let i = 0; i < keptWords.length; i++) {
+    const w = keptWords[i]
     if (lineStartTime === null) lineStartTime = w.start
     currentLine.push(w.word)
 
     const endsWithPunctuation = /[.!?]$/.test(w.word.trim())
-    const isLastWord = i === adjusted.length - 1
+    const isLastWord = i === keptWords.length - 1
 
     if (endsWithPunctuation || isLastWord) {
       if (prevLineEnd !== null) {
@@ -1127,7 +1102,7 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
       const tc = toTC(lineStartTime)
       const text = currentLine.join(' ').replace(/\s+([.,!?;:])/g, '$1')
       lines.push(`${tc} ${text.trim()}`)
-      prevLineEnd = adjusted[i].end
+      prevLineEnd = keptWords[i].end
       currentLine = []
       lineStartTime = null
     }
