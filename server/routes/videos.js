@@ -1411,15 +1411,22 @@ router.post('/groups/:id/cancel-transcriptions', requireAuth, async (req, res) =
   res.json(result)
 })
 
-// Batch-start transcription for all untranscribed videos in a group (up to 3 concurrent)
-router.post('/groups/:id/transcribe', requireAuth, async (req, res) => {
+// Batch-start transcription for all untranscribed videos in a group (up to 3 concurrent).
+// Exported as _batchTranscribeHandler for unit tests that need to assert the
+// candidate SELECT excludes media_type='script' rows.
+export async function _batchTranscribeHandler(req, res) {
   const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
 
-  // Find all videos that need transcription (not done, not currently active)
+  // Find all videos that need transcription (not done, not currently active).
+  // media_type filter: scripts (.txt/.docx/.pdf uploaded via /upload-script)
+  // share the videos table but have no audio for ElevenLabs Scribe — without
+  // this filter Scribe rejected them with "File is corrupted" and the
+  // transcribe stage in ProcessingModal stuck at "Pending".
   const videos = await db.prepare(`
     SELECT id, title, transcription_status, file_path, cf_stream_uid FROM videos
     WHERE group_id = ? AND (file_path IS NOT NULL OR cf_stream_uid IS NOT NULL)
+    AND media_type IN ('audio', 'video')
     AND (transcription_status IS NULL OR transcription_status NOT IN ('done'))
     ORDER BY id ASC
   `).all(req.params.id)
@@ -1435,7 +1442,8 @@ router.post('/groups/:id/transcribe', requireAuth, async (req, res) => {
   }
   console.log(`[batch] Enqueued ${enqueued} videos (active: ${activeTranscriptionIds.size}, waiting: ${transcriptionQueue.length})`)
   res.json({ enqueued })
-})
+}
+router.post('/groups/:id/transcribe', requireAuth, _batchTranscribeHandler)
 
 router.post('/groups/:id/rebuild-timeline', requireAuth, async (req, res) => {
   const group = await db.prepare(`SELECT * FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))

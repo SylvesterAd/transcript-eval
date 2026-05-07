@@ -148,11 +148,16 @@ ${previews}`
 }
 
 export async function classifyVideosForReview(groupId) {
+  // media_type='script' rows are reference documents (.txt/.docx/.pdf)
+  // uploaded via /upload-script. They have no transcript and no waveform,
+  // so Gemini can't classify them — without this filter they were lumped
+  // into MAIN with empty transcript content (group 308 incident, 2026-05-07).
   const videos = await db.prepare(`
     SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
     FROM videos v
     LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
     WHERE v.group_id = ? AND v.video_type = 'raw'
+      AND v.media_type IN ('audio', 'video')
     ORDER BY v.id
   `).all(groupId)
 
@@ -219,11 +224,14 @@ export async function analyzeMulticam(groupId, options = {}) {
   // the audio guard let us through. Production callers never set this.
   if (options.dryRun) return { skipped: false, dryRun: true }
 
+  // Same script filter as classifyVideosForReview — scripts have no
+  // waveform to align, so they must never enter the multicam path.
   let videos = await db.prepare(`
     SELECT v.id, v.title, v.duration_seconds, v.file_path, t.content AS transcript
     FROM videos v
     LEFT JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
     WHERE v.group_id = ? AND v.video_type = 'raw'
+      AND v.media_type IN ('audio', 'video')
     ORDER BY v.id
   `).all(groupId)
 
