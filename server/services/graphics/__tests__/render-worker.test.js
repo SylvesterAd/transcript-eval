@@ -85,6 +85,10 @@ vi.mock('../../../lib/llm/anthropic.js', () => ({
   }),
 }));
 
+vi.mock('../scene-concat.js', () => ({
+  concatScenes: vi.fn().mockResolvedValue({ durationMs: 50, outputPath: '/tmp/final.mp4' }),
+}));
+
 beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = 'sk-test';
 });
@@ -144,5 +148,62 @@ describe('renderWorker.drainOnce — retry path', () => {
     expect(result.errors).toHaveLength(0)
     // 3 critic calls = 3 attempts (initial + 2 retries)
     expect(runCritic).toHaveBeenCalledTimes(3)
+  })
+});
+
+describe('renderWorker.drainOnce — multi-scene', () => {
+  it('multi-scene: renders each scene and concatenates', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 7, session_id: 2, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          aspectRatio: '16:9',
+          tone: 'neutral',
+          scenes: [
+            { template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' },
+            { template: 'lower-third', duration: 5, mainText: 'B', subText: 'b' },
+          ],
+        },
+      })
+      .mockResolvedValue(null)
+
+    const { specToHtml } = await import('../html-generator.js')
+    const { renderHtml } = await import('../render-runner.js')
+    const { concatScenes } = await import('../scene-concat.js')
+    const { uploadRender } = await import('../uploader.js')
+    const { runCritic } = await import('../critic/critic-runner.js')
+
+    specToHtml.mockClear()
+    renderHtml.mockClear()
+    concatScenes.mockClear()
+    uploadRender.mockClear()
+    runCritic.mockReset()
+    // Two scenes, each passes on first iteration → 2 critic calls total.
+    runCritic.mockResolvedValue({
+      score: 0.9,
+      criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
+      feedback: 'good',
+      retry_recommended: false,
+      frameUrls: ['https://x/0.png'],
+      tokens: { in: 0, out: 0 },
+    })
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+    expect(specToHtml).toHaveBeenCalledTimes(2)
+    expect(renderHtml).toHaveBeenCalledTimes(2)
+    const subDirs = renderHtml.mock.calls.map((c) => c[0].subDir)
+    expect(subDirs).toEqual(['scene-0', 'scene-1'])
+    expect(concatScenes).toHaveBeenCalledTimes(1)
+    expect(concatScenes.mock.calls[0][0].sceneMp4Paths).toHaveLength(2)
+    // 2 per-scene uploads + 1 final concat upload = 3
+    expect(uploadRender).toHaveBeenCalledTimes(3)
+    expect(runCritic).toHaveBeenCalledTimes(2)
   })
 });

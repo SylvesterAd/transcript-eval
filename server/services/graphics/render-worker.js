@@ -11,6 +11,7 @@
 //   4. uploadRender -> Supabase signed URL
 //   5. Atomic: mark render complete + flip session status
 
+import path from 'node:path';
 import db from '../../db.js';                          // default import
 import { renderHtml } from './render-runner.js';
 import { uploadRender } from './uploader.js';
@@ -19,6 +20,7 @@ import { specToHtml } from './html-generator.js';
 import { MODEL_FOR } from './models.js';
 import { runCritic } from './critic/critic-runner.js';
 import { buildRetryPrompt } from './retry-prompt.js';
+import { concatScenes } from './scene-concat.js';
 import { emit } from './events/emitter.js';
 
 const POLL_INTERVAL_MS = 2000;
@@ -44,95 +46,123 @@ async function claimNextRender() {
     .get();
 }
 
+async function runSceneCriticLoop({ renderId, sessionId, sceneSpec, sceneIndex = null }) {
+  const subDir = sceneIndex !== null ? `scene-${sceneIndex}` : null;
+  let totalCost = 0;
+  const { html: initialHtml, cost } = await specToHtml({ spec: sceneSpec });
+  totalCost += cost;
+  let currentHtml = initialHtml;
+  let currentResult = await renderHtml({ html: currentHtml, renderId, subDir });
+  emit({ sessionId, step: 'render_finished', label: `Render complete (iter 1)`, renderId, iteration: 1, sceneIndex })
+  let currentUpload = await uploadRender({ renderId, sessionId, localPath: currentResult.outputPath });
+  let bestAttempt = null;
+  let iteration = 1;
+  let totalDurationMs = currentResult.durationMs;
+
+  while (iteration <= MAX_ITERATIONS) {
+    const critique = await runCritic({
+      renderId, iterationIndex: iteration, sceneIndex,
+      mp4Path: currentResult.outputPath,
+      durationSec: sceneSpec.duration || 5,
+      spec: sceneSpec, sessionId,
+    });
+    emit({ sessionId, step: 'critic_scored', label: `Critic score ${critique.score.toFixed(2)} (iter ${iteration})`, renderId, iteration, score: critique.score, sceneIndex });
+    const attempt = { iteration, score: critique.score, mp4Path: currentResult.outputPath, upload: currentUpload, durationMs: currentResult.durationMs };
+    if (!bestAttempt || attempt.score > bestAttempt.score) bestAttempt = attempt;
+    if (!critique.retry_recommended || critique.score >= SCORE_THRESHOLD) break;
+    if (iteration >= MAX_ITERATIONS) break;
+
+    emit({ sessionId, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId, sceneIndex });
+    const retrySys = buildRetryPrompt({ priorCritique: critique, priorHtml: currentHtml });
+    const retryResp = await callAnthropic({
+      model: MODEL_FOR.create, system: retrySys,
+      messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(sceneSpec)}` }],
+      max_tokens: 4096,
+    });
+    const retryHtml = retryResp.text.trim()
+      .replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim();
+    if (!/data-composition-id\s*=\s*"main"/i.test(retryHtml)) {
+      throw new Error('retry creator returned HTML missing data-composition-id="main"');
+    }
+    currentHtml = retryHtml;
+    iteration += 1;
+    currentResult = await renderHtml({ html: currentHtml, renderId, subDir });
+    emit({ sessionId, step: 'render_finished', label: `Render complete (iter ${iteration})`, renderId, iteration, sceneIndex });
+    totalDurationMs += currentResult.durationMs;
+    currentUpload = await uploadRender({ renderId, sessionId, localPath: currentResult.outputPath });
+  }
+
+  return {
+    bestMp4Path: bestAttempt.mp4Path,
+    bestUpload: bestAttempt.upload,
+    bestScore: bestAttempt.score,
+    totalIterations: iteration,
+    totalDurationMs,
+    cost: totalCost,
+  };
+}
+
 export async function drainOnce() {
   let processed = 0;
   const errors = [];
   let row;
   while ((row = await claimNextRender())) {
     try {
-      emit({ sessionId: row.session_id, step: 'render_started', label: 'Rendering…', renderId: row.id, iteration: 1 })
-      const { html: initialHtml, cost } = await specToHtml({ spec: row.spec_snapshot_json });
-      let currentHtml = initialHtml;
-      let currentResult = await renderHtml({ html: currentHtml, renderId: row.id });
-      emit({ sessionId: row.session_id, step: 'render_finished', label: `Render complete (iter 1)`, renderId: row.id, iteration: 1 })
-      let currentUpload = await uploadRender({
-        renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
-      });
+      emit({ sessionId: row.session_id, step: 'render_started', label: 'Rendering…', renderId: row.id, iteration: 1 });
 
-      let bestAttempt = null;
-      let iteration = 1;
+      const spec = row.spec_snapshot_json;
+      const isMultiScene = Array.isArray(spec.scenes) && spec.scenes.length > 0;
 
-      while (iteration <= MAX_ITERATIONS) {
-        const critique = await runCritic({
-          renderId: row.id,
-          iterationIndex: iteration,
-          mp4Path: currentResult.outputPath,
-          durationSec: row.spec_snapshot_json.duration || 5,
-          spec: row.spec_snapshot_json,
-          sessionId: row.session_id,
-        });
-
-        emit({ sessionId: row.session_id, step: 'critic_scored', label: `Critic score ${critique.score.toFixed(2)} (iter ${iteration})`, renderId: row.id, iteration, score: critique.score })
-        const attempt = {
-          iteration,
-          score: critique.score,
-          upload: currentUpload,
-          durationMs: currentResult.durationMs,
-        };
-        if (!bestAttempt || attempt.score > bestAttempt.score) bestAttempt = attempt;
-
-        // Ship if quality is acceptable
-        if (!critique.retry_recommended || critique.score >= SCORE_THRESHOLD) break;
-        // Budget exhausted
-        if (iteration >= MAX_ITERATIONS) break;
-
-        emit({ sessionId: row.session_id, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId: row.id })
-        const retrySys = buildRetryPrompt({ priorCritique: critique, priorHtml: currentHtml });
-        const retryResp = await callAnthropic({
-          model: MODEL_FOR.create,
-          system: retrySys,
-          messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(row.spec_snapshot_json)}` }],
-          max_tokens: 4096,
-        });
-        const retryHtml = retryResp.text.trim()
-          .replace(/^```html\s*/i, '')
-          .replace(/^```\s*/i, '')
-          .replace(/```$/, '')
-          .trim();
-        if (!/data-composition-id\s*=\s*"main"/i.test(retryHtml)) {
-          throw new Error(`retry creator returned HTML missing data-composition-id="main"`);
+      if (isMultiScene) {
+        const sceneResults = [];
+        let aggregateCost = 0;
+        for (let i = 0; i < spec.scenes.length; i++) {
+          const sceneSpec = { ...spec, ...spec.scenes[i] };
+          delete sceneSpec.scenes;
+          const r = await runSceneCriticLoop({
+            renderId: row.id, sessionId: row.session_id, sceneSpec, sceneIndex: i,
+          });
+          sceneResults.push(r);
+          aggregateCost += r.cost;
         }
-        currentHtml = retryHtml;
-        iteration += 1;
-        currentResult = await renderHtml({ html: currentHtml, renderId: row.id });
-        emit({ sessionId: row.session_id, step: 'render_finished', label: `Render complete (iter ${iteration})`, renderId: row.id, iteration })
-        currentUpload = await uploadRender({
-          renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
-        });
-      }
-
-      // Wrap completion writes in a transaction for atomicity
-      await db.transaction(async (tx) => {
-        await tx
-          .prepare(
+        const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
+        const finalLocalPath = path.join(baseDir, String(row.id), 'final.mp4');
+        await concatScenes({ sceneMp4Paths: sceneResults.map((r) => r.bestMp4Path), outputPath: finalLocalPath });
+        const finalUpload = await uploadRender({ renderId: row.id, sessionId: row.session_id, localPath: finalLocalPath });
+        const finalScore = Math.min(...sceneResults.map((r) => r.bestScore));
+        const totalIters = sceneResults.reduce((s, r) => s + r.totalIterations, 0);
+        const totalDuration = sceneResults.reduce((s, r) => s + r.totalDurationMs, 0);
+        await db.transaction(async (tx) => {
+          await tx.prepare(
             `UPDATE graphics_renders
              SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?,
-                 iteration_count = ?, final_score = ?
+                 iteration_count = ?, final_score = ?, scene_count = ?
              WHERE id = ?`
-          )
-          .run(
-            bestAttempt.upload.url,
-            bestAttempt.durationMs,
-            cost,
-            iteration,
-            bestAttempt.score,
-            row.id
-          );
-        await tx
-          .prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`)
-          .run(row.session_id);
+          ).run(finalUpload.url, totalDuration, aggregateCost, totalIters, finalScore, spec.scenes.length, row.id);
+          await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`).run(row.session_id);
+        });
+        emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore });
+        processed += 1;
+        continue;
+      }
+
+      // Single-scene path (back-compat)
+      const r = await runSceneCriticLoop({
+        renderId: row.id, sessionId: row.session_id, sceneSpec: spec, sceneIndex: null,
       });
-      emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore: bestAttempt.score })
+
+      await db.transaction(async (tx) => {
+        await tx.prepare(
+          `UPDATE graphics_renders
+           SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?,
+               iteration_count = ?, final_score = ?
+           WHERE id = ?`
+        ).run(
+          r.bestUpload.url, r.totalDurationMs, r.cost, r.totalIterations, r.bestScore, row.id
+        );
+        await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`).run(row.session_id);
+      });
+      emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore: r.bestScore });
       processed += 1;
     } catch (e) {
       errors.push({ renderId: row.id, error: e.message });
