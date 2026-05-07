@@ -5396,6 +5396,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
           }, null, 2)
           output = await persistPlacementOutput(rawOutput, editorCuts, videoId)
         } else {
+          console.warn(`[broll-pipeline] Unknown programmatic action "${action}" — passing transcript through unchanged. Likely a stale stages_json from before a strategy update.`)
           output = currentTranscript
         }
       }
@@ -5462,9 +5463,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     snapshot.outcome = { event: 'complete', at: new Date().toISOString() }
     writePipelineSnapshot(pipelineId, snapshot)
     console.log(`[broll-snapshot] pipeline_complete | ${stages.length} stages | $${totalCost.toFixed(4)} | ${(totalRuntime / 1000).toFixed(1)}s`)
-
-    // Clean up Supabase postcut file only on success (preserve for resume on failure)
-    try { await deleteFile('videos', `temp/postcut-${pipelineId}.mp4`) } catch {}
 
     // Clean up temp files from Supabase storage
     cleanupTempFiles(pipelineTempFiles)
