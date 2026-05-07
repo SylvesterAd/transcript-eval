@@ -31,7 +31,7 @@ export async function callGemini({ model, system, messages, tools, thinkingLevel
   });
   const history = messages.slice(0, -1).map((m) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
+    parts: typeof m.content === 'string' ? [{ text: m.content }] : m.content,
   }));
   const lastMsg = messages[messages.length - 1];
   const chat = gen.startChat({ history });
