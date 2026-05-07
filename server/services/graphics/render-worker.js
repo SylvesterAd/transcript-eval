@@ -59,7 +59,8 @@ async function generateHtmlWithLintGate({ spec, renderId, sceneIndex = null }) {
 
   lint = await runLint({ htmlPath });
   if (lint.errorCount > 0) {
-    throw new Error(`lint failed after retry: ${formatFindingsForPrompt(lint.findings)}`);
+    const scenePrefix = sceneIndex != null ? `Scene ${sceneIndex} ` : '';
+    throw new Error(`${scenePrefix}lint failed after 1 retry: ${formatFindingsForPrompt(lint.findings)}`);
   }
   return { html, cost, tokens, lintFindings: lint.findings };
 }

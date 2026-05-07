@@ -189,3 +189,85 @@ describe('few-shot examples comply with canonical rules', () => {
     expect(eases.size).toBeGreaterThanOrEqual(3)
   })
 })
+
+describe('refineHtml', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('returns refined html + cost + tokens preserving stage marker', async () => {
+    vi.doMock('../../../lib/llm/anthropic.js', () => ({
+      callAnthropic: vi.fn().mockResolvedValue({
+        text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+        toolUses: [],
+        tokens: { in: 800, out: 600 },
+        stop: 'end_turn',
+      }),
+    }))
+
+    const { refineHtml } = await import('../html-generator.js')
+    const result = await refineHtml({
+      html: '<html><body><div data-composition-id="main"></div></body></html>',
+      feedback: 'Lower-third bar slides off-screen too fast; extend hold to 4s.',
+      spec: { template: 'lower-third', duration: 5 },
+    })
+    expect(result.html).toMatch(/data-composition-id="main"/)
+    expect(result.cost).toBeGreaterThan(0)
+    expect(result.tokens.in).toBeGreaterThan(0)
+    expect(result.tokens.out).toBeGreaterThan(0)
+  })
+
+  it('REFINE_HTML_SYSTEM_PROMPT is exported and mentions edit-bay refinement', async () => {
+    const mod = await import('../html-generator.js')
+    expect(mod.REFINE_HTML_SYSTEM_PROMPT).toBeDefined()
+    expect(mod.REFINE_HTML_SYSTEM_PROMPT).toMatch(/refine|edit.bay/i)
+  })
+
+  it('throws if html is missing', async () => {
+    const { refineHtml } = await import('../html-generator.js')
+    await expect(refineHtml({ feedback: 'x', spec: {} })).rejects.toThrow(/html/i)
+  })
+})
+
+describe('specToHtml additionalSystemContext', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('passes plain CREATE_HTML_SYSTEM_PROMPT to callAnthropic when context is null', async () => {
+    const callMock = vi.fn().mockResolvedValue({
+      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+      toolUses: [],
+      tokens: { in: 100, out: 100 },
+      stop: 'end_turn',
+    })
+    vi.doMock('../../../lib/llm/anthropic.js', () => ({ callAnthropic: callMock }))
+
+    const { specToHtml, CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    await specToHtml({ spec: { template: 'lower-third', duration: 5 } })
+
+    const call = callMock.mock.calls[0][0]
+    expect(call.system).toBe(CREATE_HTML_SYSTEM_PROMPT)
+    expect(call.system).not.toMatch(/CORRECTIONS REQUESTED/)
+  })
+
+  it('appends CORRECTIONS REQUESTED block when additionalSystemContext is provided', async () => {
+    const callMock = vi.fn().mockResolvedValue({
+      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+      toolUses: [],
+      tokens: { in: 100, out: 100 },
+      stop: 'end_turn',
+    })
+    vi.doMock('../../../lib/llm/anthropic.js', () => ({ callAnthropic: callMock }))
+
+    const { specToHtml } = await import('../html-generator.js')
+    await specToHtml({
+      spec: { template: 'lower-third', duration: 5 },
+      additionalSystemContext: 'Lint findings:\n- [ERROR] determinism: Math.random() detected',
+    })
+
+    const call = callMock.mock.calls[0][0]
+    expect(call.system).toMatch(/## CORRECTIONS REQUESTED/)
+    expect(call.system).toMatch(/Math\.random\(\) detected/)
+  })
+})
