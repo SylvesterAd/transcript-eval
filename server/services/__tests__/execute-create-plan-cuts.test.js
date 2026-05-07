@@ -15,54 +15,17 @@ vi.mock('../../db.js', () => ({
 import { persistPlacementOutput } from '../broll.js'
 
 describe('persistPlacementOutput contract for executeCreatePlan per-chapter sub-runs', () => {
-  it('un-shifts the actual shape of a per-chapter B-Roll plan LLM output', async () => {
-    // Real-world fixture: a per-chapter plan output as a markdown-fenced JSON
-    // with `{placements: [{start, end, ...}]}` string format.
-    const stageOutput = '```json\n' + JSON.stringify({
-      total_placements: 2,
-      placements: [
-        {
-          start: '[00:05:09]',
-          end: '[00:05:15]',
-          beat: 'Liability',
-          category: 'broll',
-          audio_anchor: 'separates your personal assets',
-          description: 'Screen recording of digital banking interface',
-        },
-        {
-          start: '[00:05:20]',
-          end: '[00:05:25]',
-          beat: 'Liability',
-          category: 'broll',
-          audio_anchor: 'follow the formalities',
-          description: 'UI flow showing checkbox',
-        },
-      ],
-    }) + '\n```'
+  // The un-shift test that lived here was deleted as part of the cuts-as-source-
+  // of-truth refactor (Task B2.4): persistPlacementOutput no longer un-shifts —
+  // it attaches anchor_word_idx instead. Coverage for the new behavior lives in
+  // persist-placement-output-postcut.test.js.
 
-    // Cuts from project 273-shaped data: one cut at [60, 80] (20s).
-    const editorCuts = { cuts: [{ start: 60, end: 80 }], cutExclusions: [] }
-    const out = await persistPlacementOutput(stageOutput, editorCuts)
-    const parsed = JSON.parse(out)
-
-    // Both placements after cut, so each shifts by +20s.
-    expect(parsed.placements[0].start).toBe('[00:05:29]')
-    expect(parsed.placements[0].end).toBe('[00:05:35]')
-    expect(parsed.placements[1].start).toBe('[00:05:40]')
-    expect(parsed.placements[1].end).toBe('[00:05:45]')
-
-    // Other fields preserved.
-    expect(parsed.placements[0].beat).toBe('Liability')
-    expect(parsed.placements[0].audio_anchor).toBe('separates your personal assets')
-    expect(parsed.total_placements).toBe(2)
-  })
-
-  it('passes through unchanged when editorCuts has no cuts', async () => {
+  it('passes through unchanged when videoId is omitted (cant fetch words)', async () => {
     const stageOutput = JSON.stringify({
       placements: [{ start: '[00:05:09]', end: '[00:05:15]' }],
     })
     const out = await persistPlacementOutput(stageOutput, null)
-    expect(JSON.parse(out)).toEqual(JSON.parse(stageOutput))
+    expect(out).toBe(stageOutput)
   })
 })
 

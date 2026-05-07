@@ -40,6 +40,7 @@ import {
 // (Imported as well so local callers in this file still resolve the name.)
 import { unshiftPostCutTime } from './time-translation.js'
 export { unshiftPostCutTime }
+import { findAnchorWordIdx } from './anchor-word.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -1244,68 +1245,62 @@ export function remapPlacementTimesString(placements, effectiveCuts) {
 }
 
 /**
- * Single chokepoint for stages that emit placement-shaped JSON.
- *
- * Takes the raw stage output text + the editor cuts that were in effect
- * during this pipeline run. If cuts were applied, parses the JSON,
- * un-shifts every placement's timecodes back to original time, and
- * re-serializes. If parsing fails, logs a warning and returns the raw
- * text unchanged (preserves prior behavior for non-placement stages).
+ * Persists LLM placement output. Attaches anchor_word_idx to each placement
+ * (from audio_anchor → raw transcript word index) for stable identity across
+ * cut edits. Does NOT shift timecodes — the LLM emits in post-cut domain
+ * which is now the canonical storage format.
  *
  * Handles three shapes:
- *   - Top-level array: [{ start_seconds, end_seconds, ... }, ...]
+ *   - Top-level array: [{ start, end, audio_anchor, ... }, ...]
  *   - Wrapped in chapters: { chapters: [{ placements: [...] }, ...] }
- *   - Per-chapter sub-run: { placements: [{ start: "[HH:MM:SS]", end: "[HH:MM:SS]" }] }
+ *   - Per-chapter sub-run: { placements: [{ start, end, audio_anchor }] }
  *
- * Stages that should NOT use this helper: pure transcript stages,
- * chapter analysis without placements, plan strategy text. The helper
- * is a no-op for inputs that don't contain placement-shaped data.
+ * @param {string} stageOutput - LLM output (possibly markdown-fenced JSON)
+ * @param {{cuts:Array, cutExclusions:Array}|null} editorCuts - retained for signature
+ *        compatibility (unused — the LLM already saw the post-cut transcript)
+ * @param {number|null} videoId - main video ID for word_timestamps lookup; if
+ *        null/undefined, returns stageOutput unchanged (no anchor attribution possible)
+ * @returns {Promise<string>} stage output with anchor_word_idx attached
  */
-export async function persistPlacementOutput(stageOutput, editorCuts) {
-  if (!editorCuts?.cuts?.length) return stageOutput
-  const effective = computeEffectiveCuts(editorCuts.cuts, editorCuts.cutExclusions || [])
-  if (!effective.length) return stageOutput
+export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
+  if (!videoId) return stageOutput
 
   let parsed
+  try { parsed = extractJSON(stageOutput) }
+  catch { return stageOutput }
+
+  let words = []
   try {
-    parsed = extractJSON(stageOutput)
+    const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
+    if (t?.word_timestamps_json) words = JSON.parse(t.word_timestamps_json)
   } catch (err) {
-    console.warn('[persistPlacementOutput] Could not parse stage output, returning unchanged:', err.message)
+    console.warn('[persistPlacementOutput] failed to load words:', err.message)
     return stageOutput
   }
+  if (!words.length) return stageOutput
 
-  let remapped
+  const annotate = (placements) => placements.map(p => ({
+    ...p,
+    anchor_word_idx: findAnchorWordIdx(words, p.audio_anchor),
+  }))
+
+  let result
   if (Array.isArray(parsed)) {
-    // Top-level array of placements with numeric start_seconds/end_seconds.
-    remapped = remapPlacementTimes(parsed, effective)
+    result = annotate(parsed)
   } else if (parsed && Array.isArray(parsed.chapters)) {
-    // Wrapped in chapters: {chapters: [{placements: [...]}]}.
-    // Each chapter's placements may use either numeric or string format —
-    // detect at runtime by inspecting the first placement.
-    remapped = {
+    result = {
       ...parsed,
       chapters: parsed.chapters.map(ch => ({
         ...ch,
-        placements: Array.isArray(ch.placements)
-          ? (ch.placements[0] && typeof ch.placements[0].start === 'string'
-              ? remapPlacementTimesString(ch.placements, effective)
-              : remapPlacementTimes(ch.placements, effective))
-          : ch.placements,
+        placements: Array.isArray(ch.placements) ? annotate(ch.placements) : ch.placements,
       })),
     }
   } else if (parsed && Array.isArray(parsed.placements)) {
-    // Per-chapter sub-run shape: {placements: [{start: "[HH:MM:SS]", end: "[HH:MM:SS]"}]}.
-    // The placements use string timecodes by convention in this shape (LLM output of
-    // executeCreatePlan's per-chapter stages).
-    remapped = {
-      ...parsed,
-      placements: remapPlacementTimesString(parsed.placements, effective),
-    }
+    result = { ...parsed, placements: annotate(parsed.placements) }
   } else {
-    // Not placement-shaped — pass through.
     return stageOutput
   }
-  return JSON.stringify(remapped, null, 2)
+  return JSON.stringify(result, null, 2)
 }
 
 // ── Pipeline progress & abort tracking ───────────────────────────────
@@ -4032,7 +4027,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
             abortSignal: pipelineAbort.signal,
           })
 
-          const chapterOutput = await persistPlacementOutput(result.text, editorCuts)
+          const chapterOutput = await persistPlacementOutput(result.text, editorCuts, videoId)
           chapterResults[c] = chapterOutput
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
@@ -5487,7 +5482,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             total_chapters: chapters.length,
             chapters,
           }, null, 2)
-          output = await persistPlacementOutput(rawOutput, editorCuts)
+          output = await persistPlacementOutput(rawOutput, editorCuts, videoId)
         } else {
           output = currentTranscript
         }
