@@ -674,7 +674,10 @@ router.get('/groups/:id/status', requireAuth, async (req, res) => {
   })
 })
 
-router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
+// Exported as _fullAutoStatusHandler so the unit test can assert the videos
+// SELECT excludes media_type='script' rows (they'd otherwise stay forever in
+// the modal's transcribe-stage denominator and render as "Pending").
+export async function _fullAutoStatusHandler(req, res) {
   const groupId = parseInt(req.params.id)
   const parent = await db.prepare(`
     SELECT id, name, path_id, auto_rough_cut, assembly_status, assembly_error, rough_cut_status, broll_chain_status
@@ -688,10 +691,16 @@ router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
   // uploads in Full Auto / Strategy / Guided projects, so without the
   // IN clause the modal sees zero videos and ships "Transcribing —
   // Pending" even when it's actually done.
+  //
+  // media_type filter: scripts (.txt/.docx/.pdf via /upload-script) live
+  // in the same table but don't transcribe — including them stuck the
+  // transcribe stage at "Pending" forever (failed Scribe call sits in
+  // the count denominator).
   const videos = await db.prepare(`
     SELECT id, title, transcription_status, duration_seconds, cf_stream_uid, file_path
     FROM videos
     WHERE video_type = 'raw'
+      AND media_type IN ('audio', 'video')
       AND (group_id = ? OR group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?))
     ORDER BY id
   `).all(groupId, groupId)
@@ -713,7 +722,8 @@ router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
   }
 
   res.json({ parent: { ...parent, videos }, subGroups })
-})
+}
+router.get('/groups/:id/full-auto-status', requireAuth, _fullAutoStatusHandler)
 
 // Get classification data + videos with media info. Exported for unit
 // tests (the regression test for media_type asserts the SELECT column
