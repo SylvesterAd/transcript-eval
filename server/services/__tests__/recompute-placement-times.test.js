@@ -44,4 +44,27 @@ describe('recomputePlacementsForCuts', () => {
     expect(result[0].start_seconds).toBe(5)
     expect(result[0].end_seconds).toBe(8)
   })
+
+  it('marks orphaned when anchor_word_idx is -1 (anchor not found sentinel)', () => {
+    const placements = [{ uuid: 'p1', anchor_word_idx: -1, start_seconds: 5, end_seconds: 8 }]
+    const result = recomputePlacementsForCuts(placements, [], [], words)
+    expect(result[0].anchor_orphaned).toBe(true)
+  })
+
+  it('marks orphaned when anchor_word_idx is out-of-bounds vs words array', () => {
+    const placements = [{ uuid: 'p1', anchor_word_idx: 999, start_seconds: 5, end_seconds: 8 }]
+    const result = recomputePlacementsForCuts(placements, [{ start: 2, end: 4 }], [], words)
+    expect(result[0].anchor_orphaned).toBe(true)
+  })
+
+  it('clears stale anchor_in_cut flag when anchor word is no longer inside any cut', () => {
+    const placements = [{
+      uuid: 'p1', anchor_word_idx: 2, start_seconds: 5, end_seconds: 8,
+      audio_anchor: 'c',
+      anchor_in_cut: true,  // stale from a previous edit
+    }]
+    const result = recomputePlacementsForCuts(placements, [], [], words)
+    expect(result[0].anchor_in_cut).toBeUndefined()
+    expect(result[0].anchor_orphaned).toBeUndefined()
+  })
 })
