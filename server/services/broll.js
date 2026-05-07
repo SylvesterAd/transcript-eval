@@ -34,12 +34,6 @@ import {
   assertNoSelfReference,
   assertPriorsComplete,
 } from './broll-prior-strategies.js'
-// Re-exported so existing callers (and tests) that import unshiftPostCutTime
-// from broll.js keep working after extraction. The canonical home is now
-// time-translation.js; the direct re-export will be removed in a later task.
-// (Imported as well so local callers in this file still resolve the name.)
-import { unshiftPostCutTime } from './time-translation.js'
-export { unshiftPostCutTime }
 import { findAnchorWordIdx } from './anchor-word.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -1138,110 +1132,6 @@ export function computeEffectiveCuts(cuts, cutExclusions = []) {
     }
   }
   return result.sort((a, b) => a.start - b.start)
-}
-
-/**
- * Apply unshiftPostCutTime to every placement entry's start_seconds (with
- * 'start' boundary rule) and end_seconds (with 'end' boundary rule). All
- * non-time fields preserved. Entries without start_seconds/end_seconds
- * passed through untouched.
- *
- * Used by persistPlacementOutput to map post-cut timecodes (LLM output)
- * back to original time before persisting to broll_runs.output_text.
- */
-export function remapPlacementTimes(placements, effectiveCuts) {
-  if (placements == null) return placements
-  if (!Array.isArray(placements)) return placements
-  if (!effectiveCuts || effectiveCuts.length === 0) return placements
-  return placements.map(p => {
-    if (!p || typeof p !== 'object') return p
-    const out = { ...p }
-    if (typeof p.start_seconds === 'number' && Number.isFinite(p.start_seconds)) {
-      out.start_seconds = unshiftPostCutTime(p.start_seconds, effectiveCuts, 'start')
-    }
-    if (typeof p.end_seconds === 'number' && Number.isFinite(p.end_seconds)) {
-      out.end_seconds = unshiftPostCutTime(p.end_seconds, effectiveCuts, 'end')
-    }
-    return out
-  })
-}
-
-/**
- * Parse a [HH:MM:SS] or [HH:MM:SS.cc] timecode string to seconds.
- * Returns null if the string doesn't match the expected format.
- *
- * Examples:
- *   parseTimecodeString('[00:05:09]') === 309
- *   parseTimecodeString('[00:05:09.50]') === 309.5
- *   parseTimecodeString('00:05:09') === null  // missing brackets
- *   parseTimecodeString('garbage') === null
- */
-export function parseTimecodeString(s) {
-  if (typeof s !== 'string') return null
-  const m = s.match(/^\[(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\]$/)
-  if (!m) return null
-  const h = Number(m[1])
-  const min = Number(m[2])
-  const sec = Number(m[3])
-  const fracStr = m[4] || ''
-  // Pad to 3 digits for ms — '5' means 500ms, '50' means 500ms, '500' means 500ms.
-  const frac = fracStr ? Number(fracStr.padEnd(3, '0')) / 1000 : 0
-  return h * 3600 + min * 60 + sec + frac
-}
-
-/**
- * Format seconds to [HH:MM:SS.cc] timecode string. Mirrors generatePostCutTranscript's
- * formatter: emits HH:MM:SS when fractional ms is zero, HH:MM:SS.cc otherwise.
- *
- * Examples:
- *   formatTimecodeString(309)    === '[00:05:09]'
- *   formatTimecodeString(309.5)  === '[00:05:09.50]'
- *   formatTimecodeString(0)      === '[00:00:00]'
- */
-export function formatTimecodeString(secs) {
-  if (typeof secs !== 'number' || !Number.isFinite(secs)) return '[00:00:00]'
-  // Round to centisecond resolution FIRST in integer space, then split into
-  // h/m/s/cs. Without this, a value like 349.99999 (float drift) splits to
-  // s=49 + cs=100 — which is "[00:05:49.100]" (invalid) and parses back as
-  // 349.1 instead of 350. Doing the round in centisecond units (× 100) and
-  // then deriving each field from the integer count avoids the carry bug.
-  const totalCs = Math.round(Math.max(0, secs) * 100)
-  const h = Math.floor(totalCs / 360000)
-  const m = Math.floor((totalCs % 360000) / 6000)
-  const s = Math.floor((totalCs % 6000) / 100)
-  const cs = totalCs % 100
-  const base = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-  return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
-}
-
-/**
- * Like remapPlacementTimes but for placements that use [HH:MM:SS] STRING format.
- *
- * Each placement's `start` (uses 'start' boundary kind) and `end` (uses 'end' kind)
- * gets parsed, un-shifted, re-formatted. Non-time fields preserved. Placements
- * with unparseable strings passed through untouched.
- */
-export function remapPlacementTimesString(placements, effectiveCuts) {
-  if (placements == null) return placements
-  if (!Array.isArray(placements)) return placements
-  if (!effectiveCuts || effectiveCuts.length === 0) return placements
-  return placements.map(p => {
-    if (!p || typeof p !== 'object') return p
-    const out = { ...p }
-    if (typeof p.start === 'string') {
-      const sec = parseTimecodeString(p.start)
-      if (sec !== null) {
-        out.start = formatTimecodeString(unshiftPostCutTime(sec, effectiveCuts, 'start'))
-      }
-    }
-    if (typeof p.end === 'string') {
-      const sec = parseTimecodeString(p.end)
-      if (sec !== null) {
-        out.end = formatTimecodeString(unshiftPostCutTime(sec, effectiveCuts, 'end'))
-      }
-    }
-    return out
-  })
 }
 
 /**
