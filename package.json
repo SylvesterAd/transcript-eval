@@ -17,6 +17,7 @@
     "ext:package": "node extension/scripts/package.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.1",
     "@dnd-kit/react": "^0.3.2",
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.100.0",
