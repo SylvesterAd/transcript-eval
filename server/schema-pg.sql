@@ -151,6 +151,9 @@ CREATE TABLE IF NOT EXISTS deletion_annotations (
   position_end INTEGER,
   reason TEXT NOT NULL DEFAULT 'unclassified' CHECK (reason IN ('filler_word', 'false_start', 'meta_commentary', 'unclassified')),
   in_human_edit INTEGER DEFAULT 0,
+  category TEXT,
+  confidence REAL,
+  evidence_json TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

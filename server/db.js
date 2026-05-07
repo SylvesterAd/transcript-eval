@@ -46,6 +46,14 @@ try {
   try {
     await pool.query(`ALTER TABLE transcripts DROP CONSTRAINT IF EXISTS transcripts_type_check`)
     await pool.query(`ALTER TABLE transcripts ADD CONSTRAINT transcripts_type_check CHECK (type IN ('raw', 'human_edited', 'rough_cut_adjusted'))`)
+    // Rough Cut V2 (auto_v2 agent) — additive columns on deletion_annotations.
+    // category: taxonomy label emitted by the agent (e.g. 'meta_commentary',
+    // 'false_start', 'discourse_marker'). confidence: 0..1. evidence_json: free
+    // text array of supporting quotes / audio events. All NULL for legacy rows
+    // and for strategy-27 inserts (which don't set them).
+    await pool.query(`ALTER TABLE deletion_annotations ADD COLUMN IF NOT EXISTS category TEXT`)
+    await pool.query(`ALTER TABLE deletion_annotations ADD COLUMN IF NOT EXISTS confidence REAL`)
+    await pool.query(`ALTER TABLE deletion_annotations ADD COLUMN IF NOT EXISTS evidence_json TEXT`)
     await pool.query(`ALTER TABLE spending_log ADD COLUMN IF NOT EXISTS api_key_last5 TEXT`)
     await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE`)
     // Liveness signal for downloadYouTubeVideo. Refreshed every
