@@ -12,14 +12,31 @@ const exec = promisify(execFile)
 export async function runLint({ htmlPath }) {
   if (!htmlPath) throw new Error('runLint: htmlPath required')
 
-  const { stdout } = await exec(
-    'npx',
-    ['--yes', 'hyperframes', 'lint', htmlPath, '--json'],
-    { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 }
-  )
+  let stdout
+  try {
+    ;({ stdout } = await exec(
+      'npx',
+      ['--yes', 'hyperframes', 'lint', htmlPath, '--json'],
+      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 }
+    ))
+  } catch (err) {
+    // hyperframes lint exits non-zero when errorCount > 0; the JSON payload is still on err.stdout.
+    if (err && typeof err.stdout === 'string' && err.stdout.length > 0) {
+      stdout = err.stdout
+    } else {
+      throw err
+    }
+  }
 
   // hyperframes lint --json prints a single JSON object on stdout
-  const parsed = JSON.parse(stdout)
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (e) {
+    throw new Error(
+      `runLint: failed to parse hyperframes lint output as JSON: ${e.message}\nstdout (first 500 chars): ${String(stdout).slice(0, 500)}`
+    )
+  }
 
   return {
     errorCount: parsed.errorCount ?? 0,

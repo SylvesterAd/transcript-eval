@@ -65,3 +65,59 @@ describe('runLint with errors', () => {
     expect(result.findings).toHaveLength(2)
   })
 })
+
+describe('runLint with non-zero exit (errors found)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.doMock('node:child_process', () => ({
+      execFile: (cmd, args, opts, cb) => {
+        process.nextTick(() => {
+          // Simulate hyperframes lint exiting non-zero when errors found,
+          // BUT still emitting the JSON payload to stdout (lint CLI convention).
+          const stdout = JSON.stringify({
+            errorCount: 1,
+            warningCount: 0,
+            infoCount: 0,
+            findings: [
+              { severity: 'error', rule: 'determinism.banned-api', message: 'Math.random() detected' },
+            ],
+          })
+          const err = Object.assign(new Error('Command failed: npx hyperframes lint'), {
+            code: 1,
+            stdout,
+            stderr: '',
+          })
+          cb(err)
+        })
+      },
+    }))
+  })
+
+  it('returns structured findings even when subprocess exits non-zero', async () => {
+    const { runLint } = await import('../lint-runner.js')
+    const result = await runLint({ htmlPath: '/tmp/test.html' })
+    expect(result.errorCount).toBe(1)
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].rule).toBe('determinism.banned-api')
+  })
+})
+
+describe('runLint with malformed stdout', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.doMock('node:child_process', () => ({
+      execFile: (cmd, args, opts, cb) => {
+        process.nextTick(() => {
+          cb(null, { stdout: 'not-json-just-a-banner-line\n', stderr: '' })
+        })
+      },
+    }))
+  })
+
+  it('throws a contextual error when stdout is not valid JSON', async () => {
+    const { runLint } = await import('../lint-runner.js')
+    await expect(runLint({ htmlPath: '/tmp/test.html' })).rejects.toThrow(
+      /failed to parse hyperframes lint output as JSON/
+    )
+  })
+})
