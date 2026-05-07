@@ -2,7 +2,7 @@
 // (extracted from POST /confirm-classification) and chainAfterClassify (the
 // hook that fires after classification finishes for Full Auto projects).
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const state = {
   exampleSets: [],          // rows returned for SELECT id FROM broll_example_sets WHERE group_id = ?
@@ -23,6 +23,8 @@ const state = {
   reclassifyVideoRows: [],  // rows for SELECT v.id, v.title, ... FROM videos v ... WHERE v.id IN (...) for runClassification
   classificationUpdates: [], // every UPDATE video_groups SET classification_json call (parent classification write)
   subGroupDeletes: [],      // every DELETE FROM video_groups WHERE id = ? call (smart-diff different path)
+  roughCutRow: null,        // row returned for SELECT user_id, path_id, auto_rough_cut, broll_chain_status ... (chainAfterRoughCut)
+  emailCalls: [],           // every email-notifier.send(kind, payload) invocation
 }
 
 let nextSubGroupId = 1000
@@ -54,6 +56,10 @@ vi.mock('../../db.js', () => ({
           // isCancelled probe — never cancelled in these tests.
           if (/SELECT assembly_status FROM video_groups WHERE id/.test(sql)) {
             return { assembly_status: 'done' }
+          }
+          // chainAfterRoughCut lookup
+          if (/SELECT user_id, path_id, auto_rough_cut, broll_chain_status FROM video_groups WHERE id/.test(sql)) {
+            return state.roughCutRow
           }
           throw new Error(`unexpected get: ${sql}`)
         },
@@ -150,11 +156,13 @@ vi.mock('../../routes/broll.js', () => ({
   },
 }))
 
-// Default email-notifier mock — individual tests override via vi.doMock to
-// capture the template name passed to send().
-vi.mock('../email-notifier.js', () => ({ send: vi.fn(async () => {}) }))
+// Default email-notifier mock — captures calls into state.emailCalls.
+// Individual tests that need richer isolation override via vi.doMock.
+vi.mock('../email-notifier.js', () => ({
+  send: vi.fn(async (kind, payload) => { state.emailCalls.push({ kind, ...payload }) }),
+}))
 
-import { confirmClassificationGroup, chainAfterClassify, reclassifyGroup, videoIdSetsMatch } from '../auto-orchestrator.js'
+import { confirmClassificationGroup, chainAfterClassify, chainAfterRoughCut, reclassifyGroup, videoIdSetsMatch, __orchestratorDeps } from '../auto-orchestrator.js'
 
 beforeEach(() => {
   state.exampleSets = []
@@ -175,6 +183,8 @@ beforeEach(() => {
   state.reclassifyVideoRows = []
   state.classificationUpdates = []
   state.subGroupDeletes = []
+  state.roughCutRow = null
+  state.emailCalls = []
 })
 
 describe('confirmClassificationGroup', () => {
@@ -400,6 +410,54 @@ describe('videoIdSetsMatch', () => {
     const snapshot = [{ id: 240, name: 'MAIN', videoIds: [10] }]
     const newGroups = [{ name: 'Cam 1', videoIds: [10] }]
     expect(videoIdSetsMatch(snapshot, newGroups)).toBe(true)
+  })
+})
+
+describe('chainAfterRoughCut — strategy-only with auto_rough_cut', () => {
+  let originalRunChain
+
+  beforeEach(() => {
+    originalRunChain = __orchestratorDeps.runFullAutoBrollChain
+  })
+
+  afterEach(() => {
+    __orchestratorDeps.runFullAutoBrollChain = originalRunChain
+  })
+
+  it('pauses strategy-only at rough cut when auto_rough_cut is true', async () => {
+    state.roughCutRow = { user_id: 'u1', path_id: 'strategy-only', auto_rough_cut: true, broll_chain_status: null }
+    const runChain = vi.fn()
+    __orchestratorDeps.runFullAutoBrollChain = runChain
+
+    await chainAfterRoughCut(42)
+
+    const pauseUpdates = state.brollChainUpdates.filter(u => /paused_at_rough_cut/.test(u.sql))
+    expect(pauseUpdates).toHaveLength(1)
+    expect(pauseUpdates[0].args).toContain(42)
+    expect(state.emailCalls).toEqual([{ kind: 'paused_at_rough_cut', subGroupId: 42, userId: 'u1' }])
+    expect(runChain).not.toHaveBeenCalled()
+  })
+
+  it('still kicks chain for strategy-only when auto_rough_cut is false', async () => {
+    state.roughCutRow = { user_id: 'u1', path_id: 'strategy-only', auto_rough_cut: false, broll_chain_status: null }
+    const runChain = vi.fn().mockResolvedValue(undefined)
+    __orchestratorDeps.runFullAutoBrollChain = runChain
+
+    await chainAfterRoughCut(43)
+
+    const pauseUpdates = state.brollChainUpdates.filter(u => /paused_at_rough_cut/.test(u.sql))
+    expect(pauseUpdates).toHaveLength(0)
+    expect(runChain).toHaveBeenCalledWith(43)
+  })
+
+  it('still kicks chain for hands-off regardless of auto_rough_cut', async () => {
+    state.roughCutRow = { user_id: 'u1', path_id: 'hands-off', auto_rough_cut: true, broll_chain_status: null }
+    const runChain = vi.fn().mockResolvedValue(undefined)
+    __orchestratorDeps.runFullAutoBrollChain = runChain
+
+    await chainAfterRoughCut(44)
+
+    expect(runChain).toHaveBeenCalledWith(44)
   })
 })
 
