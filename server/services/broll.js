@@ -1006,6 +1006,32 @@ export async function listReferenceAnalysisRuns(strategyId) {
   }))
 }
 
+/**
+ * Cumulative duration of effective cuts ending before `time`.
+ * Pure function — `effectiveCuts` must already be sorted by start
+ * (use `computeEffectiveCuts` to produce the input).
+ *
+ * Half-open at end: a cut ending exactly at `time` does NOT contribute,
+ * so a placement starting at the moment a cut ends is unaffected by it.
+ */
+export function getCumulativeCutOffset(time, effectiveCuts) {
+  if (!effectiveCuts || !effectiveCuts.length) return 0
+  let offset = 0
+  for (const c of effectiveCuts) {
+    if (c.end < time) offset += (c.end - c.start)
+    else break
+  }
+  return offset
+}
+
+/**
+ * Convert an original-video timestamp to the post-cut domain by subtracting
+ * the cumulative duration of all cuts ending before it.
+ */
+export function shiftOriginalToPostCut(time, effectiveCuts) {
+  return time - getCumulativeCutOffset(time, effectiveCuts)
+}
+
 // ── Post-cut transcript generator ───────────────────────────────────
 /**
  * Generate a transcript with timecodes adjusted for rough cut removals.
