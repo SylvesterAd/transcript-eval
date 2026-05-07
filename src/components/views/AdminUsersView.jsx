@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useApi } from '../../hooks/useApi.js'
-import { ChevronRight, Users } from 'lucide-react'
+import { useApi, apiPost } from '../../hooks/useApi.js'
+import { ChevronRight, Users, LogIn } from 'lucide-react'
 
 function formatDate(iso) {
   if (!iso) return '—'
@@ -31,9 +31,32 @@ function formatRelative(iso) {
   return `${Math.floor(mo / 12)}y ago`
 }
 
+// Mints a one-time Supabase magiclink via the backend and navigates the
+// browser to it. Following the link replaces the current Supabase session
+// with one for `userId` — the admin must sign out and back in to return
+// to their own account.
+async function impersonate(userId, email, setBusyId) {
+  const ok = window.confirm(
+    `You'll be signed in as ${email}.\n\n` +
+    `Your admin session will end. To return, sign out and sign back in with your admin email.`,
+  )
+  if (!ok) return
+  setBusyId(userId)
+  try {
+    const { action_link } = await apiPost(`/admin/users/${userId}/impersonate`, {
+      redirect_to: `${window.location.origin}/`,
+    })
+    window.location.href = action_link
+  } catch (err) {
+    setBusyId(null)
+    window.alert(`Impersonation failed: ${err.message}`)
+  }
+}
+
 export default function AdminUsersView() {
   const [page, setPage] = useState(1)
   const perPage = 50
+  const [busyId, setBusyId] = useState(null)
   const { data, loading, error } = useApi(`/admin/users?page=${page}&perPage=${perPage}`, [page])
 
   if (loading) return <div className="p-6 text-zinc-400">Loading users…</div>
@@ -101,12 +124,23 @@ export default function AdminUsersView() {
                 <td className="px-4 py-2.5 text-zinc-400">{formatRelative(u.last_sign_in_at)}</td>
                 <td className="px-4 py-2.5 text-zinc-400">{formatDate(u.created_at)}</td>
                 <td className="px-4 py-2.5 text-right">
-                  <Link
-                    to={`/admin/users/${u.id}`}
-                    className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
-                  >
-                    Inspect <ChevronRight size={12} />
-                  </Link>
+                  <div className="inline-flex items-center gap-1">
+                    <Link
+                      to={`/admin/users/${u.id}`}
+                      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800"
+                      title="View profile + project list (no sign-in)"
+                    >
+                      Profile <ChevronRight size={12} />
+                    </Link>
+                    <button
+                      onClick={() => impersonate(u.id, u.email, setBusyId)}
+                      disabled={busyId === u.id || !u.email}
+                      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-amber-300 hover:text-amber-100 hover:bg-amber-900/40 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={u.email ? 'Sign in as this user (replaces your session)' : 'No email — magiclink unavailable'}
+                    >
+                      <LogIn size={12} /> {busyId === u.id ? 'Signing in…' : 'Inspect'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

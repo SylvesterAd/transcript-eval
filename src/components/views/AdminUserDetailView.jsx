@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useApi } from '../../hooks/useApi.js'
-import { ArrowLeft, ExternalLink, Folder, Mail, CalendarClock, Clock } from 'lucide-react'
+import { useApi, apiPost } from '../../hooks/useApi.js'
+import { ArrowLeft, ExternalLink, Folder, Mail, CalendarClock, Clock, LogIn } from 'lucide-react'
 
 function formatDate(iso) {
   if (!iso) return '—'
@@ -40,8 +41,27 @@ function statusColor(label) {
   }
 }
 
+async function impersonate(userId, email, setBusy) {
+  const ok = window.confirm(
+    `You'll be signed in as ${email}.\n\n` +
+    `Your admin session will end. To return, sign out and sign back in with your admin email.`,
+  )
+  if (!ok) return
+  setBusy(true)
+  try {
+    const { action_link } = await apiPost(`/admin/users/${userId}/impersonate`, {
+      redirect_to: `${window.location.origin}/`,
+    })
+    window.location.href = action_link
+  } catch (err) {
+    setBusy(false)
+    window.alert(`Impersonation failed: ${err.message}`)
+  }
+}
+
 export default function AdminUserDetailView() {
   const { userId } = useParams()
+  const [busy, setBusy] = useState(false)
   const { data, loading, error } = useApi(`/admin/users/${userId}`, [userId])
 
   if (loading) return <div className="p-6 text-zinc-400">Loading user…</div>
@@ -63,16 +83,26 @@ export default function AdminUserDetailView() {
       </Link>
 
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Mail size={16} className="text-zinc-500" />
-          <h2 className="text-lg font-semibold text-zinc-100">
-            {user.email || <span className="italic text-zinc-500">no email</span>}
-          </h2>
-          {role !== 'user' && (
-            <span className="px-1.5 py-0.5 rounded border border-amber-800/60 bg-amber-900/30 text-[10px] uppercase tracking-wider text-amber-300">
-              {role}
-            </span>
-          )}
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <div className="flex items-center gap-2 min-w-0">
+            <Mail size={16} className="text-zinc-500 shrink-0" />
+            <h2 className="text-lg font-semibold text-zinc-100 truncate">
+              {user.email || <span className="italic text-zinc-500">no email</span>}
+            </h2>
+            {role !== 'user' && (
+              <span className="shrink-0 px-1.5 py-0.5 rounded border border-amber-800/60 bg-amber-900/30 text-[10px] uppercase tracking-wider text-amber-300">
+                {role}
+              </span>
+            )}
+          </div>
+          <button
+            onClick={() => impersonate(user.id, user.email, setBusy)}
+            disabled={busy || !user.email}
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-amber-700/60 bg-amber-900/30 hover:bg-amber-900/60 px-3 py-1.5 text-xs font-medium text-amber-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            title={user.email ? 'Mints a one-time magiclink and signs you in as this user' : 'User has no email — magiclink unavailable'}
+          >
+            <LogIn size={13} /> {busy ? 'Signing in…' : 'Sign in as this user'}
+          </button>
         </div>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div>

@@ -154,4 +154,59 @@ router.get('/:userId', requireAuth, requireAdmin, requireSupabaseAdminConfig, as
   }
 })
 
+// POST /api/admin/users/:userId/impersonate
+//
+// Mints a one-time magiclink that, when visited, signs the browser in
+// as the target user. The admin's own session is replaced — there is
+// no "switch back" without a fresh sign-in. Returns:
+//
+//   { action_link: <supabase verify URL>, email: <target> }
+//
+// Body (optional):
+//   { redirect_to: <absolute URL> }   passed through to Supabase as
+//                                     redirectTo so the post-verify
+//                                     bounce lands on the caller's
+//                                     origin instead of the project's
+//                                     default site URL.
+//
+// 404 if the target has no email (phone-only / OAuth-only accounts
+// can't receive a magiclink). 502 surfaces upstream Supabase errors.
+router.post('/:userId/impersonate', requireAuth, requireAdmin, requireSupabaseAdminConfig, async (req, res, next) => {
+  try {
+    const { userId } = req.params
+    const supabase = getSupabaseAdmin()
+
+    const { data: userData, error: userErr } = await supabase.auth.admin.getUserById(userId)
+    if (userErr) return res.status(502).json({ error: `Supabase: ${userErr.message}` })
+    const target = userData?.user
+    if (!target) return res.status(404).json({ error: 'User not found' })
+    if (!target.email) {
+      return res.status(404).json({
+        error: 'Target user has no email — magiclink impersonation requires one',
+      })
+    }
+
+    const linkOptions = {}
+    if (typeof req.body?.redirect_to === 'string' && req.body.redirect_to) {
+      linkOptions.redirectTo = req.body.redirect_to
+    }
+
+    const { data, error } = await supabase.auth.admin.generateLink({
+      type: 'magiclink',
+      email: target.email,
+      options: linkOptions,
+    })
+    if (error) return res.status(502).json({ error: `Supabase: ${error.message}` })
+
+    const actionLink = data?.properties?.action_link
+    if (!actionLink) {
+      return res.status(502).json({ error: 'Supabase did not return an action_link' })
+    }
+
+    res.json({ action_link: actionLink, email: target.email })
+  } catch (err) {
+    next(err)
+  }
+})
+
 export default router

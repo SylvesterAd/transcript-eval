@@ -45,6 +45,8 @@ vi.mock('../../../auth.js', () => ({
 let supabaseConfigured = true
 let listUsersResponse = { data: { users: [] }, error: null }
 let getUserByIdResponse = { data: { user: null }, error: null }
+let generateLinkResponse = { data: { properties: { action_link: null } }, error: null }
+const generateLinkCalls = []
 
 vi.mock('../../../services/supabase-admin.js', () => ({
   hasSupabaseAdminConfig: () => supabaseConfigured,
@@ -53,6 +55,10 @@ vi.mock('../../../services/supabase-admin.js', () => ({
       admin: {
         listUsers: async () => listUsersResponse,
         getUserById: async () => getUserByIdResponse,
+        generateLink: async (args) => {
+          generateLinkCalls.push(args)
+          return generateLinkResponse
+        },
       },
     },
   }),
@@ -68,6 +74,7 @@ function extractHandler(pathPattern) {
 }
 const listHandlers = extractHandler('/')
 const detailHandlers = extractHandler('/:userId')
+const impersonateHandlers = extractHandler('/:userId/impersonate')
 
 function makeRes() {
   return {
@@ -105,6 +112,8 @@ beforeEach(() => {
   supabaseConfigured = true
   listUsersResponse = { data: { users: [] }, error: null }
   getUserByIdResponse = { data: { user: null }, error: null }
+  generateLinkResponse = { data: { properties: { action_link: null } }, error: null }
+  generateLinkCalls.length = 0
 })
 
 describe('GET /api/admin/users (list)', () => {
@@ -250,5 +259,115 @@ describe('GET /api/admin/users/:userId (detail)', () => {
     const res = makeRes()
     await runChain(detailHandlers, req, res)
     expect(res.statusCode).toBe(502)
+  })
+})
+
+describe('POST /api/admin/users/:userId/impersonate', () => {
+  it('401 when unauthenticated', async () => {
+    const req = { auth: null, query: {}, params: { userId: 'u-1' }, body: {} }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('403 when non-admin', async () => {
+    const req = { auth: { userId: 'u-1', isAdmin: false }, query: {}, params: { userId: 'u-2' }, body: {} }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('503 when service-role key not configured', async () => {
+    supabaseConfigured = false
+    const req = { auth: { userId: 'u-admin', isAdmin: true }, query: {}, params: { userId: 'u-1' }, body: {} }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(503)
+  })
+
+  it('404 when target user does not exist', async () => {
+    getUserByIdResponse = { data: { user: null }, error: null }
+    const req = { auth: { userId: 'u-admin', isAdmin: true }, query: {}, params: { userId: 'u-MISSING' }, body: {} }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(404)
+    expect(res.body.error).toMatch(/not found/i)
+  })
+
+  it('404 when target has no email (e.g. phone-only auth)', async () => {
+    getUserByIdResponse = { data: { user: { id: 'u-1', email: null } }, error: null }
+    const req = { auth: { userId: 'u-admin', isAdmin: true }, query: {}, params: { userId: 'u-1' }, body: {} }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(404)
+    expect(res.body.error).toMatch(/no email/i)
+  })
+
+  it('200 returns action_link when Supabase mints one', async () => {
+    getUserByIdResponse = { data: { user: { id: 'u-1', email: 'user@x.com' } }, error: null }
+    generateLinkResponse = {
+      data: { properties: { action_link: 'https://wymmywshkimzbxbmpukp.supabase.co/auth/v1/verify?token=abc&type=magiclink' } },
+      error: null,
+    }
+    const req = {
+      auth: { userId: 'u-admin', isAdmin: true },
+      query: {}, params: { userId: 'u-1' },
+      body: { redirect_to: 'https://app.example.com/' },
+    }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(200)
+    expect(res.body.action_link).toBe('https://wymmywshkimzbxbmpukp.supabase.co/auth/v1/verify?token=abc&type=magiclink')
+    expect(res.body.email).toBe('user@x.com')
+    // generateLink called with the right shape
+    expect(generateLinkCalls).toHaveLength(1)
+    expect(generateLinkCalls[0]).toEqual({
+      type: 'magiclink',
+      email: 'user@x.com',
+      options: { redirectTo: 'https://app.example.com/' },
+    })
+  })
+
+  it('omits redirectTo when body has none', async () => {
+    getUserByIdResponse = { data: { user: { id: 'u-1', email: 'user@x.com' } }, error: null }
+    generateLinkResponse = {
+      data: { properties: { action_link: 'https://x/auth/v1/verify?t=1' } },
+      error: null,
+    }
+    const req = {
+      auth: { userId: 'u-admin', isAdmin: true },
+      query: {}, params: { userId: 'u-1' },
+      body: {},
+    }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(200)
+    expect(generateLinkCalls[0].options).toEqual({})
+  })
+
+  it('502 when Supabase generateLink errors', async () => {
+    getUserByIdResponse = { data: { user: { id: 'u-1', email: 'user@x.com' } }, error: null }
+    generateLinkResponse = { data: null, error: { message: 'rate_limit_exceeded' } }
+    const req = {
+      auth: { userId: 'u-admin', isAdmin: true },
+      query: {}, params: { userId: 'u-1' }, body: {},
+    }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(502)
+    expect(res.body.error).toMatch(/rate_limit_exceeded/)
+  })
+
+  it('502 when Supabase returns no action_link', async () => {
+    getUserByIdResponse = { data: { user: { id: 'u-1', email: 'user@x.com' } }, error: null }
+    generateLinkResponse = { data: { properties: {} }, error: null }
+    const req = {
+      auth: { userId: 'u-admin', isAdmin: true },
+      query: {}, params: { userId: 'u-1' }, body: {},
+    }
+    const res = makeRes()
+    await runChain(impersonateHandlers, req, res)
+    expect(res.statusCode).toBe(502)
+    expect(res.body.error).toMatch(/action_link/)
   })
 })
