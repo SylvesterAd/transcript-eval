@@ -126,7 +126,8 @@ export default function EditorView() {
   // renders as designed.
   useEffect(() => {
     if (shouldRedirectFailedPrePause(groupDetail)) {
-      navigate(`/?step=processing&group=${id}`, { replace: true })
+      const targetGroup = groupDetail?.parent_group_id || id
+      navigate(`/?step=processing&group=${targetGroup}`, { replace: true })
     }
   }, [groupDetail, id, navigate])
 
