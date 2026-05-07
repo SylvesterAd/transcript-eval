@@ -30,10 +30,14 @@ let running = false;
 
 async function generateHtmlWithLintGate({ spec, renderId, sceneIndex = null }) {
   const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
-  const sceneSuffix = sceneIndex != null ? `scene-${sceneIndex}-` : '';
   const htmlDir = path.join(baseDir, String(renderId));
   await mkdir(htmlDir, { recursive: true });
-  const htmlPath = path.join(htmlDir, `${sceneSuffix}lint-input.html`);
+  // hyperframes lint requires a directory containing index.html (errors with
+  // "Not a directory" if given a single file), so each scene gets its own
+  // project dir. Single-scene uses `lint/`; multi-scene uses `lint-scene-N/`.
+  const lintProjectDir = path.join(htmlDir, sceneIndex != null ? `lint-scene-${sceneIndex}` : 'lint');
+  await mkdir(lintProjectDir, { recursive: true });
+  const htmlPath = path.join(lintProjectDir, 'index.html');
 
   const first = await specToHtml({ spec });
   let html = first.html;
@@ -41,7 +45,7 @@ async function generateHtmlWithLintGate({ spec, renderId, sceneIndex = null }) {
   let tokens = first.tokens;
   await writeFile(htmlPath, html, 'utf8');
 
-  let lint = await runLint({ htmlPath });
+  let lint = await runLint({ projectDir: lintProjectDir });
   if (lint.errorCount === 0) {
     return { html, cost, tokens, lintFindings: lint.findings };
   }
@@ -54,7 +58,7 @@ async function generateHtmlWithLintGate({ spec, renderId, sceneIndex = null }) {
   tokens = { in: tokens.in + retry.tokens.in, out: tokens.out + retry.tokens.out };
   await writeFile(htmlPath, html, 'utf8');
 
-  lint = await runLint({ htmlPath });
+  lint = await runLint({ projectDir: lintProjectDir });
   if (lint.errorCount > 0) {
     const scenePrefix = sceneIndex != null ? `Scene ${sceneIndex} ` : '';
     throw new Error(`${scenePrefix}lint failed after 1 retry: ${formatFindingsForPrompt(lint.findings)}`);

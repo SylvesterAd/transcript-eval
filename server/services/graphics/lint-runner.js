@@ -1,22 +1,26 @@
 // server/services/graphics/lint-runner.js
 //
-// Wraps `npx hyperframes lint <htmlPath> --json` and returns structured findings.
+// Wraps `npx hyperframes lint <projectDir> --json` and returns structured findings.
 // Used as a pre-render gate in render-worker; non-zero errorCount triggers a
 // feedback re-prompt via specToHtml.
+//
+// NOTE: hyperframes lint requires a DIRECTORY argument containing an index.html;
+// passing a single file path errors with "Not a directory". Callers must write
+// the HTML into a per-scene project dir as `<projectDir>/index.html`.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
 
-export async function runLint({ htmlPath }) {
-  if (!htmlPath) throw new Error('runLint: htmlPath required')
+export async function runLint({ projectDir }) {
+  if (!projectDir) throw new Error('runLint: projectDir required')
 
   let stdout
   try {
     ;({ stdout } = await exec(
       'npx',
-      ['--yes', 'hyperframes', 'lint', htmlPath, '--json'],
+      ['--yes', 'hyperframes', 'lint', projectDir, '--json'],
       { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 }
     ))
   } catch (err) {

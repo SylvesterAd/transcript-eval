@@ -24,16 +24,16 @@ beforeEach(() => {
 describe('runLint', () => {
   it('returns parsed { errorCount, warningCount, findings } from hyperframes lint --json', async () => {
     const { runLint } = await import('../lint-runner.js')
-    const result = await runLint({ htmlPath: '/tmp/test.html' })
+    const result = await runLint({ projectDir: '/tmp/test-proj' })
     expect(result.errorCount).toBe(0)
     expect(result.warningCount).toBe(1)
     expect(result.findings).toHaveLength(1)
     expect(result.findings[0].rule).toBe('animation-baseline.eases')
   })
 
-  it('throws on missing htmlPath', async () => {
+  it('throws on missing projectDir', async () => {
     const { runLint } = await import('../lint-runner.js')
-    await expect(runLint({})).rejects.toThrow(/htmlPath/)
+    await expect(runLint({})).rejects.toThrow(/projectDir/)
   })
 })
 
@@ -60,7 +60,7 @@ describe('runLint with errors', () => {
 
   it('reports error count + findings', async () => {
     const { runLint } = await import('../lint-runner.js')
-    const result = await runLint({ htmlPath: '/tmp/test.html' })
+    const result = await runLint({ projectDir: '/tmp/test-proj' })
     expect(result.errorCount).toBe(2)
     expect(result.findings).toHaveLength(2)
   })
@@ -95,7 +95,7 @@ describe('runLint with non-zero exit (errors found)', () => {
 
   it('returns structured findings even when subprocess exits non-zero', async () => {
     const { runLint } = await import('../lint-runner.js')
-    const result = await runLint({ htmlPath: '/tmp/test.html' })
+    const result = await runLint({ projectDir: '/tmp/test-proj' })
     expect(result.errorCount).toBe(1)
     expect(result.findings).toHaveLength(1)
     expect(result.findings[0].rule).toBe('determinism.banned-api')
@@ -116,7 +116,7 @@ describe('runLint with malformed stdout', () => {
 
   it('throws a contextual error when stdout is not valid JSON', async () => {
     const { runLint } = await import('../lint-runner.js')
-    await expect(runLint({ htmlPath: '/tmp/test.html' })).rejects.toThrow(
+    await expect(runLint({ projectDir: '/tmp/test-proj' })).rejects.toThrow(
       /failed to parse hyperframes lint output as JSON/
     )
   })
