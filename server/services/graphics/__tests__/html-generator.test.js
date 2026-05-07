@@ -221,11 +221,19 @@ describe('refineHtml', () => {
     const mod = await import('../html-generator.js')
     expect(mod.REFINE_HTML_SYSTEM_PROMPT).toBeDefined()
     expect(mod.REFINE_HTML_SYSTEM_PROMPT).toMatch(/refine|edit.bay/i)
+    // Drift detection: refine prompt must inherit determinism rules from CREATE prompt
+    expect(mod.REFINE_HTML_SYSTEM_PROMPT).toMatch(/Math\.random/)
+    expect(mod.REFINE_HTML_SYSTEM_PROMPT).toMatch(/autoAlpha/)
   })
 
   it('throws if html is missing', async () => {
     const { refineHtml } = await import('../html-generator.js')
     await expect(refineHtml({ feedback: 'x', spec: {} })).rejects.toThrow(/html/i)
+  })
+
+  it('throws if feedback is empty string', async () => {
+    const { refineHtml } = await import('../html-generator.js')
+    await expect(refineHtml({ html: '<html></html>', feedback: '   ', spec: {} })).rejects.toThrow(/non-empty feedback required/)
   })
 })
 

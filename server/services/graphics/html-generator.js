@@ -198,18 +198,19 @@ export async function specToHtml({ spec, additionalSystemContext = null }) {
 
 export const REFINE_HTML_SYSTEM_PROMPT = `You are the Hyperframes edit-bay refiner. You receive an EXISTING HTML motion-graphic and CRITIQUE feedback. Your job is to APPLY the feedback by editing the HTML in place — preserve stage markers (data-composition-id="main", data-start, data-duration), preserve the GSAP timeline structure, and only change what the critique calls out.
 
-Rules (same as the original generator):
-- All determinism rules apply: no Math.random, Date.now, performance.now, setTimeout, setInterval, repeat:-1, stagger from:'random', or async timeline construction.
-- Preserve mid-scene activity: every visible element must keep moving after its entrance.
-- Maintain ≥3 different easings per scene.
-- Display sizes: headlines ≥60px, body ≥20px, labels ≥16px.
-- autoAlpha for non-anchor scene visibility.
+Do NOT restructure unrelated portions of the HTML. If the critique does not mention an element, leave its tween EXACTLY as-is.
 
-Output ONLY the complete refined HTML. No commentary, no markdown fences. The HTML must include <!doctype html>, a <div data-composition-id="main">, and a <script> exposing window.__timelines.main.`
+Output ONLY the complete refined HTML. No commentary, no markdown fences. The HTML must include <!doctype html>, a <div data-composition-id="main">, and a <script> exposing window.__timelines.main.
+
+## ORIGINAL CONSTRAINTS (must still hold after refinement)
+
+${CREATE_HTML_SYSTEM_PROMPT}`
 
 export async function refineHtml({ html, feedback, spec }) {
   if (!html) throw new Error('refineHtml: html required')
-  if (!feedback) throw new Error('refineHtml: feedback required')
+  if (typeof feedback !== 'string' || !feedback.trim()) {
+    throw new Error('refineHtml: non-empty feedback required')
+  }
 
   const userMessage = `EXISTING HTML:\n${html}\n\nCRITIQUE FEEDBACK:\n${feedback}\n\nSPEC:\n${JSON.stringify(spec, null, 2)}\n\nReturn the refined HTML only.`
 
