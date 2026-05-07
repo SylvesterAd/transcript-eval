@@ -70,4 +70,13 @@ describe('renderHtml', () => {
       renderHtml({ html: '<html><body>no stage</body></html>', renderId: 74 })
     ).rejects.toThrow(/missing.*data-composition-id="main"/i);
   });
+
+  it('writes to subDir when provided', async () => {
+    process.env.GRAPHICS_RENDER_DIR = '/tmp/test-renders';
+    const { renderHtml } = await import('../render-runner.js');
+    const html = '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div></body></html>';
+    const result = await renderHtml({ html, renderId: 88, subDir: 'scene-0' });
+    expect(result.outputPath).toContain('/tmp/test-renders/88/scene-0/out.mp4');
+    expect(result.workDir).toContain('/scene-0');
+  });
 });

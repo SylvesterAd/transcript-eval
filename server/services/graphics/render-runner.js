@@ -57,12 +57,14 @@ export async function renderTemplate({ template, vars, renderId, fps = 30, quali
 
 const STAGE_MARKER_RE = /data-composition-id\s*=\s*"main"/i;
 
-export async function renderHtml({ html, renderId, fps = 30, quality = 'standard' }) {
+export async function renderHtml({ html, renderId, fps = 30, quality = 'standard', subDir = null }) {
   if (!STAGE_MARKER_RE.test(html)) {
     throw new Error(`renderHtml: html missing data-composition-id="main"`);
   }
   const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
-  const workDir = path.join(baseDir, String(renderId));
+  const workDir = subDir
+    ? path.join(baseDir, String(renderId), subDir)
+    : path.join(baseDir, String(renderId));
   await mkdir(workDir, { recursive: true });
 
   await writeFile(path.join(workDir, 'index.html'), html, 'utf8');
