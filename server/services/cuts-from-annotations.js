@@ -2,32 +2,41 @@
 //
 // Mirrors the frontend's TranscriptEditor.jsx annotation→cuts conversion,
 // minus the waveform-dependent edge refinement (which we don't have access
-// to server-side). The simpler conversion is correct for the post-cut
-// transcript filter, which only checks word-midpoint inclusion in cut
-// regions; sub-100ms boundary differences don't change the kept-words set.
+// to server-side). When `words` are provided, we additionally bridge
+// adjacent annotation regions (when no uncut word lies in the gap) and
+// extend each region's edges to the nearest uncut word — producing the
+// SAME cut shape the frontend would generate. This eliminates the
+// dual-cut-set bug where editor_state_json contained both tight
+// `cut-ann-server-` cuts AND extended `cut-ai-ann-` cuts simultaneously.
 //
 // Steps performed:
 //   1. Filter annotations to type='deletion' for cuttable categories.
 //   2. Sort by startTime, merge overlapping regions.
+//   2.5 (when words present). Bridge adjacent regions when no uncut word in gap.
+//   2.7 (when words present). Extend each region back to prev uncut word's end
+//        and forward to next uncut word's start, never crossing exclusions.
 //   3. Subtract cutExclusions if present.
 //
 // NOT performed (frontend-only):
 //   - Unsafe-filler filtering (waveform 3-bar silence rule).
-//   - Adjacent-region bridging (depends on mergedWords).
 //   - Head/tail trim to timeline edges.
-//   - Edge extension to fill wordless gaps.
 
 import db from '../db.js'
 
 const CUTTABLE_CATEGORIES = ['false_starts', 'filler_words', 'meta_commentary']
 
 /**
- * Convert annotations + cutExclusions into a cut array.
+ * Convert annotations + cutExclusions (+ optional words) into a cut array.
  * Each output cut has {id, start, end, source: 'annotation'}.
  *
  * Pure function — no DB access. Exported for tests.
+ *
+ * @param {object} annotations - {items: [...]} from annotations_json.
+ * @param {Array}  cutExclusions - [{start, end}, ...] right-click "keep" zones.
+ * @param {Array|null} words - [{word, start, end}, ...] from word_timestamps_json.
+ *   When null/undefined, skips bridging + extension and produces tight cuts.
  */
-export function deriveCutsFromAnnotations(annotations, cutExclusions = []) {
+export function deriveCutsFromAnnotations(annotations, cutExclusions = [], words = null) {
   if (!annotations?.items?.length) return []
 
   // Step 1: collect deletion regions for cuttable categories.
@@ -43,11 +52,86 @@ export function deriveCutsFromAnnotations(annotations, cutExclusions = []) {
 
   // Step 2: sort + merge overlaps.
   regions.sort((a, b) => a.start - b.start)
-  const merged = [{ ...regions[0] }]
+  let merged = [{ ...regions[0] }]
   for (let i = 1; i < regions.length; i++) {
     const last = merged[merged.length - 1]
     if (regions[i].start <= last.end) last.end = Math.max(last.end, regions[i].end)
     else merged.push({ ...regions[i] })
+  }
+
+  // Step 2.5: Bridge adjacent annotation regions when no uncut word lies in
+  // their gap. Mirrors TranscriptEditor.jsx — prevents fragmented cuts where
+  // two annotations are separated by silence (no transcribed words) which the
+  // user would expect to be one continuous cut.
+  if (words?.length && merged.length > 1) {
+    // "Annotation regions" for coverage check are the raw merged regions
+    // (before bridging) — matches frontend's annotationRegions semantics.
+    const annotationRegions = merged
+    const bridged = [{ ...merged[0] }]
+    for (let i = 1; i < merged.length; i++) {
+      const last = bridged[bridged.length - 1]
+      const gapStart = last.end
+      const gapEnd = merged[i].start
+
+      // Don't bridge if exclusion zone crosses the gap.
+      const exclusionCrosses = (cutExclusions || []).some(ex => ex.start < gapEnd && ex.end > gapStart)
+      if (exclusionCrosses) {
+        bridged.push({ ...merged[i] })
+        continue
+      }
+
+      // Has any uncut word in the gap? "Uncut" = not covered by any annotation
+      // region (with 0.05s tolerance — matches frontend).
+      const hasUncutWordInGap = words.some(w => {
+        const wEnd = Math.max(w.end, w.start + 0.01)
+        if (w.start < gapStart || wEnd > gapEnd) return false
+        const isCoveredByAnn = annotationRegions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
+        return !isCoveredByAnn
+      })
+      if (!hasUncutWordInGap) {
+        last.end = merged[i].end
+      } else {
+        bridged.push({ ...merged[i] })
+      }
+    }
+    merged = bridged
+  }
+
+  // Step 2.7: Extend each region's edges to the nearest uncut word, never
+  // crossing exclusion zones. Mirrors TranscriptEditor.jsx — produces the same
+  // cut shape the frontend would generate, eliminating the dual-cut-set bug.
+  if (words?.length) {
+    const annotationRegions = merged
+    for (const region of merged) {
+      // Extend end forward: stretch to next uncut word's start.
+      const nextUncutWord = words.find(w => w.start >= region.end - 0.01 &&
+        !annotationRegions.some(r => w.start >= r.start - 0.05 && w.end <= r.end + 0.05))
+      if (nextUncutWord) {
+        const hasUncutBetween = words.some(w => {
+          if (w === nextUncutWord) return false
+          const wEnd = Math.max(w.end, w.start + 0.01)
+          return w.start >= region.end - 0.01 && wEnd <= nextUncutWord.start + 0.01 &&
+            !annotationRegions.some(r => w.start >= r.start - 0.05 && wEnd <= r.end + 0.05)
+        })
+        if (!hasUncutBetween) {
+          let newEnd = nextUncutWord.start
+          for (const ex of (cutExclusions || [])) {
+            if (ex.start > region.end - 0.01 && ex.start < newEnd) newEnd = Math.min(newEnd, ex.start)
+          }
+          region.end = newEnd
+        }
+      }
+      // Extend start backward: stretch to prev uncut word's end.
+      const prevUncutWord = [...words].reverse().find(w => w.end <= region.start + 0.01 &&
+        !annotationRegions.some(r => w.start >= r.start - 0.05 && w.end <= r.end + 0.05))
+      if (prevUncutWord) {
+        let newStart = prevUncutWord.end
+        for (const ex of (cutExclusions || [])) {
+          if (ex.end < region.start + 0.01 && ex.end > newStart) newStart = Math.max(newStart, ex.end)
+        }
+        region.start = Math.max(newStart, prevUncutWord.end)
+      }
+    }
   }
 
   // Step 3: subtract cutExclusions (the user's right-click "keep this word" list).
@@ -113,12 +197,35 @@ export async function ensureEditorCutsFromAnnotations(groupId) {
     editorState = {}
   }
 
+  // Load words for the group's main raw video, so deriveCutsFromAnnotations
+  // can produce the extended cut shape the frontend generates (bridging +
+  // edge extension). If no words available, falls back to tight cuts.
+  let words = null
+  try {
+    const mainVideo = await db.prepare(
+      "SELECT id FROM videos WHERE group_id = ? AND video_type = 'raw' LIMIT 1"
+    ).get(groupId)
+    if (mainVideo) {
+      const t = await db.prepare(
+        "SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw' LIMIT 1"
+      ).get(mainVideo.id)
+      if (t?.word_timestamps_json) {
+        const parsed = typeof t.word_timestamps_json === 'string'
+          ? JSON.parse(t.word_timestamps_json)
+          : t.word_timestamps_json
+        words = Array.isArray(parsed) ? parsed : null
+      }
+    }
+  } catch (err) {
+    console.warn(`[ensureEditorCutsFromAnnotations] failed to load words for group ${groupId}:`, err.message)
+  }
+
   const existingCuts = editorState.cuts || []
   const existingExclusions = editorState.cutExclusions || []
 
   // Preserve manual cuts (source !== 'annotation'). Replace annotation-derived cuts.
   const manualCuts = existingCuts.filter(c => c.source !== 'annotation')
-  const derivedAnnCuts = deriveCutsFromAnnotations(annotations, existingExclusions)
+  const derivedAnnCuts = deriveCutsFromAnnotations(annotations, existingExclusions, words)
 
   // Compare derived set against existing annotation cuts to decide if we
   // need to write. Compare by sorted (start, end) tuples — id is regenerated
