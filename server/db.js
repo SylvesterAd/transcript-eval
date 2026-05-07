@@ -312,8 +312,10 @@ try {
         ON graphics_render_iterations(render_id, iteration_index);
       ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS iteration_count INTEGER NOT NULL DEFAULT 1;
       ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS final_score NUMERIC(3,2);
+      ALTER TABLE graphics_render_iterations ADD COLUMN IF NOT EXISTS scene_index INTEGER;
+      ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS scene_count INTEGER NOT NULL DEFAULT 1;
     `);
-    console.log('[migrate] graphics_render_iterations + critic columns ready')
+    console.log('[migrate] graphics_render_iterations + critic + scene columns ready')
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
