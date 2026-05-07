@@ -16,6 +16,8 @@ import BRollRunsView from './components/views/BRollRunsView.jsx'
 import ApiKeysView from './components/views/ApiKeysView.jsx'
 import ApiLogsView from './components/views/ApiLogsView.jsx'
 import GpuPipelineView from './components/views/GpuPipelineView.jsx'
+import AdminUsersView from './components/views/AdminUsersView.jsx'
+import AdminUserDetailView from './components/views/AdminUserDetailView.jsx'
 import ProjectsView from './components/views/ProjectsView.jsx'
 import ExportsList from './pages/admin/ExportsList.jsx'
 import ExportDetail from './pages/admin/ExportDetail.jsx'
@@ -203,6 +205,8 @@ export default function App() {
         <Route path="exports" element={<ExportsList />} />
         <Route path="exports/:id" element={<ExportDetail />} />
         <Route path="support" element={<SupportBundle />} />
+        <Route path="users" element={<AdminUsersView />} />
+        <Route path="users/:userId" element={<AdminUserDetailView />} />
       </Route>
 
       {/* User panel routes */}

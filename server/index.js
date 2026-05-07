@@ -15,6 +15,7 @@ import gpuRouter from './routes/gpu.js'
 import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter, freepikUrlRouter } from './routes/exports.js'
 import adminExportsRouter from './routes/admin/exports.js'
 import adminSupportBundlesRouter from './routes/admin/support-bundles.js'
+import adminUsersRouter from './routes/admin/users.js'
 import exportXmlRouter from './routes/export-xml.js'
 import extConfigRouter from './routes/ext-config.js'
 import { attachAuth, hasServerAuthConfig } from './auth.js'
@@ -81,6 +82,7 @@ app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/admin/exports', adminExportsRouter)
 app.use('/api/admin/support-bundles', adminSupportBundlesRouter)
+app.use('/api/admin/users', adminUsersRouter)
 app.use('/api/gpu', gpuRouter)
 app.use('/api/exports', exportsRouter)
 app.use('/api/exports', exportXmlRouter)

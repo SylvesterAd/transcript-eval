@@ -23,6 +23,7 @@ import AssetsView from './AssetsView.jsx'
 import BRollPanel from './BRollPanel.jsx'
 import EstimationModal from './EstimationModal.jsx'
 import ProcessingModal from '../views/ProcessingModal.jsx'
+import InspectingBanner from './InspectingBanner.jsx'
 
 export const EditorContext = createContext(null)
 
@@ -1001,6 +1002,7 @@ export default function EditorView() {
   return (
     <EditorContext.Provider value={editorContextValue}>
       <div className="h-screen flex flex-col overflow-hidden bg-[#0e0e10] text-on-surface font-['Inter',sans-serif]">
+        <InspectingBanner />
         {/* Top nav */}
         <header className="flex justify-between items-center w-full px-6 h-14 bg-[#0e0e10] z-50 shrink-0">
           <div className="flex items-center gap-8">
