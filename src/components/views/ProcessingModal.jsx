@@ -35,6 +35,17 @@ function isFailedPrePause(sg, parentPathId) {
   return failIdx <= SUBSTAGE_ORDER.indexOf(pause)
 }
 
+// Banner is shown when hands-off + auto_rough_cut has finished the rough cut
+// but the b-roll chain is still in flight (or paused at strategy/plan).
+export function shouldShowReviewRoughCutBanner({ parent, subGroups }) {
+  if (!parent || parent.path_id !== 'hands-off' || !parent.auto_rough_cut) return false
+  if (!subGroups || subGroups.length === 0) return false
+  if (!subGroups.every(sg => sg.rough_cut_status === 'done')) return false
+  return subGroups.some(sg =>
+    ['running', 'pending', 'paused_at_strategy', 'paused_at_plan'].includes(sg.broll_chain_status)
+  )
+}
+
 export function deriveMode({ parent, files = [], subGroups = [] }) {
   const anyUploading = files.some(f => f.status === 'uploading')
   if (anyUploading) return 'uploading'
@@ -652,6 +663,21 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
                 We're running the pipeline — feel free to keep an eye on the stages below.
               </p>
             </div>
+            {shouldShowReviewRoughCutBanner({ parent, subGroups }) && (
+              <div className="mb-4 rounded-lg border border-lime/30 bg-lime/5 px-4 py-3 flex items-center gap-3">
+                <span className="material-symbols-outlined text-lime">content_cut</span>
+                <div className="flex-1">
+                  <div className="text-sm font-bold text-on-surface">Rough cut ready — review while we keep working</div>
+                  <div className="text-xs text-on-surface-variant mt-0.5">Your b-roll search is still running. Open the rough cut to make adjustments.</div>
+                </div>
+                <button
+                  onClick={() => navigate(`/editor/${subGroups[0].id}/roughcut`)}
+                  className="px-4 py-1.5 rounded-md text-xs font-bold bg-lime text-black hover:opacity-90"
+                >
+                  Review rough cut
+                </button>
+              </div>
+            )}
             <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} groupId={groupId} />
             <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
               <div className="flex items-center justify-end">
