@@ -1529,9 +1529,11 @@ export async function executeAltPlans(planPipelineId) {
     let llmAnswer = '', questionCount = 0
     const llmAnswers = {}
 
+    const cutRangesText = '' // editorCuts not threaded into this branch — no cut-ranges available
     function replacePlaceholders(text) {
       let result = text
         .replace(/\{\{transcript\}\}/g, currentTranscript)
+        .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
         .replace(/\{\{llm_answer\}\}/g, llmAnswer)
         .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
         .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
@@ -2904,9 +2906,11 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   let llmAnswer = '', questionCount = 0
   const llmAnswers = {}
 
+  const cutRangesText = '' // editorCuts not threaded into this branch — no cut-ranges available
   function replacePlaceholders(text) {
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
+      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{reference_analysis_slim\}\}/g, slimReferenceAnalysis)
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
@@ -3336,9 +3340,11 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   let llmAnswer = '', questionCount = 0
   const llmAnswers = {}
 
+  const cutRangesText = '' // editorCuts not threaded into this branch — no cut-ranges available
   function replacePlaceholders(text) {
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
+      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{all_reference_analyses_slim\}\}/g, slimReferenceAnalyses)
       .replace(/\{\{all_reference_analyses\}\}/g, allReferenceAnalyses)
@@ -3885,9 +3891,11 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   let llmAnswer = '', questionCount = 0
   const llmAnswers = {}
 
+  const cutRangesText = formatCutRangesForPrompt(computeEffectiveCuts(editorCuts?.cuts || [], editorCuts?.cutExclusions || []))
   function replacePlaceholders(text) {
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
+      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{audience\}\}/g, audienceText)
       .replace(/\{\{audience_block\}\}/g, audienceBlock)
@@ -4338,6 +4346,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
   brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: resumeData ? 'Resuming...' : '' })
 
+  const cutRangesText = formatCutRangesForPrompt(computeEffectiveCuts(editorCuts?.cuts || [], editorCuts?.cutExclusions || []))
   function replacePlaceholders(text) {
     // Build all_chapter_analyses from completed videos
     const allChapters = Object.entries(chapterAnalyses).map(([key, json]) => {
@@ -4348,6 +4357,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
+      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{examples_output\}\}/g, examplesOutput)
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
