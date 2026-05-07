@@ -382,6 +382,19 @@ export default function EditorView() {
     }
   }, [id])
 
+  // Continue button on the rough-cut tab. For strategy-only + auto_rough_cut
+  // (and legacy guided), the chain is paused at paused_at_rough_cut and we
+  // need to fire the resume before navigating. For hands-off the chain is
+  // already running — Continue is just navigation back to the processing
+  // page so the user can see what's still in flight.
+  const handleContinueFromRoughCut = async () => {
+    if (groupDetail?.broll_chain_status === 'paused_at_rough_cut') {
+      try { await fireResumeFromRoughCut() } catch {}
+    }
+    const targetGroupId = groupDetail?.parent_group_id ?? id
+    navigate(`/?step=processing&group=${targetGroupId}`)
+  }
+
   // Sidebar B-Roll Strategy click during paused_at_rough_cut: fire resume +
   // navigate to the strategy tab. The useEffect below is the safety net for
   // any other entry point (direct URL, BRollPanel auto-redirect, etc.).
@@ -1023,12 +1036,21 @@ export default function EditorView() {
                 <span className="text-xs font-bold text-on-surface-variant">{tokenBalance.toLocaleString()}</span>
               </div>
             )}
-            <button
-              onClick={() => window.open(`/editor/${id}/export`, '_blank')}
-              className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
-            >
-              Export
-            </button>
+            {activeTab === 'roughcut' ? (
+              <button
+                onClick={handleContinueFromRoughCut}
+                className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
+              >
+                Continue
+              </button>
+            ) : activeTab === 'brolls' ? null : (
+              <button
+                onClick={() => window.open(`/editor/${id}/export`, '_blank')}
+                className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
+              >
+                Export
+              </button>
+            )}
             <div className="w-8 h-8 rounded-full bg-surface-variant flex items-center justify-center border border-outline-variant/30">
               <span className="text-primary-fixed font-bold text-sm">S</span>
             </div>
