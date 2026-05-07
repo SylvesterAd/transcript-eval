@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../events/emitter.js', () => ({ emit: vi.fn() }));
+
 // All test paths are 3-up: __tests__ → graphics → services → server
 vi.mock('../../../db.js', () => {
   const queued = [

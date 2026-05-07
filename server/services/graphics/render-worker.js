@@ -19,6 +19,7 @@ import { MODEL_FOR, costCents } from './models.js';
 import { CREATE_SYSTEM_PROMPT } from './create-prompt.js';
 import { runCritic } from './critic/critic-runner.js';
 import { buildRetryPrompt } from './retry-prompt.js';
+import { emit } from './events/emitter.js';
 
 const POLL_INTERVAL_MS = 2000;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
@@ -68,9 +69,11 @@ export async function drainOnce() {
   let row;
   while ((row = await claimNextRender())) {
     try {
+      emit({ sessionId: row.session_id, step: 'render_started', label: 'Rendering…', renderId: row.id, iteration: 1 })
       const { vars: initialVars, cost } = await specToVars(row.spec_snapshot_json);
       let currentVars = initialVars;
       let currentResult = await renderTemplate({ template: row.template, vars: currentVars, renderId: row.id });
+      emit({ sessionId: row.session_id, step: 'render_finished', label: `Render complete (iter 1)`, renderId: row.id, iteration: 1 })
       let currentUpload = await uploadRender({
         renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
       });
@@ -88,6 +91,7 @@ export async function drainOnce() {
           sessionId: row.session_id,
         });
 
+        emit({ sessionId: row.session_id, step: 'critic_scored', label: `Critic score ${critique.score.toFixed(2)} (iter ${iteration})`, renderId: row.id, iteration, score: critique.score })
         const attempt = {
           iteration,
           score: critique.score,
@@ -102,6 +106,7 @@ export async function drainOnce() {
         if (iteration >= MAX_ITERATIONS) break;
 
         // Retry: build new vars from critique feedback
+        emit({ sessionId: row.session_id, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId: row.id })
         const retrySys = buildRetryPrompt({ priorCritique: critique, priorVars: currentVars });
         const retryResp = await callAnthropic({
           model: MODEL_FOR.create,
@@ -113,6 +118,7 @@ export async function drainOnce() {
         currentVars = JSON.parse(retryText);
         iteration += 1;
         currentResult = await renderTemplate({ template: row.template, vars: currentVars, renderId: row.id });
+        emit({ sessionId: row.session_id, step: 'render_finished', label: `Render complete (iter ${iteration})`, renderId: row.id, iteration })
         currentUpload = await uploadRender({
           renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
         });
@@ -139,6 +145,7 @@ export async function drainOnce() {
           .prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`)
           .run(row.session_id);
       });
+      emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore: bestAttempt.score })
       processed += 1;
     } catch (e) {
       errors.push({ renderId: row.id, error: e.message });

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 
+vi.mock('../../events/emitter.js', () => ({ emit: vi.fn() }))
+
 vi.mock('../frame-extractor.js', () => ({
   extractFrames: vi.fn().mockResolvedValue(['/tmp/f0.png', '/tmp/f1.png', '/tmp/f2.png', '/tmp/f3.png']),
 }))

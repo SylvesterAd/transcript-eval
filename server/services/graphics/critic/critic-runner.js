@@ -12,6 +12,7 @@ import db from '../../../db.js'
 import { extractFrames } from './frame-extractor.js'
 import { evaluateFrames } from './evaluator.js'
 import { uploadFrames } from '../uploader.js'
+import { emit } from '../events/emitter.js'
 
 const FRAME_COUNT = 4
 
@@ -25,6 +26,7 @@ export async function runCritic({ renderId, iterationIndex, mp4Path, durationSec
     count: FRAME_COUNT,
     outDir: frameDir,
   })
+  emit({ sessionId, step: 'frames_captured', label: 'Frames captured', renderId, iteration: iterationIndex })
   const frameUrls = await uploadFrames({ renderId, iterationIndex, framePaths: localFramePaths })
   const critique = await evaluateFrames({ framePaths: localFramePaths, spec })
 
