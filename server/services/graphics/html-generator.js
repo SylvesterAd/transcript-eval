@@ -174,10 +174,13 @@ These examples define the visual baseline. Vary layouts as the spec calls for it
 
 const STAGE_MARKER = /data-composition-id\s*=\s*"main"/i
 
-export async function specToHtml({ spec }) {
+export async function specToHtml({ spec, additionalSystemContext = null }) {
+  const systemPrompt = additionalSystemContext
+    ? `${CREATE_HTML_SYSTEM_PROMPT}\n\n## CORRECTIONS REQUESTED\n${additionalSystemContext}`
+    : CREATE_HTML_SYSTEM_PROMPT
   const r = await callAnthropic({
     model: MODEL_FOR.create,
-    system: CREATE_HTML_SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(spec, null, 2)}` }],
     max_tokens: 4096,
   })

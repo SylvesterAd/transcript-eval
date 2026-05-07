@@ -12,6 +12,7 @@
 //   5. Atomic: mark render complete + flip session status
 
 import path from 'node:path';
+import { writeFile, mkdir } from 'node:fs/promises';
 import db from '../../db.js';                          // default import
 import { renderHtml } from './render-runner.js';
 import { uploadRender } from './uploader.js';
@@ -21,6 +22,7 @@ import { MODEL_FOR } from './models.js';
 import { runCritic } from './critic/critic-runner.js';
 import { buildRetryPrompt } from './retry-prompt.js';
 import { concatScenes } from './scene-concat.js';
+import { runLint, formatFindingsForPrompt } from './lint-runner.js';
 import { emit } from './events/emitter.js';
 
 const POLL_INTERVAL_MS = 2000;
@@ -28,6 +30,39 @@ const STUCK_AFTER_MS = 10 * 60 * 1000;
 const MAX_ITERATIONS = 3;       // initial + 2 retries
 const SCORE_THRESHOLD = 0.7;
 let running = false;
+
+async function generateHtmlWithLintGate({ spec, renderId, sceneIndex = null }) {
+  const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
+  const sceneSuffix = sceneIndex != null ? `scene-${sceneIndex}-` : '';
+  const htmlDir = path.join(baseDir, String(renderId));
+  await mkdir(htmlDir, { recursive: true });
+  const htmlPath = path.join(htmlDir, `${sceneSuffix}lint-input.html`);
+
+  const first = await specToHtml({ spec });
+  let html = first.html;
+  let cost = first.cost;
+  let tokens = first.tokens;
+  await writeFile(htmlPath, html, 'utf8');
+
+  let lint = await runLint({ htmlPath });
+  if (lint.errorCount === 0) {
+    return { html, cost, tokens, lintFindings: lint.findings };
+  }
+
+  // One feedback retry
+  const feedback = formatFindingsForPrompt(lint.findings);
+  const retry = await specToHtml({ spec, additionalSystemContext: feedback });
+  html = retry.html;
+  cost += retry.cost;
+  tokens = { in: tokens.in + retry.tokens.in, out: tokens.out + retry.tokens.out };
+  await writeFile(htmlPath, html, 'utf8');
+
+  lint = await runLint({ htmlPath });
+  if (lint.errorCount > 0) {
+    throw new Error(`lint failed after retry: ${formatFindingsForPrompt(lint.findings)}`);
+  }
+  return { html, cost, tokens, lintFindings: lint.findings };
+}
 
 async function claimNextRender() {
   return await db
@@ -49,7 +84,9 @@ async function claimNextRender() {
 async function runSceneCriticLoop({ renderId, sessionId, sceneSpec, sceneIndex = null }) {
   const subDir = sceneIndex !== null ? `scene-${sceneIndex}` : null;
   let totalCost = 0;
-  const { html: initialHtml, cost } = await specToHtml({ spec: sceneSpec });
+  const { html: initialHtml, cost } = await generateHtmlWithLintGate({
+    spec: sceneSpec, renderId, sceneIndex,
+  });
   totalCost += cost;
   let currentHtml = initialHtml;
   let currentResult = await renderHtml({ html: currentHtml, renderId, subDir });
