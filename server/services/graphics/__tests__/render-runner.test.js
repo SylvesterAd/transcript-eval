@@ -52,3 +52,22 @@ describe('renderTemplate', () => {
     ).rejects.toThrow('Template variable not provided: mainText');
   });
 });
+
+describe('renderHtml', () => {
+  it('writes raw HTML and runs hyperframes render', async () => {
+    process.env.GRAPHICS_RENDER_DIR = '/tmp/test-renders';
+    const { renderHtml } = await import('../render-runner.js');
+    const html = '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div></body></html>';
+    const result = await renderHtml({ html, renderId: 73 });
+    expect(result.outputPath).toContain('/tmp/test-renders/73/out.mp4');
+    expect(result.bytes).toBeGreaterThan(0);
+  });
+
+  it('throws if html lacks the stage marker (defense in depth)', async () => {
+    process.env.GRAPHICS_RENDER_DIR = '/tmp/test-renders';
+    const { renderHtml } = await import('../render-runner.js');
+    await expect(
+      renderHtml({ html: '<html><body>no stage</body></html>', renderId: 74 })
+    ).rejects.toThrow(/missing.*data-composition-id="main"/i);
+  });
+});
