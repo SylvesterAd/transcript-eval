@@ -111,3 +111,45 @@ describe('specToHtml', () => {
     expect(userMsg).toContain('"role": "logo"')
   })
 })
+
+describe('CREATE_HTML_SYSTEM_PROMPT canonical Hyperframes rules', () => {
+  it('bans non-deterministic APIs', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Math\.random/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Date\.now/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/performance\.now/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/setInterval/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/setTimeout/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/repeat:\s*-1/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/from:\s*['"]random['"]/)
+  })
+
+  it('mandates mid-scene activity', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/mid-scene|after.*entrance|keep moving/i)
+  })
+
+  it('requires at least 3 different easings per scene', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/at least 3|≥\s*3|three different.*ease/i)
+  })
+
+  it('lists approved easings', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/power2\.out/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/back\.out/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/expo\.out/)
+  })
+
+  it('specifies size floors', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/60px/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/20px/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/16px/)
+  })
+
+  it('teaches autoAlpha for non-anchor scene visibility', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/autoAlpha/)
+  })
+})

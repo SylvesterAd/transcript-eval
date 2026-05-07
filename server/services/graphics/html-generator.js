@@ -118,6 +118,43 @@ The spec may include an \`assets\` array. Each entry has { role, url, alt, sourc
 - ALWAYS include the \`alt\` attribute on <img> tags for accessibility.
 - Compose layouts that show the asset prominently — don't hide it behind text or off-screen.
 
+## DETERMINISM RULES (BANNED APIS — never use these)
+
+The render is frame-by-frame on headless Chromium; non-deterministic state poisons capture.
+
+| Banned                              | Use instead                                              |
+| ----------------------------------- | -------------------------------------------------------- |
+| Math.random()                       | A seeded PRNG (mulberry32 inline; deterministic)         |
+| Date.now()                          | Hard-coded numeric timing or tl.time() inside onUpdate   |
+| performance.now()                   | Same — tl.time() inside onUpdate                         |
+| setInterval / setTimeout            | Timeline tweens with onUpdate                            |
+| repeat: -1                          | repeat: Math.ceil(duration / cycle) - 1                  |
+| stagger: { from: "random" }         | from: "start" | "center" | "end"                         |
+| Async timeline construction         | Build timelines synchronously at page load               |
+
+## ANIMATION BASELINES
+
+- **Mid-scene activity:** every visible element must keep moving AFTER its entrance. A still element on a still background is a JPEG with a progress bar.
+- **Easing variety:** use at least 3 different eases per scene. Don't default to power2.out everywhere. Approved: power2.out, power4.out, back.out(1.6), expo.out, sine.inOut, steps(5).
+- **Display sizes:** headlines ≥60px, body ≥20px, labels ≥16px.
+- **Reading-time budget per text element:** no text 1.5–2s; 1–3 words 2–3s; 4–10 words 3–4s; 11–20 words 4–6s; 21–35 words 6–8s; 35+ words split. Hard 5s ceiling per scene unless justified.
+- **Weight contrast:** 300 vs 900, not 400 vs 700.
+
+## VISIBILITY (autoAlpha)
+
+When shader transitions fire, HyperShader blanks ALL .scene elements to opacity:0. Non-anchor scenes that only toggle visibility get poisoned.
+
+For NON-ANCHOR scenes, use autoAlpha (sets BOTH opacity AND visibility):
+
+    tl.set("#sceneN", { autoAlpha: 1 }, <data-start>)
+    tl.set("#sceneN", { autoAlpha: 0 }, <data-start + data-duration>)
+
+For ANCHOR scenes (HyperShader-managed), do NOT use autoAlpha. The first anchor in each shader group needs an explicit opacity:1 reset:
+
+    tl.set("#sceneN", { opacity: 1 }, <data-start>)
+
+Scene 1 typically gets only the autoAlpha hide (it starts visible).
+
 # Few-shot example A — lower-third (no assets)
 \`\`\`html
 ${FEW_SHOT_LOWER_THIRD}
