@@ -19,19 +19,32 @@ beforeEach(() => {
 })
 
 describe('StepRoughCut', () => {
-  it('defaults to Skip', () => {
-    render(<StepRoughCut groupId={1} state={{ autoRoughCut: false }} setState={{ autoRoughCut: () => {} }} />)
-    const skip = screen.getByRole('radio', { name: /skip/i })
-    expect(skip.checked).toBe(true)
+  // The Skip/Run radios were removed in commit e3dd455 — the choice
+  // moved to footer CTAs in UploadConfigFlow. The component is now
+  // purely informational + estimate-display + validity-gate; the tests
+  // below cover what remains as StepRoughCut's responsibility.
+
+  it('reports validity=true when autoRoughCut is false (skip path is always valid)', async () => {
+    const onValidity = vi.fn()
+    render(
+      <StepRoughCut
+        groupId={1}
+        state={{ autoRoughCut: false }}
+        setState={{ autoRoughCut: () => {} }}
+        onValidityChange={onValidity}
+      />
+    )
+    await waitFor(() => expect(onValidity).toHaveBeenCalledWith(true))
   })
 
-  it('shows estimate from server when Run is selected', async () => {
-    const setAutoRoughCut = vi.fn()
-    const { rerender } = render(
-      <StepRoughCut groupId={1} state={{ autoRoughCut: false }} setState={{ autoRoughCut: setAutoRoughCut }} />
+  it('shows the estimate token count after the server responds', async () => {
+    render(
+      <StepRoughCut
+        groupId={1}
+        state={{ autoRoughCut: true }}
+        setState={{ autoRoughCut: () => {} }}
+      />
     )
-    fireEvent.click(screen.getByRole('radio', { name: /run/i }))
-    rerender(<StepRoughCut groupId={1} state={{ autoRoughCut: true }} setState={{ autoRoughCut: setAutoRoughCut }} />)
     await waitFor(() => expect(screen.getAllByText(/1,200/).length).toBeGreaterThan(0))
   })
 

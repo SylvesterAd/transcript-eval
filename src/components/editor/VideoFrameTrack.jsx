@@ -1,10 +1,12 @@
 import { useRef, useEffect, useState, useMemo, useContext, useCallback, memo } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { GROUP_COLORS } from './useEditorState.js'
+import { getTrackPostCutLayout } from '../../lib/postCutTimeline.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 
-// Display dimensions
-const FRAME_H = 80
-const FRAME_W = 142
+// Display dimensions — compact, CapCut-style. Frames stay 16:9.
+const FRAME_H = 40
+const FRAME_W = 71
 const FRAME_INTERVAL = 1 // server extracts 1 frame per second
 
 /**
@@ -22,14 +24,33 @@ function frameUrl(videoId, time, cfStreamUid) {
   return `/uploads/frames/${path}`
 }
 
-function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {
-  const { state, dispatch, mediaType } = useContext(EditorContext)
+function VideoFrameTrack({ track, zoom, cuts, postCutCuts, scrollRef, scrollX, groupedBelow, groupedAbove }) {
+  const { state, dispatch, mediaType, selectedSegmentKey, setSelectedSegmentKey } = useContext(EditorContext)
   if (mediaType === 'audio') return null
   const group = track.groupId ? state.groups[track.groupId] : null
-  const color = group?.color || '#acaaad'
+  // When grouped with the matching audio for the same source, inherit the
+  // audio's color so the V + A1 read as one CapCut-style clip block (same
+  // accent strip + same background tint flowing across).
+  const pairedAudio = useMemo(() => (
+    state.tracks.find(t => t.type === 'audio' && t.videoId === track.videoId)
+  ), [state.tracks, track.videoId])
+  const pairedAudioGroup = pairedAudio?.groupId ? state.groups[pairedAudio.groupId] : null
+  const color = group?.color || pairedAudioGroup?.color || '#48e5d0'
+  const selected = state.selectedTrackIds.has(track.id)
 
-  const left = track.offset * zoom
-  const width = Math.max(track.duration * zoom, 4)
+  // In post-cut mode, the track's outer container is positioned + sized using
+  // post-cut math; cut overlays are not rendered (Timeline draws thin purple
+  // CutBars instead). In legacy mode (rough cut), behavior is unchanged.
+  const postCutLayout = useMemo(() => (
+    postCutCuts ? getTrackPostCutLayout(track.offset, track.duration, postCutCuts, zoom) : null
+  ), [postCutCuts, track.offset, track.duration, zoom])
+
+  const left = postCutLayout
+    ? postCutTime(track.offset, postCutCuts) * zoom
+    : track.offset * zoom
+  const width = postCutLayout
+    ? Math.max(postCutLayout.width, 4)
+    : Math.max(track.duration * zoom, 4)
 
   // Visible display slots (zoom-dependent, viewport-clipped)
   const displayInterval = Math.max(0.1, FRAME_W / zoom)
@@ -39,16 +60,36 @@ function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {
 
   const visibleSlots = useMemo(() => {
     if (!track.filePath) return []
+    const slots = []
+    if (postCutLayout) {
+      // Post-cut mode: viewport bounds are post-cut local seconds (relative to
+      // the outer container). Step through each kept segment in post-cut local
+      // seconds and render frames at the corresponding original-time position.
+      const vStartPost = Math.max(0, ((scrollX || 0) - labelW - left - buffer) / zoom)
+      const vEndPost = ((scrollX || 0) - labelW - left + viewW + buffer) / zoom
+      for (const seg of postCutLayout.segments) {
+        if (seg.postEnd < vStartPost || seg.postStart > vEndPost) continue
+        const segVStart = Math.max(seg.postStart, vStartPost)
+        const segVEnd = Math.min(seg.postEnd, vEndPost)
+        const start = Math.max(seg.postStart, Math.floor(segVStart / displayInterval) * displayInterval)
+        for (let postT = start; postT < segVEnd; postT += displayInterval) {
+          const origT = seg.origStart + (postT - seg.postStart)
+          const localPostX = postT * zoom
+          const nearest = Math.round(origT / FRAME_INTERVAL) * FRAME_INTERVAL
+          slots.push({ time: postT, x: localPostX, src: frameUrl(track.videoId, nearest, track.cfStreamUid) })
+        }
+      }
+      return slots
+    }
     const vStart = Math.max(0, ((scrollX || 0) - labelW - left - buffer) / zoom)
     const vEnd = ((scrollX || 0) - labelW - left + viewW + buffer) / zoom
-    const slots = []
     const start = Math.max(0, Math.floor(vStart / displayInterval) * displayInterval)
     for (let t = start; t < Math.min(track.duration, vEnd); t += displayInterval) {
       const nearest = Math.round(t / FRAME_INTERVAL) * FRAME_INTERVAL
       slots.push({ time: t, x: t * zoom, src: frameUrl(track.videoId, nearest, track.cfStreamUid) })
     }
     return slots
-  }, [track.filePath, track.videoId, scrollX, left, buffer, zoom, labelW, viewW, displayInterval, track.duration])
+  }, [track.filePath, track.videoId, track.offset, scrollX, left, buffer, zoom, labelW, viewW, displayInterval, track.duration, postCutLayout, postCutCuts])
 
   // Cut edge drag handler — blocks AI regeneration during drag, sets exclusion on release
   const { cutDragRef } = useContext(EditorContext)
@@ -108,13 +149,66 @@ function VideoFrameTrack({ track, zoom, cuts, scrollRef, scrollX }) {
   }, [state.cuts, state.cutExclusions, zoom, dispatch, cutDragRef])
 
   return (
-    <div className="relative border-b border-white/10" style={{ height: `${FRAME_H}px` }}>
+    <div className={`relative ${groupedBelow ? '' : 'border-b border-white/10'} ${selected ? 'track-selected' : ''}`} style={{ height: `${FRAME_H}px` }}>
       <div
         className="absolute top-0 h-full overflow-hidden"
         style={{ left: `${left}px`, width: `${width}px` }}
       >
-        {/* Background accent */}
-        <div className="absolute inset-0" style={{ backgroundColor: `${color}15`, borderLeft: `2px solid ${color}` }} />
+        {/* Background accent — in post-cut mode, one box per kept segment with
+            rounded corners. Each segment is inset 2px on each side so adjacent
+            segments show their rounded ends "clashing" with a barely visible
+            4px gap between them, marking the cut visually. The cut belongs to
+            the previous segment (a-roll #1 + cut #1 reads as one rounded block;
+            a-roll #2 starts after the gap). Default rendering has no left
+            "start highlight" — only the rounded background tint. Click selects
+            the segment and adds a full 4-side white border. In legacy mode,
+            single full-width accent. */}
+        {postCutLayout ? (
+          postCutLayout.segments.map((seg, si) => {
+            const segKey = track.offset + seg.origStart
+            const isSelected = selectedSegmentKey != null && Math.abs(segKey - selectedSegmentKey) < 0.01
+            const sel = '2px solid rgba(255,255,255,0.9)'
+            // For paired V+A tracks, the selection border is rendered at the
+            // pair-row level (Timeline.jsx) so it wraps the whole clip block
+            // uniformly — including V even if V's track.offset differs slightly
+            // from A's. Solo tracks still render their own border here.
+            const inPair = groupedAbove || groupedBelow
+            return (
+              <div
+                key={`acc-${si}`}
+                className="absolute top-0 h-full cursor-pointer z-[5]"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); setSelectedSegmentKey?.(isSelected ? null : segKey) }}
+                style={{
+                  left: `${seg.x + 2}px`,
+                  width: `${Math.max(seg.w - 4, 2)}px`,
+                  boxSizing: 'border-box',
+                  backgroundColor: `${color}15`,
+                  borderLeft: isSelected && !inPair ? sel : 'none',
+                  borderRight: isSelected && !inPair ? sel : 'none',
+                  borderTop: isSelected && !inPair ? sel : 'none',
+                  borderBottom: isSelected && !inPair ? sel : 'none',
+                  borderTopLeftRadius: groupedAbove ? 0 : 6,
+                  borderTopRightRadius: groupedAbove ? 0 : 6,
+                  borderBottomLeftRadius: groupedBelow ? 0 : 6,
+                  borderBottomRightRadius: groupedBelow ? 0 : 6,
+                }}
+              />
+            )
+          })
+        ) : (
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundColor: `${color}15`,
+              borderLeft: `4px solid ${color}`,
+              borderTopLeftRadius: groupedAbove ? 0 : 6,
+              borderTopRightRadius: groupedAbove ? 0 : 6,
+              borderBottomLeftRadius: groupedBelow ? 0 : 6,
+              borderBottomRightRadius: groupedBelow ? 0 : 6,
+            }}
+          />
+        )}
 
         {/* Frame thumbnails — server-extracted, loaded on demand */}
         {visibleSlots.map(slot => (

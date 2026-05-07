@@ -3,6 +3,8 @@ import { supabase } from '../../lib/supabaseClient.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { EditorContext } from './EditorView.jsx'
 import { getClipboard, setClipboard } from './brollClipboard.js'
+import { computeSkipRegions } from './usePlaybackSkipRegions.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 import {
   reducer,
   initialState,
@@ -446,13 +448,24 @@ export function useBRollEditorState(planPipelineId) {
     return state.placements.find(p => p.index === state.selectedIndex) || null
   }, [state.selectedIndex, state.placements])
 
-  // Find which placement covers a given time
+  // Find which placement covers a given time. The b-roll editor renders
+  // placements at `timelineStart * zoom` (no postCutTime translation), so a
+  // placement's visual position on the timeline is its `timelineStart` second
+  // measured against the post-cut ruler. To trigger the placement when the
+  // visual playhead reaches it, we compare the post-cut equivalent of the
+  // playback time (`currentTime` is original-time) against the placement's
+  // [timelineStart, timelineEnd] range.
+  const effectiveCutsForTrigger = useMemo(
+    () => computeSkipRegions(editorCtx?.state?.cuts || [], editorCtx?.state?.cutExclusions || []),
+    [editorCtx?.state?.cuts, editorCtx?.state?.cutExclusions]
+  )
   const activePlacementAtTime = useCallback((time) => {
+    const visualTime = postCutTime(time, effectiveCutsForTrigger)
     for (const p of state.placements) {
-      if (p.timelineStart <= time && p.timelineEnd > time) return p
+      if (p.timelineStart <= visualTime && p.timelineEnd > visualTime) return p
     }
     return null
-  }, [state.placements])
+  }, [state.placements, effectiveCutsForTrigger])
 
   // Search a single placement
   const searchPlacement = useCallback(async (index) => {

@@ -3,6 +3,7 @@ import { BRollContext } from './useBRollEditorState.js'
 import { Loader2, Copy } from 'lucide-react'
 import BRollContextMenu from './BRollContextMenu.jsx'
 import { getClipboard } from './brollClipboard.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 
 const TRACK_H = 60
 
@@ -14,7 +15,7 @@ export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
   return placement.persistedSelectedResult ?? 0
 }
 
-function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -28,6 +29,18 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
   const labelW = 144
   const buffer = 200
 
+  // In post-cut mode placement positions/widths are translated through
+  // postCutTime so cuts collapse visually. timelineStart/End remain in
+  // original-time inside placement state — only render math changes.
+  const placementLeft = useCallback((p) => (
+    postCutCuts ? postCutTime(p.timelineStart, postCutCuts) * zoom : p.timelineStart * zoom
+  ), [postCutCuts, zoom])
+  const placementRight = useCallback((p) => (
+    postCutCuts
+      ? postCutTime(p.timelineStart + p.timelineDuration, postCutCuts) * zoom
+      : (p.timelineStart + p.timelineDuration) * zoom
+  ), [postCutCuts, zoom])
+
   // Only render placements visible in viewport
   const visible = useMemo(() => {
     if (!placements?.length) return []
@@ -35,18 +48,18 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
     const vEndPx = (scrollX || 0) - labelW + viewW + buffer
     return placements.filter(p => {
       if (!p.timelineStart && p.timelineStart !== 0) return false
-      const left = p.timelineStart * zoom
-      const right = (p.timelineStart + p.timelineDuration) * zoom
+      const left = placementLeft(p)
+      const right = placementRight(p)
       return right >= vStartPx && left <= vEndPx
     })
-  }, [placements, scrollX, zoom, viewW])
+  }, [placements, scrollX, viewW, placementLeft, placementRight])
 
   // Total timeline width
   const totalWidth = useMemo(() => {
     if (!placements?.length) return 0
     const last = placements[placements.length - 1]
-    return last ? (last.timelineStart + last.timelineDuration) * zoom + 200 : 0
-  }, [placements, zoom])
+    return last ? placementRight(last) + 200 : 0
+  }, [placements, placementRight])
 
   // Compute neighbor boundaries for a placement (collision prevention)
   const getNeighborBounds = useCallback((placement) => {
@@ -324,8 +337,8 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, isActive = true, onActivate, 
       }}
     >
       {visible.map(p => {
-        const left = p.timelineStart * zoom
-        const width = Math.max(p.timelineDuration * zoom, 4)
+        const left = placementLeft(p)
+        const width = Math.max(placementRight(p) - left, 4)
         const isSelected = isActive && p.index === selectedIndex
         const resultIdx = resolveDisplayResultIdx(p, isActive, selectedResults)
         const result = p.results?.[resultIdx]

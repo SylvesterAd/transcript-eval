@@ -34,6 +34,7 @@ import {
   assertNoSelfReference,
   assertPriorsComplete,
 } from './broll-prior-strategies.js'
+import { findAnchorWordIdx } from './anchor-word.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -1093,7 +1094,7 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
 /**
  * Merge cuts and subtract exclusions to get effective cut regions.
  */
-function computeEffectiveCuts(cuts, cutExclusions = []) {
+export function computeEffectiveCuts(cuts, cutExclusions = []) {
   if (!cuts || !cuts.length) return []
 
   // Filter real cuts (not zero-width razor markers)
@@ -1131,6 +1132,65 @@ function computeEffectiveCuts(cuts, cutExclusions = []) {
     }
   }
   return result.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * Persists LLM placement output. Attaches anchor_word_idx to each placement
+ * (from audio_anchor → raw transcript word index) for stable identity across
+ * cut edits. Does NOT shift timecodes — the LLM emits in post-cut domain
+ * which is now the canonical storage format.
+ *
+ * Handles three shapes:
+ *   - Top-level array: [{ start, end, audio_anchor, ... }, ...]
+ *   - Wrapped in chapters: { chapters: [{ placements: [...] }, ...] }
+ *   - Per-chapter sub-run: { placements: [{ start, end, audio_anchor }] }
+ *
+ * @param {string} stageOutput - LLM output (possibly markdown-fenced JSON)
+ * @param {{cuts:Array, cutExclusions:Array}|null} editorCuts - retained for signature
+ *        compatibility (unused — the LLM already saw the post-cut transcript)
+ * @param {number|null} videoId - main video ID for word_timestamps lookup; if
+ *        null/undefined, returns stageOutput unchanged (no anchor attribution possible)
+ * @returns {Promise<string>} stage output with anchor_word_idx attached
+ */
+export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
+  if (!videoId) return stageOutput
+
+  let parsed
+  try { parsed = extractJSON(stageOutput) }
+  catch { return stageOutput }
+
+  let words = []
+  try {
+    const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
+    if (t?.word_timestamps_json) words = JSON.parse(t.word_timestamps_json)
+  } catch (err) {
+    console.warn('[persistPlacementOutput] failed to load words:', err.message)
+    return stageOutput
+  }
+  if (!words.length) return stageOutput
+
+  const annotate = (placements) => placements.map(p => ({
+    ...p,
+    anchor_word_idx: findAnchorWordIdx(words, p.audio_anchor),
+  }))
+
+  let result
+  if (Array.isArray(parsed)) {
+    result = annotate(parsed)
+  } else if (parsed && Array.isArray(parsed.chapters)) {
+    result = {
+      ...parsed,
+      chapters: parsed.chapters.map(ch => ({
+        ...ch,
+        placements: Array.isArray(ch.placements) ? annotate(ch.placements) : ch.placements,
+      })),
+    }
+  } else if (parsed && Array.isArray(parsed.placements)) {
+    result = { ...parsed, placements: annotate(parsed.placements) }
+  } else {
+    return stageOutput
+  }
+  return JSON.stringify(result, null, 2)
 }
 
 // ── Pipeline progress & abort tracking ───────────────────────────────
@@ -3600,7 +3660,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   }
 }
 
-export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId) {
+export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId, editorCuts = null) {
   // 1. Load create_plan strategy, preferring audio-only variant when audio.
   const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
   const strategy = await pickStrategyByKind('create_plan', mainVideoRow?.media_type)
@@ -3857,7 +3917,8 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
             abortSignal: pipelineAbort.signal,
           })
 
-          chapterResults[c] = result.text
+          const chapterOutput = await persistPlacementOutput(result.text, editorCuts, videoId)
+          chapterResults[c] = chapterOutput
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
           stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
@@ -3867,7 +3928,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
           // Store sub-run — stageName MUST be 'Per-chapter B-Roll plan' for downstream consumers
           await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             strategy.id, videoId, 'analysis', 'complete',
-            ch.transcript.slice(0, 500), result.text, chPrompt, chSystem,
+            ch.transcript.slice(0, 500), chapterOutput, chPrompt, chSystem,
             stage.model || 'gemini-3.1-pro-preview',
             result.tokensIn || 0, result.tokensOut || 0, result.cost || 0, 0,
             JSON.stringify({ pipelineId, stageIndex: i, stageName: 'Per-chapter B-Roll plan', subIndex: c, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}`, isSubRun: true, phase: 'create_plan', prepPipelineId, strategyPipelineId }),
@@ -5306,11 +5367,12 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             plan: parsedPlans[idx] || null,
           }))
 
-          output = JSON.stringify({
+          const rawOutput = JSON.stringify({
             video_context: allChaptersCtx,
             total_chapters: chapters.length,
             chapters,
           }, null, 2)
+          output = await persistPlacementOutput(rawOutput, editorCuts, videoId)
         } else {
           output = currentTranscript
         }

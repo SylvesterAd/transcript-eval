@@ -2,6 +2,8 @@ import { useContext, useRef, useMemo, useCallback, useEffect, memo } from 'react
 import { EditorContext } from './EditorView.jsx'
 import { GROUP_COLORS, buildSentences } from './useEditorState.js'
 import WaveformData from 'waveform-data'
+import { getTrackPostCutLayout } from '../../lib/postCutTimeline.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 
 /**
  * Logarithmic (dB) scaling — same approach as Premiere Pro.
@@ -201,12 +203,25 @@ export const VideoTrack = memo(VideoTrackImpl)
 
 const CHUNK_W = 1000 // CSS pixels per canvas chunk
 
-function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
-  const { state, dispatch } = useContext(EditorContext)
+function AudioTrackImpl({ track, zoom, cuts, postCutCuts, scrollRef, scrollX, groupedBelow, groupedAbove }) {
+  const { state, dispatch, selectedSegmentKey, setSelectedSegmentKey } = useContext(EditorContext)
   const selected = state.selectedTrackIds.has(track.id)
   const group = track.groupId ? state.groups[track.groupId] : null
   const color = group?.color || '#48e5d0'
   const containerRef = useRef(null)
+
+  // Post-cut layout: cut regions collapse, transcript renders per kept
+  // segment. When postCutCuts is null, behavior is unchanged (rough cut).
+  const postCutLayout = useMemo(() => (
+    postCutCuts ? getTrackPostCutLayout(track.offset, track.duration, postCutCuts, zoom) : null
+  ), [postCutCuts, track.offset, track.duration, zoom])
+
+  const outerLeft = postCutLayout
+    ? postCutTime(track.offset, postCutCuts) * zoom
+    : track.offset * zoom
+  const outerWidth = postCutLayout
+    ? Math.max(postCutLayout.width, 4)
+    : Math.max(track.duration * zoom, 4)
 
   // Cut edge drag handler — blocks AI regeneration during drag, sets exclusion on release
   const { cutDragRef } = useContext(EditorContext)
@@ -313,14 +328,30 @@ function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
   //   3. Individual word level — each word in its own box (zoomed in)
   // Binary search on pre-computed sentences for viewport, per-sentence LOD decision.
   // Sentence boundaries always start a new box.
+  // In post-cut mode the timeline is sized in post-cut pixels; viewport bounds
+  // must be translated back to track-local original-time before filtering words.
   const mergedGroups = useMemo(() => {
     const viewW = scrollRef?.current?.clientWidth || 1200
     const labelW = 144
     const buffer = 300
+    if (postCutLayout) {
+      const trackOuterLeft = postCutTime(track.offset, postCutCuts) * zoom
+      const localStartPost = Math.max(0, (scrollX - labelW - trackOuterLeft - buffer) / zoom)
+      const localEndPost = (scrollX - labelW - trackOuterLeft + viewW + buffer) / zoom
+      const seg2orig = (postSec) => {
+        for (const s of postCutLayout.segments) {
+          if (postSec <= s.postEnd) return s.origStart + Math.max(0, postSec - s.postStart)
+        }
+        return track.duration
+      }
+      const vStart = Math.max(0, seg2orig(localStartPost))
+      const vEnd = seg2orig(localEndPost)
+      return computeWordGroups(track.transcriptWords, track.transcriptSentences, zoom, vStart, vEnd)
+    }
     const vStart = Math.max(0, (scrollX - labelW - buffer) / zoom - track.offset)
     const vEnd = (scrollX - labelW + viewW + buffer) / zoom - track.offset
     return computeWordGroups(track.transcriptWords, track.transcriptSentences, zoom, vStart, vEnd)
-  }, [track.transcriptWords, track.transcriptSentences, zoom, scrollX, track.offset, scrollRef])
+  }, [track.transcriptWords, track.transcriptSentences, zoom, scrollX, track.offset, scrollRef, postCutLayout, postCutCuts, track.duration])
 
   // Resample for current zoom: downsample via WaveformData.resample() when
   // zoomed out, use base data when zoomed in (bars stretch).
@@ -333,18 +364,90 @@ function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
     return waveformData
   }, [waveformData, zoom, track.duration])
 
-  // Chunked canvas rendering with dirty tracking.
+  // Post-cut waveform: one canvas per kept segment, drawing the original-time
+  // peak slice scaled to the segment's post-cut pixel width. Cuts are removed
+  // (not just hidden), so the rendered waveform is continuous across joins.
+  useEffect(() => {
+    if (!postCutLayout) return
+    const container = containerRef.current
+    if (!container) return
+
+    const dpr = window.devicePixelRatio || 1
+    const h = 24
+
+    while (container.firstChild) container.firstChild.remove()
+    if (!resampled) return
+
+    const channel = resampled.channel(0)
+    const peaksPerSec = resampled.length / track.duration
+
+    for (const seg of postCutLayout.segments) {
+      if (seg.w < 1) continue
+      const startPeak = Math.max(0, Math.floor(seg.origStart * peaksPerSec))
+      const endPeak = Math.min(resampled.length, Math.ceil(seg.origEnd * peaksPerSec))
+      const numPeaks = endPeak - startPeak
+      if (numPeaks <= 0) continue
+
+      // Inset the canvas 2px on each side to match the accent box's gap so
+      // adjacent segments' waveforms don't bleed into the cut gap.
+      const drawW = Math.max(seg.w - 4, 2)
+      const canvas = document.createElement('canvas')
+      canvas.style.position = 'absolute'
+      canvas.style.top = '0'
+      canvas.style.left = `${seg.x + 2}px`
+      canvas.width = Math.round(drawW * dpr)
+      canvas.height = h * dpr
+      canvas.style.width = `${drawW}px`
+      canvas.style.height = `${h}px`
+      container.appendChild(canvas)
+
+      const ctx = canvas.getContext('2d')
+      ctx.scale(dpr, dpr)
+      ctx.clearRect(0, 0, drawW, h)
+      ctx.fillStyle = color
+
+      const pxPerPeak = drawW / numPeaks
+      if (pxPerPeak <= 1) {
+        for (let i = startPeak; i < endPeak; i++) {
+          const amp = Math.max(Math.abs(channel.min_sample(i)), Math.abs(channel.max_sample(i))) / 128
+          const scaled = logScale(amp)
+          const barH = scaled * h
+          if (barH < 0.5) continue
+          ctx.globalAlpha = 0.6 + 0.35 * scaled
+          ctx.fillRect((i - startPeak) * pxPerPeak, h - barH, 1, barH)
+        }
+      } else {
+        const barW = Math.max(1, Math.ceil(pxPerPeak))
+        for (let i = startPeak; i < endPeak; i++) {
+          const amp = Math.max(Math.abs(channel.min_sample(i)), Math.abs(channel.max_sample(i))) / 128
+          const scaled = logScale(amp)
+          const barH = scaled * h
+          if (barH < 0.5) continue
+          const x = Math.round((i - startPeak) * pxPerPeak)
+          ctx.globalAlpha = 0.6 + 0.35 * scaled
+          ctx.fillRect(x, h - barH, barW, barH)
+        }
+      }
+    }
+
+    return () => {
+      while (container.firstChild) container.firstChild.remove()
+    }
+  }, [postCutLayout, resampled, track.duration, color])
+
+  // Chunked canvas rendering with dirty tracking (legacy / rough cut mode).
   // Splits the waveform into 1000px-wide canvas chunks. Only visible chunks
   // (+ 1 chunk overscan) are mounted in the DOM. On scroll, only newly
   // visible chunks get drawn — existing ones are untouched.
   useEffect(() => {
+    if (postCutLayout) return
     const scrollEl = scrollRef?.current
     const container = containerRef.current
     if (!container) return
 
     const dpr = window.devicePixelRatio || 1
     const fullW = Math.max(Math.round(track.duration * zoom), 4)
-    const h = 56 // waveform always 56px — fills half when transcript on, full when off
+    const h = 24 // waveform always 56px — fills half when transcript on, full when off
     const labelW = 144 // w-36 (144px) — no extra margin
     const totalChunks = Math.ceil(fullW / CHUNK_W)
     const pxPerPeak = resampled ? fullW / resampled.length : 1
@@ -455,7 +558,7 @@ function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
       for (const canvas of canvases.values()) canvas.remove()
       canvases.clear()
     }
-  }, [resampled, zoom, track.duration, track.offset, color, track.showTranscript, scrollRef])
+  }, [resampled, zoom, track.duration, track.offset, color, track.showTranscript, scrollRef, postCutLayout])
 
   const onMouseDown = useCallback((e) => {
     if (e.button !== 0) return
@@ -487,31 +590,77 @@ function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
 
   return (
     <div
-      className={`border-b border-white/5 flex flex-col relative ${selected ? 'track-selected' : ''}`}
-      style={{ height: track.showTranscript ? '112px' : '56px' }}
+      className={`flex flex-col relative ${groupedBelow ? '' : 'border-b border-white/5'} ${selected ? 'track-selected' : ''}`}
+      style={{ height: track.showTranscript ? '48px' : '24px' }}
       onContextMenu={onContextMenu}
     >
       {/* Waveform */}
       <div
-        className={`h-14 w-full relative overflow-hidden ${isRoughCut ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}
+        className={`h-6 w-full relative overflow-hidden ${isRoughCut ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}
         onMouseDown={onMouseDown}
       >
-        {/* Background + left accent — separate from canvas container to avoid border shifting canvas positions */}
-        <div
-          className="absolute top-0 h-full"
-          style={{
-            left: `${track.offset * zoom}px`,
-            width: `${Math.max(track.duration * zoom, 4)}px`,
-            borderLeft: `4px solid ${color}`,
-            backgroundColor: `${color}15`,
-          }}
-        />
-        {/* Canvas container — no border so canvas left:0 aligns with container edge */}
-        <div ref={containerRef} className="absolute top-0 h-full" style={{ left: `${track.offset * zoom}px` }} />
+        {/* Background + left accent — in post-cut mode, one rounded box per
+            kept segment, each inset 2px on the sides so adjacent segments show
+            "clashing" rounded ends with a barely visible 4px gap between them.
+            In legacy mode, a single full-width accent. Bottom corners round
+            only at the bottom of a group AND when transcript is hidden (else
+            the bottom rounding moves to the transcript box below). */}
+        {postCutLayout ? (
+          postCutLayout.segments.map((seg, si) => {
+            const segKey = track.offset + seg.origStart
+            const isSelected = selectedSegmentKey != null && Math.abs(segKey - selectedSegmentKey) < 0.01
+            const sel = '2px solid rgba(255,255,255,0.9)'
+            // Paired V+A tracks render the selection border at the pair-row
+            // level (Timeline.jsx) so it wraps the whole clip uniformly. Solo
+            // tracks still draw their own border here.
+            const inPair = groupedAbove || groupedBelow
+            return (
+              <div
+                key={`acc-${si}`}
+                className="absolute top-0 h-full cursor-pointer z-[5]"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); setSelectedSegmentKey?.(isSelected ? null : segKey) }}
+                style={{
+                  left: `${outerLeft + seg.x + 2}px`,
+                  width: `${Math.max(seg.w - 4, 2)}px`,
+                  boxSizing: 'border-box',
+                  backgroundColor: `${color}15`,
+                  borderLeft: isSelected && !inPair ? sel : 'none',
+                  borderRight: isSelected && !inPair ? sel : 'none',
+                  borderTop: isSelected && !inPair ? sel : 'none',
+                  borderBottom: isSelected && !inPair && !track.showTranscript ? sel : 'none',
+                  borderTopLeftRadius: groupedAbove ? 0 : 6,
+                  borderTopRightRadius: groupedAbove ? 0 : 6,
+                  borderBottomLeftRadius: (groupedBelow || track.showTranscript) ? 0 : 6,
+                  borderBottomRightRadius: (groupedBelow || track.showTranscript) ? 0 : 6,
+                }}
+              />
+            )
+          })
+        ) : (
+          <div
+            className="absolute top-0 h-full"
+            style={{
+              left: `${outerLeft}px`,
+              width: `${outerWidth}px`,
+              borderLeft: `4px solid ${color}`,
+              backgroundColor: `${color}15`,
+              borderTopLeftRadius: groupedAbove ? 0 : 6,
+              borderTopRightRadius: groupedAbove ? 0 : 6,
+              borderBottomLeftRadius: (groupedBelow || track.showTranscript) ? 0 : 6,
+              borderBottomRightRadius: (groupedBelow || track.showTranscript) ? 0 : 6,
+            }}
+          />
+        )}
+        {/* Canvas container — no border so canvas left:0 aligns with container edge.
+            Legacy mode: chunked tiled canvases with scroll-aware mounting.
+            Post-cut mode: one canvas per kept segment, drawing original-time peaks
+            scaled to the segment's post-cut pixel width. */}
+        <div ref={containerRef} className="absolute top-0 h-full" style={{ left: `${outerLeft}px` }} />
       </div>
 
-      {/* Cut overlays with draggable edges */}
-      {cuts?.map(cut => {
+      {/* Cut overlays with draggable edges — skipped in post-cut mode (Timeline draws thin purple CutBars) */}
+      {!postCutLayout && cuts?.map(cut => {
         const cStart = Math.max(track.offset, cut.start)
         const cEnd = Math.min(track.offset + track.duration, cut.end)
         if (cEnd < cStart) return null
@@ -555,36 +704,94 @@ function AudioTrackImpl({ track, zoom, cuts, scrollRef, scrollX }) {
       {/* Transcript */}
       {track.showTranscript && (
         <div
-          className="h-14 w-full relative overflow-hidden"
+          className="h-6 w-full relative overflow-hidden"
           onMouseDown={onMouseDown}
         >
           <div
             className="absolute top-0 h-full overflow-hidden"
             style={{
-              left: `${track.offset * zoom}px`,
-              width: `${Math.max(track.duration * zoom, 4)}px`,
-              borderLeft: `4px solid ${color}`,
-              backgroundColor: `${color}08`,
+              left: `${outerLeft}px`,
+              width: `${outerWidth}px`,
+              borderLeft: postCutLayout ? 'none' : `4px solid ${color}`,
+              backgroundColor: postCutLayout ? 'transparent' : `${color}08`,
+              borderBottomLeftRadius: groupedBelow ? 0 : 6,
+              borderBottomRightRadius: groupedBelow ? 0 : 6,
             }}
           >
-            {mergedGroups.length > 0 ? (
-              mergedGroups.map((g) => (
+            {/* Per-segment transcript accent boxes (post-cut mode). Each kept
+                segment gets its own bottom-rounded accent, inset by 2px on each
+                side to match the waveform/frame accents above. Default has no
+                left "start highlight"; click selects the segment and adds full
+                white border on the OUTER edges (sides + bottom). */}
+            {postCutLayout && postCutLayout.segments.map((seg, si) => {
+              const segKey = track.offset + seg.origStart
+              const isSelected = selectedSegmentKey != null && Math.abs(segKey - selectedSegmentKey) < 0.01
+              const sel = '2px solid rgba(255,255,255,0.9)'
+              // Paired tracks: pair-row overlay handles the border.
+              // Solo tracks: draw the side+bottom border here.
+              const inPair = groupedAbove || groupedBelow
+              return (
                 <div
-                  key={g.start}
-                  className="absolute top-3 h-8 px-1.5 bg-black/30 rounded border flex items-center text-[9px] font-medium overflow-hidden whitespace-nowrap"
+                  key={`tr-acc-${si}`}
+                  className="absolute top-0 h-full cursor-pointer z-[5]"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); setSelectedSegmentKey?.(isSelected ? null : segKey) }}
                   style={{
-                    left: `${g.start * zoom}px`,
-                    width: `${Math.max(((g.displayEnd || g.end) - g.start) * zoom, 4)}px`,
-                    borderColor: `${color}30`,
-                    color,
+                    left: `${seg.x + 2}px`,
+                    width: `${Math.max(seg.w - 4, 2)}px`,
+                    boxSizing: 'border-box',
+                    backgroundColor: `${color}08`,
+                    borderLeft: isSelected && !inPair ? sel : 'none',
+                    borderRight: isSelected && !inPair ? sel : 'none',
+                    borderTop: 'none',
+                    borderBottom: isSelected && !inPair ? sel : 'none',
+                    borderBottomLeftRadius: groupedBelow ? 0 : 6,
+                    borderBottomRightRadius: groupedBelow ? 0 : 6,
                   }}
-                >
-                  {g.text}
-                </div>
-              ))
+                />
+              )
+            })}
+            {mergedGroups.length > 0 ? (
+              mergedGroups
+                .map(g => {
+                  if (!postCutLayout) {
+                    // Legacy mode: position in track-local original-time space
+                    return { g, left: g.start * zoom, width: Math.max(((g.displayEnd || g.end) - g.start) * zoom, 4) }
+                  }
+                  // Post-cut mode: drop groups whose midpoint sits inside a cut
+                  // (those are removed content); position survivors at post-cut
+                  // local x relative to the track's outer container.
+                  const gStart = g.start
+                  const gEnd = g.displayEnd || g.end
+                  const mid = (gStart + gEnd) / 2
+                  const globalMid = mid + track.offset
+                  const inCut = postCutCuts.some(c => globalMid >= c.start && globalMid < c.end)
+                  if (inCut) return null
+                  const trackOffsetPost = postCutTime(track.offset, postCutCuts)
+                  const startPost = postCutTime(gStart + track.offset, postCutCuts)
+                  const endPost = postCutTime(gEnd + track.offset, postCutCuts)
+                  const localLeft = (startPost - trackOffsetPost) * zoom
+                  const localWidth = Math.max((endPost - startPost) * zoom, 4)
+                  return { g, left: localLeft, width: localWidth }
+                })
+                .filter(Boolean)
+                .map(({ g, left: gLeft, width: gWidth }) => (
+                  <div
+                    key={g.start}
+                    className="absolute top-0.5 h-5 px-1 bg-black/30 rounded border flex items-center text-[9px] font-medium overflow-hidden whitespace-nowrap"
+                    style={{
+                      left: `${gLeft}px`,
+                      width: `${gWidth}px`,
+                      borderColor: `${color}30`,
+                      color,
+                    }}
+                  >
+                    {g.text}
+                  </div>
+                ))
             ) : (
               !track.transcriptWords?.length && (
-                <div className="absolute top-3 h-8 w-32 bg-black/20 rounded border border-white/5 opacity-30" />
+                <div className="absolute top-0.5 h-5 w-24 bg-black/20 rounded border border-white/5 opacity-30" />
               )
             )}
           </div>
@@ -714,7 +921,7 @@ function CompositeAudioTrackImpl({ segments, zoom, cuts, scrollRef, scrollX, sho
     if (!container || !segmentData.length) return
 
     const dpr = window.devicePixelRatio || 1
-    const h = 56
+    const h = 24
     const labelW = 144
     const totalEnd = segmentData[segmentData.length - 1].end
     const totalW = Math.max(Math.round(totalEnd * zoom), 4)
@@ -862,7 +1069,7 @@ function CompositeAudioTrackImpl({ segments, zoom, cuts, scrollRef, scrollX, sho
   }, [showTranscript, segmentData, zoom, scrollX, scrollRef])
 
   return (
-    <div className="relative border-b border-white/5" style={{ height: showTranscript ? '112px' : '56px' }}>
+    <div className="relative border-b border-white/5" style={{ height: showTranscript ? '48px' : '24px' }}>
       {/* Background + accent per segment */}
       {segmentData.map((seg, si) => (
         <div
@@ -872,22 +1079,22 @@ function CompositeAudioTrackImpl({ segments, zoom, cuts, scrollRef, scrollX, sho
         >
           <div className="absolute inset-0" style={{ backgroundColor: `${seg.color}15`, borderLeft: `4px solid ${seg.color}` }} />
           {si > 0 && <div className="absolute left-0 top-0 w-[2px] h-full bg-white/40 z-10" />}
-          <div className="absolute top-1 left-1 bg-black/60 px-1.5 py-0.5 rounded text-[8px] font-bold z-10" style={{ color: seg.color }}>
+          <div className="absolute top-0.5 left-1 bg-black/60 px-1 py-px rounded text-[8px] font-bold z-10" style={{ color: seg.color }}>
             {seg.title || `A${si + 1}`}
           </div>
         </div>
       ))}
 
       {/* Waveform canvases */}
-      <div ref={containerRef} className="absolute top-0 left-0 right-0 overflow-hidden" style={{ height: '56px' }} />
+      <div ref={containerRef} className="absolute top-0 left-0 right-0 overflow-hidden" style={{ height: '24px' }} />
 
       {/* Transcript */}
       {showTranscript && (
-        <div className="absolute left-0 right-0 overflow-hidden" style={{ top: '56px', height: '56px' }}>
+        <div className="absolute left-0 right-0 overflow-hidden" style={{ top: '24px', height: '24px' }}>
           {compositeGroups.map((g, i) => (
             <div
               key={`${g.start}-${i}`}
-              className="absolute top-3 h-8 px-1.5 bg-black/30 rounded border flex items-center text-[9px] font-medium overflow-hidden whitespace-nowrap"
+              className="absolute top-0.5 h-5 px-1 bg-black/30 rounded border flex items-center text-[9px] font-medium overflow-hidden whitespace-nowrap"
               style={{
                 left: `${g.start * zoom}px`,
                 width: `${Math.max(((g.displayEnd || g.end) - g.start) * zoom, 4)}px`,

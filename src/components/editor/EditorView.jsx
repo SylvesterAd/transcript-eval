@@ -24,6 +24,8 @@ import BRollPanel from './BRollPanel.jsx'
 import EstimationModal from './EstimationModal.jsx'
 import ProcessingModal from '../views/ProcessingModal.jsx'
 import InspectingBanner from './InspectingBanner.jsx'
+import { computeSkipRegions } from './usePlaybackSkipRegions.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 
 export const EditorContext = createContext(null)
 
@@ -611,6 +613,38 @@ export default function EditorView() {
   stateRefs.current.segmentAudioOverrides = state.segmentAudioOverrides
   stateRefs.current.totalDuration = totalDuration
 
+  // UI: the cut the user is currently inspecting in b-roll mode, identified
+  // by an anchor timestamp (original-time, typically the cut's center at
+  // click). When set, the effective cut whose interval contains the anchor
+  // is rendered as a popover overlay (rough-cut style dark gap + draggable
+  // edges + transcript) sitting on top of the post-cut timeline. Layout does
+  // NOT change — ruler stays put, b-rolls stay put — so the overlay overlaps
+  // with content to its right. Anchor-based identity (vs `${start}-${end}`
+  // string) survives edge-resize drags that would otherwise change the key
+  // and flicker the overlay. Reset whenever the active tab leaves b-rolls.
+  const [expandedCutAnchor, setExpandedCutAnchor] = useState(null)
+  useEffect(() => {
+    if (state.activeTab !== 'brolls' && expandedCutAnchor != null) setExpandedCutAnchor(null)
+  }, [state.activeTab, expandedCutAnchor])
+
+  // Segment selection (b-roll editor): the user clicks a kept segment (an
+  // "a-roll + its trailing cut") and it lights up with a full 4-side white
+  // border. Identified by the segment's global original-time start (matches
+  // both V's and A's per-segment box for the same source).
+  const [selectedSegmentKey, setSelectedSegmentKey] = useState(null)
+  useEffect(() => {
+    if (state.activeTab !== 'brolls' && selectedSegmentKey != null) setSelectedSegmentKey(null)
+  }, [state.activeTab, selectedSegmentKey])
+
+  // Effective cuts (cuts minus exclusions) for b-roll post-cut playhead
+  // translation. Computed once per relevant change so the 60fps rAF tick
+  // reads it without recomputing.
+  const brollEffectiveCuts = useMemo(
+    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts, state.cutExclusions) : null,
+    [state.activeTab, state.cuts, state.cutExclusions]
+  )
+  stateRefs.current.brollEffectiveCuts = brollEffectiveCuts
+
   // Declared before tick so tick's deps can include stopAllVideos without TDZ.
   const stopAllVideos = useCallback(() => {
     Object.values(videoRefs.current).forEach(el => {
@@ -807,9 +841,13 @@ export default function EditorView() {
       }
     }
 
-    // Update playhead via ref (60fps, no React re-render)
+    // Update playhead via ref (60fps, no React re-render).
+    // In b-roll mode the timeline is in post-cut space — translate so the
+    // marker lines up with the displayed (collapsed) content.
     if (playheadRef.current) {
-      const x = newTime * s.zoom
+      const cuts = s.brollEffectiveCuts
+      const displayT = cuts && cuts.length ? postCutTime(newTime, cuts) : newTime
+      const x = displayT * s.zoom
       playheadRef.current.style.transform = `translateX(${x}px)`
     }
 
@@ -862,7 +900,9 @@ export default function EditorView() {
           }
         })
         if (playheadRef.current) {
-          playheadRef.current.style.transform = `translateX(${time * state.zoom}px)`
+          const cuts = stateRefs.current.brollEffectiveCuts
+          const displayT = cuts && cuts.length ? postCutTime(time, cuts) : time
+          playheadRef.current.style.transform = `translateX(${displayT * state.zoom}px)`
         }
       },
       setRate(rate) {
@@ -969,8 +1009,8 @@ export default function EditorView() {
   const mediaType = mainVideo?.media_type || 'video'
 
   const editorContextValue = useMemo(
-    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType }),
-    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType]
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, expandedCutAnchor, setExpandedCutAnchor, selectedSegmentKey, setSelectedSegmentKey }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, expandedCutAnchor, selectedSegmentKey]
   )
 
   if (loading) {

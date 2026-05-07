@@ -33,7 +33,7 @@ vi.mock('../../db.js', () => ({
               broll_chain_heartbeat_at: state.brollChainHeartbeatAt,
             }
           }
-          if (/SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id/.test(sql)) {
+          if (/SELECT id, user_id, path_id, parent_group_id.* FROM video_groups WHERE id/.test(sql)) {
             return state.subGroup
           }
           if (/SELECT assembly_status FROM video_groups WHERE id/.test(sql)) {
