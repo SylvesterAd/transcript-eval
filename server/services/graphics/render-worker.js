@@ -86,7 +86,6 @@ export async function drainOnce() {
         // Budget exhausted
         if (iteration >= MAX_ITERATIONS) break;
 
-        // Retry: build new vars from critique feedback
         emit({ sessionId: row.session_id, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId: row.id })
         const retrySys = buildRetryPrompt({ priorCritique: critique, priorHtml: currentHtml });
         const retryResp = await callAnthropic({
