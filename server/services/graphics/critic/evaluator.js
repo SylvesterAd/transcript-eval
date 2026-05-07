@@ -1,11 +1,11 @@
 // server/services/graphics/critic/evaluator.js
 //
-// VLM critic. Sends N PNG frames + the spec to Opus-4.7-vision, asks for
+// VLM critic. Sends N PNG frames + the spec to Gemini 3 Flash, asks for
 // a structured score JSON, parses, returns. Throws on parse error so the
 // caller can decide whether to retry with the same frames or skip.
 
 import { readFile } from 'node:fs/promises'
-import { callAnthropic } from '../../../lib/llm/anthropic.js'
+import { callGemini } from '../../../lib/llm/gemini.js'
 
 const SYSTEM_PROMPT = `You are a senior motion-graphics art director reviewing a rendered short clip frame-by-frame. You will receive a spec and N evenly-spaced keyframes from a single render.
 
@@ -24,29 +24,25 @@ Output ONLY this JSON shape, no markdown fences, no commentary:
 }`
 
 export async function evaluateFrames({ framePaths, spec }) {
-  const imageBlocks = await Promise.all(
+  const imageParts = await Promise.all(
     framePaths.map(async (p) => {
       const buf = await readFile(p)
-      return {
-        type: 'image',
-        source: { type: 'base64', media_type: 'image/png', data: buf.toString('base64') },
-      }
+      return { inlineData: { mimeType: 'image/png', data: buf.toString('base64') } }
     })
   )
-  const r = await callAnthropic({
-    model: 'claude-opus-4-7',
+  const r = await callGemini({
+    model: 'gemini-3-flash-preview',
     system: SYSTEM_PROMPT,
     messages: [
       {
         role: 'user',
         content: [
-          { type: 'text', text: `Spec:\n${JSON.stringify(spec, null, 2)}\n\nFrames (in time order):` },
-          ...imageBlocks,
+          { text: `Spec:\n${JSON.stringify(spec, null, 2)}\n\nFrames (in time order):` },
+          ...imageParts,
         ],
       },
     ],
     max_tokens: 512,
-    cache: false,
   })
   let parsed
   try {
