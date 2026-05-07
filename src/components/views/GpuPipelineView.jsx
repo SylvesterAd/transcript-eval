@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useApi } from '../../hooks/useApi.js'
+import { useHlsSource } from '../../hooks/useHlsSource.js'
 import {
   ChevronDown, ChevronRight, Search, Image, Sparkles, CheckCircle,
   AlertCircle, AlertTriangle, Clock, Play, Loader2, ExternalLink, Copy, Check, XCircle
@@ -105,13 +106,24 @@ function PipelineStages({ currentStage, currentStatus }) {
 
 function VideoThumbnail({ item, showScore, scoreLabel }) {
   const [playing, setPlaying] = useState(false)
+  const videoRef = useRef(null)
+
+  // Artlist returns HLS .m3u8 previews; Chrome can't decode those in a plain
+  // <video> element. Route through useHlsSource which handles HLS via hls.js
+  // (or Safari native) and falls back to MP4 for other providers.
+  const url = playing ? (item.preview_url || '') : ''
+  const isHls = url.includes('.m3u8')
+  useHlsSource(videoRef, {
+    hlsUrl: isHls ? url : null,
+    mp4Url: !isHls && url ? url : null,
+  })
 
   return (
     <div className="group relative rounded overflow-hidden border border-zinc-800 bg-zinc-900">
       <div className="aspect-video relative cursor-pointer" onClick={() => item.preview_url && setPlaying(!playing)}>
         {playing && item.preview_url ? (
           <video
-            src={item.preview_url}
+            ref={videoRef}
             autoPlay
             loop
             muted

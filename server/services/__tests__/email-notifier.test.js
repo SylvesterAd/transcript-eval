@@ -50,7 +50,7 @@ describe('email-notifier', () => {
     await send('done', { subGroupId: 1, userId: 'u1' })
     expect(mockSend).toHaveBeenCalledOnce()
     const call = mockSend.mock.calls[0][0]
-    expect(call.from).toMatch(/Adpunk/)
+    expect(call.from).toMatch(/Cutpunk/)
     expect(call.to).toBe('user@example.com')
     expect(call.subject).toMatch(/Project X.*ready/)
     expect(call.html).toContain('href=')
@@ -68,6 +68,33 @@ describe('email-notifier', () => {
     await send('paused_at_strategy', { subGroupId: 1, userId: 'u1' })
     const call = mockSend.mock.calls[0][0]
     expect(call.subject).toMatch(/Pick.*strategy/)
+  })
+
+  it('sends paused_at_rough_cut template with correct subject and roughcut URL', async () => {
+    const { send } = await import('../email-notifier.js?roughcut=' + Date.now())
+    await send('paused_at_rough_cut', { subGroupId: 1, userId: 'u1' })
+    expect(mockSend).toHaveBeenCalledOnce()
+    const call = mockSend.mock.calls[0][0]
+    expect(call.subject).toMatch(/rough cut/)
+    expect(call.html).toContain('/roughcut')
+  })
+
+  it('routes each template to the correct URL path', async () => {
+    const routes = [
+      ['paused_at_rough_cut', '/roughcut'],
+      ['paused_at_strategy',  '/brolls/strategy/strategy'],
+      ['paused_at_plan',      '/brolls/strategy/plan'],
+      ['done',                '/brolls/edit'],
+      ['failed',              '/sync'],
+    ]
+    for (const [template, expectedPath] of routes) {
+      mockSend.mockClear()
+      state.recentNotified = false
+      const { send } = await import('../email-notifier.js?route_' + template + '=' + Date.now())
+      await send(template, { subGroupId: 1, userId: 'u1' })
+      const call = mockSend.mock.calls[0]?.[0]
+      expect(call?.html, `template=${template}`).toContain(expectedPath)
+    }
   })
 
   it('logs errors but never throws', async () => {

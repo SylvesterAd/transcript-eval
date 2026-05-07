@@ -9,8 +9,12 @@
 // references at the right level.
 //
 // chainAfterClassify — called by maybeAutoClassify after classification
-// finishes. For path_id='hands-off' projects, it auto-confirms the
-// classification so the user doesn't have to click anything.
+// finishes. Auto-confirms the classification for ANY group with a known
+// auto path (hands-off / strategy-only / guided), so the user never has
+// to review classification — paths gate strategy/plan review, not this.
+// Originally only fired for hands-off; expanded to all auto paths because
+// the classification review UI was buggy and gating it added no value —
+// every auto path wants to immediately advance past classification.
 
 import db from '../db.js'
 import { analyzeMulticam, runClassification } from './multicam-sync.js'
@@ -335,7 +339,7 @@ export async function chainAfterClassify(groupId) {
     'SELECT id, user_id, path_id, auto_rough_cut, classification_json, assembly_status FROM video_groups WHERE id = ?'
   ).get(groupId)
   if (!g) return
-  if (g.path_id !== 'hands-off') return
+  if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
   if (g.assembly_status !== 'classified') return // classifier may have failed
   if (!g.classification_json) return
 
@@ -343,12 +347,54 @@ export async function chainAfterClassify(groupId) {
   try { parsed = JSON.parse(g.classification_json) } catch { return }
   if (!parsed?.groups?.length) return
 
-  console.log(`[orchestrator] Auto-confirming classification for hands-off group ${groupId}`)
+  console.log(`[orchestrator] Auto-confirming classification for ${g.path_id} group ${groupId}`)
   await confirmClassificationGroup(groupId, parsed.groups, {
     propagateAutoRoughCut: !!g.auto_rough_cut,
     propagatePathId: g.path_id,
     userId: g.user_id,
   })
+}
+
+// chainAfterRoughCut — called when rough cut reaches a TERMINAL state for a
+// (sub-)group. For 'guided' paths, sets broll_chain_status='paused_at_rough_cut'
+// and emails the user. For 'hands-off' / 'strategy-only', kicks off the b-roll
+// chain. No-op for null path_id (legacy / manual projects).
+//
+// Safe to call from any rough-cut completion site (rough-cut-runner.js IIFE,
+// or multicam-sync.js for the already_exists / kickoff-failure cases).
+// Idempotent enough: paused_at_rough_cut is a state flip; chain duplicate-fire
+// is guarded by runFullAutoBrollChain's heartbeat lock.
+export async function chainAfterRoughCut(groupId) {
+  const g = await db.prepare(
+    'SELECT user_id, path_id, broll_chain_status FROM video_groups WHERE id = ?'
+  ).get(groupId)
+  if (!g) return
+  if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
+
+  // Don't clobber a chain that's already advanced past rough-cut review.
+  // Possible if the previous (buggy) code paused prematurely and the user
+  // clicked through to strategy before the cut actually completed; we
+  // shouldn't reset their progress when the IIFE finally fires us.
+  if (['running', 'paused_at_strategy', 'paused_at_plan', 'done', 'failed'].includes(g.broll_chain_status)) {
+    return
+  }
+
+  if (g.path_id === 'guided') {
+    await db.prepare(
+      "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
+    ).run(groupId)
+    try {
+      const { send } = await import('./email-notifier.js')
+      await send('paused_at_rough_cut', { subGroupId: groupId, userId: g.user_id })
+    } catch (err) {
+      console.error(`[chain-after-rough-cut] email failed for group ${groupId}:`, err.message)
+    }
+    return
+  }
+
+  // hands-off or strategy-only — fire chain
+  __orchestratorDeps.runFullAutoBrollChain(groupId)
+    .catch(err => console.error(`[chain] ${err.message}`))
 }
 
 // True if the group already has the broll_runs outputs needed to skip a phase.
@@ -504,8 +550,12 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
       if (prepRow) {
         try { refs.prepPipelineId = JSON.parse(prepRow.metadata_json || '{}').pipelineId || null } catch {}
       }
+      // No DISTINCT: Postgres rejects `SELECT DISTINCT x ... ORDER BY y` when
+      // `y` isn't in the SELECT list. The pipelineId Set below dedups
+      // anyway — we just iterate every matching row, which is fine for the
+      // ~10s of rows per group's analysis history.
       const analysisRows = await db.prepare(`
-        SELECT DISTINCT metadata_json FROM broll_runs r
+        SELECT metadata_json FROM broll_runs r
         JOIN broll_strategies s ON s.id = r.strategy_id
         WHERE r.video_id = ? AND s.strategy_kind = 'main_analysis' AND r.status = 'complete'
         ORDER BY r.id DESC
@@ -530,8 +580,9 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     const skipStrategy = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'strategy')
     if (skipStrategy) {
       console.log(`[orchestrator] Skipping strategy phase for group ${subGroupId} — outputs already exist`)
+      // See comment on the analysisRows query above re: DISTINCT vs ORDER BY.
       const stratRows = await db.prepare(`
-        SELECT DISTINCT metadata_json FROM broll_runs r
+        SELECT metadata_json FROM broll_runs r
         JOIN broll_strategies s ON s.id = r.strategy_id
         WHERE r.video_id = ? AND s.strategy_kind IN ('create_strategy', 'create_combined_strategy') AND r.status = 'complete'
         ORDER BY r.id DESC
@@ -565,8 +616,9 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     const skipPlan = resumeFromSubstage && await phaseHasOutputs(subGroupId, 'plan')
     if (skipPlan) {
       console.log(`[orchestrator] Skipping plan phase for group ${subGroupId} — outputs already exist`)
+      // See comment on the analysisRows query above re: DISTINCT vs ORDER BY.
       const planRows = await db.prepare(`
-        SELECT DISTINCT metadata_json FROM broll_runs r
+        SELECT metadata_json FROM broll_runs r
         JOIN broll_strategies s ON s.id = r.strategy_id
         WHERE r.video_id = ? AND s.strategy_kind = 'plan' AND r.status = 'complete'
         ORDER BY r.id DESC
@@ -659,9 +711,21 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
   await db.prepare(
-    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = ? WHERE id = ?"
+    "UPDATE video_groups SET broll_chain_status = 'running', broll_chain_substage = ?, broll_chain_heartbeat_at = NOW() WHERE id = ?"
   ).run(startSubstage, subGroupId)
   if (await isCancelled(subGroupId)) return
+
+  // Mirror runFullAutoBrollChain's heartbeat keeper. Without this, the
+  // periodic-resume sweep (PR #41) flags this chain as interrupted after
+  // HEARTBEAT_TTL_MS (90 s) and tries to resume it via runFullAutoBrollChain
+  // — which double-fires plan/search and burns tokens. Plan + 3 search
+  // batches typically run for several minutes; a single fresh heartbeat at
+  // the top isn't enough.
+  const heartbeat = setInterval(() => {
+    db.prepare('UPDATE video_groups SET broll_chain_heartbeat_at = NOW() WHERE id = ?')
+      .run(subGroupId)
+      .catch(() => {})
+  }, HEARTBEAT_INTERVAL_MS)
 
   try {
     const runner = await import('./broll-runner.js')
@@ -715,6 +779,8 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
     await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
+  } finally {
+    clearInterval(heartbeat)
   }
 }
 
@@ -724,6 +790,13 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
 // chains, uses smart per-pipeline resume + advance-from-substage rather than
 // re-firing the whole chain (which previously caused 50+ spurious analysis runs).
 // See spec docs/superpowers/specs/2026-04-29-broll-auto-resume-design.md.
+//
+// The stuck-chain branch (status IS NULL) is intentionally boot-only — pairs
+// with the periodic resumeInterruptedFullAutoChains sweep wired in
+// server/index.js. NULL status can mean "manually cleared by /retry-chain"
+// or "user paused", and a periodic sweep that re-fires those would race the
+// user. Only boot retries them, on the assumption that any in-flight worker
+// from the previous container is dead.
 export async function resumeStuckFullAutoChains() {
   const stuck = await db.prepare(`
     SELECT id FROM video_groups
@@ -737,11 +810,26 @@ export async function resumeStuckFullAutoChains() {
     setTimeout(() => __orchestratorDeps.runFullAutoBrollChain(sg.id), 3000)
   }
 
-  // Skip chains whose heartbeat was updated within HEARTBEAT_TTL_MS — those
-  // belong to a still-live driver process (e.g., a previous container that
-  // overlaps with this boot during a rolling Vercel/Railway deploy, or a
-  // dev nodemon hot-reload race). Resuming a live chain spawns parallel
-  // runAllReferences calls and double-billed token usage.
+  const { resumedPipelinesCount, advancedChainsCount, interruptedCount } =
+    await resumeInterruptedFullAutoChains({ logSource: 'startup' })
+
+  console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interruptedCount} chains; advanced ${advancedChainsCount} chains from substage`)
+}
+
+// Sweeps chains in 'running' state whose heartbeat hasn't ticked within
+// HEARTBEAT_TTL_MS — those belong to a worker that died without writing a
+// failed status (OOM, container restart between heartbeats, unhandled
+// rejection on an LLM stream). The TTL gate makes this safe to call while
+// the server is up: live workers update the heartbeat every
+// HEARTBEAT_INTERVAL_MS, so they're never picked up here.
+//
+// Resuming a live chain would spawn parallel runAllReferences calls and
+// double-bill tokens — the heartbeat staleness check is the only thing
+// preventing that, so don't relax it.
+//
+// Returns { resumedPipelinesCount, advancedChainsCount, interruptedCount }
+// so the boot-time caller can collapse to a single summary line.
+export async function resumeInterruptedFullAutoChains({ logSource = 'periodic-resume' } = {}) {
   const heartbeatTtlSeconds = Math.ceil(HEARTBEAT_TTL_MS / 1000)
   const interrupted = await db.prepare(
     `SELECT id FROM video_groups
@@ -775,13 +863,12 @@ export async function resumeStuckFullAutoChains() {
           await executePromise
           resumedPipelinesCount++
         } catch (err) {
-          console.error(`[startup] resumePipeline(${pid}) failed for group ${sg.id}: ${err.message}`)
+          console.error(`[${logSource}] resumePipeline(${pid}) failed for group ${sg.id}: ${err.message}`)
         }
       }
 
-      // Step 2: advance the chain. Use setTimeout(... 3000) to mirror the
-      // first loop's startup delay — gives the rest of the boot path a moment
-      // to settle before kicking off chain advancement.
+      // Step 2: advance the chain. setTimeout(... 3000) gives the rest of the
+      // event loop a moment to settle before kicking off chain advancement.
       if (substage === 'plan' || substage === 'search') {
         setTimeout(() => __orchestratorDeps.resumeChain(sg.id, substage), 3000)
       } else {
@@ -793,11 +880,15 @@ export async function resumeStuckFullAutoChains() {
       }
       advancedChainsCount++
     } catch (err) {
-      console.error(`[startup] resume failed for group ${sg.id}: ${err.message}`)
+      console.error(`[${logSource}] resume failed for group ${sg.id}: ${err.message}`)
     }
   }
 
-  console.log(`[startup] resumed ${stuck.length} stuck + ${resumedPipelinesCount} interrupted pipelines across ${interrupted.length} chains; advanced ${advancedChainsCount} chains from substage`)
+  if (logSource === 'periodic-resume' && interrupted.length > 0) {
+    console.log(`[${logSource}] resumed ${resumedPipelinesCount} pipelines across ${interrupted.length} interrupted chains; advanced ${advancedChainsCount}`)
+  }
+
+  return { resumedPipelinesCount, advancedChainsCount, interruptedCount: interrupted.length }
 }
 
 // Boot-time recovery for YouTube reference downloads. downloadYouTubeVideo

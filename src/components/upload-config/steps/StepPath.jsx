@@ -13,61 +13,75 @@ function brollHeuristicTokens(durationSeconds, refCount) {
   return Math.round(minutes * 50 * Math.max(1, refCount) + 500 + 500 * Math.max(1, refCount))
 }
 
-const PATHS = [
-  {
-    id: 'hands-off',
-    badge: 'A · HANDS-OFF',
-    title: 'Full Auto',
-    subtitle: 'Start now, email when b-roll is ready',
-    tone: 'secondary',
-    icon: 'rocket_launch',
-    flow: [
-      { label: 'References analyzed', status: 'auto' },
-      { label: 'Strategy proposal',   status: 'auto' },
-      { label: 'B-roll plan',         status: 'auto' },
-      { label: 'Search & download',   status: 'auto' },
-      { label: 'Final review',        status: 'review', checkpoint: true },
-    ],
-    eta: '~18–24 hrs for a 40-min video',
-    note: 'Kick it off and walk away — you review at the end before the cut goes live.',
-  },
-  {
-    id: 'strategy-only',
-    badge: 'B · BALANCED',
-    title: 'Strategy Review',
-    subtitle: 'Confirm the creative strategy, then we run',
-    tone: 'tertiary',
-    icon: 'center_focus_strong',
-    flow: [
-      { label: 'References analyzed', status: 'auto' },
-      { label: 'Strategy proposal',   status: 'review', checkpoint: true },
-      { label: 'B-roll plan',         status: 'auto' },
-      { label: 'Search & download',   status: 'auto' },
-      { label: 'Final review',        status: 'review', checkpoint: true },
-    ],
-    eta: '~20–28 hrs for a 40-min video',
-    note: "Each checkpoint waits on your login — without it, the next phase won't start.",
-    warn: true,
-  },
-  {
-    id: 'guided',
-    badge: 'C · FULL CONTROL',
-    title: 'Rough Cut + Strategy',
-    subtitle: 'Review the rough cut, then the b-roll strategy — we run the rest',
-    tone: 'primary',
-    icon: 'account_tree',
-    flow: [
-      { label: 'References analyzed', status: 'auto' },
-      { label: 'Rough cut review',    status: 'review', checkpoint: true },
-      { label: 'Strategy proposal',   status: 'review', checkpoint: true },
-      { label: 'B-roll plan',         status: 'auto' },
-      { label: 'Search & download',   status: 'auto' },
-    ],
-    eta: '~24–36 hrs for a 40-min video',
-    note: "Each checkpoint waits on your login — without it, the next phase won't start.",
-    warn: true,
-  },
-]
+// Path cards depend on whether rough cut is enabled:
+//   - 'guided' (Rough Cut + Strategy) only makes sense when there's a rough cut
+//     to review — hide the card entirely if rough cut was skipped.
+//   - When rough cut IS enabled, every path's flow list shows a "Rough cut"
+//     step so users see what'll actually run. For 'hands-off' / 'strategy-only'
+//     it's auto; for 'guided' it's the review checkpoint already in the flow.
+function buildPaths(autoRoughCut) {
+  const roughCutAutoStep = { label: 'Rough cut',           status: 'auto' }
+  const paths = [
+    {
+      id: 'hands-off',
+      badge: 'A · HANDS-OFF',
+      title: 'Full Auto',
+      subtitle: 'Start now, email when b-roll is ready',
+      tone: 'secondary',
+      icon: 'rocket_launch',
+      flow: [
+        ...(autoRoughCut ? [roughCutAutoStep] : []),
+        { label: 'References analyzed', status: 'auto' },
+        { label: 'Strategy proposal',   status: 'auto' },
+        { label: 'B-roll plan',         status: 'auto' },
+        { label: 'Search & download',   status: 'auto' },
+        { label: 'Final review',        status: 'review', checkpoint: true },
+      ],
+      eta: '~18–24 hrs for a 40-min video',
+      note: 'Kick it off and walk away — you review at the end before the cut goes live.',
+    },
+    {
+      id: 'strategy-only',
+      badge: 'B · BALANCED',
+      title: 'Strategy Review',
+      subtitle: 'Confirm the creative strategy, then we run',
+      tone: 'tertiary',
+      icon: 'center_focus_strong',
+      flow: [
+        ...(autoRoughCut ? [roughCutAutoStep] : []),
+        { label: 'References analyzed', status: 'auto' },
+        { label: 'Strategy proposal',   status: 'review', checkpoint: true },
+        { label: 'B-roll plan',         status: 'auto' },
+        { label: 'Search & download',   status: 'auto' },
+        { label: 'Final review',        status: 'review', checkpoint: true },
+      ],
+      eta: '~20–28 hrs for a 40-min video',
+      note: "Each checkpoint waits on your login — without it, the next phase won't start.",
+      warn: true,
+    },
+  ]
+  if (autoRoughCut) {
+    paths.push({
+      id: 'guided',
+      badge: 'C · FULL CONTROL',
+      title: 'Rough Cut + Strategy',
+      subtitle: 'Review the rough cut, then the b-roll strategy — we run the rest',
+      tone: 'primary',
+      icon: 'account_tree',
+      flow: [
+        { label: 'Rough cut review',    status: 'review', checkpoint: true },
+        { label: 'References analyzed', status: 'auto' },
+        { label: 'Strategy proposal',   status: 'review', checkpoint: true },
+        { label: 'B-roll plan',         status: 'auto' },
+        { label: 'Search & download',   status: 'auto' },
+      ],
+      eta: '~24–36 hrs for a 40-min video',
+      note: "Each checkpoint waits on your login — without it, the next phase won't start.",
+      warn: true,
+    })
+  }
+  return paths
+}
 
 function PathCard({ path, active, onSelect }) {
   const [hover, setHover] = useState(false)
@@ -183,6 +197,17 @@ export default function StepPath({ state, setState, groupId, onValidityChange })
   const [balance, setBalance] = useState(null)
   const [estimate, setEstimate] = useState(null)
 
+  const paths = buildPaths(state.autoRoughCut)
+
+  // If rough cut was just turned off and 'guided' was selected, fall back to
+  // 'strategy-only' — 'guided' is no longer in the picker so the chosen value
+  // would be invisibly invalid otherwise.
+  useEffect(() => {
+    if (!state.autoRoughCut && state.pathId === 'guided') {
+      setState.pathId('strategy-only')
+    }
+  }, [state.autoRoughCut, state.pathId, setState])
+
   useEffect(() => {
     if (state.pathId !== 'hands-off') { onValidityChange?.(true); return }
     if (!groupId) return
@@ -225,8 +250,8 @@ export default function StepPath({ state, setState, groupId, onValidityChange })
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-3.5 mb-4">
-        {PATHS.map(p => (
+      <div className={`grid gap-3.5 mb-4 ${paths.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+        {paths.map(p => (
           <PathCard key={p.id} path={p} active={state.pathId === p.id} onSelect={setState.pathId} />
         ))}
       </div>

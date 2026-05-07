@@ -6,6 +6,8 @@ import { supabase } from '../../lib/supabaseClient.js'
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
+const AUDIO_EXTS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']
+const ACCEPTED_EXTS = [...VIDEO_EXTS, ...AUDIO_EXTS]
 const MAX_SIZE = 50 * 1024 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
@@ -39,10 +41,16 @@ export function deriveMode({ parent, files = [], subGroups = [] }) {
   const transcribed = parent?.videos?.every(v => v.transcription_status === 'done' || v.transcription_status === 'failed')
   if (!transcribed) return 'pipeline'
   if (subGroups?.length === 0) return 'pipeline'
+  // paused_at_* are NOT terminal for the modal — they're explicit hand-offs
+  // to the user (rough-cut review, strategy review, plan review) that need
+  // the StageTimeline's per-stage CTAs to render. Bucketing them with
+  // 'done'/'failed' here flips the modal into <DoneView>, hides the CTAs,
+  // and the editor's auto-resume effect then advances past the pause on
+  // the user's first click.
   const allTerminal = subGroups.every(sg =>
     (sg.assembly_status === 'done' || sg.assembly_status === 'error') &&
     (parent.auto_rough_cut === false || sg.rough_cut_status === 'done' || sg.rough_cut_status === 'failed' || sg.rough_cut_status === 'insufficient_tokens') &&
-    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed' || sg.broll_chain_status === 'paused_at_rough_cut' || sg.broll_chain_status === 'paused_at_strategy' || sg.broll_chain_status === 'paused_at_plan')
+    (sg.broll_chain_status === 'done' || sg.broll_chain_status === 'failed')
   )
   if (!allTerminal) return 'pipeline'
   // Promote the pre-pause failure to its own mode so the loader can
@@ -61,10 +69,14 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
 
   const classifyDone = parent.assembly_status === 'confirmed' || parent.assembly_status === 'done' || subGroups.length > 0
   const classifying = parent.assembly_status === 'classifying'
-  // 'classified' = backend finished classification but no sub-groups exist yet
-  // (auto-confirm only fires for path_id === 'hands-off'; everyone else must
-  // confirm in AssetsView). Surface as paused-for-review so the user has a CTA.
-  const classifyPaused = parent.assembly_status === 'classified' && subGroups.length === 0
+  // 'classified' = backend finished classification but no sub-groups exist yet.
+  // Any auto path (hands-off / strategy-only / guided) auto-confirms within
+  // milliseconds via chainAfterClassify, so suppress the "needs review" flash
+  // for those — only legacy/manual paths actually require a user click.
+  const AUTO_PATHS = new Set(['hands-off', 'strategy-only', 'guided'])
+  const classifyPaused = parent.assembly_status === 'classified'
+    && subGroups.length === 0
+    && !AUTO_PATHS.has(parent.path_id)
 
   const sgDone = (sg) => sg.assembly_status === 'done' || sg.assembly_status === 'error'
   const syncDone = subGroups.length > 0 && subGroups.every(sgDone)
@@ -86,15 +98,32 @@ export function deriveStages({ parent = { videos: [] }, subGroups = [] }) {
   // active (they all walk the chain in parallel).
   const brollSubstage = subGroups.find(sg => sg.broll_chain_status === 'running')?.broll_chain_substage || null
 
+  // A chain that's PAUSED at a later checkpoint has by definition finished
+  // every preceding substage. Without these flags, paused_at_strategy
+  // leaves "References analyzed" rendered as Pending forever (the chain
+  // already ran refs to completion before stopping at the strategy review),
+  // and paused_at_plan leaves both refs + strategy as Pending. Old logic
+  // only marked a stage done when the chain was actively running PAST it,
+  // which fails the moment the chain stops anywhere upstream of `done`.
+  const refsDone = brollDone
+    || brollPausedAtStrat
+    || brollPausedAtPlan
+    || (brollActive && ['strategy', 'plan', 'search'].includes(brollSubstage))
+  const strategyDone = brollDone
+    || brollPausedAtPlan
+    || (brollActive && ['plan', 'search'].includes(brollSubstage))
+  const planDone = brollDone
+    || (brollActive && brollSubstage === 'search')
+
   return [
     { id: 'upload',         label: 'Upload',                 done: uploadDone, active: !uploadDone },
     { id: 'transcribe',     label: 'Transcribing',           done: videos.length > 0 && transcribed === videos.length, active: transcribing, sub: `${transcribed} of ${videos.length} done` },
     { id: 'classify',       label: 'Classifying',            done: classifyDone, active: classifying, paused: classifyPaused },
     { id: 'sync',           label: 'Multi-cam sync',         done: syncDone, active: syncActive },
     { id: 'rough_cut',      label: 'AI Rough Cut',           skipped: rcSkipped, done: rcDone, active: rcActive, paused: brollPausedAtRough },
-    { id: 'broll_refs',     label: 'References analyzed',     active: brollActive && brollSubstage === 'refs',     done: brollDone || (brollActive && ['strategy','plan','search'].includes(brollSubstage)) },
-    { id: 'broll_strategy', label: 'B-roll strategy',         paused: brollPausedAtStrat, active: brollActive && brollSubstage === 'strategy', done: brollDone || (brollActive && ['plan','search'].includes(brollSubstage)) },
-    { id: 'broll_plan',     label: 'B-roll plan',             paused: brollPausedAtPlan,  active: brollActive && brollSubstage === 'plan',     done: brollDone || (brollActive && brollSubstage === 'search') },
+    { id: 'broll_refs',     label: 'References analyzed',     active: brollActive && brollSubstage === 'refs',     done: refsDone },
+    { id: 'broll_strategy', label: 'B-roll strategy',         paused: brollPausedAtStrat, active: brollActive && brollSubstage === 'strategy', done: strategyDone },
+    { id: 'broll_plan',     label: 'B-roll plan',             paused: brollPausedAtPlan,  active: brollActive && brollSubstage === 'plan',     done: planDone },
     { id: 'broll_search',   label: 'B-roll search (first 30)', active: brollActive && brollSubstage === 'search', done: brollDone },
     { id: 'done',           label: 'Done',                   done: brollDone },
   ]
@@ -257,6 +286,26 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
   // asking whether to exit to the projects list. The pipeline keeps
   // running on the server regardless — exit just closes this modal view.
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
+
+  // Skip the manual classification-review CTA for any auto-path project.
+  // Server-side chainAfterClassify auto-confirms going forward, but groups
+  // that classified before that fix is deployed (or with a dropped event)
+  // get stuck at assembly_status='classified' with no sub-groups. Hit the
+  // server-side retrigger; polling picks up the new sub-groups and
+  // continues the pipeline display in this modal — no navigation away.
+  const autoConfirmRetriggerRef = useRef(false)
+  useEffect(() => {
+    if (autoConfirmRetriggerRef.current) return
+    if (!parent) return
+    if (parent.assembly_status !== 'classified') return
+    if (subGroups.length > 0) return
+    if (!['hands-off', 'strategy-only', 'guided'].includes(parent.path_id)) return
+    autoConfirmRetriggerRef.current = true
+    apiPost(`/videos/groups/${parent.id}/retrigger-classify`).catch((err) => {
+      console.error('[processing-modal] retrigger-classify failed:', err.message)
+      autoConfirmRetriggerRef.current = false  // allow retry on next poll
+    })
+  }, [parent, subGroups])
 
   // Bootstrap files from server if we have none (e.g. navigated here after b-roll step)
   const bootstrappedRef = useRef(false)
@@ -452,7 +501,7 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
     for (const file of fileList) {
       const ext = '.' + file.name.split('.').pop().toLowerCase()
       const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8)
-      if (!VIDEO_EXTS.includes(ext)) {
+      if (!ACCEPTED_EXTS.includes(ext)) {
         entries.push({ id, name: file.name, file, type: 'video', status: 'error', progress: 0, error: 'Unsupported format', xhr: null, serverId: null })
         continue
       }
@@ -695,7 +744,7 @@ function UploadingFileList({
         <input
           ref={fileInputRef}
           type="file"
-          accept={VIDEO_EXTS.join(',')}
+          accept={ACCEPTED_EXTS.join(',')}
           multiple
           className="hidden"
           onChange={(e) => { if (e.target.files?.length) handleAddFiles(e.target.files); e.target.value = '' }}

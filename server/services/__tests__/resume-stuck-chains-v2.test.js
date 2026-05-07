@@ -62,7 +62,7 @@ vi.mock('../broll.js', () => ({
 }))
 
 const orchestratorModule = await import('../auto-orchestrator.js')
-const { resumeStuckFullAutoChains, __orchestratorDeps } = orchestratorModule
+const { resumeStuckFullAutoChains, resumeInterruptedFullAutoChains, __orchestratorDeps } = orchestratorModule
 
 // Snapshot the real helpers so we can restore between tests. We swap them
 // for stubs by mutating the indirection holder (the pattern mirrors
@@ -190,6 +190,37 @@ describe('resumeStuckFullAutoChains (rewritten second loop)', () => {
     // sees parallel main_analysis pipelines for the same reference.
     state.interruptedRows = []
     await resumeStuckFullAutoChains()
+    expect(state.interruptedQueryFiltersHeartbeat).toBe(true)
+  })
+})
+
+describe('resumeInterruptedFullAutoChains (periodic sweep)', () => {
+  it('handles interrupted chains identically to the boot-time second loop', async () => {
+    state.interruptedRows = [{ id: 800 }]
+    state.substageByGroup[800] = 'plan'
+    state.interruptedPipelinesByGroup[800] = ['p-periodic']
+    const result = await resumeInterruptedFullAutoChains()
+    expect(state.resumePipelineCalls).toEqual(['p-periodic'])
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(state.resumeChainCalls).toEqual([{ gid: 800, sub: 'plan' }])
+    // Returns counts so a caller can log or test
+    expect(result).toEqual({ resumedPipelinesCount: 1, advancedChainsCount: 1, interruptedCount: 1 })
+  })
+
+  it('does NOT pick up stuck (status IS NULL) chains — that path is boot-only', async () => {
+    // Periodic sweep must skip stuck chains: a NULL status can mean the user
+    // just /retry-chain'd it and a periodic re-fire would race them.
+    state.stuckRows = [{ id: 999 }]      // would be picked up by boot-time path
+    state.interruptedRows = []           // nothing interrupted
+    await resumeInterruptedFullAutoChains()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(state.runFullAutoBrollChainCalls.find(c => c.gid === 999)).toBeFalsy()
+    expect(state.resumePipelineCalls).toEqual([])
+  })
+
+  it('still applies the heartbeat-staleness gate (live drivers untouched)', async () => {
+    state.interruptedQueryFiltersHeartbeat = false
+    await resumeInterruptedFullAutoChains()
     expect(state.interruptedQueryFiltersHeartbeat).toBe(true)
   })
 })

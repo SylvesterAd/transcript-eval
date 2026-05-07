@@ -8,6 +8,27 @@ import { mp4Url } from './cloudflare-stream.js'
 import { segmentTranscript, segmentByChapters, reassembleSegments } from './segmenter.js'
 import { extractYouTubeId } from './youtube.js'
 import { formatAudience } from './audience-formatter.js'
+import { bucketAspect } from '../lib/aspect.js'
+
+// Resolve the b-roll search `orientation` hint from a main video's
+// stored media_info_json. Returns 'landscape' on any miss/parse error so
+// adpunk.ssh's Pexels/Freepik adapters get a usable default — same
+// fallback the proxy uses when `orientation` is absent.
+async function resolveOrientation(videoId) {
+  if (!videoId) return 'landscape'
+  try {
+    const v = await db.prepare(
+      'SELECT media_type, media_info_json FROM videos WHERE id = ?',
+    ).get(videoId)
+    let info = {}
+    if (v?.media_info_json) {
+      try { info = JSON.parse(v.media_info_json) } catch {}
+    }
+    return bucketAspect({ width: info.width, height: info.height, mediaType: v?.media_type })
+  } catch {
+    return 'landscape'
+  }
+}
 import {
   loadPriorChapterStrategies,
   assertNoSelfReference,
@@ -1401,6 +1422,28 @@ export function buildSpecialAudioNote(mediaType) {
 // any future import name. Mirrors __test__filterStagesForMedia (Task 7).
 export { buildSpecialAudioNote as __test__buildSpecialAudioNote }
 
+// Pick the strategy of a given kind, preferring the audio-only variant
+// (bundle_key='audio_only') when mediaType='audio'. Falls through to the
+// first strategy of that kind by id otherwise.
+//
+// Every executor in this file used to do `WHERE strategy_kind = '<kind>' ORDER
+// BY id LIMIT 1` directly — that ignored bundle_key, so cloned audio variants
+// were never picked. Route every strategy lookup through this helper so audio
+// uploads actually run their audio-specific strategies.
+export async function pickStrategyByKind(kind, mediaType) {
+  if (mediaType === 'audio') {
+    const audio = await db.prepare(
+      "SELECT * FROM broll_strategies WHERE strategy_kind = ? AND bundle_key = 'audio_only' ORDER BY id LIMIT 1"
+    ).get(kind)
+    if (audio) return audio
+  }
+  return await db.prepare(
+    "SELECT * FROM broll_strategies WHERE strategy_kind = ? ORDER BY id LIMIT 1"
+  ).get(kind)
+}
+
+export { pickStrategyByKind as __test__pickStrategyByKind }
+
 // Run alt plans for non-favorite reference videos using a completed plan pipeline's data
 export async function executeAltPlans(planPipelineId) {
   // Load the plan pipeline's completed stages
@@ -1420,8 +1463,11 @@ export async function executeAltPlans(planPipelineId) {
   const planStrategy = await getStrategy(strategyId)
   if (!planStrategy?.main_strategy_id) throw new Error('Plan strategy has no linked analysis strategy')
 
-  // Load alt_plan strategy and its latest version
-  const altPlanStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'alt_plan' ORDER BY id LIMIT 1").get()
+  // Resolve alt_plan strategy with audio variant preference. Computed up front
+  // (before the existing mainVideoRow lookup below) so the same media_type
+  // query isn't repeated.
+  const mainVideoRowEarly = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const altPlanStrategy = await pickStrategyByKind('alt_plan', mainVideoRowEarly?.media_type)
   if (!altPlanStrategy) throw new Error('No alt_plan strategy found')
   const altVersion = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(altPlanStrategy.id)
   if (!altVersion) throw new Error('No alt_plan version found')
@@ -1435,7 +1481,8 @@ export async function executeAltPlans(planPipelineId) {
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} expands based on the MAIN video's media_type (the video the
   // alt plan is being generated for), not the reference video being analysed.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses the lookup performed above for pickStrategyByKind.
+  const mainVideoRow = mainVideoRowEarly
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
   const favoriteVideo = exampleVideos.find(v => v.isFavorite) || exampleVideos[0]
   const altVideos = exampleVideos.filter(v => v !== favoriteVideo)
@@ -1913,8 +1960,8 @@ async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
 
 // Pure source-list builder, exported for unit tests.
 // Inputs: a row's libraries_json (string | array | null) and freepik_opt_in (bool | null).
-// Output: deduped array of source names with the artlist filter applied
-// and pexels always appended; freepik appended unless explicitly opted out.
+// Output: deduped array of source names; pexels always appended,
+// freepik appended unless explicitly opted out.
 //
 // Exported for unit tests in __tests__/resolve-broll-sources.test.js.
 export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
@@ -1926,16 +1973,15 @@ export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
     } catch {}
   }
   const freepikOptIn = freepik_opt_in !== false  // null → default-on
-  const sources = [...libraries.filter(l => l !== 'artlist'), 'pexels']
+  const sources = [...libraries, 'pexels']
   if (freepikOptIn) sources.push('freepik')
   return Array.from(new Set(sources))
 }
 
 // Resolve which stock libraries to send to the broll proxy for a given plan pipeline.
 // Reads the parent video group's `libraries_json` + `freepik_opt_in` (falling
-// back to the sub-group's own values if there's no parent), filters `artlist`,
-// and always appends `pexels`. `overrides.sources` (if non-empty) wins, with
-// the same artlist filter applied.
+// back to the sub-group's own values if there's no parent), and always appends
+// `pexels`. `overrides.sources` (if non-empty) wins.
 //
 // SQL MUST walk the parent: post-classification, `videos.group_id` points at
 // the sub-group, but library config is configured on the parent project.
@@ -1946,7 +1992,7 @@ export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
 // Exported for unit tests; production callers go through executeBrollSearch.
 export async function resolveBrollSources(planPipelineId, overrides = {}) {
   if (overrides.sources?.length) {
-    return overrides.sources.filter(s => s !== 'artlist')
+    return overrides.sources
   }
 
   let row = { libraries_json: null, freepik_opt_in: null }
@@ -1998,6 +2044,8 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
   const videoId = planRuns[0].video_id
   const firstMeta = JSON.parse(planRuns[0].metadata_json || '{}')
   const groupId = firstMeta.groupId || null
+  // One per main video — used on every per-placement /broll/search request below.
+  const orientation = await resolveOrientation(videoId)
 
   // Find or create broll_search strategy
   let searchStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'broll_search' ORDER BY id LIMIT 1").get()
@@ -2152,6 +2200,7 @@ export async function executeBrollSearch(planPipelineId, { limit } = {}) {
         brief,
         sources: resolvedSources,
         max_results: 10,
+        orientation,
       }
 
       let results = []
@@ -2743,8 +2792,13 @@ async function _getPendingGpuPlacements(planPipelineId) {
  * This is a convenience wrapper that runs executePipeline with the plan_prep strategy.
  */
 export async function executePlanPrep(videoId, groupId, editorCuts = null, pipelineIdOverride = null) {
-  // Find the plan_prep strategy and its latest version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1").get()
+  // Find the plan_prep strategy, preferring the audio-only variant when the
+  // main video is audio. This is the bug that bit group 286 / video 421:
+  // the plain `WHERE strategy_kind = 'plan_prep' ORDER BY id LIMIT 1` lookup
+  // always returned strategy 7 even when strategy 12 (bundle_key='audio_only')
+  // was the right one.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('plan_prep', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No plan_prep strategy found. Run the split-plan-strategies migration.')
 
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
@@ -2776,8 +2830,9 @@ export async function executePlanPrep(videoId, groupId, editorCuts = null, pipel
 
 // Run per-chapter B-Roll strategy for ONE reference video using completed prep + analysis pipelines
 export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, videoId, groupId, pipelineIdOverride, priorStrategyPipelineIds = []) {
-  // 1. Load create_strategy strategy and version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_strategy' ORDER BY id LIMIT 1").get()
+  // 1. Load create_strategy strategy, preferring audio-only variant when audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('create_strategy', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No create_strategy strategy found')
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
   if (!version) throw new Error('No create_strategy version found')
@@ -2932,7 +2987,7 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses mainVideoRow from the strategy-resolver lookup at the top of the function.
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_strategy' })
@@ -3188,8 +3243,9 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
 
 // Run per-chapter B-Roll strategy for MULTIPLE reference videos using completed prep + analysis pipelines
 export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipelineIds, videoId, groupId, pipelineIdOverride) {
-  // 1. Load create_combined_strategy strategy and version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy' ORDER BY id LIMIT 1").get()
+  // 1. Load create_combined_strategy strategy, preferring audio-only variant when audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('create_combined_strategy', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No create_combined_strategy strategy found')
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
   if (!version) throw new Error('No create_combined_strategy version found')
@@ -3363,7 +3419,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses mainVideoRow from the strategy-resolver lookup at the top of the function.
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Combined Strategy', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_combined_strategy' })
@@ -3748,8 +3804,9 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
 }
 
 export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId, editorCuts = null) {
-  // 1. Load create_plan strategy and version
-  const strategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'create_plan' ORDER BY id LIMIT 1").get()
+  // 1. Load create_plan strategy, preferring audio-only variant when audio.
+  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  const strategy = await pickStrategyByKind('create_plan', mainVideoRow?.media_type)
   if (!strategy) throw new Error('No create_plan strategy found')
   const version = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(strategy.id)
   if (!version) throw new Error('No create_plan version found')
@@ -3911,7 +3968,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   const audienceText = await loadAudienceText(groupId)
   const audienceBlock = buildAudienceBlock(audienceText)
   // {{special_audio_note}} → verbatim voice-over instruction when the main video is audio.
-  const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
+  // Reuses mainVideoRow from the strategy-resolver lookup at the top of the function.
   const specialAudioNote = buildSpecialAudioNote(mainVideoRow?.media_type)
 
   brollPipelineProgress.set(pipelineId, { strategyId: strategy.id, videoId, groupId, strategyName: strategy.name || 'Create Plan', startedAt: pipelineStart, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: 'Starting...', phase: 'create_plan' })
@@ -4107,7 +4164,12 @@ const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set(['export_post_cut_video'])
 
 function filterStagesForMedia(stages, mediaType) {
   if (mediaType !== 'audio') return stages
-  return stages.filter(s => {
+
+  // Mark which stages survive the filter, then remap *StageIndex params.
+  // Without remapping, programmatic actions like split_by_chapter point at
+  // the wrong (or undefined) earlier stage output and crash with
+  // "Cannot read properties of null (reading 'chapters')".
+  const keep = stages.map(s => {
     const isVideoStage = VIDEO_STAGE_TYPES.has(s.type)
     const targetsMain = s.target === 'main_video'
     if (isVideoStage && targetsMain) {
@@ -4120,6 +4182,34 @@ function filterStagesForMedia(stages, mediaType) {
     }
     return true
   })
+
+  const newIndexOfOld = new Map()
+  let nextNew = 0
+  for (let i = 0; i < keep.length; i++) {
+    if (keep[i]) {
+      newIndexOfOld.set(i, nextNew++)
+    }
+  }
+
+  const result = []
+  for (let i = 0; i < stages.length; i++) {
+    if (!keep[i]) continue
+    const stage = { ...stages[i] }
+    const params = stage.params || stage.actionParams
+    if (params && typeof params === 'object') {
+      const remapped = { ...params }
+      for (const key of Object.keys(remapped)) {
+        if (!key.endsWith('StageIndex')) continue
+        const oldVal = remapped[key]
+        if (typeof oldVal !== 'number') continue
+        remapped[key] = newIndexOfOld.has(oldVal) ? newIndexOfOld.get(oldVal) : null
+      }
+      if (stage.params) stage.params = remapped
+      else stage.actionParams = remapped
+    }
+    result.push(stage)
+  }
+  return result
 }
 
 // Exported as a __test__ alias so unit tests can exercise the helper without
@@ -4182,9 +4272,9 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     `).get(strategy.main_strategy_id) : null
     const analysisStagesTemplate = analysisVersion ? JSON.parse(analysisVersion.stages_json || '[]') : []
 
-    // Load alt plan strategy stages
+    // Load alt plan strategy stages — prefer audio-only variant when main is audio.
     let altPlanStagesTemplate = []
-    const altPlanStrategy = await db.prepare("SELECT * FROM broll_strategies WHERE strategy_kind = 'alt_plan' ORDER BY id LIMIT 1").get()
+    const altPlanStrategy = await pickStrategyByKind('alt_plan', mainMediaType)
     if (altPlanStrategy) {
       const altVer = await db.prepare('SELECT * FROM broll_strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1').get(altPlanStrategy.id)
       if (altVer) altPlanStagesTemplate = JSON.parse(altVer.stages_json || '[]')
@@ -6345,6 +6435,7 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
 
   const videoId = planRuns[0]?.video_id
   if (!videoId) throw new Error('No video found for pipeline')
+  const orientation = await resolveOrientation(videoId)
 
   const chapterRuns = planRuns.filter(r => {
     try { const m = JSON.parse(r.metadata_json || '{}'); return m.isSubRun && m.stageName === 'Per-chapter B-Roll plan' }
@@ -6429,6 +6520,7 @@ export async function searchSinglePlacement(planPipelineId, identity, overrides 
     brief,
     sources,
     max_results: 10,
+    orientation,
   }
 
   // Find or create broll_search strategy
@@ -6612,7 +6704,15 @@ export async function searchUserPlacement(planPipelineId, userPlacementId, overr
   ].filter(Boolean).join('\n')
 
   const sources = await resolveBrollSources(planPipelineId, overrides)
-  const requestBody = { keywords: [], brief, sources, max_results: 10 }
+  // Resolve the main video for orientation — searchUserPlacement is the
+  // only call site that doesn't pre-load videoId, so do it inline. Same
+  // pipelineId-LIKE lookup the other two paths use.
+  const planRunsForOrient = await db.prepare(
+    `SELECT video_id FROM broll_runs WHERE metadata_json LIKE ? AND status = 'complete' ORDER BY id LIMIT 1`,
+  ).all(`%"pipelineId":"${planPipelineId}"%`)
+  const videoIdForOrient = planRunsForOrient[0]?.video_id
+  const orientation = await resolveOrientation(videoIdForOrient)
+  const requestBody = { keywords: [], brief, sources, max_results: 10, orientation }
 
   const res = await fetch(GPU_URL, {
     method: 'POST',

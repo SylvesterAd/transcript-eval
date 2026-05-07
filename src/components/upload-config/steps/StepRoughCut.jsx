@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import Eyebrow from '../primitives/Eyebrow.jsx'
 import PageTitle from '../primitives/PageTitle.jsx'
 import { supabase } from '../../../lib/supabaseClient.js'
+import { estimateTokenCost, estimateProcessingTime } from '../../../lib/token-pricing.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -80,15 +81,35 @@ function TranscriptPreview() {
   )
 }
 
-export default function StepRoughCut({ groupId, state, setState, onValidityChange, onEstimate }) {
+export default function StepRoughCut({ groupId, state, setState, onValidityChange, onEstimate, clientDurationSeconds }) {
   const [estimate, setEstimate] = useState(null)
   const [polling, setPolling] = useState(false)
   const pollAttempts = useRef(0)
 
+  // Client-side fast path when UploadModal's probeDuration succeeded:
+  // duration is already known locally so the token math is a single
+  // multiplication. Only the balance still needs a network round-trip,
+  // and that's a ~10 ms GET. End-to-end this lands the estimate well
+  // before the upload even reaches CF Stream.
+  //
+  // Fallback path (clientDurationSeconds == null): probe failed for at
+  // least one entry, no liveFiles in scope, or user navigated in cold —
+  // poll the server estimate which only resolves once duration_seconds
+  // hits the DB (after /register at upload completion, or
+  // processVideoMetadata after CF encoding ~30s).
   useEffect(() => {
     if (!groupId) return
     let cancelled = false
-    async function fetchEstimate() {
+
+    async function fetchBalance() {
+      try {
+        const headers = await authHeaders()
+        const res = await fetch(`${API_BASE}/videos/user/tokens`, { headers })
+        if (!res.ok) return null
+        return await res.json()
+      } catch { return null }
+    }
+    async function fetchServerEstimate() {
       try {
         const headers = await authHeaders()
         const res = await fetch(`${API_BASE}/videos/groups/${groupId}/estimate-ai-roughcut`, { method: 'POST', headers })
@@ -96,10 +117,30 @@ export default function StepRoughCut({ groupId, state, setState, onValidityChang
         return await res.json()
       } catch { return null }
     }
-    async function loop() {
+
+    async function run() {
+      if (clientDurationSeconds && clientDurationSeconds > 0) {
+        setPolling(false)
+        const balanceRes = await fetchBalance()
+        if (cancelled) return
+        const balance = balanceRes?.balance ?? 0
+        const tokenCost = estimateTokenCost(clientDurationSeconds)
+        const estimatedTimeSeconds = estimateProcessingTime(clientDurationSeconds)
+        const data = {
+          tokenCost,
+          estimatedTimeSeconds,
+          balance,
+          sufficient: balance >= tokenCost,
+          durationSeconds: clientDurationSeconds,
+        }
+        setEstimate(data)
+        onEstimate?.(data)
+        return
+      }
+
       setPolling(true)
       while (!cancelled) {
-        const data = await fetchEstimate()
+        const data = await fetchServerEstimate()
         if (cancelled) return
         if (data) {
           setEstimate(data)
@@ -111,9 +152,9 @@ export default function StepRoughCut({ groupId, state, setState, onValidityChang
         await new Promise(r => setTimeout(r, delay))
       }
     }
-    loop()
+    run()
     return () => { cancelled = true }
-  }, [groupId, onEstimate])
+  }, [groupId, onEstimate, clientDurationSeconds])
 
   // Validity gates the Run button in the footer when balance is short.
   // Skip is always allowed.

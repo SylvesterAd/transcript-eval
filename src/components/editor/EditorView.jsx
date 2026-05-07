@@ -128,6 +128,23 @@ export default function EditorView() {
       navigate(`/?step=processing&group=${id}`, { replace: true })
     }
   }, [groupDetail, id, navigate])
+
+  // Paused-for-review chains: when the URL has no explicit tab and the
+  // chain is awaiting human input (rough-cut / strategy / plan review),
+  // bounce to the processing modal so the StageTimeline's "Review …"
+  // CTA is what handles the next step. The activeTab fallback below
+  // would otherwise default to 'sync' for a sub-group with
+  // assembly_status='done', dropping the user into multicam past their
+  // actual review point — and the auto-resume effect would then flip
+  // broll_chain_status from paused_at_rough_cut → running on first click.
+  useEffect(() => {
+    if (!groupDetail) return
+    if (tab) return
+    const PAUSED_FOR_REVIEW = ['paused_at_rough_cut', 'paused_at_strategy', 'paused_at_plan']
+    if (!PAUSED_FOR_REVIEW.includes(groupDetail.broll_chain_status)) return
+    const targetGroup = groupDetail.parent_group_id || id
+    navigate(`/?step=processing&group=${targetGroup}`, { replace: true })
+  }, [groupDetail, tab, id, navigate])
   const { state, dispatch, totalDuration, formatTime } = useEditorState()
   const [showRoughCutWarning, setShowRoughCutWarning] = useState(false)
   const [flowRunState, setFlowRunState] = useState(null)
@@ -348,7 +365,11 @@ export default function EditorView() {
 
   // Handler: resume b-roll chain from rough-cut pause to strategy
   const [resumeKickedAt, setResumeKickedAt] = useState(null)
-  const handleResumeFromRoughCut = async () => {
+  const resumeFiredRef = useRef(false)
+
+  const fireResumeFromRoughCut = useCallback(async () => {
+    if (resumeFiredRef.current) return
+    resumeFiredRef.current = true
     // Optimistically reflect "running" so ProcessingModal mounts immediately.
     setResumeKickedAt(Date.now())
     try {
@@ -356,10 +377,28 @@ export default function EditorView() {
     } catch (err) {
       console.error('[resume] failed:', err.message)
       setResumeKickedAt(null)
+      resumeFiredRef.current = false  // allow retry
     }
-    // Navigate to the strategy tab so the panel is visible while loader runs.
+  }, [id])
+
+  // Sidebar B-Roll Strategy click during paused_at_rough_cut: fire resume +
+  // navigate to the strategy tab. The useEffect below is the safety net for
+  // any other entry point (direct URL, BRollPanel auto-redirect, etc.).
+  const handleResumeFromRoughCut = async () => {
+    await fireResumeFromRoughCut()
     navigate(`/editor/${id}/brolls/strategy`)
   }
+
+  // Auto-fire resume whenever the user is at /editor/:id/brolls/* AND the chain
+  // is still paused at rough cut. Covers sidebar clicks that didn't go through
+  // the bespoke handler (props missing, race with groupDetail load, etc.).
+  useEffect(() => {
+    if (resumeFiredRef.current) return
+    if (!groupDetail) return
+    if (groupDetail.broll_chain_status !== 'paused_at_rough_cut') return
+    if (tab !== 'brolls') return
+    fireResumeFromRoughCut()
+  }, [groupDetail, tab, fireResumeFromRoughCut])
 
   // Handler: accept estimation and start pipeline
   const handleAcceptAIRoughCut = useCallback(async () => {
@@ -1036,7 +1075,7 @@ export default function EditorView() {
           {activeTab === 'assets' ? (
             <AssetsView />
           ) : activeTab === 'brolls' ? (
-            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} sub={sub} detail={detail} />
+            <BRollPanel groupId={Number(id)} videoId={groupDetail?.videos?.[0]?.id} sub={sub} detail={detail} pathId={groupDetail?.path_id} parentGroupId={groupDetail?.parent_group_id || Number(id)} />
           ) : (
             <MainWorkspace audioOnly={state.audioOnly} isRoughCut={activeTab === 'roughcut'} isMainMode={activeTab === 'roughcut' && state.roughCutTrackMode === 'main'} />
           )}
@@ -1204,13 +1243,11 @@ function MainWorkspace({ audioOnly, isRoughCut, isMainMode }) {
               <RoughCutPreview />
             </div>
           </div>
-        ) : mediaType === 'audio' ? (
-          // Audio-only A-roll: nothing to preview visually. Keep layout stable
-          // by occupying the same flex slot as <VideoPreviewGrid />.
-          <div className="flex-1 flex items-center justify-center w-full h-full bg-zinc-950 border border-zinc-800 rounded text-zinc-500 text-sm">
-            No video — audio only
-          </div>
         ) : (
+          // VideoPreviewGrid handles mediaType==='audio' itself: shows the mic
+          // rows in place of the grid AND mounts hidden <video> elements so
+          // the playback engine can drive audio. Don't short-circuit here or
+          // those refs never register and the user can't hear anything.
           <VideoPreviewGrid />
         )}
       </div>

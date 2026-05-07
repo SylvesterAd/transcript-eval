@@ -19,7 +19,7 @@ export default function VideoPreviewGrid() {
 
   if (mediaType === 'audio') {
     return (
-      <div className="flex-1 flex flex-col gap-2 bg-black rounded-xl overflow-hidden shadow-2xl p-2">
+      <div className="flex-1 flex flex-col gap-2 bg-black rounded-xl overflow-hidden shadow-2xl p-2 relative">
         {videoTracks.map(track => (
           <div key={track.id} className="flex items-center gap-2 p-2 bg-zinc-900 rounded">
             <Mic size={16} className="text-zinc-500" />
@@ -30,6 +30,11 @@ export default function VideoPreviewGrid() {
         {videoTracks.length === 0 && (
           <div className="flex items-center justify-center text-on-surface-variant text-sm">No visible tracks</div>
         )}
+        {/* Hidden media elements so the playback engine has refs to drive —
+            without them videoRefs stays empty and audio never plays. */}
+        {videoTracks.map(track => (
+          <AudioOnlyCell key={`media-${track.id}`} track={track} videoRefs={videoRefs} />
+        ))}
       </div>
     )
   }
@@ -105,5 +110,35 @@ function VideoCell({ track, num, videoRefs, currentTime, state }) {
         </div>
       )}
     </div>
+  )
+}
+
+// Off-screen <video> for audio-only tracks. Mounted purely so the playback
+// engine has an HTMLMediaElement ref in videoRefs — the visible UI is the
+// <Mic> row above. Browsers play .mp3 / .wav etc. inside <video> just fine.
+function AudioOnlyCell({ track, videoRefs }) {
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (ref.current) {
+      videoRefs.current[track.videoId] = ref.current
+    }
+    return () => { delete videoRefs.current[track.videoId] }
+  }, [track.videoId, videoRefs])
+
+  const cfMp4 = track.cfStreamUid ? `https://videodelivery.net/${track.cfStreamUid}/downloads/default.mp4` : null
+  const directSrc = track.filePath?.startsWith('http') ? track.filePath : track.filePath ? `/uploads/videos/${track.filePath.split('/').pop()}` : null
+  const src = cfMp4 || directSrc
+  if (!src) return null
+
+  return (
+    <video
+      ref={ref}
+      src={src}
+      className="absolute w-px h-px opacity-0 pointer-events-none overflow-hidden"
+      preload="auto"
+      playsInline
+      muted
+    />
   )
 }

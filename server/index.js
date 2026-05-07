@@ -128,10 +128,34 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 
 ;(async () => {
   try {
-    const { resumeStuckFullAutoChains, resumeStuckYouTubeDownloads } =
+    const { resumeStuckFullAutoChains, resumeInterruptedFullAutoChains, resumeStuckYouTubeDownloads } =
       await import('./services/auto-orchestrator.js')
     await resumeStuckFullAutoChains()
     await resumeStuckYouTubeDownloads()
+
+    // Periodic sweep for chains that go stale mid-runtime (worker dies
+    // without writing a failed status — OOM, unhandled rejection on an
+    // LLM stream, container restart between heartbeats). The boot-time
+    // call above only catches chains stale at startup; a chain that went
+    // stale 10 min after a deploy used to sit forever until the next
+    // deploy. The HEARTBEAT_TTL_MS (90 s) gate inside
+    // resumeInterruptedFullAutoChains is what guarantees we never resume
+    // a chain whose worker is still alive — live workers tick the
+    // heartbeat every HEARTBEAT_INTERVAL_MS (30 s).
+    //
+    // Stuck chains (status IS NULL) are intentionally NOT swept here —
+    // see auto-orchestrator.js comment.
+    //
+    // 5 min cadence: comfortably above the heartbeat TTL so a legitimate
+    // worker mid-LLM-call isn't flagged, and well below any timescale a
+    // user would notice. .unref() so the timer doesn't keep the process
+    // alive past SIGTERM during a graceful shutdown.
+    const PERIODIC_RESUME_INTERVAL_MS = 5 * 60 * 1000
+    setInterval(() => {
+      resumeInterruptedFullAutoChains().catch(err =>
+        console.error('[periodic-resume] sweep failed:', err.message),
+      )
+    }, PERIODIC_RESUME_INTERVAL_MS).unref()
   } catch (err) {
     console.error('[startup] resume failed:', err.message)
   }

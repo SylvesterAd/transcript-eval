@@ -3,6 +3,7 @@ import { BRollContext } from './useBRollEditorState.js'
 import { EditorContext } from './EditorView.jsx'
 import { Play, Pause, X, Search, Loader2, RotateCw, Pencil, Trash2 } from 'lucide-react'
 import { parseTimecode } from './brollUtils.js'
+import { useHlsSource } from '../../hooks/useHlsSource.js'
 
 function formatTime(s) {
   const m = Math.floor(s / 60)
@@ -291,6 +292,15 @@ function BRollOptionThumbnail({ result, isSelected, onSelect, eager = false }) {
   const videoUrl = result.preview_url || result.preview_url_hq || result.url
   const hasVideo = !!videoUrl && videoUrl !== thumb
 
+  // Artlist returns HLS .m3u8 previews; Chrome can't decode those in a plain
+  // <video> element. Route through useHlsSource which handles HLS via hls.js
+  // (or Safari native) and falls back to MP4 for other providers.
+  const isHls = !!videoUrl && /\.m3u8(\?|$)/i.test(videoUrl)
+  useHlsSource(videoRef, {
+    hlsUrl: hasVideo && isHls ? videoUrl : null,
+    mp4Url: hasVideo && !isHls ? videoUrl : null,
+  })
+
   function togglePlay(e) {
     e.stopPropagation()
     const v = videoRef.current
@@ -330,7 +340,6 @@ function BRollOptionThumbnail({ result, isSelected, onSelect, eager = false }) {
       {hasVideo ? (
         <video
           ref={videoRef}
-          src={videoUrl}
           poster={thumb}
           className="w-full h-full object-cover bg-black pointer-events-none"
           preload={eager ? 'auto' : 'metadata'}

@@ -64,7 +64,9 @@ export function filterVariantsWithPlacements(variants) {
   return variants.filter(v => Number.isFinite(v?.totalPlacements) && v.totalPlacements > 0)
 }
 
-export default function BRollPanel({ groupId, videoId, sub, detail }) {
+const AUTO_PATHS = new Set(['hands-off', 'strategy-only', 'guided'])
+
+export default function BRollPanel({ groupId, videoId, sub, detail, pathId, parentGroupId }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const { data: strategies } = useApi('/broll/strategies')
@@ -93,6 +95,16 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
   const altPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'alt_plan')
   const keywordsStrategy = (strategies || []).find(s => s.strategy_kind === 'keywords')
   const planPrepStrategy = (strategies || []).find(s => s.strategy_kind === 'plan_prep')
+  // plan_prep has multiple bundle variants (e.g. id=7 default + id=12
+  // audio_only). The server picks the right one via resolvePlanStrategyId
+  // based on the main video's media_type — for audio mains the run is
+  // strategy_id=12 while .find() returns id=7. Without an all-IDs set,
+  // completedPrepPipeline below misses the audio run, prepPipelineId stays
+  // null, and handleRunNewPlan early-returns silently when the user clicks
+  // Generate Plan (so the navigate to /?step=processing never fires).
+  const planPrepStrategyIds = new Set(
+    (strategies || []).filter(s => s.strategy_kind === 'plan_prep').map(s => Number(s.id)),
+  )
   const createStrategyKind = (strategies || []).find(s => s.strategy_kind === 'create_strategy')
   const createPlanStrategy = (strategies || []).find(s => s.strategy_kind === 'create_plan')
   // Memoized so reference identity is stable across re-renders (incl. the 10Hz
@@ -226,9 +238,11 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
     pid.startsWith('kw-') && p.status === 'complete'
   )
 
-  // Find completed prep pipeline (strategy_kind === 'plan_prep')
+  // Find completed prep pipeline. Match against EVERY plan_prep strategy ID
+  // (default + audio_only variant) so an audio main video's plan_prep run
+  // — strategy_id=12 — isn't missed when planPrepStrategy.id resolves to 7.
   const completedPrepPipeline = Object.entries(pipelineMap).find(([pid, p]) =>
-    p.status === 'complete' && p.stages.some(s => s.strategy_id === planPrepStrategy?.id || String(s.strategy_id) === String(planPrepStrategy?.id))
+    p.status === 'complete' && p.stages.some(s => planPrepStrategyIds.has(Number(s.strategy_id)))
   )
   const prepPipelineId = completedPrepPipeline?.[0] || null
   const hasCompletedPrep = !!completedPrepPipeline
@@ -680,19 +694,56 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
 
   async function handleRunNewPlan() {
     const selected = [...selectedStrategies]
-    if (!prepPipelineId || !selected.length || !videoId) return
+    if (!prepPipelineId || !selected.length || !videoId) {
+      // Surfacing why nothing happened — historically this swallowed the
+      // click silently (no nav, no toast) and made it look like Generate
+      // Plan was broken. Log the missing piece so it's visible in the
+      // browser console for triage.
+      console.warn('[broll] Generate Plan: prereqs missing — staying put', {
+        prepPipelineId, selectedCount: selected.length, videoId,
+      })
+      return
+    }
     setRunningType('plan')
     setError(null)
     setProgress(null)
     setPipelineIds([])
     setPipelineProgresses({})
+
+    // Auto paths: hand the entire plan + search advance to the orchestrator
+    // via /resume-chain?from=plan. The orchestrator flips
+    // broll_chain_status='running'/'plan' immediately (with heartbeat
+    // keeper), runs plan, advances substage to search, runs all 3 batches,
+    // marks the chain done, sends the email. The processing modal sees
+    // each status transition and updates StageTimeline in real time —
+    // strategy shows Done + plan shows Active right after the click,
+    // instead of staying paused-at-strategy for the 15-30 s the
+    // per-pipeline run-plan flow took (during which the modal would
+    // mislead the user into thinking nothing was happening).
+    //
+    // Skipping clean-strategy here is intentional: the boot-time full-auto
+    // path (runFullAutoBrollChain → orchestrator's plan phase) doesn't run
+    // it either, and the fields it strips
+    // (matched_reference_chapter / commonalities / match_reason) are an
+    // input-size optimization the plan generator doesn't actually require.
+    if (AUTO_PATHS.has(pathId)) {
+      navigate(`/?step=processing&group=${parentGroupId}`)
+      apiPost(`/broll/groups/${groupId}/resume-chain?from=plan`, {
+        prepPipelineId,
+        strategyPipelineIds: selected,
+      }).catch(err => console.error('[resume-chain plan]', err.message))
+      return
+    }
+
+    // Non-auto / legacy manual flow: keep the per-strategy clean + run-plan
+    // calls so the in-panel progress UI keeps working. No chain status to
+    // advance for these projects.
+    navigate(`/editor/${id}/brolls/strategy/plan`)
     try {
-      // 1. Clean strategy outputs (strip reference-only fields) for each selected
       await Promise.all(selected.map(stratId =>
         apiPost('/broll/pipeline/clean-strategy', { strategy_pipeline_id: stratId })
       ))
 
-      // 2. Fire plan for each selected strategy
       const planPipelineIds = []
       for (const stratId of selected) {
         const res = await apiPost('/broll/pipeline/run-plan', {
@@ -961,7 +1012,19 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
             return (
               <button
                 key={step.key}
-                onClick={isCTA ? () => { step.action(); navigate(`/editor/${id}/brolls/strategy/${step.key}`) } : canNavigate ? () => navigate(`/editor/${id}/brolls/strategy/${step.key}`) : undefined}
+                onClick={isCTA ? () => {
+                  step.action()
+                  // The 'plan' CTA owns its own navigation: handleRunNewPlan
+                  // routes to /?step=processing for auto paths and to the
+                  // /plan tab otherwise. Always skip the local navigate
+                  // here so we never race a stale closure (the previous
+                  // gate was `step.key === 'plan' && AUTO_PATHS.has(pathId)`
+                  // — when pathId hadn't loaded yet or the JS bundle was
+                  // stale, the gate failed open and /plan won the race
+                  // against the /processing redirect).
+                  if (step.key === 'plan') return
+                  navigate(`/editor/${id}/brolls/strategy/${step.key}`)
+                } : canNavigate ? () => navigate(`/editor/${id}/brolls/strategy/${step.key}`) : undefined}
                 disabled={!isCTA && !canNavigate && !isActive}
                 className={`relative flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex-1 justify-center disabled:opacity-30 ${
                   isCTA
@@ -1413,52 +1476,54 @@ export default function BRollPanel({ groupId, videoId, sub, detail }) {
             })}
 
             {/* Manual creation card */}
-            <div className="bg-zinc-900 rounded-xl overflow-hidden flex flex-col group transition-all border-2 border-transparent hover:border-zinc-700/50">
-              <div className="flex items-start justify-between gap-4 p-5 pb-3">
-                <div className="flex items-start gap-3 flex-1 min-w-0">
-                  {/* Empty checkbox slot for alignment */}
-                  <div className="mt-0.5 w-5 h-5 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-base font-bold text-zinc-100 truncate">Manual Creation</p>
-                    <div className="flex items-center gap-2 mt-1.5">
-                      <span className="material-symbols-outlined text-zinc-400 shrink-0" style={{ fontSize: '13px' }}>upload_file</span>
-                      <span className="text-[11px] text-zinc-500">Upload your own strategy document</span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-2">
-                      <span className="text-[9px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-bold uppercase tracking-wide">Custom</span>
+            {false && (
+              <div className="bg-zinc-900 rounded-xl overflow-hidden flex flex-col group transition-all border-2 border-transparent hover:border-zinc-700/50">
+                <div className="flex items-start justify-between gap-4 p-5 pb-3">
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                    {/* Empty checkbox slot for alignment */}
+                    <div className="mt-0.5 w-5 h-5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-base font-bold text-zinc-100 truncate">Manual Creation</p>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <span className="material-symbols-outlined text-zinc-400 shrink-0" style={{ fontSize: '13px' }}>upload_file</span>
+                        <span className="text-[11px] text-zinc-500">Upload your own strategy document</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className="text-[9px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-bold uppercase tracking-wide">Custom</span>
+                      </div>
                     </div>
                   </div>
+                  <div className="w-[120px] h-[84px] rounded-lg overflow-hidden shrink-0 bg-zinc-950 flex items-center justify-center">
+                    <span className="material-symbols-outlined text-zinc-700 text-3xl">edit_document</span>
+                  </div>
                 </div>
-                <div className="w-[120px] h-[84px] rounded-lg overflow-hidden shrink-0 bg-zinc-950 flex items-center justify-center">
-                  <span className="material-symbols-outlined text-zinc-700 text-3xl">edit_document</span>
-                </div>
-              </div>
 
-              <div className="px-5 pb-5">
-                <div
-                  onClick={() => document.getElementById('manual-strategy-file')?.click()}
-                  className="rounded-lg p-6 bg-zinc-950/50 border-2 border-dashed border-zinc-800 flex flex-col items-center justify-center gap-3 hover:bg-zinc-950 hover:border-zinc-700 transition-colors cursor-pointer group/drop min-h-[100px]"
-                >
-                  <span className="material-symbols-outlined text-[#cefc00]/50 group-hover/drop:text-[#cefc00]/70 transition-colors text-3xl">upload_file</span>
-                  <div className="text-center">
-                    <span className="text-xs font-medium text-zinc-400 group-hover/drop:text-zinc-300 block">Click to upload</span>
-                    <span className="text-[10px] text-zinc-600 mt-0.5 block">.docx, .txt, or spreadsheet</span>
+                <div className="px-5 pb-5">
+                  <div
+                    onClick={() => document.getElementById('manual-strategy-file')?.click()}
+                    className="rounded-lg p-6 bg-zinc-950/50 border-2 border-dashed border-zinc-800 flex flex-col items-center justify-center gap-3 hover:bg-zinc-950 hover:border-zinc-700 transition-colors cursor-pointer group/drop min-h-[100px]"
+                  >
+                    <span className="material-symbols-outlined text-[#cefc00]/50 group-hover/drop:text-[#cefc00]/70 transition-colors text-3xl">upload_file</span>
+                    <div className="text-center">
+                      <span className="text-xs font-medium text-zinc-400 group-hover/drop:text-zinc-300 block">Click to upload</span>
+                      <span className="text-[10px] text-zinc-600 mt-0.5 block">.docx, .txt, or spreadsheet</span>
+                    </div>
+                    <input
+                      id="manual-strategy-file"
+                      type="file"
+                      accept=".docx,.txt,.csv,.xlsx,.xls"
+                      className="hidden"
+                      onChange={(e) => {
+                        // TODO: handle manual strategy file upload
+                        const file = e.target.files?.[0]
+                        if (file) console.log('[manual-strategy] File selected:', file.name)
+                        e.target.value = ''
+                      }}
+                    />
                   </div>
-                  <input
-                    id="manual-strategy-file"
-                    type="file"
-                    accept=".docx,.txt,.csv,.xlsx,.xls"
-                    className="hidden"
-                    onChange={(e) => {
-                      // TODO: handle manual strategy file upload
-                      const file = e.target.files?.[0]
-                      if (file) console.log('[manual-strategy] File selected:', file.name)
-                      e.target.value = ''
-                    }}
-                  />
                 </div>
               </div>
-            </div>
+            )}
           </section>
         )}
 

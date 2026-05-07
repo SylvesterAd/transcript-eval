@@ -52,6 +52,38 @@ describe('deriveMode', () => {
     }
     expect(deriveMode(state)).toBe('done')
   })
+
+  // Regression: paused_at_* used to count as terminal, flipping the modal
+  // into <DoneView> the moment the chain paused for review. The "Open
+  // project" button there hard-codes /sync, herding the user past the
+  // review point — and the editor's auto-resume effect then advances the
+  // chain on first click.
+  it('returns "pipeline" (not "done") when sub-group is paused_at_rough_cut for guided review', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'guided', auto_rough_cut: true },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: 'done', broll_chain_status: 'paused_at_rough_cut', path_id: 'guided' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('pipeline')
+  })
+
+  it('returns "pipeline" when sub-group is paused_at_strategy', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'strategy-only', auto_rough_cut: false },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: null, broll_chain_status: 'paused_at_strategy', path_id: 'strategy-only' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('pipeline')
+  })
+
+  it('returns "pipeline" when sub-group is paused_at_plan', () => {
+    const state = {
+      parent: { videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }], assembly_status: 'confirmed', path_id: 'guided', auto_rough_cut: true },
+      subGroups: [{ assembly_status: 'done', rough_cut_status: 'done', broll_chain_status: 'paused_at_plan', path_id: 'guided' }],
+      files: [{ status: 'complete' }],
+    }
+    expect(deriveMode(state)).toBe('pipeline')
+  })
 })
 
 describe('deriveStages', () => {
@@ -72,6 +104,35 @@ describe('deriveStages', () => {
     const stages = deriveStages(state)
     const s = stages.find(s => s.id === 'broll_strategy')
     expect(s.paused).toBe(true)
+  })
+
+  // Regression: paused_at_strategy used to leave "References analyzed"
+  // stuck on Pending — `done` was only true when chain was actively
+  // running PAST refs. A chain paused at any later checkpoint has by
+  // definition finished refs, so it should render Done.
+  it('marks broll_refs done when chain is paused_at_strategy', () => {
+    const state = { parent: { auto_rough_cut: false, videos: [] }, subGroups: [{ broll_chain_status: 'paused_at_strategy', broll_chain_substage: 'strategy' }] }
+    const stages = deriveStages(state)
+    const refs = stages.find(s => s.id === 'broll_refs')
+    expect(refs.done).toBe(true)
+    expect(refs.active).toBe(false)
+  })
+
+  it('marks broll_refs + broll_strategy done when chain is paused_at_plan', () => {
+    const state = { parent: { auto_rough_cut: false, videos: [] }, subGroups: [{ broll_chain_status: 'paused_at_plan', broll_chain_substage: 'plan' }] }
+    const stages = deriveStages(state)
+    expect(stages.find(s => s.id === 'broll_refs').done).toBe(true)
+    expect(stages.find(s => s.id === 'broll_strategy').done).toBe(true)
+    expect(stages.find(s => s.id === 'broll_plan').paused).toBe(true)
+    expect(stages.find(s => s.id === 'broll_plan').done).toBe(false)
+  })
+
+  it('keeps refs Pending while chain is genuinely running on refs (not yet finished)', () => {
+    const state = { parent: { auto_rough_cut: false, videos: [] }, subGroups: [{ broll_chain_status: 'running', broll_chain_substage: 'refs' }] }
+    const stages = deriveStages(state)
+    const refs = stages.find(s => s.id === 'broll_refs')
+    expect(refs.done).toBe(false)
+    expect(refs.active).toBe(true)
   })
   it('marks classify as paused when assembly_status is classified and no sub-groups exist', () => {
     const state = { parent: { assembly_status: 'classified', videos: [{ transcription_status: 'done', cf_stream_uid: 'x' }] }, subGroups: [] }

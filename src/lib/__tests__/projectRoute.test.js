@@ -89,6 +89,18 @@ describe('resolveProjectRoute', () => {
         ...READY, id: 7, path_id: 'guided', broll_chain_status: 'paused_at_rough_cut',
       })).toBe('/?step=processing&group=7')
     })
+
+    it('routes to processing when broll_chain_status is paused_at_strategy', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'strategy-only', broll_chain_status: 'paused_at_strategy',
+      })).toBe('/?step=processing&group=7')
+    })
+
+    it('routes to processing when broll_chain_status is paused_at_plan', () => {
+      expect(resolveProjectRoute({
+        ...READY, id: 7, path_id: 'guided', broll_chain_status: 'paused_at_plan',
+      })).toBe('/?step=processing&group=7')
+    })
   })
 
   describe('ready for editor', () => {
@@ -118,12 +130,6 @@ describe('resolveProjectRoute', () => {
       expect(resolveProjectRoute({
         ...READY, id: 42, path_id: 'guided',
         broll_chain_status: 'failed', broll_chain_substage: 'search',
-      })).toBe('/editor/42/assets')
-    })
-
-    it('routes to editor when broll_chain_status paused_at_strategy (auto path)', () => {
-      expect(resolveProjectRoute({
-        ...READY, id: 42, path_id: 'strategy-only', broll_chain_status: 'paused_at_strategy',
       })).toBe('/editor/42/assets')
     })
 
@@ -254,18 +260,18 @@ describe('resolveProjectRoute', () => {
       })).toBe('/editor/7/assets')
     })
 
-    it('paused_at_strategy still routes to editor (intentional checkpoint)', () => {
+    it('paused_at_strategy routes to processing (StageTimeline surfaces the review CTA)', () => {
       expect(resolveProjectRoute({
         ...READY, id: 7, path_id: 'strategy-only',
         broll_chain_status: 'paused_at_strategy', broll_chain_substage: 'strategy',
-      })).toBe('/editor/7/assets')
+      })).toBe('/?step=processing&group=7')
     })
 
-    it('paused_at_plan still routes to editor (intentional checkpoint)', () => {
+    it('paused_at_plan routes to processing (StageTimeline surfaces the review CTA)', () => {
       expect(resolveProjectRoute({
         ...READY, id: 7, path_id: 'guided',
         broll_chain_status: 'paused_at_plan', broll_chain_substage: 'plan',
-      })).toBe('/editor/7/assets')
+      })).toBe('/?step=processing&group=7')
     })
   })
 })

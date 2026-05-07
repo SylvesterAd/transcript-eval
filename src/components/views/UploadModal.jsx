@@ -8,21 +8,24 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
+const AUDIO_EXTS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']
 const SCRIPT_EXTS = ['.docx', '.pdf', '.txt']
-const VIDEO_ACCEPT = VIDEO_EXTS.join(',')
+const VIDEO_ACCEPT = [...VIDEO_EXTS, ...AUDIO_EXTS].join(',')
 const SCRIPT_ACCEPT = SCRIPT_EXTS.join(',')
 const MAX_SIZE = 50 * 1024 * 1024 * 1024 // 50GB
 
-// Probe a video file's duration locally before upload starts. Reads only
-// the moov atom via an HTML5 <video> element + blob URL — no bytes are
-// uploaded, no extra deps. Returns the duration in seconds, or null when
-// the browser can't decode the container (rare formats, corrupted files,
-// or live-style MSE streams that report Infinity until seek).
+// Probe a video file's duration + pixel dimensions locally before upload
+// starts. Reads only the moov atom via an HTML5 <video> element + blob URL
+// — no bytes are uploaded, no extra deps. Returns
+// `{ duration, width, height }` (width/height are null for audio-only
+// containers), or null when the browser can't decode at all (rare
+// formats, corrupted files, or live-style MSE streams that report
+// Infinity until seek).
 //
-// Used by validateAndAddFiles to attach durationSeconds to each file
-// entry; the value is then forwarded to /videos/register so the rough-
-// cut estimator has accurate data from t≈0 instead of waiting ~30-90 s
-// for Cloudflare Stream to report it server-side.
+// Used by validateAndAddFiles to attach durationSeconds + width/height
+// to each file entry; the values are forwarded to /videos/register so
+// (a) the rough-cut estimator can run from t≈0 and (b) the b-roll
+// search has an `orientation` hint immediately.
 //
 // The optional opts arg lets unit tests inject mock factories — see
 // __tests__/UploadModal-probe-duration.test.js. Production callers omit
@@ -32,20 +35,31 @@ export function probeDuration(file, opts = {}) {
   const _createObjectURL = opts._createObjectURL || ((f) => URL.createObjectURL(f))
   const _revokeObjectURL = opts._revokeObjectURL || ((u) => URL.revokeObjectURL(u))
 
-  return new Promise((resolve) => {
+  const tryWith = (tag) => new Promise((res) => {
     const url = _createObjectURL(file)
-    const v = _createElement('video')
-    v.preload = 'metadata'
-    v.onloadedmetadata = () => {
-      const dur = Number.isFinite(v.duration) ? v.duration : null
+    const el = _createElement(tag)
+    el.preload = 'metadata'
+    el.onloadedmetadata = () => {
+      const dur = el.duration
+      // videoWidth/videoHeight only exist on HTMLVideoElement — for the
+      // <audio> fallback they're undefined, which we collapse to null so
+      // bucketAspect's audio path picks the landscape default.
+      const w = el.videoWidth || null
+      const h = el.videoHeight || null
       _revokeObjectURL(url)
-      resolve(dur)
+      res(Number.isFinite(dur) && dur > 0 ? { duration: dur, width: w, height: h } : null)
     }
-    v.onerror = () => {
+    el.onerror = () => {
       _revokeObjectURL(url)
-      resolve(null)
+      res(null)
     }
-    v.src = url
+    el.src = url
+  })
+
+  return tryWith('video').then((r) => {
+    if (r != null) return r
+    // fallback for audio-only containers that <video> can't decode
+    return tryWith('audio')
   })
 }
 
@@ -108,6 +122,60 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
     try {
       console.log(`[upload] uploadFileWithProgress called for ${entry.name}, gid=${gid}`)
       const entryId = entry.id
+      const ext = '.' + entry.file.name.split('.').pop().toLowerCase()
+      const isAudio = AUDIO_EXTS.includes(ext) || (entry.file.type || '').startsWith('audio/')
+
+      // Audio files cannot use Cloudflare Stream (video-only transcoding).
+      // Route audio through multer → Supabase via POST /videos/upload,
+      // mirroring ProcessingModal's add-files XHR pattern.
+      if (isAudio) {
+        await new Promise(async (resolve, reject) => {
+          const formData = new FormData()
+          formData.append('video', entry.file)
+          formData.append('title', entry.name)
+          formData.append('group_id', gid)
+          formData.append('video_type', 'raw')
+
+          const API_BASE = import.meta.env.VITE_API_URL || '/api'
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', `${API_BASE}/videos/upload`)
+
+          // Match TUS path: send Supabase auth token if available
+          if (supabase) {
+            const { data: { session } } = await supabase.auth.getSession()
+            if (session?.access_token) {
+              xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`)
+            }
+          }
+
+          xhr.upload.onprogress = (e) => {
+            if (!e.lengthComputable) return
+            const pct = Math.round((e.loaded / e.total) * 100)
+            setFiles(prev => prev.map(f => f.id === entryId
+              ? { ...f, progress: pct, loaded: e.loaded, total: e.total }
+              : f))
+          }
+          xhr.onload = () => {
+            try {
+              const data = JSON.parse(xhr.responseText)
+              if (xhr.status >= 200 && xhr.status < 300) {
+                setFiles(prev => prev.map(f => f.id === entryId
+                  ? { ...f, status: 'complete', progress: 100, serverId: data.videoId }
+                  : f))
+                resolve()
+              } else {
+                reject(new Error(data.error || 'Upload failed'))
+              }
+            } catch {
+              reject(new Error('Upload failed'))
+            }
+          }
+          xhr.onerror = () => reject(new Error('Network error'))
+          xhr.timeout = 3600000
+          xhr.send(formData)
+        })
+        return
+      }
 
       // 1. Upload via TUS to backend proxy → Cloudflare Stream
       // Backend proxies the TUS creation POST to CF, returns Location header.
@@ -165,6 +233,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
         file_size: entry.file.size,
         cf_stream_uid: cfStreamUid,
         duration_seconds: entry.durationSeconds ?? null,
+        width: entry.width ?? null,
+        height: entry.height ?? null,
       })
 
       setFiles(prev => prev.map(f =>
@@ -190,9 +260,9 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
   }, [ensureGroup, uploadFileWithProgress])
 
   const validateAndAddFiles = useCallback((fileList, type) => {
-    const exts = type === 'video' ? VIDEO_EXTS : SCRIPT_EXTS
+    const exts = type === 'video' ? [...VIDEO_EXTS, ...AUDIO_EXTS] : SCRIPT_EXTS
     const errorMsg = type === 'video'
-      ? `Unsupported format. Accepted: ${VIDEO_EXTS.join(', ')}`
+      ? `Unsupported format. Accepted: ${[...VIDEO_EXTS, ...AUDIO_EXTS].join(', ')}`
       : `Unsupported format. Accepted: ${SCRIPT_EXTS.join(', ')}`
 
     const entries = []
@@ -214,17 +284,27 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
 
     setFiles(prev => [...prev, ...entries])
 
-    // Probe duration in parallel for every video entry in this batch (no I/O,
-    // just local moov-atom read), then start uploads. Probe failures are
-    // non-fatal — the entry uploads with durationSeconds=null and the server-
-    // side ffprobe/CF Stream path fills it in later as a fallback.
+    // Probe duration + dimensions in parallel for every video entry in this
+    // batch (no I/O, just local moov-atom read), then start uploads. Probe
+    // failures are non-fatal — the entry uploads with durationSeconds=null
+    // (and width/height=null) and the server-side ffprobe / CF Stream path
+    // fills the values in later as a fallback.
     ;(async () => {
       await Promise.all(entries.map(async (entry) => {
         if (entry.status !== 'uploading' || entry.type !== 'video') return
-        const dur = await probeDuration(entry.file)
-        if (dur != null) {
-          entry.durationSeconds = Math.round(dur)
-          setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, durationSeconds: entry.durationSeconds } : f))
+        const probed = await probeDuration(entry.file)
+        if (probed != null) {
+          entry.durationSeconds = Math.round(probed.duration)
+          entry.width = probed.width ?? null
+          entry.height = probed.height ?? null
+          setFiles(prev => prev.map(f => f.id === entry.id
+            ? { ...f, durationSeconds: entry.durationSeconds, width: entry.width, height: entry.height }
+            : f))
+        } else {
+          // Diagnostic: rough-cut estimate falls back to server-side polling
+          // (~30s on CF Stream) when this fires; orientation hint also misses
+          // for that entry. Surfaces in the browser console for triage.
+          console.warn('[probe] duration unknown for', entry.file.name, '— rough-cut + orientation will use server fallbacks')
         }
       }))
       for (const entry of entries) {
