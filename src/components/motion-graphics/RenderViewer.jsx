@@ -1,4 +1,18 @@
+import { useState } from 'react';
+import { useIterationHistory } from '../../hooks/useIterationHistory.js';
+import { IterationHistoryPanel } from './IterationHistoryPanel.jsx';
+
 export function RenderViewer({ render }) {
+  const [expanded, setExpanded] = useState(false);
+  const iterCount = render.iteration_count ?? 1;
+  const showToggle = render.status === 'complete' && iterCount > 1;
+  const { iterations, loading, error, load } = useIterationHistory(render.id);
+
+  const onToggle = () => {
+    if (!expanded) load();
+    setExpanded((v) => !v);
+  };
+
   if (render.status === 'queued' || render.status === 'running') {
     return (
       <div className="my-3 rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-sm text-zinc-400">
@@ -29,6 +43,20 @@ export function RenderViewer({ render }) {
           Download MP4
         </a>
       </div>
+      {showToggle && (
+        <button
+          type="button"
+          onClick={onToggle}
+          className="block w-full border-t border-zinc-800 bg-zinc-950 px-4 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-900"
+        >
+          {expanded ? 'Hide iterations' : `View ${iterCount} iterations`}
+        </button>
+      )}
+      {showToggle && expanded && (
+        <div className="border-t border-zinc-800 bg-zinc-950">
+          <IterationHistoryPanel iterations={iterations} loading={loading} error={error} />
+        </div>
+      )}
     </div>
   );
 }
