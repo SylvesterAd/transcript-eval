@@ -1053,8 +1053,12 @@ export function formatCutRangesForPrompt(effectiveCuts) {
 
 // ── Post-cut transcript generator ───────────────────────────────────
 /**
- * Generate a transcript with timecodes adjusted for rough cut removals.
- * Words inside cut regions are removed; remaining words get shifted timecodes.
+ * Generate a transcript that drops words inside rough-cut regions while
+ * preserving each kept word's ORIGINAL timecode (no shift). Cuts surface as
+ * `[Ns]` gap markers between sentences. Downstream LLM stages anchor
+ * placements directly to the original video — `persistPlacementOutput`
+ * shifts those placements into the post-cut storage domain at the
+ * persistence boundary.
  */
 export async function generatePostCutTranscript(videoId, cuts, cutExclusions = []) {
   const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
@@ -1155,10 +1159,12 @@ export function computeEffectiveCuts(cuts, cutExclusions = []) {
 }
 
 /**
- * Persists LLM placement output. Attaches anchor_word_idx to each placement
- * (from audio_anchor → raw transcript word index) for stable identity across
- * cut edits. Does NOT shift timecodes — the LLM emits in post-cut domain
- * which is now the canonical storage format.
+ * Persists LLM placement output. Two responsibilities:
+ *
+ *   1. Attach `anchor_word_idx` to each placement (audio_anchor → raw word index)
+ *      for stable identity across cut edits.
+ *   2. Shift placement timestamps from the LLM's ORIGINAL-time domain into the
+ *      post-cut canonical storage format used by the editor.
  *
  * Handles three shapes:
  *   - Top-level array: [{ start, end, audio_anchor, ... }, ...]
@@ -1166,11 +1172,11 @@ export function computeEffectiveCuts(cuts, cutExclusions = []) {
  *   - Per-chapter sub-run: { placements: [{ start, end, audio_anchor }] }
  *
  * @param {string} stageOutput - LLM output (possibly markdown-fenced JSON)
- * @param {{cuts:Array, cutExclusions:Array}|null} editorCuts - retained for signature
- *        compatibility (unused — the LLM already saw the post-cut transcript)
+ * @param {{cuts:Array, cutExclusions:Array}|null} editorCuts - cuts used to
+ *        shift original→post-cut. When null/empty, no shift is applied.
  * @param {number|null} videoId - main video ID for word_timestamps lookup; if
- *        null/undefined, returns stageOutput unchanged (no anchor attribution possible)
- * @returns {Promise<string>} stage output with anchor_word_idx attached
+ *        null/undefined, returns stageOutput unchanged.
+ * @returns {Promise<string>} stage output with anchor_word_idx + post-cut times
  */
 export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
   if (!videoId) return stageOutput
@@ -1189,10 +1195,33 @@ export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
   }
   if (!words.length) return stageOutput
 
-  const annotate = (placements) => placements.map(p => ({
-    ...p,
-    anchor_word_idx: findAnchorWordIdx(words, p.audio_anchor),
-  }))
+  const effectiveCuts = computeEffectiveCuts(editorCuts?.cuts || [], editorCuts?.cutExclusions || [])
+
+  const tc = (s) => {
+    if (s == null || Number.isNaN(s)) return null
+    const h = String(Math.floor(s / 3600)).padStart(2, '0')
+    const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
+    const sec = String(Math.floor(s % 60)).padStart(2, '0')
+    const cs = Math.round((s % 1) * 100)
+    const base = `${h}:${m}:${sec}`
+    return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
+  }
+
+  const shiftPlacement = (p) => {
+    const next = { ...p, anchor_word_idx: findAnchorWordIdx(words, p.audio_anchor) }
+    if (!effectiveCuts.length) return next
+    if (typeof p.start_seconds === 'number') {
+      next.start_seconds = shiftOriginalToPostCut(p.start_seconds, effectiveCuts)
+      next.start = tc(next.start_seconds)
+    }
+    if (typeof p.end_seconds === 'number') {
+      next.end_seconds = shiftOriginalToPostCut(p.end_seconds, effectiveCuts)
+      next.end = tc(next.end_seconds)
+    }
+    return next
+  }
+
+  const annotate = (placements) => placements.map(shiftPlacement)
 
   let result
   if (Array.isArray(parsed)) {
