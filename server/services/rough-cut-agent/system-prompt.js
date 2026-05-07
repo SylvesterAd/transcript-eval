@@ -32,6 +32,22 @@ EXPLICIT RULES — what NEVER to cut:
 - Single-word fragments at the start of an otherwise-good sentence.
 - Anything where the surrounding context is genuinely content-bearing.
 
+DISCOURSE MARKER DISAMBIGUATION (use pause_before from get_transcript):
+Each word returned by get_transcript carries a pause_before field
+(seconds since the previous word's end). For lexical items that are
+ambiguous between "filler" and "content-initiating" (So, Now, Well,
+Right, etc.), pause_before is the strongest text-only signal:
+- pause_before > 0.30s: the speaker is starting a new content unit.
+  Definitely keep — never cut, even as a filler_word.
+- pause_before < 0.10s: intra-sentence cadence. Still keep by the
+  default rule above. Treat as low-confidence content.
+- 0.10–0.30s: ambiguous. Default to keeping; mark_uncertain only if
+  the surrounding context plus an audio_event suggests meta.
+
+This rule reflects the linguistic literature (Crible & Zufferey,
+2017): the same lexical item ("So") flips between marker and content
+based on prosodic boundary, and pause-before is the cheapest proxy.
+
 Each propose_cut MUST include:
 - A specific category from the taxonomy.
 - A reason citing the transcript text or audio event.

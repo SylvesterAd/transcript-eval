@@ -156,9 +156,14 @@ function inScope(start, end, scope) {
 
 async function get_transcript(params, state) {
   const { scope } = params || {}
-  const words = scope
-    ? state.wordTimestamps.filter(w => inScope(w.start, w.end, scope))
-    : state.wordTimestamps
+  // pause_before is computed on the FULL timeline (not the filtered window)
+  // so the discourse-marker discriminator stays intact even at chunk edges.
+  const all = state.wordTimestamps
+  const enriched = all.map((w, i) => {
+    const pause_before = i === 0 ? 0 : Math.max(0, w.start - all[i - 1].end)
+    return { ...w, pause_before }
+  })
+  const words = scope ? enriched.filter(w => inScope(w.start, w.end, scope)) : enriched
   return { words }
 }
 

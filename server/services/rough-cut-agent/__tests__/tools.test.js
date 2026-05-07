@@ -44,6 +44,26 @@ describe('dispatchTool', () => {
     expect(r.words.length).toBe(2)
   })
 
+  it('get_transcript adds pause_before to each word', async () => {
+    const r = await dispatchTool('get_transcript', {}, makeState())
+    // sampleWords: Hello (0-1), world (1-2), Um (3-3.4), [keyboard] (4-6), Nice (6.1-6.5)
+    expect(r.words[0].pause_before).toBe(0)         // first word
+    expect(r.words[1].pause_before).toBe(0)         // 1.0 - 1.0 = 0 (back-to-back)
+    expect(r.words[2].pause_before).toBeCloseTo(1)  // 3.0 - 2.0 = 1.0s
+    expect(r.words[3].pause_before).toBeCloseTo(0.6) // 4.0 - 3.4 = 0.6
+    expect(r.words[4].pause_before).toBeCloseTo(0.1) // 6.1 - 6.0 = 0.1
+  })
+
+  it('get_transcript pause_before never negative when word starts mid-prev', async () => {
+    const overlapping = [
+      { word: 'a', start: 0, end: 1 },
+      { word: 'b', start: 0.5, end: 1.5 },
+    ]
+    const state = createState({ assembledTranscript: '', wordTimestamps: overlapping })
+    const r = await dispatchTool('get_transcript', {}, state)
+    expect(r.words[1].pause_before).toBe(0)
+  })
+
   it('get_silences wraps deriveSilences', async () => {
     const r = await dispatchTool('get_silences', { min_duration: 0.75 }, makeState())
     expect(r.silences.length).toBeGreaterThan(0)
