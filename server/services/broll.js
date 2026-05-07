@@ -1032,6 +1032,25 @@ export function shiftOriginalToPostCut(time, effectiveCuts) {
   return time - getCumulativeCutOffset(time, effectiveCuts)
 }
 
+/**
+ * Format effective cut ranges as a human-readable block for LLM prompts.
+ * Returns '' when there are no cuts, otherwise newline-separated lines like
+ *   [00:00:00] - [00:02:02]
+ * Sub-second values are rounded to the nearest whole second so the LLM gets a
+ * clean, easy-to-match block.
+ */
+export function formatCutRangesForPrompt(effectiveCuts) {
+  if (!effectiveCuts || !effectiveCuts.length) return ''
+  const tc = (s) => {
+    const r = Math.round(s)
+    const h = String(Math.floor(r / 3600)).padStart(2, '0')
+    const m = String(Math.floor((r % 3600) / 60)).padStart(2, '0')
+    const sec = String(r % 60).padStart(2, '0')
+    return `[${h}:${m}:${sec}]`
+  }
+  return effectiveCuts.map(c => `${tc(c.start)} - ${tc(c.end)}`).join('\n')
+}
+
 // ── Post-cut transcript generator ───────────────────────────────────
 /**
  * Generate a transcript with timecodes adjusted for rough cut removals.
