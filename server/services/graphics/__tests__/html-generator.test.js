@@ -162,14 +162,14 @@ describe('CREATE_HTML_SYSTEM_PROMPT canonical Hyperframes rules', () => {
 
 describe('few-shot examples comply with canonical rules', () => {
   it('FEW_SHOT_LOWER_THIRD does not use banned APIs', async () => {
-    const mod = await import('../html-generator.js')
-    const fs = mod.CREATE_HTML_SYSTEM_PROMPT
-    // Few-shot is interpolated into the system prompt; assert it doesn't contain banned APIs
-    expect(fs).not.toMatch(/Math\.random\s*\(/)
-    expect(fs).not.toMatch(/Date\.now\s*\(/)
-    expect(fs).not.toMatch(/performance\.now\s*\(/)
-    expect(fs).not.toMatch(/setTimeout\s*\(/)
-    expect(fs).not.toMatch(/setInterval\s*\(/)
+    const { FEW_SHOT_LOWER_THIRD, FEW_SHOT_LOWER_THIRD_WITH_LOGO } = await import('../html-generator.js')
+    for (const fs of [FEW_SHOT_LOWER_THIRD, FEW_SHOT_LOWER_THIRD_WITH_LOGO]) {
+      expect(fs).not.toMatch(/Math\.random\s*\(/)
+      expect(fs).not.toMatch(/Date\.now\s*\(/)
+      expect(fs).not.toMatch(/performance\.now\s*\(/)
+      expect(fs).not.toMatch(/setTimeout\s*\(/)
+      expect(fs).not.toMatch(/setInterval\s*\(/)
+    }
   })
 
   it('FEW_SHOT_LOWER_THIRD shows autoAlpha usage', async () => {

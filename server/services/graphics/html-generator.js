@@ -7,7 +7,7 @@
 import { callAnthropic } from '../../lib/llm/anthropic.js'
 import { MODEL_FOR, costCents } from './models.js'
 
-const FEW_SHOT_LOWER_THIRD = `<!doctype html>
+export const FEW_SHOT_LOWER_THIRD = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -45,7 +45,7 @@ const FEW_SHOT_LOWER_THIRD = `<!doctype html>
   </body>
 </html>`
 
-const FEW_SHOT_LOWER_THIRD_WITH_LOGO = `<!doctype html>
+export const FEW_SHOT_LOWER_THIRD_WITH_LOGO = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -128,9 +128,9 @@ The render is frame-by-frame on headless Chromium; non-deterministic state poiso
 
 | Banned                              | Use instead                                              |
 | ----------------------------------- | -------------------------------------------------------- |
-| Math.random                         | A seeded PRNG (mulberry32 inline; deterministic)         |
-| Date.now                            | Hard-coded numeric timing or tl.time() inside onUpdate   |
-| performance.now                     | Same — tl.time() inside onUpdate                         |
+| Math.random()                       | A seeded PRNG (mulberry32 inline; deterministic)         |
+| Date.now()                          | Hard-coded numeric timing or tl.time() inside onUpdate   |
+| performance.now()                   | Same — tl.time() inside onUpdate                         |
 | setInterval / setTimeout            | Timeline tweens with onUpdate                            |
 | repeat: -1                          | repeat: Math.ceil(duration / cycle) - 1                  |
 | stagger: { from: "random" }         | from: "start" | "center" | "end"                         |
