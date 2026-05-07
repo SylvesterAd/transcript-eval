@@ -34,6 +34,12 @@ import {
   assertNoSelfReference,
   assertPriorsComplete,
 } from './broll-prior-strategies.js'
+// Re-exported so existing callers (and tests) that import unshiftPostCutTime
+// from broll.js keep working after extraction. The canonical home is now
+// time-translation.js; the direct re-export will be removed in a later task.
+// (Imported as well so local callers in this file still resolve the name.)
+import { unshiftPostCutTime } from './time-translation.js'
+export { unshiftPostCutTime }
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -1131,40 +1137,6 @@ export function computeEffectiveCuts(cuts, cutExclusions = []) {
     }
   }
   return result.sort((a, b) => a.start - b.start)
-}
-
-/**
- * Inverse of generatePostCutTranscript's getOffset. Given a timecode in
- * post-cut time (the rendered post-cut MP4's coordinate system, which
- * equals the shifted timecodes inside the post-cut transcript), return
- * the equivalent timecode in original time.
- *
- * `effectiveCuts` MUST be the output of computeEffectiveCuts (sorted,
- * non-overlapping, in original time).
- *
- * `kind` controls the boundary rule when tPost lands EXACTLY on a cut
- * boundary in post-cut time:
- *   - 'start' (default): tPost == boundary jumps PAST the cut → returns cut.end.
- *     Use this for placement.start_seconds — semantically "begin at the
- *     frame that appears right after the FFmpeg concat join".
- *   - 'end': tPost == boundary stays BEFORE the cut → returns cut.start.
- *     Use this for placement.end_seconds — semantically "end at the
- *     last frame before the join".
- *
- * In practice LLMs emit whole seconds and cuts get edge-refined to
- * non-integer boundaries, so this rule rarely fires. It exists to
- * prevent a silent failure mode if it ever does.
- */
-export function unshiftPostCutTime(tPost, effectiveCuts, kind = 'start') {
-  if (!effectiveCuts || effectiveCuts.length === 0) return tPost
-  let cumOffset = 0
-  for (const c of effectiveCuts) {
-    const boundary = c.start - cumOffset
-    const beforeBoundary = kind === 'end' ? tPost <= boundary : tPost < boundary
-    if (beforeBoundary) return tPost + cumOffset
-    cumOffset += c.end - c.start
-  }
-  return tPost + cumOffset
 }
 
 /**
