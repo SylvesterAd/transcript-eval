@@ -59,7 +59,7 @@ async function main() {
   const { default: db } = await import('../server/db.js')
 
   const groups = await db.prepare(
-    "SELECT id, editor_state_json FROM video_groups WHERE editor_state_json IS NOT NULL"
+    "SELECT id, editor_state_json FROM video_groups WHERE editor_state_json IS NOT NULL ORDER BY id"
   ).all()
 
   let scanned = 0, migrated = 0, skipped = 0, errored = 0

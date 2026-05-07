@@ -1,5 +1,19 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+
+// Mock db.js to avoid the process.exit(1) on missing DATABASE_URL.
+// migrateGroupState is pure — doesn't use DB — but its module dependency
+// chain pulls in broll.js → db.js which insists on a connection at load.
+vi.mock('../../db.js', () => ({
+  default: {
+    prepare: () => ({
+      get: async () => null,
+      all: async () => [],
+      run: async () => ({ changes: 0 }),
+    }),
+  },
+}))
+
 import { migrateGroupState } from '../../../scripts/_migrate-placements-to-postcut.mjs'
 
 const fixture = JSON.parse(readFileSync(
@@ -78,6 +92,14 @@ describe('migrateGroupState', () => {
     const stateNoP = { broll: {} }
     const migrated = migrateGroupState(stateNoP, [])
     expect(migrated.broll.schema_version).toBeUndefined()  // no marker added if no placements
+  })
+
+  it('is a no-op when broll.placements is an empty array', () => {
+    const state = { broll: { placements: [] } }
+    const migrated = migrateGroupState(state, [])
+    // No marker added because no placements to migrate
+    expect(migrated.broll.schema_version).toBeUndefined()
+    expect(migrated.broll.placements).toEqual([])
   })
 
   it('handles placement with no audio_anchor (anchor_word_idx = -1)', () => {
