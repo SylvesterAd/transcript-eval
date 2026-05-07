@@ -19,17 +19,26 @@ vi.mock('../../../lib/llm/gemini.js', () => ({
     }),
 }))
 
-const VARS_JSON = '{"width":1920,"height":1080,"duration":5,"mainText":"Hello","subText":"World","accent":"#9ca3af","barBottom":80,"barLeft":80,"barHeight":120,"barMaxWidth":1056,"mainSize":48,"subSize":18}'
+const RETRY_HTML = '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">retry</div></body></html>'
 
 vi.mock('../../../lib/llm/anthropic.js', () => ({
   callAnthropic: vi.fn().mockResolvedValue({
-    text: VARS_JSON,
+    text: RETRY_HTML,
     toolUses: [], tokens: { in: 600, out: 90 }, stop: 'end_turn',
   }),
 }))
 
+vi.mock('../html-generator.js', () => ({
+  specToHtml: vi.fn().mockResolvedValue({
+    html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080"></div></body></html>',
+    cost: 5,
+    tokens: { in: 600, out: 400 },
+  }),
+  CREATE_HTML_SYSTEM_PROMPT: 'mock-create-html-system-prompt',
+}))
+
 vi.mock('../render-runner.js', () => ({
-  renderTemplate: vi.fn().mockResolvedValue({
+  renderHtml: vi.fn().mockResolvedValue({
     outputPath: '/tmp/integration-x.mp4',
     bytes: 1234,
     durationMs: 5000,
