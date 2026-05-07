@@ -15,6 +15,12 @@ Optional spec field:
     Include an entry only when the user mentions a logo, background, map, chart, or other image.
     Use Google Search to find a reliable URL — prefer Wikimedia, official brand sites, or stable
     publisher pages. If no imagery is mentioned, omit the field entirely (don't emit \`assets: []\`).
+  - scenes: array of scene objects for multi-scene graphics, format [{template, duration, mainText, subText, assets?}]
+      Use this when the user wants a sequence of clips (e.g. "intro then main then outro").
+      Each scene has its own template/duration/text and may have its own assets. Top-level
+      aspectRatio + tone apply to all scenes. When scenes is present, top-level
+      template/duration/mainText/subText are ignored. Defaults to single-scene (omit the field)
+      unless the user requests a sequence.
 
 Rules:
 1. Ask ONE question at a time. Confirm understanding before moving on.
