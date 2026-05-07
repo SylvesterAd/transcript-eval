@@ -162,8 +162,8 @@ describe('CREATE_HTML_SYSTEM_PROMPT canonical Hyperframes rules', () => {
 
 describe('few-shot examples comply with canonical rules', () => {
   it('FEW_SHOT_LOWER_THIRD does not use banned APIs', async () => {
-    const { FEW_SHOT_LOWER_THIRD, FEW_SHOT_LOWER_THIRD_WITH_LOGO } = await import('../html-generator.js')
-    for (const fs of [FEW_SHOT_LOWER_THIRD, FEW_SHOT_LOWER_THIRD_WITH_LOGO]) {
+    const { FEW_SHOT_LOWER_THIRD, FEW_SHOT_LOWER_THIRD_WITH_LOGO, FEW_SHOT_LOTTIE_LOGO } = await import('../html-generator.js')
+    for (const fs of [FEW_SHOT_LOWER_THIRD, FEW_SHOT_LOWER_THIRD_WITH_LOGO, FEW_SHOT_LOTTIE_LOGO]) {
       expect(fs).not.toMatch(/Math\.random\s*\(/)
       expect(fs).not.toMatch(/Date\.now\s*\(/)
       expect(fs).not.toMatch(/performance\.now\s*\(/)
@@ -277,5 +277,16 @@ describe('specToHtml additionalSystemContext', () => {
     const call = callMock.mock.calls[0][0]
     expect(call.system).toMatch(/## CORRECTIONS REQUESTED/)
     expect(call.system).toMatch(/Math\.random\(\) detected/)
+  })
+})
+
+describe('FEW_SHOT_LOTTIE_LOGO', () => {
+  it('is interpolated into CREATE_HTML_SYSTEM_PROMPT and uses window.__hfLottie', async () => {
+    const mod = await import('../html-generator.js')
+    expect(mod.FEW_SHOT_LOTTIE_LOGO).toBeDefined()
+    expect(mod.FEW_SHOT_LOTTIE_LOGO).toMatch(/window\.__hfLottie|hfLottie/)
+    expect(mod.FEW_SHOT_LOTTIE_LOGO).toMatch(/lottie-web|@hyperframes\/lottie/)
+    expect(mod.FEW_SHOT_LOTTIE_LOGO).toMatch(/data-composition-id="main"/)
+    expect(mod.CREATE_HTML_SYSTEM_PROMPT).toContain(mod.FEW_SHOT_LOTTIE_LOGO)
   })
 })

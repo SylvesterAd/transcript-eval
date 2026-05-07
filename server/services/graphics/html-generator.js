@@ -92,6 +92,54 @@ export const FEW_SHOT_LOWER_THIRD_WITH_LOGO = `<!doctype html>
   </body>
 </html>`
 
+// Lottie adapter few-shot — demonstrates window.__hfLottie usage for scenes
+// that scrub a Lottie animation in lockstep with the GSAP timeline. The
+// `{{LOTTIE_ASSET_URL}}` token is a templating placeholder substituted by the
+// codegen path from `spec.assetUrl` (Phase 3.3 grounding).
+export const FEW_SHOT_LOTTIE_LOGO = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; background: #0a0a0f; overflow: hidden; }
+      .stage { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+      .logo-wrap { width: 480px; height: 480px; }
+      .tagline { position: absolute; bottom: 240px; left: 50%; transform: translateX(-50%); font-family: "Roboto Condensed", sans-serif; font-weight: 900; font-size: 72px; color: #fafaf5; letter-spacing: 0.05em; }
+    </style>
+  </head>
+  <body>
+    <div id="stage" class="stage" data-composition-id="main" data-start="0" data-duration="6" data-width="1920" data-height="1080">
+      <div class="logo-wrap" id="logo-wrap"></div>
+      <div class="tagline" id="tagline" style="opacity:0;">RIVERA &amp; CO</div>
+    </div>
+    <script>
+      // Lottie adapter (window.__hfLottie) — load animation paused, scrubbed via timeline.
+      const lottieAnim = lottie.loadAnimation({
+        container: document.getElementById('logo-wrap'),
+        renderer: 'svg',
+        loop: false,
+        autoplay: false,
+        path: '{{LOTTIE_ASSET_URL}}'
+      });
+      window.__hfLottie = window.__hfLottie || {};
+      window.__hfLottie.main = lottieAnim;
+
+      const tl = gsap.timeline({ paused: true });
+      tl.to({ frame: 0 }, {
+        frame: 60, duration: 3, ease: 'power4.out',
+        onUpdate: function() { lottieAnim.goToAndStop(this.targets()[0].frame, true); }
+      }, 0);
+      tl.to('#tagline', { autoAlpha: 1, y: 0, duration: 0.7, ease: 'back.out(1.6)' }, 1.6);
+      tl.fromTo('#tagline', { letterSpacing: '0.02em' }, { letterSpacing: '0.05em', duration: 4, ease: 'sine.inOut' }, 2.0);
+
+      window.__timelines = { main: tl };
+    </script>
+  </body>
+</html>`
+
 export const CREATE_HTML_SYSTEM_PROMPT = `You are an HTML motion-graphics author for the Hyperframes pipeline. Given a spec, you write a single complete HTML file that Hyperframes renders to MP4 by scrubbing GSAP timelines frame-by-frame.
 
 # Hard contract (must always hold)
@@ -168,6 +216,12 @@ ${FEW_SHOT_LOWER_THIRD}
 For specs that include an \`assets\` entry with role "logo", produce something like:
 \`\`\`html
 ${FEW_SHOT_LOWER_THIRD_WITH_LOGO}
+\`\`\`
+
+# Few-shot example C — Lottie logo intro
+For specs whose scene picks \`adapter: 'lottie'\`, load the animation paused and scrub it via a GSAP tween that calls \`lottieAnim.goToAndStop(frame, true)\` in onUpdate. Register the animation under \`window.__hfLottie.<compositionId>\` so the runtime can introspect it. The \`{{LOTTIE_ASSET_URL}}\` token below is substituted from \`spec.assetUrl\` by the codegen path.
+\`\`\`html
+${FEW_SHOT_LOTTIE_LOGO}
 \`\`\`
 
 These examples define the visual baseline. Vary layouts as the spec calls for it (e.g. fullscreen title cards, charts, maps) while honoring the hard contract.`
