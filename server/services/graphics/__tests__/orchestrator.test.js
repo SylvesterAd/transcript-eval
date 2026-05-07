@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../events/emitter.js', () => ({ emit: vi.fn() }));
+
 // Correction #1: paths use 3-up traversal (__tests__ → graphics → services → server)
 vi.mock('../../../lib/llm/gemini.js', () => ({
   callGemini: vi.fn().mockResolvedValue({

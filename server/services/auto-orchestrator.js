@@ -356,9 +356,12 @@ export async function chainAfterClassify(groupId) {
 }
 
 // chainAfterRoughCut — called when rough cut reaches a TERMINAL state for a
-// (sub-)group. For 'guided' paths, sets broll_chain_status='paused_at_rough_cut'
-// and emails the user. For 'hands-off' / 'strategy-only', kicks off the b-roll
-// chain. No-op for null path_id (legacy / manual projects).
+// (sub-)group. Sets broll_chain_status='paused_at_rough_cut' (and emails the
+// user) when the path requires a rough-cut review checkpoint:
+//   - guided (legacy projects)
+//   - strategy-only with auto_rough_cut=true
+// Otherwise (hands-off, or strategy-only without auto_rough_cut) it kicks
+// off the b-roll chain. No-op for null path_id (legacy / manual projects).
 //
 // Safe to call from any rough-cut completion site (rough-cut-runner.js IIFE,
 // or multicam-sync.js for the already_exists / kickoff-failure cases).
@@ -366,20 +369,21 @@ export async function chainAfterClassify(groupId) {
 // is guarded by runFullAutoBrollChain's heartbeat lock.
 export async function chainAfterRoughCut(groupId) {
   const g = await db.prepare(
-    'SELECT user_id, path_id, broll_chain_status FROM video_groups WHERE id = ?'
+    'SELECT user_id, path_id, auto_rough_cut, broll_chain_status FROM video_groups WHERE id = ?'
   ).get(groupId)
   if (!g) return
   if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
 
   // Don't clobber a chain that's already advanced past rough-cut review.
-  // Possible if the previous (buggy) code paused prematurely and the user
-  // clicked through to strategy before the cut actually completed; we
-  // shouldn't reset their progress when the IIFE finally fires us.
   if (['running', 'paused_at_strategy', 'paused_at_plan', 'done', 'failed'].includes(g.broll_chain_status)) {
     return
   }
 
-  if (g.path_id === 'guided') {
+  const shouldPauseAtRoughCut =
+    g.path_id === 'guided' ||
+    (g.path_id === 'strategy-only' && g.auto_rough_cut)
+
+  if (shouldPauseAtRoughCut) {
     await db.prepare(
       "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
     ).run(groupId)
@@ -392,7 +396,7 @@ export async function chainAfterRoughCut(groupId) {
     return
   }
 
-  // hands-off or strategy-only — fire chain
+  // hands-off (or strategy-only with auto_rough_cut=false) — fire chain
   __orchestratorDeps.runFullAutoBrollChain(groupId)
     .catch(err => console.error(`[chain] ${err.message}`))
 }

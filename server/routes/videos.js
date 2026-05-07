@@ -676,7 +676,19 @@ router.get('/groups/:id/status', requireAuth, async (req, res) => {
 })
 
 router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
-  const groupId = parseInt(req.params.id)
+  let groupId = parseInt(req.params.id)
+  // Subgroup → parent: callers occasionally pass a subgroup id (race conditions
+  // where groupDetail.parent_group_id wasn't loaded yet, or hand-typed URLs).
+  // The processing modal expects the parent's id; resolving here keeps the
+  // contract on one server-side spot instead of fanning the lookup out across
+  // every navigate() call.
+  const initial = await db.prepare(`
+    SELECT id, parent_group_id FROM video_groups
+    WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}
+  `).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!initial) return res.status(404).json({ error: 'Group not found' })
+  if (initial.parent_group_id) groupId = initial.parent_group_id
+
   const parent = await db.prepare(`
     SELECT id, name, path_id, auto_rough_cut, assembly_status, assembly_error, rough_cut_status, broll_chain_status
     FROM video_groups

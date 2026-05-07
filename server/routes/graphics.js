@@ -58,7 +58,8 @@ router.get('/sessions/:id', async (req, res) => {
     .all(id);
   const renders = await db
     .prepare(
-      `SELECT id, iteration, status, output_url, preview_url, duration_ms, cost_cents, created_at
+      `SELECT id, iteration, status, output_url, preview_url, duration_ms, cost_cents,
+              iteration_count, final_score, created_at
        FROM graphics_renders WHERE session_id = ? ORDER BY iteration ASC`
     )
     .all(id);
