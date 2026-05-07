@@ -1338,12 +1338,13 @@ function SyncingScreen({ groupId, status, onDone }) {
 }
 
 function applyConfigDefaults(config, dispatch) {
-  // When no config exists, default all deletion categories ON — the LLM found
-  // things to cut, so they should be applied as cuts by default
+  // Deletion categories default OFF — annotations still highlight in the transcript
+  // (deletion-type annotations always render their category bg color), no cut performed.
   dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: {
-    false_starts: config?.false_starts ?? true,
-    filler_words: config?.filler_words ?? true,
-    meta_commentary: config?.meta_commentary ?? true,
+    silences: config?.silences ?? false,
+    false_starts: config?.false_starts ?? false,
+    filler_words: config?.filler_words ?? false,
+    meta_commentary: config?.meta_commentary ?? false,
   }})
   dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: {
     repetition: config?.repetition ?? true,
