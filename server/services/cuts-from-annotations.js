@@ -9,13 +9,13 @@
 // dual-cut-set bug where editor_state_json contained both tight
 // `cut-ann-server-` cuts AND extended `cut-ai-ann-` cuts simultaneously.
 //
-// Steps performed:
+// Steps performed (order matches TranscriptEditor.jsx):
 //   1. Filter annotations to type='deletion' for cuttable categories.
 //   2. Sort by startTime, merge overlapping regions.
-//   2.5 (when words present). Bridge adjacent regions when no uncut word in gap.
-//   2.7 (when words present). Extend each region back to prev uncut word's end
+//   3. Subtract cutExclusions if present (split regions around "keep" zones).
+//   4. (when words present) Bridge adjacent regions when no uncut word in gap.
+//   5. (when words present) Extend each region back to prev uncut word's end
 //        and forward to next uncut word's start, never crossing exclusions.
-//   3. Subtract cutExclusions if present.
 //
 // NOT performed (frontend-only):
 //   - Unsafe-filler filtering (waveform 3-bar silence rule).
@@ -59,7 +59,29 @@ export function deriveCutsFromAnnotations(annotations, cutExclusions = [], words
     else merged.push({ ...regions[i] })
   }
 
-  // Step 2.5: Bridge adjacent annotation regions when no uncut word lies in
+  // Step 3: subtract cutExclusions (the user's right-click "keep this word"
+  // list). MUST happen BEFORE bridging + extension to match
+  // TranscriptEditor.jsx ordering — splitting a partially-overlapping
+  // exclusion first prevents bridge/extend from later producing fragments
+  // the frontend wouldn't.
+  if (cutExclusions?.length) {
+    const sortedEx = [...cutExclusions].sort((a, b) => a.start - b.start)
+    const split = []
+    for (const region of merged) {
+      let cur = { ...region }
+      for (const ex of sortedEx) {
+        if (ex.start >= cur.end || ex.end <= cur.start) continue
+        if (cur.start < ex.start - 0.01) {
+          split.push({ start: cur.start, end: ex.start })
+        }
+        cur.start = ex.end
+      }
+      if (cur.start < cur.end - 0.01) split.push(cur)
+    }
+    merged = split
+  }
+
+  // Step 4: Bridge adjacent annotation regions when no uncut word lies in
   // their gap. Mirrors TranscriptEditor.jsx — prevents fragmented cuts where
   // two annotations are separated by silence (no transcribed words) which the
   // user would expect to be one continuous cut.
@@ -97,11 +119,19 @@ export function deriveCutsFromAnnotations(annotations, cutExclusions = [], words
     merged = bridged
   }
 
-  // Step 2.7: Extend each region's edges to the nearest uncut word, never
+  // Step 5: Extend each region's edges to the nearest uncut word, never
   // crossing exclusion zones. Mirrors TranscriptEditor.jsx — produces the same
   // cut shape the frontend would generate, eliminating the dual-cut-set bug.
   if (words?.length) {
-    const annotationRegions = merged
+    // SNAPSHOT pre-extension bounds. The frontend uses an unmutated
+    // `annotationRegions` reference (from a useMemo above the extend loop),
+    // so region[0]'s edge extension does NOT change the membership-check
+    // input for region[1]'s extension. We MUST do the same — aliasing
+    // `merged` directly here would make region[0]'s end-extension widen
+    // the coverage window seen during region[1]'s reverse scan, producing
+    // different "is this word covered" answers in narrow tolerance cases.
+    // Do not "optimize" this back to `const annotationRegions = merged`.
+    const annotationRegions = merged.map(r => ({ start: r.start, end: r.end }))
     for (const region of merged) {
       // Extend end forward: stretch to next uncut word's start.
       const nextUncutWord = words.find(w => w.start >= region.end - 0.01 &&
@@ -134,25 +164,7 @@ export function deriveCutsFromAnnotations(annotations, cutExclusions = [], words
     }
   }
 
-  // Step 3: subtract cutExclusions (the user's right-click "keep this word" list).
-  let final = merged
-  if (cutExclusions?.length) {
-    const sortedEx = [...cutExclusions].sort((a, b) => a.start - b.start)
-    final = []
-    for (const region of merged) {
-      let cur = { ...region }
-      for (const ex of sortedEx) {
-        if (ex.start >= cur.end || ex.end <= cur.start) continue
-        if (cur.start < ex.start - 0.01) {
-          final.push({ start: cur.start, end: ex.start })
-        }
-        cur.start = ex.end
-      }
-      if (cur.start < cur.end - 0.01) final.push(cur)
-    }
-  }
-
-  return final.map((r, i) => ({
+  return merged.map((r, i) => ({
     id: `cut-ann-server-${i}`,
     start: r.start,
     end: r.end,

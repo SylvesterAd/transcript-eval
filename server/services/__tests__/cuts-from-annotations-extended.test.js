@@ -185,6 +185,48 @@ describe('deriveCutsFromAnnotations — extended cut shape with words', () => {
     })
   })
 
+  describe('annotationRegions snapshot (no aliasing during extension)', () => {
+    it('extension uses pre-extension region bounds (no mutation aliasing across regions)', () => {
+      // Two annotations + a word in the gap that would be classified differently
+      // depending on whether annotationRegions reflects the in-progress mutated state
+      // or a snapshot taken before extension.
+      //
+      // Setup: ann1 [5, 10], ann2 [15, 20]. Word at [12, 12.04] in the gap.
+      // Words: [{0,1}, {12,12.04}, {25,26}]
+      //
+      // Pre-fix (aliasing bug): after ann1.end extends to 12 (because [12,12.04]
+      // is the next uncut word), the membership check for ann2's reverse scan
+      // sees [12,12.04] as covered by the now-mutated ann1=[5,12] (12.04 ≤ 12.05),
+      // skipping it. prevUncutWord becomes the previous one (or undefined),
+      // so ann2.start either stays at 15 or extends to 1 (kept0.end), depending
+      // on what other words exist.
+      //
+      // Post-fix (snapshot): annotationRegions captures [{5,10},{15,20}] before
+      // extension. The check for [12,12.04] sees it covered by [5,10]?
+      // 12.04 ≤ 10.05? No. NOT covered. So [12,12.04] is the prevUncutWord.
+      // ann2.start = 12.04.
+      const annotations = {
+        items: [
+          { type: 'deletion', category: 'filler_words', startTime: 5, endTime: 10 },
+          { type: 'deletion', category: 'filler_words', startTime: 15, endTime: 20 },
+        ],
+      }
+      const words = [
+        { word: 'kept0', start: 0, end: 1 },
+        { word: 'gapWord', start: 12, end: 12.04 },
+        { word: 'kept2', start: 25, end: 26 },
+      ]
+      const cuts = deriveCutsFromAnnotations(annotations, [], words)
+      // ann1 extends back to kept0.end=1, forward to gapWord.start=12 → [1, 12]
+      expect(cuts.length).toBe(2)
+      expect(cuts[0].start).toBeCloseTo(1, 2)
+      expect(cuts[0].end).toBeCloseTo(12, 2)
+      // ann2 extends back to gapWord.end=12.04 (matches frontend) → [12.04, 25]
+      expect(cuts[1].start).toBeCloseTo(12.04, 2)
+      expect(cuts[1].end).toBeCloseTo(25, 2)
+    })
+  })
+
   describe('output shape', () => {
     it('produces cut-ann-server- prefixed IDs and source=annotation', () => {
       const words = [
