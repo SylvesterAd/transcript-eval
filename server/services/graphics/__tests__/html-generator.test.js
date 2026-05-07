@@ -131,7 +131,13 @@ describe('CREATE_HTML_SYSTEM_PROMPT canonical Hyperframes rules', () => {
 
   it('requires at least 3 different easings per scene', async () => {
     const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
-    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/at least 3|≥\s*3|three different.*ease/i)
+    // The rule should mention a ≥3 ease requirement (durable across phrasing)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/(?:at least|≥|minimum (?:of )?|no fewer than)\s*(?:3|three)\b[^.]*?eas/i)
+    // And the approved-easing list must enumerate ≥3 entries
+    const approvedMatch = CREATE_HTML_SYSTEM_PROMPT.match(/Approved:\s*([^\n]+)/)
+    expect(approvedMatch).not.toBeNull()
+    const eases = approvedMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
+    expect(eases.length).toBeGreaterThanOrEqual(3)
   })
 
   it('lists approved easings', async () => {
@@ -151,5 +157,35 @@ describe('CREATE_HTML_SYSTEM_PROMPT canonical Hyperframes rules', () => {
   it('teaches autoAlpha for non-anchor scene visibility', async () => {
     const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
     expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/autoAlpha/)
+  })
+})
+
+describe('few-shot examples comply with canonical rules', () => {
+  it('FEW_SHOT_LOWER_THIRD does not use banned APIs', async () => {
+    const mod = await import('../html-generator.js')
+    const fs = mod.CREATE_HTML_SYSTEM_PROMPT
+    // Few-shot is interpolated into the system prompt; assert it doesn't contain banned APIs
+    expect(fs).not.toMatch(/Math\.random\s*\(/)
+    expect(fs).not.toMatch(/Date\.now\s*\(/)
+    expect(fs).not.toMatch(/performance\.now\s*\(/)
+    expect(fs).not.toMatch(/setTimeout\s*\(/)
+    expect(fs).not.toMatch(/setInterval\s*\(/)
+  })
+
+  it('FEW_SHOT_LOWER_THIRD shows autoAlpha usage', async () => {
+    const mod = await import('../html-generator.js')
+    expect(mod.CREATE_HTML_SYSTEM_PROMPT).toMatch(/autoAlpha:\s*[01]/)
+  })
+
+  it('FEW_SHOT_LOWER_THIRD shows ≥3 unique eases', async () => {
+    const mod = await import('../html-generator.js')
+    const prompt = mod.CREATE_HTML_SYSTEM_PROMPT
+    const eases = new Set()
+    const easeRegex = /ease:\s*['"]([a-z0-9.()-]+)['"]/gi
+    let m
+    while ((m = easeRegex.exec(prompt)) !== null) {
+      eases.add(m[1])
+    }
+    expect(eases.size).toBeGreaterThanOrEqual(3)
   })
 })

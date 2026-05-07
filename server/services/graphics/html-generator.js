@@ -34,10 +34,12 @@ const FEW_SHOT_LOWER_THIRD = `<!doctype html>
     <script>
       window.__timelines = window.__timelines || {};
       const tl = gsap.timeline({ paused: true });
-      tl.fromTo("#lt-bar", { opacity: 0, x: -60 }, { opacity: 1, x: 0, duration: 0.6, ease: "expo.out" }, 0.1);
-      tl.fromTo("#lt-main", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.5 }, 0.4);
-      tl.fromTo("#lt-sub", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.5 }, 0.6);
-      tl.to("#lt-bar", { opacity: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, 8 - 0.7));
+      tl.fromTo("#lt-bar", { autoAlpha: 0, x: -60 }, { autoAlpha: 1, x: 0, duration: 0.6, ease: "back.out(1.6)" }, 0.1);
+      tl.fromTo("#lt-main", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.4);
+      tl.fromTo("#lt-sub", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.6);
+      // mid-scene activity: subtle letter-spacing breathe on the headline
+      tl.to("#lt-main", { letterSpacing: "0.02em", duration: 2, ease: "sine.inOut", yoyo: true, repeat: 1 }, 1.5);
+      tl.to("#lt-bar", { autoAlpha: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, 8 - 0.7));
       window.__timelines["main"] = tl;
     </script>
   </body>
@@ -78,11 +80,13 @@ const FEW_SHOT_LOWER_THIRD_WITH_LOGO = `<!doctype html>
     <script>
       window.__timelines = window.__timelines || {};
       const tl = gsap.timeline({ paused: true });
-      tl.fromTo("#lt-bar", { opacity: 0, x: -60 }, { opacity: 1, x: 0, duration: 0.6, ease: "expo.out" }, 0.1);
-      tl.fromTo("#lt-main", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.5 }, 0.4);
-      tl.fromTo("#lt-sub", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.5 }, 0.6);
-      tl.fromTo("#lt-logo", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 0.7);
-      tl.to("#lt-bar", { opacity: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, 8 - 0.7));
+      tl.fromTo("#lt-bar", { autoAlpha: 0, x: -60 }, { autoAlpha: 1, x: 0, duration: 0.6, ease: "back.out(1.6)" }, 0.1);
+      tl.fromTo("#lt-main", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.4);
+      tl.fromTo("#lt-sub", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.6);
+      tl.fromTo("#lt-logo", { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.5, ease: "power2.out" }, 0.7);
+      // mid-scene activity: subtle letter-spacing breathe on the headline
+      tl.to("#lt-main", { letterSpacing: "0.02em", duration: 2, ease: "sine.inOut", yoyo: true, repeat: 1 }, 1.5);
+      tl.to("#lt-bar", { autoAlpha: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, 8 - 0.7));
       window.__timelines["main"] = tl;
     </script>
   </body>
@@ -124,9 +128,9 @@ The render is frame-by-frame on headless Chromium; non-deterministic state poiso
 
 | Banned                              | Use instead                                              |
 | ----------------------------------- | -------------------------------------------------------- |
-| Math.random()                       | A seeded PRNG (mulberry32 inline; deterministic)         |
-| Date.now()                          | Hard-coded numeric timing or tl.time() inside onUpdate   |
-| performance.now()                   | Same — tl.time() inside onUpdate                         |
+| Math.random                         | A seeded PRNG (mulberry32 inline; deterministic)         |
+| Date.now                            | Hard-coded numeric timing or tl.time() inside onUpdate   |
+| performance.now                     | Same — tl.time() inside onUpdate                         |
 | setInterval / setTimeout            | Timeline tweens with onUpdate                            |
 | repeat: -1                          | repeat: Math.ceil(duration / cycle) - 1                  |
 | stagger: { from: "random" }         | from: "start" | "center" | "end"                         |
@@ -137,7 +141,7 @@ The render is frame-by-frame on headless Chromium; non-deterministic state poiso
 - **Mid-scene activity:** every visible element must keep moving AFTER its entrance. A still element on a still background is a JPEG with a progress bar.
 - **Easing variety:** use at least 3 different eases per scene. Don't default to power2.out everywhere. Approved: power2.out, power4.out, back.out(1.6), expo.out, sine.inOut, steps(5).
 - **Display sizes:** headlines ≥60px, body ≥20px, labels ≥16px.
-- **Reading-time budget per text element:** no text 1.5–2s; 1–3 words 2–3s; 4–10 words 3–4s; 11–20 words 4–6s; 21–35 words 6–8s; 35+ words split. Hard 5s ceiling per scene unless justified.
+- **Reading-time budget per text element:** no text 1.5–2s; 1–3 words 2–3s; 4–10 words 3–4s; 11–20 words 4–6s; 21–35 words 6–8s; 35+ words split. Hard 5s ceiling for any single text element's on-screen time, unless justified.
 - **Weight contrast:** 300 vs 900, not 400 vs 700.
 
 ## VISIBILITY (autoAlpha)
