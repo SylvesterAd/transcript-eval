@@ -176,6 +176,10 @@ export default function EditorView() {
   const [tokenBalance, setTokenBalance] = useState(null)
   const [estimationLoading, setEstimationLoading] = useState(false)
 
+  // auto_v2 admin beta — Task 12 (rough-cut-v2 agent)
+  const [autoV2StrategyId, setAutoV2StrategyId] = useState(null)
+  const [isAdminUser, setIsAdminUser] = useState(false)
+
   // URL tab is source of truth — sync to state before paint
   const assetsStatuses = ['classifying', 'classified', 'classification_failed', 'confirmed']
   const activeTab = tab || (assetsStatuses.includes(groupDetail?.assembly_status) ? 'assets' : 'sync')
@@ -348,6 +352,37 @@ export default function EditorView() {
       .catch(() => {})
   }, [])
 
+  // Look up the auto_v2 strategy id once on mount — used to gate the admin
+  // beta button. Endpoint is mounted at /api/strategies (see server/index.js).
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await authFetch('/strategies')
+        if (!res.ok) return
+        const list = await res.json()
+        if (cancelled) return
+        const v2 = list.find(s => s.name === 'auto_v2')
+        if (v2) setAutoV2StrategyId(v2.id)
+      } catch {}
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // Identify the admin user (matches server/auth.js hardcoded check).
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data } = await supabase.auth.getUser()
+        if (!cancelled && data?.user?.email === 'silvestras.stonk@gmail.com') {
+          setIsAdminUser(true)
+        }
+      } catch {}
+    })()
+    return () => { cancelled = true }
+  }, [])
+
   // Handler: open estimation modal
   const handleStartAIRoughCut = useCallback(async () => {
     if (!state.groupId) return
@@ -435,6 +470,30 @@ export default function EditorView() {
       setEstimationLoading(false)
     }
   }, [state.groupId, refetchDetail])
+
+  // Handler: trigger an admin-only auto_v2 (rough-cut-v2 agent) beta run.
+  // This does NOT touch the visible rough cut — it just starts a strategy run
+  // and shows the user the run id so they can inspect /admin/runs?run=<id>.
+  const handleRunAutoV2 = useCallback(async () => {
+    if (!autoV2StrategyId) {
+      alert('auto_v2 strategy not found. Run the seed: node server/seed/create-rough-cut-v2-strategy.js')
+      return
+    }
+    const res = await authFetch(`/admin/groups/${state.groupId}/run-strategy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy_id: autoV2StrategyId }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      alert(`Failed: ${err.error || res.statusText}`)
+      return
+    }
+    const { runId } = await res.json()
+    if (window.confirm(`auto_v2 beta run started: run #${runId}.\nOpen the run in a new tab?`)) {
+      window.open(`/admin/runs?run=${runId}`, '_blank')
+    }
+  }, [autoV2StrategyId, state.groupId])
 
   // Clear resumeKickedAt when the resume chain reaches a terminal status
   useEffect(() => {
@@ -955,8 +1014,8 @@ export default function EditorView() {
   const mediaType = mainVideo?.media_type || 'video'
 
   const editorContextValue = useMemo(
-    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType }),
-    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType]
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, isAdminUser, autoV2StrategyId, handleRunAutoV2 }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, isAdminUser, autoV2StrategyId, handleRunAutoV2]
   )
 
   if (loading) {

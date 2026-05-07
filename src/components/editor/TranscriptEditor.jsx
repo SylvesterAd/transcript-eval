@@ -2,15 +2,23 @@ import { useState, useRef, useCallback, useEffect, useMemo, useContext } from 'r
 import { EditorContext } from './EditorView.jsx'
 
 const ANNOTATION_COLORS = {
-  // Deletions — red spectrum (dark → light)
+  // Strategy-27 (existing) — plural
   false_starts:      { bg: 'rgba(220, 38, 38, 0.15)',  border: '#dc2626', label: 'False Starts' },
   filler_words:      { bg: 'rgba(251, 146, 60, 0.15)',  border: '#fb923c', label: 'Filler Words' },
   meta_commentary:   { bg: 'rgba(251, 113, 133, 0.15)', border: '#fb7185', label: 'Meta Commentary' },
-  // Identifications — purple/orange/warm
+  // Strategy-27 identifications
   repetition:        { bg: 'rgba(167, 139, 250, 0.20)', border: '#a78bfa', label: 'Repetition' },
   lengthy:           { bg: 'rgba(251, 191, 36, 0.20)',  border: '#fbbf24', label: 'Lengthy' },
   technical_unclear: { bg: 'rgba(251, 146, 60, 0.20)',  border: '#fb923c', label: 'Too Technical & Unclear' },
   irrelevance:       { bg: 'rgba(232, 121, 249, 0.20)', border: '#e879f9', label: 'Irrelevance' },
+  // auto_v2 agent — singular taxonomy from spec §Category taxonomy
+  false_start:       { bg: 'rgba(220, 38, 38, 0.15)',  border: '#dc2626', label: 'False Start' },
+  filler_word:       { bg: 'rgba(251, 146, 60, 0.15)',  border: '#fb923c', label: 'Filler Word' },
+  retake:            { bg: 'rgba(167, 139, 250, 0.20)', border: '#a78bfa', label: 'Retake' },
+  silence:           { bg: 'rgba(148, 163, 184, 0.15)', border: '#94a3b8', label: 'Silence' },
+  tangent:           { bg: 'rgba(244, 114, 182, 0.15)', border: '#f472b6', label: 'Tangent' },
+  discourse_marker:  { bg: 'rgba(125, 211, 252, 0.15)', border: '#7dd3fc', label: 'Discourse Marker' },
+  custom:            { bg: 'rgba(229, 231, 235, 0.15)', border: '#e5e7eb', label: 'Custom' },
 }
 
 function formatGap(seconds) {
@@ -19,7 +27,7 @@ function formatGap(seconds) {
 }
 
 export default function TranscriptEditor() {
-  const { state, dispatch, playbackEngine, cutDragRef, flowRunState, handleStartAIRoughCut, estimationLoading } = useContext(EditorContext)
+  const { state, dispatch, playbackEngine, cutDragRef, flowRunState, handleStartAIRoughCut, estimationLoading, isAdminUser, autoV2StrategyId, handleRunAutoV2 } = useContext(EditorContext)
 
   // Primary transcript: use the longest audio track's words as the single source.
   // Only fill in time gaps (ranges the primary doesn't cover) from other tracks.
@@ -769,6 +777,15 @@ export default function TranscriptEditor() {
               <span className="material-symbols-outlined text-[18px]">auto_videocam</span>
               Start AI Rough Cut
             </button>
+            {isAdminUser && autoV2StrategyId && (
+              <button
+                onClick={handleRunAutoV2}
+                title="Run with auto_v2 agent (admin beta). Does not touch the visible rough cut."
+                className="ml-2 px-2 py-1 text-xs rounded border border-amber-700/60 text-amber-300 hover:bg-amber-900/30"
+              >
+                Run with auto_v2 (beta)
+              </button>
+            )}
           </>
         )}
       </div>
@@ -873,6 +890,18 @@ export default function TranscriptEditor() {
                   </div>
                   {ann.reason && (
                     <p className="text-[10px] text-on-surface-variant/70 mt-0.5 leading-tight">{ann.reason}</p>
+                  )}
+                  {typeof ann.confidence === 'number' && (
+                    <p className="text-[9px] text-on-surface-variant/50 mt-0.5">
+                      confidence: {(ann.confidence * 100).toFixed(0)}%
+                    </p>
+                  )}
+                  {Array.isArray(ann.evidence) && ann.evidence.length > 0 && (
+                    <ul className="text-[9px] text-on-surface-variant/50 mt-0.5 list-disc list-inside space-y-0.5">
+                      {ann.evidence.slice(0, 3).map((e, j) => (
+                        <li key={j} className="truncate">{e}</li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               )
