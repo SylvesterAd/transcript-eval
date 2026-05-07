@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn((cmd, args, opts, cb) => {
@@ -15,6 +15,10 @@ vi.mock('node:fs/promises', async () => {
     readFile: vi.fn().mockResolvedValue('<html>{{mainText}}</html>'),
     stat: vi.fn().mockResolvedValue({ size: 1024 }),
   };
+});
+
+afterEach(() => {
+  delete process.env.GRAPHICS_RENDER_DIR;
 });
 
 describe('renderTemplate', () => {
