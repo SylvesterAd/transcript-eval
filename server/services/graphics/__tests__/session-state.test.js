@@ -28,3 +28,37 @@ describe('isSpecComplete', () => {
     expect(isSpecComplete(full)).toBe(true);
   });
 });
+
+describe('isSpecComplete (multi-scene)', () => {
+  it('multi-scene complete', async () => {
+    const { isSpecComplete } = await import('../session-state.js')
+    expect(isSpecComplete({
+      aspectRatio: '16:9', tone: 'neutral',
+      scenes: [
+        { template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' },
+        { template: 'lower-third', duration: 5, mainText: 'B', subText: 'b' },
+      ],
+    })).toBe(true)
+  })
+  it('multi-scene incomplete: scene missing field', async () => {
+    const { isSpecComplete } = await import('../session-state.js')
+    expect(isSpecComplete({
+      aspectRatio: '16:9', tone: 'neutral',
+      scenes: [{ template: 'lower-third', duration: 3, mainText: 'A' }],
+    })).toBe(false)
+  })
+  it('multi-scene incomplete: top-level missing aspectRatio', async () => {
+    const { isSpecComplete } = await import('../session-state.js')
+    expect(isSpecComplete({
+      tone: 'neutral',
+      scenes: [{ template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' }],
+    })).toBe(false)
+  })
+  it('single-scene back-compat', async () => {
+    const { isSpecComplete } = await import('../session-state.js')
+    expect(isSpecComplete({
+      template: 'lower-third', aspectRatio: '16:9', duration: 5,
+      mainText: 'A', subText: 'a', tone: 'neutral',
+    })).toBe(true)
+  })
+})
