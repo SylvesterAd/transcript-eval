@@ -399,7 +399,7 @@ export default function EditorView() {
   // navigate to the strategy tab. The useEffect below is the safety net for
   // any other entry point (direct URL, BRollPanel auto-redirect, etc.).
   const handleResumeFromRoughCut = async () => {
-    await fireResumeFromRoughCut()
+    try { await fireResumeFromRoughCut() } catch {}
     navigate(`/editor/${id}/brolls/strategy`)
   }
 
