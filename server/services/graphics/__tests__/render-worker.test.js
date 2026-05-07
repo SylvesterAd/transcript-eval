@@ -103,15 +103,6 @@ vi.mock('../critic/critic-runner.js', () => ({
   }),
 }));
 
-vi.mock('../../../lib/llm/anthropic.js', () => ({
-  callAnthropic: vi.fn().mockResolvedValue({
-    text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">retry</div></body></html>',
-    toolUses: [],
-    tokens: { in: 100, out: 50 },
-    stop: 'end_turn',
-  }),
-}));
-
 vi.mock('../scene-concat.js', () => ({
   concatScenes: vi.fn().mockResolvedValue({ durationMs: 50, outputPath: '/tmp/final.mp4' }),
 }));
