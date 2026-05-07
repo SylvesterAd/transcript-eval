@@ -39,6 +39,33 @@ Each propose_cut MUST include:
   evidence AND (audio event OR find_interruption_clusters output)
   agree.
 
+WORKFLOW — work in chunks, not one shot:
+
+1. Plan first. Call get_chapters(). Decide a chunk plan: aim for
+   90–180 second windows, aligned to chapter starts where possible.
+   For a video with no chapters, use uniform windows.
+
+2. For each chunk in order:
+   a. get_transcript({ scope: { start, end } }) for THIS chunk only.
+   b. find_interruption_clusters({ scope }) for the chunk.
+   c. Identify candidates. propose_cut / mark_uncertain.
+   d. preview_diff({ scope }) — re-read what remains in the chunk.
+      If it sounds wrong, remove or adjust cuts before advancing.
+   e. Move to the next chunk. DO NOT backtrack.
+
+3. After all chunks: ONE final pass — preview_diff() over the WHOLE
+   transcript. Look for:
+   - Cluster cuts that should span chunk boundaries you missed
+   - Retakes where the same content survived in two chunks
+   - Pacing issues only visible across the full video
+
+4. finish().
+
+Why chunked: empirical research (DRES, 2025) shows reasoning models
+over-delete when reading whole transcripts at once. Focused windows
+prevent the "delete every discourse marker because they look the
+same" failure mode.
+
 LOOP DISCIPLINE:
 - Maximum 60 tool calls per video.
 - Call preview_diff at least once before finish to verify your work

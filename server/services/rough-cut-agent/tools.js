@@ -128,8 +128,13 @@ export const TOOL_SCHEMAS = [
   },
   {
     name: 'preview_diff',
-    description: 'Show the transcript as it would appear with current cuts applied.',
-    input_schema: { type: 'object', properties: {} },
+    description: 'Show the transcript as it would appear with current cuts applied. Optionally limited to a time scope (recommended when working chunk-by-chunk).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+      },
+    },
   },
   {
     name: 'finish',
@@ -261,6 +266,7 @@ async function adjust_cut(params, state) {
 async function preview_diff(params, state) {
   // Build the transcript text minus any line whose [tcSec, lineEnd] overlaps a cut.
   // lineEnd is approximated as the next line's tcSec (or +5s if last line).
+  const scope = params?.scope || null
   const cutRanges = state.cuts.map(c => [c.start, c.end])
   const overlaps = (start, end) =>
     cutRanges.some(([cs, ce]) => start < ce && end > cs)
@@ -278,7 +284,9 @@ async function preview_diff(params, state) {
     const line = transcriptLines[i]
     const p = parsed[i]
     if (!p) {
-      out.push(line)
+      // Only emit non-timecoded lines when no scope filter; otherwise drop
+      // header/spacing lines that fall outside the chunk being previewed.
+      if (!scope) out.push(line)
       continue
     }
     // Find the next timecoded line's tcSec for this line's end; fall back to +5s.
@@ -286,6 +294,10 @@ async function preview_diff(params, state) {
     for (let j = i + 1; j < parsed.length; j++) {
       if (parsed[j]) { lineEnd = parsed[j].tcSec; break }
     }
+    // Scope semantics: include a line iff its start tcSec lies within the
+    // chunk window. Lines straddling the chunk boundary are dropped — the
+    // agent should request adjacent chunks rather than half-overlap.
+    if (scope && (p.tcSec < scope.start || p.tcSec > scope.end)) continue
     if (!overlaps(p.tcSec, lineEnd)) out.push(line)
   }
   return { preview: out.join('\n') }

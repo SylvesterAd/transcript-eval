@@ -122,6 +122,25 @@ describe('dispatchTool', () => {
     expect(r.preview).toContain('Hello world.')
   })
 
+  it('preview_diff with scope only returns lines within window', async () => {
+    const state = makeState()
+    const r = await dispatchTool('preview_diff', { scope: { start: 2.5, end: 7 } }, state)
+    expect(r.preview).not.toContain('Hello world.')
+    expect(r.preview).toContain('Um,')
+    expect(r.preview).toContain('Nice.')
+  })
+
+  it('preview_diff with scope still respects cuts inside window', async () => {
+    const state = makeState()
+    await dispatchTool('propose_cut', {
+      start: 3, end: 3.4, category: 'filler_word', reason: '', confidence: 0.9, evidence: []
+    }, state)
+    const r = await dispatchTool('preview_diff', { scope: { start: 2.5, end: 7 } }, state)
+    expect(r.preview).not.toContain('Um,')
+    expect(r.preview).toContain('Nice.')
+    expect(r.preview).not.toContain('Hello world.')
+  })
+
   it('finish returns summary stats', async () => {
     const state = makeState()
     await dispatchTool('propose_cut', {
