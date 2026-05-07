@@ -43,8 +43,17 @@ vi.mock('../../../db.js', () => {
   };
 });
 
+vi.mock('../html-generator.js', () => ({
+  specToHtml: vi.fn().mockResolvedValue({
+    html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">initial</div></body></html>',
+    cost: 5,
+    tokens: { in: 600, out: 400 },
+  }),
+  CREATE_HTML_SYSTEM_PROMPT: 'mock-create-html-system-prompt',
+}));
+
 vi.mock('../render-runner.js', () => ({
-  renderTemplate: vi.fn().mockResolvedValue({
+  renderHtml: vi.fn().mockResolvedValue({
     outputPath: '/tmp/x.mp4',
     bytes: 12345,
     durationMs: 9000,
@@ -69,9 +78,9 @@ vi.mock('../critic/critic-runner.js', () => ({
 
 vi.mock('../../../lib/llm/anthropic.js', () => ({
   callAnthropic: vi.fn().mockResolvedValue({
-    text: '{"width":1920,"height":1080,"duration":5,"mainText":"Hi","subText":"Sub","accent":"#9ca3af","barBottom":80,"barLeft":80,"barHeight":120,"barMaxWidth":1056,"mainSize":48,"subSize":18}',
+    text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">retry</div></body></html>',
     toolUses: [],
-    tokens: { in: 800, out: 100 },
+    tokens: { in: 100, out: 50 },
     stop: 'end_turn',
   }),
 }));
@@ -83,9 +92,15 @@ beforeEach(() => {
 describe('renderWorker.drainOnce', () => {
   it('claims one queued render, runs it, marks complete', async () => {
     const { drainOnce } = await import('../render-worker.js');
+    const { renderHtml } = await import('../render-runner.js');
     const result = await drainOnce();
     expect(result.processed).toBe(1);
     expect(result.errors).toHaveLength(0);
+    // Sanity check: renderHtml was called with an html string containing the stage marker
+    expect(renderHtml).toHaveBeenCalled();
+    const call = renderHtml.mock.calls[0][0];
+    expect(typeof call.html).toBe('string');
+    expect(call.html).toMatch(/data-composition-id\s*=\s*"main"/i);
   });
 });
 

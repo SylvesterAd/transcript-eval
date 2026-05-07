@@ -6,17 +6,17 @@
 //
 // Per iteration:
 //   1. Claim ONE queued render
-//   2. Opus: spec -> template variables JSON
-//   3. renderTemplate (Task 7) -> local MP4
+//   2. Opus: spec -> full HTML (specToHtml)
+//   3. renderHtml -> local MP4
 //   4. uploadRender -> Supabase signed URL
 //   5. Atomic: mark render complete + flip session status
 
 import db from '../../db.js';                          // default import
-import { renderTemplate } from './render-runner.js';
+import { renderHtml } from './render-runner.js';
 import { uploadRender } from './uploader.js';
 import { callAnthropic } from '../../lib/llm/anthropic.js';
-import { MODEL_FOR, costCents } from './models.js';
-import { CREATE_SYSTEM_PROMPT } from './create-prompt.js';
+import { specToHtml } from './html-generator.js';
+import { MODEL_FOR } from './models.js';
 import { runCritic } from './critic/critic-runner.js';
 import { buildRetryPrompt } from './retry-prompt.js';
 import { emit } from './events/emitter.js';
@@ -44,25 +44,6 @@ async function claimNextRender() {
     .get();
 }
 
-async function specToVars(spec) {
-  const r = await callAnthropic({
-    model: MODEL_FOR.create,
-    system: CREATE_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(spec)}` }],
-    max_tokens: 1024,
-  });
-  const cost = costCents(MODEL_FOR.create, r.tokens);
-  // Defensively strip markdown fences in case Opus wraps output despite the prompt
-  const text = r.text.trim().replace(/^```json\s*/i, '').replace(/```$/, '');
-  let vars;
-  try {
-    vars = JSON.parse(text);
-  } catch (e) {
-    throw new Error(`creator returned invalid JSON: ${r.text.slice(0, 200)}`);
-  }
-  return { vars, cost };
-}
-
 export async function drainOnce() {
   let processed = 0;
   const errors = [];
@@ -70,9 +51,9 @@ export async function drainOnce() {
   while ((row = await claimNextRender())) {
     try {
       emit({ sessionId: row.session_id, step: 'render_started', label: 'Rendering…', renderId: row.id, iteration: 1 })
-      const { vars: initialVars, cost } = await specToVars(row.spec_snapshot_json);
-      let currentVars = initialVars;
-      let currentResult = await renderTemplate({ template: row.template, vars: currentVars, renderId: row.id });
+      const { html: initialHtml, cost } = await specToHtml({ spec: row.spec_snapshot_json });
+      let currentHtml = initialHtml;
+      let currentResult = await renderHtml({ html: currentHtml, renderId: row.id });
       emit({ sessionId: row.session_id, step: 'render_finished', label: `Render complete (iter 1)`, renderId: row.id, iteration: 1 })
       let currentUpload = await uploadRender({
         renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
@@ -107,17 +88,24 @@ export async function drainOnce() {
 
         // Retry: build new vars from critique feedback
         emit({ sessionId: row.session_id, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId: row.id })
-        const retrySys = buildRetryPrompt({ priorCritique: critique, priorVars: currentVars });
+        const retrySys = buildRetryPrompt({ priorCritique: critique, priorHtml: currentHtml });
         const retryResp = await callAnthropic({
           model: MODEL_FOR.create,
           system: retrySys,
           messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(row.spec_snapshot_json)}` }],
-          max_tokens: 1024,
+          max_tokens: 4096,
         });
-        const retryText = retryResp.text.trim().replace(/^```json\s*/i, '').replace(/```$/, '');
-        currentVars = JSON.parse(retryText);
+        const retryHtml = retryResp.text.trim()
+          .replace(/^```html\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/```$/, '')
+          .trim();
+        if (!/data-composition-id\s*=\s*"main"/i.test(retryHtml)) {
+          throw new Error(`retry creator returned HTML missing data-composition-id="main"`);
+        }
+        currentHtml = retryHtml;
         iteration += 1;
-        currentResult = await renderTemplate({ template: row.template, vars: currentVars, renderId: row.id });
+        currentResult = await renderHtml({ html: currentHtml, renderId: row.id });
         emit({ sessionId: row.session_id, step: 'render_finished', label: `Render complete (iter ${iteration})`, renderId: row.id, iteration })
         currentUpload = await uploadRender({
           renderId: row.id, sessionId: row.session_id, localPath: currentResult.outputPath,
