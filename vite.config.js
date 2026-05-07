@@ -37,7 +37,11 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        // VITE_PROXY_TARGET lets you point at prod backend for frontend-only
+        // testing without spinning up dev:server (which triggers auto-resume).
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:3001',
+        changeOrigin: true,
+        secure: true,
         timeout: 3600000, // 1 hour for large file uploads + concat
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq) => {
@@ -46,7 +50,7 @@ export default defineConfig({
           })
         }
       },
-      '/uploads': 'http://localhost:3001'
+      '/uploads': process.env.VITE_PROXY_TARGET || 'http://localhost:3001'
     },
     hmr: { overlay: false }
   }
