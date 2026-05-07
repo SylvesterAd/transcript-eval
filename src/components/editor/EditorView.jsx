@@ -1083,7 +1083,9 @@ export default function EditorView() {
             hasVideos={groupDetail?.videos?.length > 0}
             hasBrollSearch={hasBrollSearch}
             brollChainStatus={groupDetail?.broll_chain_status}
+            parentGroupId={groupDetail?.parent_group_id ?? id}
             onResumeFromRoughCut={handleResumeFromRoughCut}
+            onNavigateToProcessing={(gid) => navigate(`/?step=processing&group=${gid}`)}
             onTabChange={(newTab) => {
               // Warn when leaving roughcut with progress
               const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0
