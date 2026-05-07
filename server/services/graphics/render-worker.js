@@ -16,11 +16,8 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import db from '../../db.js';                          // default import
 import { renderHtml } from './render-runner.js';
 import { uploadRender } from './uploader.js';
-import { callAnthropic } from '../../lib/llm/anthropic.js';
-import { specToHtml } from './html-generator.js';
-import { MODEL_FOR } from './models.js';
+import { specToHtml, refineHtml } from './html-generator.js';
 import { runCritic } from './critic/critic-runner.js';
-import { buildRetryPrompt } from './retry-prompt.js';
 import { concatScenes } from './scene-concat.js';
 import { runLint, formatFindingsForPrompt } from './lint-runner.js';
 import { emit } from './events/emitter.js';
@@ -111,18 +108,13 @@ async function runSceneCriticLoop({ renderId, sessionId, sceneSpec, sceneIndex =
     if (iteration >= MAX_ITERATIONS) break;
 
     emit({ sessionId, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId, sceneIndex });
-    const retrySys = buildRetryPrompt({ priorCritique: critique, priorHtml: currentHtml });
-    const retryResp = await callAnthropic({
-      model: MODEL_FOR.create, system: retrySys,
-      messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(sceneSpec)}` }],
-      max_tokens: 4096,
+    const refineRes = await refineHtml({
+      html: currentHtml,
+      feedback: critique.feedback,
+      spec: sceneSpec,
     });
-    const retryHtml = retryResp.text.trim()
-      .replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim();
-    if (!/data-composition-id\s*=\s*"main"/i.test(retryHtml)) {
-      throw new Error('retry creator returned HTML missing data-composition-id="main"');
-    }
-    currentHtml = retryHtml;
+    currentHtml = refineRes.html;
+    totalCost += refineRes.cost;
     iteration += 1;
     currentResult = await renderHtml({ html: currentHtml, renderId, subDir });
     emit({ sessionId, step: 'render_finished', label: `Render complete (iter ${iteration})`, renderId, iteration, sceneIndex });

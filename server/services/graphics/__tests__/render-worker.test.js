@@ -71,6 +71,11 @@ vi.mock('../html-generator.js', () => ({
     cost: 5,
     tokens: { in: 600, out: 400 },
   }),
+  refineHtml: vi.fn().mockResolvedValue({
+    html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">refined</div></body></html>',
+    cost: 3,
+    tokens: { in: 800, out: 600 },
+  }),
   CREATE_HTML_SYSTEM_PROMPT: 'mock-create-html-system-prompt',
 }));
 
@@ -163,6 +168,10 @@ describe('renderWorker.drainOnce — retry path', () => {
         retry_recommended: false, frameUrls: ['x'], tokens: { in: 0, out: 0 },
       })
 
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    specToHtml.mockClear()
+    refineHtml.mockClear()
+
     const { drainOnce } = await import('../render-worker.js')
     const result = await drainOnce()
 
@@ -170,6 +179,71 @@ describe('renderWorker.drainOnce — retry path', () => {
     expect(result.errors).toHaveLength(0)
     // 3 critic calls = 3 attempts (initial + 2 retries)
     expect(runCritic).toHaveBeenCalledTimes(3)
+    // specToHtml only on iteration 0; refineHtml on iterations 1 and 2
+    expect(specToHtml).toHaveBeenCalledTimes(1)
+    expect(refineHtml).toHaveBeenCalledTimes(2)
+  })
+});
+
+describe('renderWorker.drainOnce — critic-loop refinement', () => {
+  it('calls refineHtml (not specToHtml) when critic recommends retry', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 99, session_id: 'sess-99', iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Test', subText: 'Subtext',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null)
+
+    const { runLint } = await import('../lint-runner.js')
+    runLint.mockReset()
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    specToHtml.mockClear()
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div data-composition-id="main">v1</div></body></html>',
+      cost: 1,
+      tokens: { in: 100, out: 100 },
+    })
+    refineHtml.mockClear()
+    refineHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div data-composition-id="main">v2</div></body></html>',
+      cost: 1,
+      tokens: { in: 100, out: 100 },
+    })
+
+    const { runCritic } = await import('../critic/critic-runner.js')
+    runCritic.mockReset()
+    runCritic
+      .mockResolvedValueOnce({
+        score: 0.5, criteria: {},
+        feedback: 'Lower-third bar moves too fast; extend hold to 4s',
+        retry_recommended: true, frameUrls: [], tokens: { in: 50, out: 50 },
+      })
+      .mockResolvedValueOnce({
+        score: 0.95, criteria: {},
+        feedback: 'much better',
+        retry_recommended: false, frameUrls: [], tokens: { in: 50, out: 50 },
+      })
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+    expect(specToHtml).toHaveBeenCalledTimes(1) // only iteration 0
+    expect(refineHtml).toHaveBeenCalledTimes(1) // iteration 1 retry
+    const refineCall = refineHtml.mock.calls[0][0]
+    expect(refineCall.html).toContain('v1')
+    expect(refineCall.feedback).toMatch(/extend hold to 4s/i)
+    expect(refineCall.spec).toBeDefined()
+    expect(refineCall.spec.template).toBe('lower-third')
   })
 });
 
