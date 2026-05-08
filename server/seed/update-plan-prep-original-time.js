@@ -2,16 +2,15 @@ import db from '../db.js'
 
 // Update plan_prep (strategy id=7) for the original-time domain.
 //
-// Changes:
-//   1. Drop the "Export post-cut video" stage (export_post_cut_video) — Gemini
-//      now consumes the raw original video. The prompt steers chapter/beat
-//      anchoring to the trimmed transcript instead of the video timeline.
-//   2. Merge "Analyze A-Roll Appearances" + "Analyze Chapters & Beats" into a
-//      single combined "Analyze A-Roll + Chapters & Beats" stage. One Gemini
-//      call sees the raw video AND the trimmed transcript and emits a JSON
-//      blob with `a_roll_appearances` AND `chapters` keys.
-//   3. Update split_by_chapter actionParams: chaptersStageIndex 3→1,
-//      aRollStageIndex 2→1 (both point at the new merged stage at index 1).
+// Final shape (4 stages):
+//   [0] Generate post-cut transcript     (programmatic, no shift — original timecodes)
+//   [1] Analyze A-Roll Appearances        (video_question, raw video)
+//   [2] Analyze Chapters & Beats          (transcript_question, trimmed transcript)
+//   [3] Split by chapter                  (programmatic, indexes 1 + 2)
+//
+// Idempotent: writes the canonical 4-stage layout regardless of what's
+// currently in id=7. Earlier intermediate layouts (5 stages with
+// export_post_cut_video, or 3 stages with merged analysis) both end up here.
 //
 // Re-run with:  node server/seed/update-plan-prep-original-time.js
 
@@ -21,79 +20,49 @@ const ver = await db.prepare(
 if (!ver) { console.error('No plan_prep (strategy_id=7) version found'); process.exit(1) }
 
 const oldStages = JSON.parse(ver.stages_json)
-console.log(`plan_prep current: ${oldStages.length} stages`)
+console.log(`plan_prep current: ${oldStages.length} stages — [${oldStages.map(s => s.name).join('; ')}]`)
 
-// Sanity check expected layout
-const expectedNames = [
-  'Generate post-cut transcript',
-  'Export post-cut video',
-  'Analyze A-Roll Appearances',
-  'Analyze Chapters & Beats',
-  'Split by chapter',
-]
-const actualNames = oldStages.map(s => s.name)
-const layoutOk = expectedNames.every((n, i) => actualNames[i] === n)
-if (!layoutOk) {
-  console.warn('WARNING: stage names do not match expected layout. Continuing — but verify.')
-  console.warn('  expected:', expectedNames)
-  console.warn('  actual:  ', actualNames)
+const transcriptStage = {
+  name: 'Generate post-cut transcript',
+  type: 'programmatic',
+  target: 'text_only',
+  action: 'generate_post_cut_transcript',
+  actionParams: {},
+  description: 'Remove cut words from the transcript while preserving original timecodes',
 }
 
-const transcriptStage = oldStages[0]              // unchanged
-const aRollStage      = oldStages[2]              // merge source
-const chaptersStage   = oldStages[3]              // merge source
-const splitStage      = oldStages[4]              // index will shift
+// ── A-Roll Appearances stage ─────────────────────────────────────────
+const aRollSystem = `# Main Categories:
+A-roll: Primary footage that carries the narrative (often a talking head/interview).
+Overlay images: Non-text visual elements layered on top of the base visual to illustrate, reinforce, or direct attention (e.g., icons, logos/bugs, arrows, stickers, product images, floating screenshots, simple shapes). Overlay images can appear on A-roll only!
+Graphic package / PiP: A layout template that defines the base visual (background + frames + placement). It usually contains A-roll inside a box, plus branded design elements. Key rule: turning the package off does change the whole screen composition (because the layout itself is the scene).
+Key distinction: overlay images sit on top; a package rearranges the whole scene.
+B-roll: Supporting footage used to illustrate the narration or cover A-roll (so the viewer doesn't see the talking head). B-roll can have its own overlays.
 
-// ── Combined system_instruction ───────────────────────────────────────
-// Take A-Roll's category/enum definitions + chapters' narrative analyst framing.
-const combinedSystem = `${aRollStage.system_instruction.trimEnd()}
+# IGNORE SUBTITLES
+Subtitles = on-screen text at the bottom of the screen that transcribes or translates the spoken audio. If text on screen matches what is being said — it is a subtitle. Do NOT report subtitles. Ignore them completely.
 
-# YOUR TASK
-You are also a video narrative analyst. From the SAME video, derive chapters and beats — the narrative structure of the conversation.
+You are a video structure analyst. Watch the video and output ONLY valid JSON. No commentary.`
 
-You have reference video chapter analyses to understand how similar videos are structured:
-{{all_chapter_analyses}}
+const aRollPrompt = `Watch this video and identify:
+1. Whether there is a main talking head (presenter/host) — someone whose lip movement matches the spoken audio
+2. A-Roll appearance changes — moments where the talking head's visual setup CHANGES
 
-For chapter/beat boundaries, anchor to the TRANSCRIPT below, not to what you see in the video. The transcript shows only the kept portions of the rough cut, with original video timecodes preserved. Where the transcript skips ahead (e.g. \`[115s]\` gap markers), that's a rough-cut deletion — treat it as a section boundary, never as continuous content.
-
-Output ONLY valid JSON with both \`a_roll_appearances\` AND \`chapters\` keys. No commentary.`
-
-// ── Combined prompt ───────────────────────────────────────────────────
-const combinedPrompt = `Watch this video and analyze it on TWO axes:
-
-## (1) A-Roll appearances — VISUAL only, derived from the video
-- Identify the main talking head (presenter/host) — someone whose lip movement matches the spoken audio
-- Describe their INITIAL appearance first (id: 1) — the default look
-- Add MORE entries only when something VISUALLY CHANGES: different room, different outfit, different lighting, different camera setup
+## A-Roll appearance rules:
+- A-Roll is ONLY the main talking head on camera with lip-sync matching the audio
+- Describe the INITIAL appearance first (id: 1). This is the default look
+- Then ONLY add more entries when something VISUALLY CHANGES: different room, different outfit, different lighting, different camera setup
 - If the talking head looks the same the entire video → only 1 entry
 - Cutting away to B-Roll and coming back to the SAME look is NOT a change
 - A change means: the viewer can clearly tell "this was filmed in a different setting or at a different time"
 - Scenes without the talking head (screen recordings, stock footage, graphics, cutaways) are NOT A-Roll
 - If the video has NO talking head (e.g. voice-over only), set "has_talking_head" to false and leave "a_roll_appearances" empty
-- A-Roll \`change_at\` timecodes are observational from the video and may include time inside rough-cut deletions; that's fine.
 
-## (2) Chapters & Beats — NARRATIVE structure, derived from the TRANSCRIPT
-- The transcript below shows ONLY the kept content of the rough cut. Timecodes are original-video time.
-- Chapters cover the entire transcript without gaps. Use the transcript's first kept timecode as your start, the transcript's last kept timecode as your end.
-- A \`[Ns]\` gap marker in the transcript is a rough-cut deletion — a chapter or beat MUST end at or before that gap, and the next chapter/beat MUST start at or after the gap. Never span a gap with one chapter.
-- Use the timecodes printed in the transcript verbatim — do NOT invent timecodes from what you saw in the video.
+## Timestamp format:
+Use ONLY timecodes in [HH:MM:SS] format for ALL timestamps. Do NOT include separate seconds fields.
+Note: this is the original raw video — \`change_at\` timecodes are observational and may fall inside time ranges that were removed in the rough cut. That's fine; A-Roll appearances are descriptive context.
 
-## Definitions
-- Chapter: a bigger section made of multiple beats — a "phase" of the video (setup, conflict, resolution, conclusion).
-- Beat: a single moment where something changes (a decision, a setback, a discovery, a reaction).
-
-## Output rules for chapters/beats
-- "description": 2-3 sentences explaining what happens in this chapter/beat — be specific about the content, arguments, or story points covered
-- "purpose": 1-2 sentences explaining WHY this chapter/beat exists in the video — what editorial or narrative function does it serve for the viewer
-
-## Timecodes
-Use ONLY [HH:MM:SS] format. Do NOT include separate seconds fields.
-
-## Transcript (cut text already removed; timecodes are original video time)
-{{transcript}}
-
-Return ONE JSON object containing BOTH a_roll_appearances and chapters:
-
+Return JSON:
 \`\`\`json
 {
   "has_talking_head": true,
@@ -117,7 +86,56 @@ Return ONE JSON object containing BOTH a_roll_appearances and chapters:
       "change_at": "[00:09:41]",
       "change_note": "Location + wardrobe + lighting all changed"
     }
-  ],
+  ]
+}
+\`\`\``
+
+const aRollStage = {
+  name: 'Analyze A-Roll Appearances',
+  type: 'video_question',
+  target: 'main_video',
+  model: 'gemini-3-flash-preview',
+  system_instruction: aRollSystem,
+  prompt: aRollPrompt,
+  params: { temperature: 1, thinking_level: 'LOW' },
+}
+
+// ── Chapters & Beats stage ────────────────────────────────────────────
+const chaptersSystem = `You are a video narrative analyst. Analyze the transcript and identify the chapter structure and beats.
+
+You have reference video chapter analyses to understand how similar videos are structured:
+{{all_chapter_analyses}}
+
+Output ONLY valid JSON. No commentary.`
+
+const chaptersPrompt = `Analyze this transcript and identify all chapters and beats.
+
+A-Roll context from the same video:
+{{llm_answer_1}}
+
+## Transcript (cut text already removed; timecodes are original video time)
+The transcript shows ONLY the kept content of the rough cut. \`[Ns]\` gap markers
+between sentences mean a rough-cut deletion happened there — chapters and beats
+MUST end at or before each gap, and the next chapter/beat MUST start at or after
+the gap. Never span a gap with one chapter. Use the transcript's timecodes
+verbatim (do not invent new ones).
+
+{{transcript}}
+
+## Definitions:
+- Chapter: A bigger section made of multiple beats — a "phase" of the video (setup, conflict, resolution, conclusion).
+- Beat: A single moment where something changes (a decision, a setback, a discovery, a reaction).
+- Chapters should cover the entire transcript without gaps (other than the rough-cut deletion gaps described above)
+
+## Output rules:
+- "description": 2-3 sentences explaining what happens in this chapter/beat — be specific about the content, arguments, or story points covered
+- "purpose": 1-2 sentences explaining WHY this chapter/beat exists in the video — what editorial or narrative function does it serve for the viewer
+
+Use ONLY [HH:MM:SS] timecodes.
+
+Return JSON:
+\`\`\`json
+{
   "chapters": [
     {
       "id": 1,
@@ -140,29 +158,27 @@ Return ONE JSON object containing BOTH a_roll_appearances and chapters:
 }
 \`\`\``
 
-const mergedStage = {
-  name: 'Analyze A-Roll + Chapters & Beats',
-  type: 'video_question',
+const chaptersStage = {
+  name: 'Analyze Chapters & Beats',
+  type: 'transcript_question',
   target: 'main_video',
-  model: chaptersStage.model || 'gemini-3.1-pro-preview',  // pro for richer narrative analysis
-  system_instruction: combinedSystem,
-  prompt: combinedPrompt,
+  model: 'gemini-3.1-pro-preview',
+  system_instruction: chaptersSystem,
+  prompt: chaptersPrompt,
   params: { temperature: 1, thinking_level: 'MEDIUM' },
 }
 
-// New 3-stage layout
-const newStages = [
-  transcriptStage,                             // index 0 — Generate post-cut transcript
-  mergedStage,                                 // index 1 — combined analysis (was 2 + 3)
-  {                                            // index 2 — Split by chapter (was index 4)
-    ...splitStage,
-    actionParams: {
-      ...(splitStage.actionParams || {}),
-      chaptersStageIndex: 1,
-      aRollStageIndex: 1,
-    },
-  },
-]
+// ── Split by chapter stage ────────────────────────────────────────────
+const splitStage = {
+  name: 'Split by chapter',
+  type: 'programmatic',
+  target: 'text_only',
+  action: 'split_by_chapter',
+  actionParams: { chaptersStageIndex: 2, aRollStageIndex: 1 },
+  description: 'Prepare per-chapter data (transcript slices, beats, A-Roll context) for downstream stages',
+}
+
+const newStages = [transcriptStage, aRollStage, chaptersStage, splitStage]
 
 console.log(`plan_prep new layout: ${newStages.length} stages`)
 for (const [i, s] of newStages.entries()) {
@@ -172,7 +188,7 @@ for (const [i, s] of newStages.entries()) {
 await db.prepare('UPDATE broll_strategy_versions SET stages_json = ?, notes = ? WHERE id = ?')
   .run(
     JSON.stringify(newStages),
-    'Merged A-Roll + Chapters/Beats into one stage; dropped post-cut video export. Gemini now consumes raw video + trimmed transcript with original timecodes.',
+    'Dropped export_post_cut_video stage; A-Roll analyzes raw video, Chapters & Beats reads trimmed transcript with original timecodes + [Ns] gap markers.',
     ver.id,
   )
 
