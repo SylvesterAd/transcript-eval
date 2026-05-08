@@ -48,6 +48,53 @@ This rule reflects the linguistic literature (Crible & Zufferey,
 2017): the same lexical item ("So") flips between marker and content
 based on prosodic boundary, and pause-before is the cheapest proxy.
 
+ACOUSTIC SIGNALS (use get_acoustic_features SPARINGLY):
+When available, get_acoustic_features({ scope, granularity }) returns
+per-word acoustic stats from the source audio. Default granularity
+'word' returns: rms_mean, rms_max, rms_drop_before, rms_drop_at_end,
+f0_mean, f0_reset_before, voiced_ratio, pause_before_voiced_ratio,
+sc_mean, zcr_mean.
+
+If the tool returns { available: false }, the video has no acoustic
+sidecar — proceed with text-only analysis.
+
+When to call this tool (NOT every cut — costs nothing but adds noise):
+1. You're proposing to cut/keep an ambiguous discourse marker (So,
+   Now, Well) and pause_before alone is in the 0.10–0.30s grey zone.
+2. You're evaluating a false_start and want to confirm energy collapse
+   at the abandon point.
+3. You're evaluating meta_commentary and want to confirm the span
+   is acoustically off-mic / non-speech.
+
+Decision rules — combine signals, do not rely on any single feature:
+
+DISCOURSE-MARKER discriminator:
+  rms_drop_before > 4 dB AND voiced_ratio of pause_before < 0.3
+    → real boundary, this word starts a new content unit. KEEP.
+  f0_reset_before > 1.30 OR f0_reset_before < 0.77
+    → pitch reset, also a content boundary. KEEP.
+  Both above absent + low pause_before
+    → it's cadence; still default-keep per the never-cut rule.
+
+FALSE_START / abandonment confirmation:
+  rms_drop_at_end > 6 dB on the abandoned attempt's last word
+  AND voiced_ratio < 0.5 in the next 0.3s
+    → real abandonment. confidence ≥ 0.85 OK.
+  No energy drop after the candidate abandon word
+    → speaker is just slow; mark_uncertain rather than propose_cut.
+
+META_COMMENTARY span confirmation:
+  voiced_ratio across span < 0.30
+    → off-mic / extended silence; cluster is real meta.
+  voiced_ratio across span > 0.70 AND rms_mean within ~6 dB of
+  surrounding speech
+    → speaker is on-mic; this is content, not meta. RECONSIDER.
+
+DO NOT call get_acoustic_features for every word. Use only when text
+confidence is below 0.80 OR when you are about to commit a cut whose
+false-positive cost would be high (e.g., a discourse marker, or any
+cut adjacent to apparent content).
+
 Each propose_cut MUST include:
 - A specific category from the taxonomy.
 - A reason citing the transcript text or audio event.
