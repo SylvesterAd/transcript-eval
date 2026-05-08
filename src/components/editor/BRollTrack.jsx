@@ -222,10 +222,11 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
         }
         crossMode = null
         marker.style.display = 'none'
-        // In-variant drag: recompute neighbors against the cursor position so the dragged
-        // clip can tunnel past intermediate placements into a wider gap further along.
-        // Static drag-start neighbors clamp the cursor inside the original gap forever.
-        // Use inVariantStartX as the anchor (re-anchored after cross-bounce).
+        // In-variant drag: clamp at neighbor edges, jump over if cursor passes
+        // a neighbor's far edge. Direction-aware: dragging right → jump past
+        // neighbors whose far edge is behind the cursor; dragging left → same
+        // mirrored. Multi-jump supported: cursor can leapfrog several adjacent
+        // touching placements if dragged far enough.
         const dx = ev.clientX - inVariantStartX
         const dt = dx / zoom
         const cursorTime = origStart + dt
@@ -234,28 +235,43 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
           .filter(p => p.index !== placement.index)
           .filter(p => Number.isFinite(p.timelineStart) && Number.isFinite(p.timelineEnd))
           .sort((a, b) => a.timelineStart - b.timelineStart)
+
+        // Decide where the dragged placement should land based on cursor +
+        // direction. The "anchor point" the cursor maps to is the placement's
+        // start (so cursorTime is the desired newStart unless something blocks).
         let target = Math.max(0, cursorTime)
-        const inside = others.find(o => target >= o.timelineStart && target < o.timelineEnd)
-        if (inside) {
-          // Pick whichever side of the placement is nearer so the user can pull either way.
-          const distToStart = target - inside.timelineStart
-          const distToEnd = inside.timelineEnd - target
-          target = distToStart < distToEnd
-            ? Math.max(0, inside.timelineStart - duration - 0.05)
-            : inside.timelineEnd + 0.05
+        if (dt > 0) {
+          // Dragging right. Walk forward past any neighbors whose right edge
+          // is behind the cursor (jump over). Stop and clamp at the first
+          // neighbor whose right edge is still ahead of the cursor.
+          for (const o of others) {
+            if (o.timelineEnd <= origStart + 0.001) continue  // behind us
+            if (target + duration <= o.timelineStart + 0.001) break  // fits before
+            if (cursorTime > o.timelineEnd) {
+              target = Math.max(target, o.timelineEnd + 0.05)  // jump over
+              continue
+            }
+            target = Math.max(0, o.timelineStart - duration - 0.05)  // clamp before
+            break
+          }
+        } else if (dt < 0) {
+          // Dragging left. Walk backward past neighbors the cursor has cleared.
+          for (let i = others.length - 1; i >= 0; i--) {
+            const o = others[i]
+            if (o.timelineStart >= origEnd - 0.001) continue  // ahead of us
+            if (target >= o.timelineEnd - 0.001) break  // fits after
+            if (cursorTime < o.timelineStart) {
+              target = Math.min(target, o.timelineStart - duration - 0.05)  // jump over (place before)
+              if (target < 0) target = 0
+              continue
+            }
+            target = o.timelineEnd + 0.05  // clamp after
+            break
+          }
         }
-        const next = others.find(o => o.timelineStart >= target)
-        const prev = [...others].reverse().find(o => o.timelineEnd <= target)
-        const dynPrevEnd = prev ? prev.timelineEnd : 0
-        const dynNextStart = next ? next.timelineStart : Infinity
-        const minStart = dynPrevEnd
-        const maxStart = Number.isFinite(dynNextStart) ? dynNextStart - duration : Infinity
-        if (maxStart - minStart < 0) {
-          // No gap big enough at this cursor location; skip dispatch this frame.
-          return
-        }
-        const newStart = Math.max(minStart, Math.min(target, maxStart))
-        pendingArgs = [newStart, newStart + duration]
+
+        target = Math.max(0, target)
+        pendingArgs = [target, target + duration]
         if (!pendingFrame) pendingFrame = requestAnimationFrame(flushPosition)
         inVariantDispatched = true
       }
