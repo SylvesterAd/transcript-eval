@@ -78,14 +78,14 @@ async function claimNextRender() {
          LIMIT 1
          FOR UPDATE SKIP LOCKED
        )
-       RETURNING id, session_id, iteration, spec_snapshot_json, template`
+       RETURNING id, session_id, iteration, spec_snapshot_json, template, parent_render_id, human_feedback`
     )
     .get()
 }
 
 // Scene-agnostic loop: spec (single or multi-scene) is passed intact to runCritic,
 // which handles per-scene frame sampling + aggregation internally.
-async function runCriticLoop({ renderId, sessionId, spec }) {
+async function runCriticLoop({ renderId, sessionId, spec, parentRenderId = null, humanFeedback = null }) {
   let totalCost = 0
   const { html: initialHtml, cost } = await generateHtmlWithLintGate({ spec, renderId })
   totalCost += cost
@@ -140,7 +140,13 @@ export async function drainOnce() {
     try {
       emit({ sessionId: row.session_id, step: 'render_started', label: 'Rendering…', renderId: row.id, iteration: 1 })
       const spec = row.spec_snapshot_json
-      const r = await runCriticLoop({ renderId: row.id, sessionId: row.session_id, spec })
+      const r = await runCriticLoop({
+        renderId: row.id,
+        sessionId: row.session_id,
+        spec,
+        parentRenderId: row.parent_render_id ?? null,
+        humanFeedback: row.human_feedback ?? null,
+      })
       const sceneCount = Array.isArray(spec.scenes) && spec.scenes.length > 0 ? spec.scenes.length : 1
       await db.transaction(async (tx) => {
         await tx.prepare(
