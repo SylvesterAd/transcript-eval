@@ -5,6 +5,56 @@ import { parseTimecode } from './placement-match.js'
 const isInCut = (t, effectiveCuts) =>
   effectiveCuts.some(c => t >= c.start && t < c.end)
 
+function normalize(text) {
+  return String(text || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Fuzzy-match audio_anchor against raw words, skipping any word inside an
+ * effective cut. Returns the matched word's `start` (original time) or null.
+ *
+ * Mirrors the scoring loop from placement-match.js:matchPlacementsToTranscript
+ * but with NO time window (anchor may be hundreds of seconds away from the
+ * LLM-emitted timecode after our original→post-cut shift) and a cut-skip
+ * filter on each candidate.
+ */
+function fuzzyMatchAnchorOriginalTime(audioAnchor, words, effectiveCuts) {
+  const target = normalize(audioAnchor)
+  if (!target) return null
+  const targetTokens = target.split(' ')
+  const N = targetTokens.length
+
+  let bestScore = 0
+  let bestStart = null
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]
+    if (isInCut(w.start, effectiveCuts)) continue
+
+    const phraseWords = []
+    for (let j = i; j < Math.min(i + N + 2, words.length); j++) {
+      phraseWords.push(normalize(words[j].word))
+    }
+    const phrase = phraseWords.join(' ')
+
+    let score = 0
+    let phraseIdx = 0
+    for (const aw of targetTokens) {
+      const found = phrase.indexOf(aw, phraseIdx)
+      if (found >= 0) { score++; phraseIdx = found + aw.length }
+    }
+
+    if (score > bestScore) {
+      bestScore = score
+      bestStart = w.start
+    }
+  }
+
+  // Require at least one matched token (any score > 0). Earlier match wins
+  // on ties via the strict `>` above.
+  return bestStart
+}
+
 /**
  * Materialize a per-placement remap from anchor + effective cuts.
  *
@@ -36,9 +86,16 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
       }
     }
 
-    if (anchorOriginal == null && state === null) {
-      // No idx attached at all — leave for fuzzy fallback (Task 4).
-      state = 'orphaned'
+    if (anchorOriginal == null) {
+      const fuzzy = fuzzyMatchAnchorOriginalTime(p.audio_anchor, words, effectiveCuts)
+      if (fuzzy != null) {
+        anchorOriginal = fuzzy
+        state = 'fuzzy'
+      } else if (state === null) {
+        state = 'orphaned'
+      }
+      // If state was already 'in_cut' from idx resolution, keep it (the
+      // anchor text overlaps a cut region and fuzzy didn't recover it).
     }
 
     let startSec, endSec

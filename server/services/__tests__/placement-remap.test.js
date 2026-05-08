@@ -74,3 +74,60 @@ describe('materializePlacementRemap — anchor_word_idx happy path', () => {
     expect(out.get('p_b').anchor_state).toBe('in_cut')
   })
 })
+
+describe('materializePlacementRemap — fuzzy fallback', () => {
+  it('uses anchor text to find the word when anchor_word_idx is missing', () => {
+    // Words: "From a tax standpoint" at 8.0s; "There" filler also exists.
+    const words = W(
+      ['Filler', 11.0, 11.5],
+      ['From', 8.0, 8.3],
+      ['a', 8.3, 8.4],
+      ['tax', 8.4, 8.7],
+      ['standpoint', 8.7, 9.2],
+    )
+    const placements = [{
+      uuid: 'p_c',
+      start: '[00:00:08.00]', end: '[00:00:10.00]',
+      audio_anchor: 'From a tax standpoint',
+      // no anchor_word_idx
+    }]
+    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
+    const p = out.get('p_c')
+    expect(p.anchor_state).toBe('fuzzy')
+    expect(p.start_seconds).toBeCloseTo(8.0, 2)
+  })
+
+  it('skips fuzzy candidates that fall inside an effective cut', () => {
+    // "There" appears twice — once inside cut [10,15], once at 19.94.
+    const words = W(
+      ['There', 11.5, 11.7],   // in cut
+      ['Filler', 12.0, 12.5],
+      ['There', 19.94, 20.10], // valid candidate
+      ['is', 20.10, 20.18],
+    )
+    const placements = [{
+      uuid: 'p_d',
+      start: '[00:00:11.50]', end: '[00:00:13.50]',
+      audio_anchor: 'There is',
+      // no anchor_word_idx
+    }]
+    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
+    const p = out.get('p_d')
+    expect(p.anchor_state).toBe('fuzzy')
+    // post-cut: 19.94 - 5 = 14.94
+    expect(p.start_seconds).toBeCloseTo(14.94, 2)
+  })
+
+  it('marks orphaned when neither idx nor fuzzy match works', () => {
+    const words = W(['Hello', 1.0, 1.2], ['World', 1.2, 1.5])
+    const placements = [{
+      uuid: 'p_e',
+      start: '[00:00:50.00]', end: '[00:00:52.00]',
+      audio_anchor: 'completely unmatched phrase',
+    }]
+    const out = materializePlacementRemap(placements, [], words)
+    const p = out.get('p_e')
+    expect(p.anchor_state).toBe('orphaned')
+    expect(p.start_seconds).toBeCloseTo(50.0, 2) // falls back to LLM time
+  })
+})
