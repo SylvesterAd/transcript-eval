@@ -59,7 +59,7 @@ router.get('/sessions/:id', async (req, res) => {
   const renders = await db
     .prepare(
       `SELECT id, iteration, status, output_url, preview_url, duration_ms, cost_cents,
-              iteration_count, final_score, created_at
+              iteration_count, final_score, parent_render_id, human_feedback, created_at
        FROM graphics_renders WHERE session_id = ? ORDER BY iteration ASC`
     )
     .all(id);
