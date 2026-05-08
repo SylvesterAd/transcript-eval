@@ -114,11 +114,11 @@ A-Roll context from the same video:
 {{llm_answer_1}}
 
 ## Transcript (cut text already removed; timecodes are original video time)
-The transcript shows ONLY the kept content of the rough cut. \`[Ns]\` gap markers
-between sentences mean a rough-cut deletion happened there — chapters and beats
-MUST end at or before each gap, and the next chapter/beat MUST start at or after
-the gap. Never span a gap with one chapter. Use the transcript's timecodes
-verbatim (do not invent new ones).
+The transcript shows only the kept content of the rough cut. \`[Ns]\` gap markers
+between sentences indicate seconds that were removed in editing — usually filler
+removal, false starts, or dead air. They are NOT topic boundaries. A chapter
+can span multiple \`[Ns]\` gaps when the topic continues. Use the transcript's
+timecodes verbatim — do not invent new ones.
 
 {{transcript}}
 

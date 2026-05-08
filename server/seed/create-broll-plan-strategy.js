@@ -59,11 +59,11 @@ You are a video structure analyst. Watch the video and output ONLY valid JSON. N
 - A-Roll: When the camera setup, location, or framing changes significantly, it is a new A-Roll.
 
 ## Transcript (cut text already removed; timecodes are in the original video)
-The transcript below shows ONLY the kept content of the rough cut. \`[Ns]\` gap
-markers between sentences mean a rough-cut deletion happened there — chapters
-and beats must NOT span those gaps, and timestamps for chapters/beats must come
-from the transcript verbatim (do not emit timestamps from the video that have
-no corresponding transcript line):
+The transcript below shows only the kept content of the rough cut. \`[Ns]\` gap
+markers between sentences indicate seconds that were removed in editing — usually
+filler removal, false starts, or dead air. They are NOT topic boundaries; a
+chapter can span multiple \`[Ns]\` gaps when the topic continues. Use the
+transcript's timecodes verbatim — do not invent new ones.
 {{transcript}}
 
 IMPORTANT: For ALL timestamps, include BOTH seconds (integer) AND timecodes in [HH:MM:SS] format.
