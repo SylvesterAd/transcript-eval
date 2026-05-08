@@ -14,9 +14,12 @@ import { SYSTEM_PROMPT } from './system-prompt.js'
 // test (200K in / 50K out) is the hard ceiling on cost.
 const MAX_TOOL_CALLS = 100
 const DEFAULT_MAX_TOKENS = 4096
-// Extended thinking budget per turn. Anthropic API requires
-// max_tokens > budget_tokens; we add THINKING_HEADROOM for visible output.
-const DEFAULT_THINKING_BUDGET = 8000
+// Extended thinking budget per turn. 16K accommodates cross-chunk
+// reasoning in the final pass without truncating mid-thought; the model
+// rarely uses the full budget (~30-60% in practice). Anthropic API
+// requires max_tokens > budget_tokens; we add THINKING_HEADROOM for
+// visible output.
+const DEFAULT_THINKING_BUDGET = 16000
 const THINKING_HEADROOM = 4096
 
 let _client = null

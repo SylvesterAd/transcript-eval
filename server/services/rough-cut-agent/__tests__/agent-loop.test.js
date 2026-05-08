@@ -58,8 +58,8 @@ describe('runAgent', () => {
       thinking: true,
     })
     const apiArgs = messagesCreateMock.mock.calls[0][0]
-    expect(apiArgs.thinking).toEqual({ type: 'enabled', budget_tokens: 8000 })
-    expect(apiArgs.max_tokens).toBe(8000 + 4096)
+    expect(apiArgs.thinking).toEqual({ type: 'enabled', budget_tokens: 16000 })
+    expect(apiArgs.max_tokens).toBe(16000 + 4096)
     expect(r.thinkingEnabled).toBe(true)
     expect(r.thinkingLog[0].thinking).toContain('Let me plan')
     expect(r.thinkingLog[0].text).toContain('done')
