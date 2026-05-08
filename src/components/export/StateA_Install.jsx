@@ -93,10 +93,10 @@ function detectBrowser() {
 export default function StateA_Install({ variant, ping }) {
   const [browser] = useState(detectBrowser)
 
-  // Chrome Web Store URL placeholder — Ext.11 fills in the real listing
-  // URL. For Phase A we point at chrome://extensions with a "Load
-  // unpacked" hint copy because there's no published store listing yet.
-  const STORE_URL = 'https://chrome.google.com/webstore/'  // TODO Ext.11: replace with real listing
+  // Chrome Web Store listing for the Transcript Eval Export Helper extension.
+  // Listing ID is the public Web Store identifier; the path /detail/<slug>/<id>
+  // is canonical so the link survives slug renames.
+  const STORE_URL = 'https://chromewebstore.google.com/detail/transcript-eval-export-he/mmpjebkpbikpmkmdafooadlclakjcdom'
 
   if (!browser.isChromium) {
     return (
