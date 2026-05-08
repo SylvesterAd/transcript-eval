@@ -22,3 +22,4 @@ server/db.sqlite
 /query_*.js
 /final_*.js
 /check_*.js
+.venv/
