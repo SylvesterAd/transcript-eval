@@ -150,3 +150,49 @@ describe('materializePlacementRemap — fuzzy fallback', () => {
     expect(p.start_seconds).toBeCloseTo(14.0, 2) // 19.0 - 5
   })
 })
+
+describe('materializePlacementRemap — duration rules', () => {
+  it('bumps duration below 0.5s up to 0.5s', () => {
+    const words = W(['There', 5.0, 5.1])
+    const placements = [{
+      uuid: 'p_short',
+      start: '[00:00:05.00]', end: '[00:00:05.30]',
+      audio_anchor: 'There',
+      anchor_word_idx: 0,
+    }]
+    const out = materializePlacementRemap(placements, [], words)
+    const p = out.get('p_short')
+    expect(p.end_seconds - p.start_seconds).toBeCloseTo(0.5, 2)
+  })
+
+  it('trims earlier end when two placements overlap', () => {
+    const words = W(
+      ['A', 10.0, 10.2],
+      ['B', 10.8, 11.0],
+    )
+    const placements = [
+      { uuid: 'p_first',  start: '[00:00:10.00]', end: '[00:00:11.50]', audio_anchor: 'A', anchor_word_idx: 0 },
+      { uuid: 'p_second', start: '[00:00:10.80]', end: '[00:00:12.00]', audio_anchor: 'B', anchor_word_idx: 1 },
+    ]
+    const out = materializePlacementRemap(placements, [], words)
+    const a = out.get('p_first')
+    const b = out.get('p_second')
+    expect(a.end_seconds).toBeCloseTo(10.8, 2)
+    expect(b.start_seconds).toBeCloseTo(10.8, 2)
+  })
+
+  it('marks overlap_squeezed when trim forces duration below 0.5s', () => {
+    const words = W(
+      ['A', 10.0, 10.2],
+      ['B', 10.3, 10.5],
+    )
+    const placements = [
+      { uuid: 'p_first',  start: '[00:00:10.00]', end: '[00:00:11.00]', audio_anchor: 'A', anchor_word_idx: 0 },
+      { uuid: 'p_second', start: '[00:00:10.30]', end: '[00:00:11.30]', audio_anchor: 'B', anchor_word_idx: 1 },
+    ]
+    const out = materializePlacementRemap(placements, [], words)
+    const a = out.get('p_first')
+    expect(a.anchor_state).toBe('overlap_squeezed')
+    expect(a.end_seconds).toBeCloseTo(10.3, 2)  // trimmed, not re-pushed
+  })
+})

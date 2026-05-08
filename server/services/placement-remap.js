@@ -67,7 +67,10 @@ function fuzzyMatchAnchorOriginalTime(audioAnchor, words, effectiveCuts) {
  * `anchor_state`: 'idx' | 'fuzzy' | 'in_cut' | 'orphaned' | 'overlap_squeezed'.
  */
 export function materializePlacementRemap(placements, effectiveCuts, words) {
-  const out = new Map()
+  const MIN_DURATION = 0.5
+
+  // Pass 1 — anchor resolve + initial post-cut times + 0.5s minimum.
+  const resolved = []
   for (const p of placements) {
     if (!p.uuid) continue
 
@@ -76,14 +79,9 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
 
     if (typeof p.anchor_word_idx === 'number' && p.anchor_word_idx >= 0) {
       const w = words[p.anchor_word_idx]
-      if (!w) {
-        state = 'orphaned'
-      } else if (isInCut(w.start, effectiveCuts)) {
-        state = 'in_cut'
-      } else {
-        anchorOriginal = w.start
-        state = 'idx'
-      }
+      if (!w) state = 'orphaned'
+      else if (isInCut(w.start, effectiveCuts)) state = 'in_cut'
+      else { anchorOriginal = w.start; state = 'idx' }
     }
 
     if (anchorOriginal == null) {
@@ -94,22 +92,38 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
       } else if (state === null) {
         state = 'orphaned'
       }
-      // If state was already 'in_cut' from idx resolution, keep it (the
-      // anchor text overlaps a cut region and fuzzy didn't recover it).
     }
 
     let startSec, endSec
     if (anchorOriginal != null) {
       startSec = postCutTime(anchorOriginal, effectiveCuts)
       const origDur = parseTimecode(p.end) - parseTimecode(p.start)
-      endSec = startSec + (origDur > 0 ? origDur : 0.5)
+      endSec = startSec + Math.max(MIN_DURATION, origDur > 0 ? origDur : MIN_DURATION)
     } else {
-      // Fall back to LLM-emitted post-cut times (already shifted by persist).
       startSec = parseTimecode(p.start)
       endSec = parseTimecode(p.end)
+      if (endSec - startSec < MIN_DURATION) endSec = startSec + MIN_DURATION
     }
 
-    out.set(p.uuid, { start_seconds: startSec, end_seconds: endSec, anchor_state: state })
+    resolved.push({ uuid: p.uuid, startSec, endSec, state })
+  }
+
+  // Pass 2 — sort by start, trim overlaps, flag squeezed.
+  resolved.sort((a, b) => a.startSec - b.startSec)
+  for (let i = 0; i < resolved.length - 1; i++) {
+    const cur = resolved[i]
+    const nxt = resolved[i + 1]
+    if (cur.endSec > nxt.startSec) {
+      cur.endSec = nxt.startSec
+      if (cur.endSec - cur.startSec < MIN_DURATION) {
+        cur.state = 'overlap_squeezed'
+      }
+    }
+  }
+
+  const out = new Map()
+  for (const r of resolved) {
+    out.set(r.uuid, { start_seconds: r.startSec, end_seconds: r.endSec, anchor_state: r.state })
   }
   return out
 }
