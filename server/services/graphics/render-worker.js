@@ -83,6 +83,8 @@ async function claimNextRender() {
     .get()
 }
 
+// Scene-agnostic loop: spec (single or multi-scene) is passed intact to runCritic,
+// which handles per-scene frame sampling + aggregation internally.
 async function runCriticLoop({ renderId, sessionId, spec }) {
   let totalCost = 0
   const { html: initialHtml, cost } = await generateHtmlWithLintGate({ spec, renderId })

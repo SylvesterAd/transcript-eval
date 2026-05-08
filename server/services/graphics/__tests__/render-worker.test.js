@@ -103,10 +103,6 @@ vi.mock('../critic/critic-runner.js', () => ({
   }),
 }));
 
-vi.mock('../scene-concat.js', () => ({
-  concatScenes: vi.fn().mockResolvedValue({ durationMs: 50, outputPath: '/tmp/final.mp4' }),
-}));
-
 beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = 'sk-test';
 });
