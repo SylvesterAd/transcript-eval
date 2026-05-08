@@ -1143,7 +1143,7 @@ export default function EditorView() {
               >
                 Continue
               </button>
-            ) : activeTab === 'brolls' ? null : (
+            ) : (
               <button
                 onClick={() => window.open(`/editor/${id}/export`, '_blank')}
                 className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
