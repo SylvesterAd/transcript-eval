@@ -693,9 +693,10 @@ export default function EditorView() {
 
   // Effective cuts (cuts minus exclusions) for b-roll post-cut playhead
   // translation. Computed once per relevant change so the 60fps rAF tick
-  // reads it without recomputing.
+  // reads it without recomputing. Annotation-source cuts are visual
+  // suggestions only — same filter as Timeline.userCuts + BRollPreview.
   const brollEffectiveCuts = useMemo(
-    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts, state.cutExclusions) : null,
+    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions) : null,
     [state.activeTab, state.cuts, state.cutExclusions]
   )
   stateRefs.current.brollEffectiveCuts = brollEffectiveCuts

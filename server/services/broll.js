@@ -6134,7 +6134,12 @@ export async function getBRollEditorData(planPipelineId) {
     ).get(planPipelineId)
     if (groupRow?.editor_state_json) {
       const groupState = JSON.parse(groupRow.editor_state_json)
-      const cuts = groupState.cuts || []
+      // Annotation-source cuts are visual suggestions only — they shouldn't
+      // collapse the b-roll editor's timeline either. Same filter as
+      // TranscriptEditor.isItemCut + Timeline.userCuts: only user-applied
+      // cuts (Backspace adds source:'transcript') drive the post-cut layout
+      // and placement remap on the b-roll tab.
+      const cuts = (groupState.cuts || []).filter(c => c.source !== 'annotation')
       const exclusions = groupState.cutExclusions || []
       const currentHash = cutsHash(cuts, exclusions)
 
