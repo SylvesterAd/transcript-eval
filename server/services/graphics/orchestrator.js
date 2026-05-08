@@ -43,6 +43,22 @@ export async function runChatTurn({ sessionId, userMessage }) {
   if (!session) throw new Error(`session ${sessionId} not found`);
 
   if (session.status === 'iterating') {
+    const countRow = await db.prepare(
+      `SELECT COUNT(*)::int AS c FROM graphics_renders WHERE session_id = ?`
+    ).get(sessionId);
+    if (countRow.c >= MAX_ITERATIONS_PER_SESSION) {
+      const refusal = `Iteration limit reached for this session (${MAX_ITERATIONS_PER_SESSION}). Start a new session for further changes.`;
+      await db.transaction(async (tx) => {
+        await tx.prepare(
+          `INSERT INTO graphics_messages (session_id, role, content) VALUES (?, ?, ?)`
+        ).run(sessionId, 'user', userMessage);
+        await tx.prepare(
+          `INSERT INTO graphics_messages (session_id, role, content) VALUES (?, ?, ?)`
+        ).run(sessionId, 'assistant', refusal);
+      });
+      return { assistantText: refusal, specUpdate: {}, newSpec: session.spec_json || {}, renderId: null, cost: 0 };
+    }
+
     // Find latest complete parent
     const parent = await db.prepare(
       `SELECT id, iteration, template, spec_snapshot_json, final_html_text

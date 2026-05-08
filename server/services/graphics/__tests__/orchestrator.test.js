@@ -175,4 +175,43 @@ describe('orchestrator — iterating mode', () => {
     expect(messageInserts[1].args).toContain('assistant')    // role
     expect(messageInserts[1].args).toContain('Refining…')    // content
   })
+
+  it('refuses to enqueue a render when iteration cap is hit', async () => {
+    dbState.loadSessionResult = { id: 1, spec_json: {}, status: 'iterating' }
+    dbState.parentResult = {
+      id: 7, iteration: 9, template: 'lower-third',
+      spec_snapshot_json: { template: 'lower-third', mainText: 'A', subText: 'B', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      final_html_text: '<!doctype html><div data-composition-id="main">P</div>',
+    }
+    dbState.iterationCountResult = { c: 10 }  // already at cap
+
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+
+    const { runChatTurn } = await import('../orchestrator.js')
+    const result = await runChatTurn({ sessionId: 1, userMessage: 'one more please' })
+
+    // No render row inserted
+    const insertRender = dbState.txCalls.find(
+      (c) => /INSERT INTO graphics_renders/i.test(c.sql)
+    )
+    expect(insertRender).toBeUndefined()
+    // No session status flip
+    const sessionUpdate = dbState.txCalls.find(
+      (c) => /UPDATE graphics_sessions/i.test(c.sql) && /status\s*=\s*'rendering'/i.test(c.sql)
+    )
+    expect(sessionUpdate).toBeUndefined()
+    // The user message + a refusal assistant message ARE inserted
+    const userMsgInsert = dbState.txCalls.find(
+      (c) => /INSERT INTO graphics_messages/i.test(c.sql) && c.args.includes('user')
+    )
+    const refusalInsert = dbState.txCalls.find(
+      (c) => /INSERT INTO graphics_messages/i.test(c.sql) && c.args.includes('assistant')
+    )
+    expect(userMsgInsert).toBeDefined()
+    expect(refusalInsert).toBeDefined()
+    // Returned shape
+    expect(result.renderId).toBeNull()
+    expect(result.assistantText).toMatch(/iteration limit/i)
+  })
 })
