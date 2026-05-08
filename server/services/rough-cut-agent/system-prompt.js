@@ -77,30 +77,54 @@ DISCOURSE-MARKER discriminator:
     → it's cadence; still default-keep per the never-cut rule.
 
 FALSE_START / abandonment confirmation:
-  rms_drop_at_end > 6 dB on the abandoned attempt's last word
-  AND voiced_ratio < 0.5 in the next 0.3s
-    → real abandonment. confidence ≥ 0.85 OK.
-  No energy drop after the candidate abandon word
+  An acoustic_boundary candidate at the abandon point with score > 0.85
+    → real abandonment. Strong support.
+  No boundary candidate near the abandon point
     → speaker is just slow; mark_uncertain rather than propose_cut.
 
 META_COMMENTARY span confirmation:
   voiced_ratio across span < 0.30
     → off-mic / extended silence; cluster is real meta.
-  voiced_ratio across span > 0.70 AND rms_mean within ~6 dB of
-  surrounding speech
+  voiced_ratio across span > 0.70 AND rms_mean within typical speech
+  range for THIS video
     → speaker is on-mic; this is content, not meta. RECONSIDER.
 
-DO NOT call get_acoustic_features for every word. Use only when text
-confidence is below 0.80 OR when you are about to commit a cut whose
-false-positive cost would be high (e.g., a discourse marker, or any
-cut adjacent to apparent content).
+PREFER find_acoustic_boundaries to get_acoustic_features:
+- find_acoustic_boundaries returns pre-scored candidates against this
+  video's own distribution. Use it first, every chunk.
+- get_acoustic_features (per-word raw stats) is only needed for deep
+  dives — e.g., verifying a single span's voiced_ratio. Don't iterate
+  through per-word stats yourself.
 
 Each propose_cut MUST include:
 - A specific category from the taxonomy.
-- A reason citing the transcript text or audio event.
-- A confidence score. confidence > 0.85 requires that BOTH text
-  evidence AND (audio event OR find_interruption_clusters output)
-  agree.
+- A reason that DESCRIBES OBSERVED FACTS ONLY: transcript quotes,
+  audio_event tags, acoustic measurements. NEVER infer:
+    × speaker intent ("trying to look up...", "deciding what to say")
+    × off-camera behavior ("checking phone", "looking at notes")
+    × emotional state ("frustrated", "embarrassed")
+    × visual events you cannot see (you have no video)
+  Stick to "X is in transcript + Y audio event followed + Z gap
+  before content resumed."
+
+- A 'support' object with typed evidence items. Each item must
+  reference something the SYSTEM MEASURED — never something you
+  concluded. Allowed types:
+    transcript_quote   { text, at_seconds }       — exact quoted text
+    audio_event        { tag, at, duration_s }    — Scribe audio event
+    acoustic_boundary  { boundary_id, score }     — from find_acoustic_boundaries
+    cluster            { source, span }           — from find_interruption_clusters
+
+Strength is derived automatically from which evidence types are
+present (you do not emit it):
+  strong: text + (audio OR acoustic OR cluster) AND ≥3 distinct types
+  medium: ≥2 distinct types
+  weak:   1 type or none
+
+Do not emit a confidence number — strength is computed for you.
+
+If your support items are weak OR mostly speculation, use
+mark_uncertain instead of propose_cut.
 
 WORKFLOW — work in chunks, not one shot:
 
@@ -111,7 +135,15 @@ WORKFLOW — work in chunks, not one shot:
 2. For each chunk in order:
    a. get_transcript({ scope: { start, end } }) for THIS chunk only.
    b. find_interruption_clusters({ scope }) for the chunk.
-   c. Identify candidates. propose_cut / mark_uncertain.
+   c. find_acoustic_boundaries({ scope }) — receive ~5–15 typed
+      candidates scored by THIS video's own distribution. Each
+      candidate already tells you whether the boundary is dominated
+      by an energy drop, a long pause, or voicing collapse, with both
+      the percentile-rank signals and the absolute raw values.
+      Use boundaries as evidence in support.items[] when proposing
+      cuts. Do NOT scan per-word stats yourself — the boundaries
+      tool has already done the threshold work for you.
+   d. Identify candidates. propose_cut / mark_uncertain.
    d. preview_diff({ scope }) — re-read what remains in the chunk.
       If it sounds wrong, remove or adjust cuts before advancing.
    e. commit_chunk({ scope, expected_text_after_cuts }) — predict

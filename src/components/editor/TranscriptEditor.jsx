@@ -891,16 +891,33 @@ export default function TranscriptEditor() {
                   {ann.reason && (
                     <p className="text-[10px] text-on-surface-variant/70 mt-0.5 leading-tight">{ann.reason}</p>
                   )}
-                  {typeof ann.confidence === 'number' && (
+                  {ann.strength && (
+                    <p className="text-[9px] text-on-surface-variant/50 mt-0.5">
+                      support: <span className={
+                        ann.strength === 'strong' ? 'text-emerald-400 font-semibold' :
+                        ann.strength === 'medium' ? 'text-amber-400 font-semibold' :
+                        'text-zinc-500 font-semibold'
+                      }>{ann.strength}</span>
+                    </p>
+                  )}
+                  {!ann.strength && typeof ann.confidence === 'number' && (
                     <p className="text-[9px] text-on-surface-variant/50 mt-0.5">
                       confidence: {(ann.confidence * 100).toFixed(0)}%
                     </p>
                   )}
                   {Array.isArray(ann.evidence) && ann.evidence.length > 0 && (
                     <ul className="text-[9px] text-on-surface-variant/50 mt-0.5 list-disc list-inside space-y-0.5">
-                      {ann.evidence.slice(0, 3).map((e, j) => (
-                        <li key={j} className="truncate">{e}</li>
-                      ))}
+                      {ann.evidence.slice(0, 3).map((e, j) => {
+                        // Typed evidence object → render structured. String → render as-is (legacy).
+                        if (typeof e === 'string') return <li key={j} className="truncate">{e}</li>
+                        if (!e || typeof e !== 'object') return null
+                        const text = e.type === 'transcript_quote' ? `"${e.text}"`
+                          : e.type === 'audio_event' ? `${e.tag} (${e.duration_s ?? '?'}s)`
+                          : e.type === 'acoustic_boundary' ? `acoustic boundary score=${e.score?.toFixed?.(2) ?? '?'}`
+                          : e.type === 'cluster' ? `cluster ${e.span?.[0]?.toFixed?.(1) ?? '?'}–${e.span?.[1]?.toFixed?.(1) ?? '?'}s`
+                          : JSON.stringify(e)
+                        return <li key={j} className="truncate"><span className="text-on-surface-variant/40 mr-1">{e.type}:</span>{text}</li>
+                      })}
                     </ul>
                   )}
                 </div>

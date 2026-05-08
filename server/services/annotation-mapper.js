@@ -269,8 +269,13 @@ export async function buildAnnotationsFromRun(experimentRunId, wordTimestamps, a
           type: 'deletion',
           category: c.category || 'meta_commentary',
           reason: c.reason || '',
-          confidence: typeof c.confidence === 'number' ? c.confidence : null,
+          // New typed shape: strength + evidence items[]. Legacy back-compat:
+          // if no strength but legacy confidence/evidence are present, the
+          // agent state already migrated them, so pass through what's there.
+          strength: c.strength || null,
           evidence: Array.isArray(c.evidence) ? c.evidence : [],
+          // Keep legacy confidence for pre-existing rows that have it.
+          confidence: typeof c.confidence === 'number' ? c.confidence : null,
           text: '',
           timecode: '',
           startTime: c.start,

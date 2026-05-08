@@ -75,7 +75,7 @@ export const TOOL_SCHEMAS = [
   },
   {
     name: 'propose_cut',
-    description: 'Propose a cut. Each cut requires category, reason, confidence, evidence.',
+    description: 'Propose a cut. The reason MUST describe observed facts only — transcript quotes, audio_event tags, acoustic measurements. Never infer speaker intent ("trying to look up..."), off-camera behavior ("checking phone"), or emotional state ("frustrated"). Stick to "X is in transcript + Y audio event followed + Z gap before content resumed."',
     input_schema: {
       type: 'object',
       properties: {
@@ -85,11 +85,36 @@ export const TOOL_SCHEMAS = [
           'meta_commentary', 'false_start', 'filler_word', 'retake',
           'silence', 'tangent', 'discourse_marker', 'custom',
         ] },
-        reason: { type: 'string' },
-        confidence: { type: 'number', minimum: 0, maximum: 1 },
-        evidence: { type: 'array', items: { type: 'string' } },
+        reason: { type: 'string', description: 'Observed pattern only. Cite transcript / audio events / acoustic measurements. No intent or visual inference.' },
+        support: {
+          type: 'object',
+          description: 'Typed evidence. Strength is derived deterministically from which item types are present.',
+          properties: {
+            items: {
+              type: 'array',
+              description: 'Each item must reference something the system measured.',
+              items: {
+                type: 'object',
+                properties: {
+                  type: { type: 'string', enum: ['transcript_quote', 'audio_event', 'acoustic_boundary', 'cluster'] },
+                  text: { type: 'string', description: 'For transcript_quote' },
+                  at_seconds: { type: 'number' },
+                  tag: { type: 'string', description: 'For audio_event, e.g. "[keyboard clacking]"' },
+                  at: { type: 'number' },
+                  duration_s: { type: 'number' },
+                  boundary_id: { type: 'string', description: 'For acoustic_boundary' },
+                  score: { type: 'number' },
+                  source: { type: 'string', description: 'For cluster, e.g. "find_interruption_clusters"' },
+                  span: { type: 'array', items: { type: 'number' } },
+                },
+                required: ['type'],
+              },
+            },
+          },
+          required: ['items'],
+        },
       },
-      required: ['start', 'end', 'category', 'reason', 'confidence', 'evidence'],
+      required: ['start', 'end', 'category', 'reason', 'support'],
     },
   },
   {

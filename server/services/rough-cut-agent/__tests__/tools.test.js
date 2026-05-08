@@ -93,17 +93,64 @@ describe('dispatchTool', () => {
     expect(r.clusters[0].suggested_category).toBe('meta_commentary')
   })
 
-  it('propose_cut appends to state.cuts and returns id', async () => {
+  it('propose_cut appends to state.cuts and returns id (typed evidence)', async () => {
     const state = makeState()
     const r = await dispatchTool('propose_cut', {
       start: 3, end: 3.4,
       category: 'filler_word',
-      reason: '"Um" with adjacent silence',
-      confidence: 0.9,
-      evidence: ['text: "Um,"']
+      reason: '"Um," followed by 0.6s pause then content resumes',
+      support: {
+        items: [
+          { type: 'transcript_quote', text: 'Um,', at_seconds: 3.0 },
+          { type: 'acoustic_boundary', boundary_id: 'b1', score: 0.92 },
+        ]
+      }
     }, state)
     expect(r.cut_id).toMatch(/^cut_/)
     expect(state.cuts.length).toBe(1)
+    expect(state.cuts[0].strength).toBe('medium')   // text + acoustic = medium
+  })
+
+  it('propose_cut derives strength=strong from text+audio_event+acoustic', async () => {
+    const state = makeState()
+    await dispatchTool('propose_cut', {
+      start: 7 * 60 + 8.72, end: 7 * 60 + 19.6,
+      category: 'meta_commentary',
+      reason: 'speaker says "gotta pause"; [keyboard clacking] follows for 2.6s; cluster span detected',
+      support: {
+        items: [
+          { type: 'transcript_quote', text: 'gotta pause for a second', at_seconds: 425.5 },
+          { type: 'audio_event', tag: '[keyboard clacking]', at: 432.14, duration_s: 2.6 },
+          { type: 'acoustic_boundary', boundary_id: 'b1', score: 0.95 },
+          { type: 'cluster', source: 'find_interruption_clusters', span: [428.72, 439.60] },
+        ],
+      },
+    }, state)
+    expect(state.cuts[0].strength).toBe('strong')
+  })
+
+  it('propose_cut strength=weak when only text or only acoustic', async () => {
+    const state = makeState()
+    await dispatchTool('propose_cut', {
+      start: 1, end: 2, category: 'filler_word', reason: 'just a quote',
+      support: { items: [{ type: 'transcript_quote', text: 'hi', at_seconds: 1.5 }] },
+    }, state)
+    expect(state.cuts[0].strength).toBe('weak')
+  })
+
+  it('propose_cut accepts legacy confidence + evidence shape (back-compat)', async () => {
+    const state = makeState()
+    const r = await dispatchTool('propose_cut', {
+      start: 3, end: 3.4,
+      category: 'filler_word',
+      reason: '"Um" with silence',
+      confidence: 0.9,
+      evidence: ['text: "Um,"'],
+    }, state)
+    expect(r.cut_id).toMatch(/^cut_/)
+    // Legacy strings get migrated into items array, strength derived from confidence.
+    expect(state.cuts[0].strength).toBeTypeOf('string')
+    expect(['weak', 'medium', 'strong']).toContain(state.cuts[0].strength)
   })
 
   it('remove_cut removes by id', async () => {
