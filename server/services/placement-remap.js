@@ -2,11 +2,6 @@ import crypto from 'node:crypto'
 import { postCutTime } from './time-translation.js'
 import { parseTimecode } from './placement-match.js'
 
-/**
- * Stable hash of (cuts, exclusions). Reorderings produce the same hash;
- * any change to start/end times or exclusion content produces a different
- * hash. Cut ids are ignored — only timing matters for the remap result.
- */
 const isInCut = (t, effectiveCuts) =>
   effectiveCuts.some(c => t >= c.start && t < c.end)
 
@@ -62,6 +57,11 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
   return out
 }
 
+/**
+ * Stable hash of (cuts, exclusions). Reorderings produce the same hash;
+ * any change to start/end times or exclusion content produces a different
+ * hash. Cut ids are ignored — only timing matters for the remap result.
+ */
 export function cutsHash(cuts, exclusions) {
   const norm = (arr) => (arr || []).slice()
     .sort((a, b) => (a.start - b.start) || (a.end - b.end))
