@@ -6039,10 +6039,17 @@ export async function getBRollEditorData(planPipelineId) {
             lastRemappedCutsHash: currentHash,
           }
           const saveResult = await saveBrollEditorState(planPipelineId, nextState, loaded.version)
-          if (saveResult.status !== 'conflict') {
-            // Inject for the merge step below — read fresh state to avoid races.
-            const refreshed = await loadBrollEditorState(planPipelineId)
-            loaded = refreshed
+          if (saveResult.status === 'conflict') {
+            // Race-loser: another concurrent fetch beat us. Use the winner's state
+            // so the merge step still sees up-to-date remappedPositions for this
+            // request — otherwise this one response shows pre-remap placement times.
+            loaded = { state: saveResult.state, version: saveResult.version }
+          } else {
+            // Save committed our nextState at the bumped version. Use it directly
+            // rather than re-reading (saves one DB roundtrip with no consistency
+            // benefit; any external write between commit and re-read would be newer
+            // than ours regardless).
+            loaded = { state: nextState, version: saveResult.version }
           }
         } else {
           // Words missing — skip the remap, do NOT update hash so a later retry recovers.
