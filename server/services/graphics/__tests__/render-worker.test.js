@@ -571,6 +571,99 @@ describe('renderWorker.drainOnce — refine-from-parent path', () => {
     expect(refineCall.feedback).toBe('make the title bigger')
     expect(refineCall.spec.template).toBe('lower-third')
   })
+
+  it('marks render failed when parent has no final_html_text', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 301, session_id: 's-301', iteration: 2, template: 'lower-third',
+        parent_render_id: 201,
+        human_feedback: 'change something',
+        spec_snapshot_json: { template: 'lower-third', mainText: 'X', subText: 'Y', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      })
+      .mockResolvedValueOnce({ final_html_text: null })
+      .mockResolvedValue(null)
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    specToHtml.mockClear(); refineHtml.mockClear()
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+    expect(result.processed).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].error).toMatch(/missing final_html_text/i)
+    expect(refineHtml).not.toHaveBeenCalled()
+  })
+
+  it('marks render failed when human_feedback is missing despite parent_render_id', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 302, session_id: 's-302', iteration: 2, template: 'lower-third',
+        parent_render_id: 202,
+        human_feedback: null,
+        spec_snapshot_json: { template: 'lower-third', mainText: 'X', subText: 'Y', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      })
+      .mockResolvedValueOnce({ final_html_text: '<!doctype html><div data-composition-id="main">P</div>' })
+      .mockResolvedValue(null)
+
+    const { refineHtml } = await import('../html-generator.js')
+    refineHtml.mockClear()
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+    expect(result.processed).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].error).toMatch(/no human_feedback/i)
+    expect(refineHtml).not.toHaveBeenCalled()
+  })
+
+  it('marks render failed when refined HTML fails lint (no retry on this path)', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 303, session_id: 's-303', iteration: 2, template: 'lower-third',
+        parent_render_id: 203,
+        human_feedback: 'something',
+        spec_snapshot_json: { template: 'lower-third', mainText: 'X', subText: 'Y', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      })
+      .mockResolvedValueOnce({
+        final_html_text: '<!doctype html><div data-composition-id="main">P</div>',
+      })
+      .mockResolvedValue(null)
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    const { runLint } = await import('../lint-runner.js')
+    const { renderHtml } = await import('../render-runner.js')
+    specToHtml.mockClear()
+    refineHtml.mockClear()
+    refineHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div data-composition-id="main">USES_MATH_RANDOM</div></body></html>',
+      cost: 1, tokens: { in: 50, out: 50 },
+    })
+    runLint.mockReset()
+    runLint.mockResolvedValue({
+      errorCount: 1, warningCount: 0, infoCount: 0,
+      findings: [{ severity: 'error', rule: 'determinism', message: 'Math.random' }],
+    })
+    renderHtml.mockClear()
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+    expect(result.processed).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].error).toMatch(/refined HTML failed lint/i)
+    // refine was called once; lint was called ONCE (no retry); renderHtml never reached
+    expect(refineHtml).toHaveBeenCalledTimes(1)
+    expect(runLint).toHaveBeenCalledTimes(1)
+    expect(renderHtml).not.toHaveBeenCalled()
+  })
 })
 
 describe('renderWorker.drainOnce — final_html_text persistence', () => {
