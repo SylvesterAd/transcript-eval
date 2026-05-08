@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const TRANSCRIPT = readFileSync(join(__dirname, '__fixtures__', 'run-166-transcript.txt'), 'utf-8')
 const WORDS = JSON.parse(readFileSync(join(__dirname, '__fixtures__', 'run-166-words.json'), 'utf-8'))
+const ACOUSTIC = JSON.parse(readFileSync(join(__dirname, '__fixtures__', 'run-166-acoustic.json'), 'utf-8'))
 
 const DISCOURSE_MARKER_RE = /^(So|Now|Well|Frankly|Of course|Right|And|But)$/
 
@@ -96,5 +97,64 @@ describe(`regression: run 166 — ${liveMode ? 'LIVE' : 'stubbed'}`, () => {
     })
     expect(r.totalTokens.in).toBeLessThan(200_000)
     expect(r.totalTokens.out).toBeLessThan(50_000)
+  })
+})
+
+// Acoustic-feature aggregation regression. Runs deterministically on the
+// real librosa output we backfilled to video 509, so failures here mean a
+// real change in either librosa output, the aggregator, or feature schema
+// — not LLM nondeterminism. Independent of liveMode.
+describe('regression: run 166 acoustic features (deterministic)', () => {
+  it('content-initiating "All" at t=21s shows a real boundary signal', async () => {
+    const { createState } = await import('../state.js')
+    const { dispatchTool } = await import('../tools.js')
+    const state = createState({
+      assembledTranscript: TRANSCRIPT,
+      wordTimestamps: WORDS,
+      acousticFeatures: ACOUSTIC,
+    })
+    const r = await dispatchTool('get_acoustic_features', { scope: { start: 18, end: 25 } }, state)
+    expect(r.available).toBe(true)
+    // The "All" token starts at 21.0 right after a 4s silence gap. The
+    // discourse-marker disambiguator wants to KEEP this — the test verifies
+    // the boundary signals would actually fire in the agent's decision.
+    const allWord = r.words.find(w => w.start === 21 && /^All/.test(w.word))
+    expect(allWord).toBeDefined()
+    // Pause before should be near-silent (< 0.4 voiced).
+    expect(allWord.pause_before_voiced_ratio).toBeLessThan(0.4)
+    // Energy in this word should be at speaking levels (loud relative to silence).
+    expect(allWord.rms_mean).toBeGreaterThan(-50)
+  })
+
+  it('keyboard-clacking cluster span shows low voiced_ratio', async () => {
+    const { createState } = await import('../state.js')
+    const { dispatchTool } = await import('../tools.js')
+    const state = createState({
+      assembledTranscript: TRANSCRIPT,
+      wordTimestamps: WORDS,
+      acousticFeatures: ACOUSTIC,
+    })
+    const r = await dispatchTool('get_acoustic_features', {
+      scope: { start: 7 * 60 + 8.72, end: 7 * 60 + 19.6 },
+      granularity: 'frame',
+    }, state)
+    expect(r.available).toBe(true)
+    expect(r.frames.length).toBeGreaterThan(50)
+    // The cluster contains [keyboard clacking] + a 2.5s recovery gap.
+    // Frames within it should average low rms (mostly quiet / non-speech).
+    const meanRms = r.frames.reduce((a, f) => a + f[1], 0) / r.frames.length
+    expect(meanRms).toBeLessThan(-40)  // well below normal speaking levels
+  })
+
+  it('returns available=false when acousticFeatures is null', async () => {
+    const { createState } = await import('../state.js')
+    const { dispatchTool } = await import('../tools.js')
+    const state = createState({
+      assembledTranscript: TRANSCRIPT,
+      wordTimestamps: WORDS,
+      // no acousticFeatures
+    })
+    const r = await dispatchTool('get_acoustic_features', {}, state)
+    expect(r.available).toBe(false)
   })
 })
