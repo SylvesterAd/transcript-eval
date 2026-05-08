@@ -23,7 +23,7 @@ const UNIFIED_STEPS = [
 const CONFIG_STEPS = UNIFIED_STEPS.slice(1, 6)
 const UNIFIED_OFFSET = 1
 
-const DEFAULT_STATE = {
+export const DEFAULT_STATE = {
   libraries: [],
   freepikOptIn: true,
   audience: {
@@ -34,8 +34,8 @@ const DEFAULT_STATE = {
     region: '',
     notes: '',
   },
-  pathId: 'strategy-only',
-  autoRoughCut: false,
+  pathId: 'hands-off',
+  autoRoughCut: true,
 }
 
 function reducer(state, action) {

@@ -1,5 +1,6 @@
 import { useContext, useState, useCallback } from 'react'
 import { EditorContext } from './EditorView.jsx'
+import { splitAtPlayhead } from './sharedCutLogic.js'
 import { BRollContext } from './useBRollEditorState.js'
 import { apiPost } from '../../hooks/useApi.js'
 import { supabase } from '../../lib/supabaseClient.js'
@@ -59,7 +60,7 @@ export default function PlaybackControls() {
   }
 
   const handleSplit = () => {
-    if (state.activeTab === 'roughcut') {
+    if (state.activeTab === 'roughcut' || state.activeTab === 'brolls') {
       // Razor split at the playhead position.
       // If inside an existing cut, split that cut into two at the playhead,
       // creating a visible seam the user can drag to resize either half.
@@ -75,10 +76,15 @@ export default function PlaybackControls() {
         dispatch({ type: 'ADD_EXCLUSION', payload: { start: t - 0.5, end: t + 0.5 } })
       } else {
         // No existing cut — create a zero-width razor for the user to drag open
-        dispatch({
-          type: 'ADD_CUT',
-          payload: { id: `cut-${Date.now()}`, start: t, end: t, source: 'split', splitPoint: t },
+        const action = splitAtPlayhead({
+          playheadTime: t,
+          cuts: state.cuts,
+          cutExclusions: state.cutExclusions || [],
         })
+        if (action) {
+          // splitAtPlayhead's payload includes splitPoint already; dispatch as-is
+          dispatch(action)
+        }
       }
       return
     }
@@ -197,14 +203,13 @@ export default function PlaybackControls() {
           <button onClick={cycleSpeed} className="text-xs font-medium text-on-surface hover:text-primary-fixed transition-colors">
             {state.playbackRate}x
           </button>
-          {state.activeTab !== 'brolls' && (
+          {(state.activeTab === 'roughcut' || state.activeTab === 'brolls') && (
             <button
               onClick={handleSplit}
-              disabled={state.activeTab !== 'roughcut' && state.selectedTrackIds.size !== 1}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all disabled:opacity-30 disabled:cursor-not-allowed group"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-on-surface hover:text-primary-fixed transition-all group"
             >
               <span className="material-symbols-outlined text-sm">content_cut</span>
-              <span className="text-[10px] font-bold uppercase tracking-wider">{state.activeTab === 'roughcut' ? 'Cut' : 'Split'}</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider">Cut</span>
             </button>
           )}
         </div>

@@ -471,28 +471,51 @@ router.post('/runs/:runId/restart-from/:stageIndex', requireAuth, async (req, re
     await executeRun(runId)
     // Rebuild annotations after successful run
     const completedRun = await db.prepare('SELECT status, video_id FROM experiment_runs WHERE id = ?').get(runId)
-    if (completedRun?.status === 'complete' || completedRun?.status === 'partial') {
+    const succeeded = completedRun?.status === 'complete' || completedRun?.status === 'partial'
+    let groupId = null
+    if (completedRun?.video_id) {
       const video = await db.prepare('SELECT group_id FROM videos WHERE id = ?').get(completedRun.video_id)
-      if (video?.group_id) {
-        try {
-          const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await import('../services/annotation-mapper.js')
-          let wordTimestamps = getTimelineWordTimestamps(video.group_id)
-          if (!wordTimestamps?.length) {
-            const transcript = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(completedRun.video_id)
-            if (transcript?.word_timestamps_json) {
-              try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch {}
-            }
+      groupId = video?.group_id ?? null
+    }
+    if (succeeded && groupId) {
+      try {
+        const { buildAnnotationsFromRun, getTimelineWordTimestamps } = await import('../services/annotation-mapper.js')
+        let wordTimestamps = await getTimelineWordTimestamps(groupId)
+        if (!wordTimestamps?.length) {
+          const transcript = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(completedRun.video_id)
+          if (transcript?.word_timestamps_json) {
+            try { wordTimestamps = JSON.parse(transcript.word_timestamps_json) } catch {}
           }
-          if (wordTimestamps?.length) {
-            const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(video.group_id)
-            const annotations = buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
-            await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
-              .run(JSON.stringify(annotations), video.group_id)
-            console.log(`[restart] Rebuilt ${annotations.items.length} annotations for group ${video.group_id}`)
-          }
-        } catch (annErr) {
-          console.error(`[restart] Annotation rebuild failed:`, annErr.message)
         }
+        if (wordTimestamps?.length) {
+          const groupData = await db.prepare('SELECT assembled_transcript FROM video_groups WHERE id = ?').get(groupId)
+          const annotations = await buildAnnotationsFromRun(runId, wordTimestamps, groupData?.assembled_transcript)
+          await db.prepare('UPDATE video_groups SET annotations_json = ? WHERE id = ?')
+            .run(JSON.stringify(annotations), groupId)
+          console.log(`[restart] Rebuilt ${annotations.items.length} annotations for group ${groupId}`)
+        }
+      } catch (annErr) {
+        console.error(`[restart] Annotation rebuild failed:`, annErr.message)
+      }
+    }
+    // Mirror rough-cut-runner.js:188-219 — if this run was the auto-trigger
+    // (rough_cut_status was 'pending'/'running'), flip the subgroup to its
+    // terminal state and fan out to chainAfterRoughCut so the b-roll chain
+    // (or paused_at_rough_cut email) actually fires. Without this, restarts
+    // of rough-cut runs leave subgroups stuck and the downstream chain never
+    // starts.
+    if (groupId) {
+      try {
+        const terminal = succeeded ? 'done' : 'failed'
+        const r = await db.prepare(
+          `UPDATE video_groups SET rough_cut_status = '${terminal}' WHERE id = ? AND rough_cut_status IN ('pending', 'running')`
+        ).run(groupId)
+        if (r?.changes) {
+          const { chainAfterRoughCut } = await import('../services/auto-orchestrator.js')
+          await chainAfterRoughCut(groupId)
+        }
+      } catch (chainErr) {
+        console.error(`[restart] post-run state flip / chainAfterRoughCut failed for group ${groupId}:`, chainErr.message)
       }
     }
   } catch (err) {

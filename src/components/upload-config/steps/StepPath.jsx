@@ -13,74 +13,56 @@ function brollHeuristicTokens(durationSeconds, refCount) {
   return Math.round(minutes * 50 * Math.max(1, refCount) + 500 + 500 * Math.max(1, refCount))
 }
 
-// Path cards depend on whether rough cut is enabled:
-//   - 'guided' (Rough Cut + Strategy) only makes sense when there's a rough cut
-//     to review — hide the card entirely if rough cut was skipped.
-//   - When rough cut IS enabled, every path's flow list shows a "Rough cut"
-//     step so users see what'll actually run. For 'hands-off' / 'strategy-only'
-//     it's auto; for 'guided' it's the review checkpoint already in the flow.
-function buildPaths(autoRoughCut) {
-  const roughCutAutoStep = { label: 'Rough cut',           status: 'auto' }
-  const paths = [
+// Two paths after the guided-card removal:
+//   - 'hands-off' (Auto + Rough Cut) is the primary default. Rough cut review
+//     surfaces as a non-checkpoint step — pipeline keeps running through to
+//     b-roll, the user is just notified to review.
+//   - 'strategy-only' (Strategy + Rough Cut) pauses at rough cut review AND
+//     at strategy review when autoRoughCut=true. Without rough cut, it only
+//     pauses at strategy review (current behavior).
+// When autoRoughCut=false the cards drop the "+ Rough Cut" suffix.
+export function buildPaths(autoRoughCut) {
+  const handsOffFlow = [
+    ...(autoRoughCut ? [{ label: 'Rough cut review', status: 'review', optional: true }] : []),
+    { label: 'References analyzed', status: 'auto' },
+    { label: 'Strategy proposal',   status: 'auto' },
+    { label: 'B-roll plan',         status: 'auto' },
+    { label: 'Search & download',   status: 'auto' },
+    { label: 'Final review',        status: 'review', checkpoint: true },
+  ]
+  const strategyFlow = [
+    ...(autoRoughCut ? [{ label: 'Rough cut review', status: 'review', checkpoint: true }] : []),
+    { label: 'References analyzed', status: 'auto' },
+    { label: 'Strategy proposal',   status: 'review', checkpoint: true },
+    { label: 'B-roll plan',         status: 'auto' },
+    { label: 'Search & download',   status: 'auto' },
+    { label: 'Final review',        status: 'review', checkpoint: true },
+  ]
+  return [
     {
       id: 'hands-off',
-      badge: 'A · HANDS-OFF',
-      title: 'Full Auto',
+      badge: 'A · RECOMMENDED',
+      title: autoRoughCut ? 'Auto + Rough Cut' : 'Auto',
       subtitle: 'Start now, email when b-roll is ready',
-      tone: 'secondary',
+      tone: 'primary',
       icon: 'rocket_launch',
-      flow: [
-        ...(autoRoughCut ? [roughCutAutoStep] : []),
-        { label: 'References analyzed', status: 'auto' },
-        { label: 'Strategy proposal',   status: 'auto' },
-        { label: 'B-roll plan',         status: 'auto' },
-        { label: 'Search & download',   status: 'auto' },
-        { label: 'Final review',        status: 'review', checkpoint: true },
-      ],
+      flow: handsOffFlow,
       eta: '~18–24 hrs for a 40-min video',
-      note: 'Kick it off and walk away — you review at the end before the cut goes live.',
+      note: 'Kick it off and walk away — review the rough cut on the side, the pipeline keeps running.',
     },
     {
       id: 'strategy-only',
-      badge: 'B · BALANCED',
-      title: 'Strategy Review',
-      subtitle: 'Confirm the creative strategy, then we run',
+      badge: 'B · CHECKPOINTED',
+      title: autoRoughCut ? 'Strategy + Rough Cut' : 'Strategy',
+      subtitle: 'Confirm the rough cut and the strategy, then we run',
       tone: 'tertiary',
       icon: 'center_focus_strong',
-      flow: [
-        ...(autoRoughCut ? [roughCutAutoStep] : []),
-        { label: 'References analyzed', status: 'auto' },
-        { label: 'Strategy proposal',   status: 'review', checkpoint: true },
-        { label: 'B-roll plan',         status: 'auto' },
-        { label: 'Search & download',   status: 'auto' },
-        { label: 'Final review',        status: 'review', checkpoint: true },
-      ],
-      eta: '~20–28 hrs for a 40-min video',
+      flow: strategyFlow,
+      eta: '~24–32 hrs for a 40-min video',
       note: "Each checkpoint waits on your login — without it, the next phase won't start.",
       warn: true,
     },
   ]
-  if (autoRoughCut) {
-    paths.push({
-      id: 'guided',
-      badge: 'C · FULL CONTROL',
-      title: 'Rough Cut + Strategy',
-      subtitle: 'Review the rough cut, then the b-roll strategy — we run the rest',
-      tone: 'primary',
-      icon: 'account_tree',
-      flow: [
-        { label: 'Rough cut review',    status: 'review', checkpoint: true },
-        { label: 'References analyzed', status: 'auto' },
-        { label: 'Strategy proposal',   status: 'review', checkpoint: true },
-        { label: 'B-roll plan',         status: 'auto' },
-        { label: 'Search & download',   status: 'auto' },
-      ],
-      eta: '~24–36 hrs for a 40-min video',
-      note: "Each checkpoint waits on your login — without it, the next phase won't start.",
-      warn: true,
-    })
-  }
-  return paths
 }
 
 function PathCard({ path, active, onSelect }) {
@@ -138,36 +120,39 @@ function PathCard({ path, active, onSelect }) {
       </div>
 
       <div className="flex flex-col gap-1.5 mt-1">
-        {path.flow.map((f, i) => (
-          <div key={i} className={[
-            'flex items-center gap-2.5 px-2.5 py-[7px] rounded-md',
-            f.checkpoint ? checkpointBg : 'bg-transparent',
-          ].join(' ')}>
-            <div className={[
-              'w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center',
-              f.status === 'review'
-                ? (path.tone === 'primary' ? 'bg-lime text-on-primary-container'
-                  : path.tone === 'tertiary' ? 'bg-teal text-[#00201c]'
-                  : 'bg-purple-accent text-[#33005b]')
-                : 'bg-surface-container-high text-on-surface-variant',
+        {path.flow.map((f, i) => {
+          const highlighted = f.checkpoint || f.optional
+          return (
+            <div key={i} className={[
+              'flex items-center gap-2.5 px-2.5 py-[7px] rounded-md',
+              highlighted ? checkpointBg : 'bg-transparent',
             ].join(' ')}>
-              <span className="material-symbols-outlined text-[11px]" style={{ fontVariationSettings: '"wght" 700' }}>
-                {f.status === 'review' ? 'visibility' : 'auto_mode'}
+              <div className={[
+                'w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center',
+                f.status === 'review'
+                  ? (path.tone === 'primary' ? 'bg-lime text-on-primary-container'
+                    : path.tone === 'tertiary' ? 'bg-teal text-[#00201c]'
+                    : 'bg-purple-accent text-[#33005b]')
+                  : 'bg-surface-container-high text-on-surface-variant',
+              ].join(' ')}>
+                <span className="material-symbols-outlined text-[11px]" style={{ fontVariationSettings: '"wght" 700' }}>
+                  {f.status === 'review' ? 'visibility' : 'auto_mode'}
+                </span>
+              </div>
+              <span className={[
+                'flex-1 text-[11px] font-["Inter"]',
+                highlighted ? 'text-on-surface font-semibold' : 'text-on-surface-variant font-medium',
+              ].join(' ')}>
+                {f.label}
               </span>
+              {(f.checkpoint || f.optional) && (
+                <span className={`text-[9px] font-bold uppercase tracking-[0.15em] font-['Inter'] ${accent}`}>
+                  {f.checkpoint ? 'You review' : 'Optional review'}
+                </span>
+              )}
             </div>
-            <span className={[
-              'flex-1 text-[11px] font-["Inter"]',
-              f.checkpoint ? 'text-on-surface font-semibold' : 'text-on-surface-variant font-medium',
-            ].join(' ')}>
-              {f.label}
-            </span>
-            {f.checkpoint && (
-              <span className={`text-[9px] font-bold uppercase tracking-[0.15em] font-['Inter'] ${accent}`}>
-                You review
-              </span>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className="mt-auto pt-3.5 ring-[0.5px] ring-inset ring-white/3 flex flex-col gap-2">

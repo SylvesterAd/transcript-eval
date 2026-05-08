@@ -21,8 +21,78 @@
 
 import { Router } from 'express'
 import { requireAuth } from '../auth.js'
+import db from '../db.js'
 import { getExportResult } from '../services/exports.js'
 import { generateXmeml } from '../services/xmeml-generator.js'
+import { computeEffectiveCuts } from '../services/broll.js'
+import { unshiftPostCutTime } from '../services/time-translation.js'
+
+/**
+ * Given a sorted, non-overlapping cuts array (output of computeEffectiveCuts)
+ * and a total duration, return the COMPLEMENT — the list of kept segments
+ * that span [0, totalDuration]. Each segment is {start, end} in seconds.
+ *
+ * Used by the export route to convert cuts → arollSegments for XMEML.
+ *
+ * Examples:
+ *   complementSegments([], 60) → [{start: 0, end: 60}]              // no cuts
+ *   complementSegments([{start: 20, end: 30}], 60)
+ *     → [{start: 0, end: 20}, {start: 30, end: 60}]                 // single cut splits
+ *   complementSegments([{start: 0, end: 10}], 60)
+ *     → [{start: 10, end: 60}]                                       // cut at start
+ *   complementSegments([{start: 50, end: 60}], 60)
+ *     → [{start: 0, end: 50}]                                        // cut at end
+ */
+function complementSegments(cutsArr, totalDuration) {
+  const segs = []
+  let cursor = 0
+  for (const c of cutsArr) {
+    if (c.start > cursor + 0.001) segs.push({ start: cursor, end: c.start })
+    cursor = Math.max(cursor, c.end)
+  }
+  if (cursor < totalDuration - 0.001) segs.push({ start: cursor, end: totalDuration })
+  return segs
+}
+
+/**
+ * Translate b-roll placement timeline times from post-cut canonical
+ * (Task 4) back to original-time before handing them to generateXmeml.
+ *
+ * NLEs (Premiere/Resolve/FCP) consume original-time of the source
+ * media — their imported sequence places clipitems at sequence-timeline
+ * coordinates that match the user's source video on the timeline (which
+ * is the original, uncut video). Our placements are stored in post-cut
+ * coordinates after Task 4. This function applies unshiftPostCutTime to
+ * each placement's timelineStart (kind='start') and the implied end
+ * (timelineStart + timelineDuration, kind='end'), then derives a new
+ * timelineDuration from the original-time pair.
+ *
+ * Notes:
+ *   - When effectiveCuts is empty/identity, returns the input array
+ *     unchanged (cheap reference identity, not a copy).
+ *   - Placements without finite timelineStart or timelineDuration are
+ *     passed through untouched — generateXmeml's own validation will
+ *     surface a helpful error.
+ *   - When a cut lies INSIDE the placement's original-time span, the
+ *     resulting duration is longer than the post-cut duration — this
+ *     is correct: the b-roll lays continuously over the timeline,
+ *     including any cut region (the user can re-trim in their NLE).
+ *
+ * Exported for direct unit testing; the route also calls it inline.
+ */
+export function translatePlacementsForExport(placements, effectiveCuts) {
+  if (!Array.isArray(placements)) return placements
+  if (!effectiveCuts || effectiveCuts.length === 0) return placements
+  return placements.map(p => {
+    if (!p || typeof p !== 'object') return p
+    const startPost = p.timelineStart
+    const durPost = p.timelineDuration
+    if (!Number.isFinite(startPost) || !Number.isFinite(durPost)) return p
+    const startOrig = unshiftPostCutTime(startPost, effectiveCuts, 'start')
+    const endOrig = unshiftPostCutTime(startPost + durPost, effectiveCuts, 'end')
+    return { ...p, timelineStart: startOrig, timelineDuration: endOrig - startOrig }
+  })
+}
 
 const router = Router()
 
@@ -63,6 +133,43 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       return res.status(404).json({ error: 'export not found or not ready' })
     }
 
+    // Load editor_state_json for cut-aware A-roll segmentation.
+    // The export's plan_pipeline_id encodes the videoId as 'plan-<videoId>-...'.
+    // From videoId we reach video_groups.editor_state_json which holds cuts/cutExclusions.
+    // If the chain fails at any step (legacy pipeline IDs, missing rows) we fall through
+    // gracefully — editorCuts stays [] and the legacy aroll single-clip path is used.
+    let editorCuts = []
+    let editorCutExclusions = []
+    try {
+      const exportRow = await db.prepare(
+        'SELECT plan_pipeline_id FROM exports WHERE id = ?'
+      ).get(id)
+      const planPipelineId = exportRow?.plan_pipeline_id || ''
+      const planMatch = planPipelineId.match(/^plan-(\d+)-/)
+      if (planMatch) {
+        const videoId = parseInt(planMatch[1], 10)
+        const vRow = await db.prepare(
+          'SELECT group_id FROM videos WHERE id = ?'
+        ).get(videoId)
+        const groupId = vRow?.group_id || null
+        if (groupId) {
+          const gRow = await db.prepare(
+            'SELECT editor_state_json FROM video_groups WHERE id = ?'
+          ).get(groupId)
+          if (gRow?.editor_state_json) {
+            const editorState = typeof gRow.editor_state_json === 'string'
+              ? JSON.parse(gRow.editor_state_json)
+              : gRow.editor_state_json
+            editorCuts = editorState.cuts || []
+            editorCutExclusions = editorState.cutExclusions || []
+          }
+        }
+      }
+    } catch (cutLoadErr) {
+      // Non-fatal: cut loading failed, fall back to legacy single-clip A-roll.
+      console.warn('[export-xml] editor cut load failed; using legacy aroll:', cutLoadErr.message)
+    }
+
     // Index variants by label for O(1) lookup; reject any requested
     // variant the export doesn't carry.
     const byLabel = new Map(result.variants.map((v) => [v.label, v]))
@@ -94,6 +201,11 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       }
     }
 
+    // Hoist effective cuts once — both the arollSegments build below and
+    // the b-roll placement translation use the same cut topology, and the
+    // computation is per-group, not per-variant.
+    const effectiveCuts = computeEffectiveCuts(editorCuts, editorCutExclusions)
+
     // Generate per variant. Loop is sequential since each call is
     // CPU-bound microseconds of string concat — no benefit to Promise.all.
     const xml_by_variant = {}
@@ -104,11 +216,39 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       // Strip the A-roll out of the b-roll placements list — it's emitted
       // separately on V1 by generateXmeml's `aroll` arg, not as a regular
       // b-roll clipitem.
-      const brollPlacements = allPlacements.filter((p) => !p || (p.source !== 'aroll' && p.seq !== 0))
+      const brollPlacementsPostCut = allPlacements.filter((p) => !p || (p.source !== 'aroll' && p.seq !== 0))
+      // Placements are stored in post-cut canonical (Task 4). NLEs
+      // (Premiere/Resolve/FCP) consume original-time of the source
+      // media. Translate timelineStart/timelineDuration here so the
+      // emitted clipitem <start>/<end> match the source video's
+      // timeline. With no effective cuts this is reference-identity.
+      const brollPlacements = translatePlacementsForExport(brollPlacementsPostCut, effectiveCuts)
+
+      // Build arollSegments from editor cuts when cuts are present.
+      // If no cuts (empty array), pass null so generateXmeml uses the legacy
+      // aroll single-clip path — preserves behaviour for projects without cuts.
+      let arollSegments = null
+      if (editorCuts.length > 0 && aroll) {
+        const arollDurationSeconds = aroll.sourceDurationSeconds
+        if (Number.isFinite(arollDurationSeconds) && arollDurationSeconds > 0) {
+          const keptSegments = complementSegments(effectiveCuts, arollDurationSeconds)
+          arollSegments = keptSegments.map(s => ({
+            filename: aroll.filename,
+            start: s.start,
+            end: s.end,
+            sourceFrameRate: aroll.frameRate,
+            sourceDurationSeconds: arollDurationSeconds,
+            width: aroll.width,
+            height: aroll.height,
+          }))
+        }
+      }
+
       xml_by_variant[label] = generateXmeml({
         sequenceName: v.sequenceName || `Variant ${label}`,
         placements: brollPlacements,
         aroll,
+        arollSegments,
         mediaFolderAbsolute,
         // frameRate + sequenceSize fall through to generator defaults;
         // future manifest fields could override here.

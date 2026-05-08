@@ -35,6 +35,17 @@ function isFailedPrePause(sg, parentPathId) {
   return failIdx <= SUBSTAGE_ORDER.indexOf(pause)
 }
 
+// Banner is shown when hands-off + auto_rough_cut has finished the rough cut
+// but the b-roll chain is still in flight (or paused at strategy/plan).
+export function shouldShowReviewRoughCutBanner({ parent, subGroups }) {
+  if (!parent || parent.path_id !== 'hands-off' || !parent.auto_rough_cut) return false
+  if (!subGroups || subGroups.length === 0) return false
+  if (!subGroups.every(sg => sg.rough_cut_status === 'done')) return false
+  return subGroups.some(sg =>
+    ['running', 'pending', 'paused_at_strategy', 'paused_at_plan'].includes(sg.broll_chain_status)
+  )
+}
+
 export function deriveMode({ parent, files = [], subGroups = [] }) {
   const anyUploading = files.some(f => f.status === 'uploading')
   if (anyUploading) return 'uploading'
@@ -652,7 +663,7 @@ export default function ProcessingModal({ groupId, initialFiles, liveFiles, onBa
                 We're running the pipeline — feel free to keep an eye on the stages below.
               </p>
             </div>
-            <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} groupId={groupId} />
+            <StageTimeline stages={stages} subGroups={subGroups} navigate={navigate} groupId={groupId} parent={parent} />
             <div className="mx-8 mt-2 mb-8 p-6 bg-white/5 rounded-2xl border border-white/5">
               <div className="flex items-center justify-end">
                 <span className="text-[11px] italic text-on-surface-variant">
@@ -830,11 +841,16 @@ function FullAutoBanner({ onTakeMeToProjects, onDismiss }) {
   )
 }
 
-function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
+function StageTimeline({ stages, subGroups = [], navigate, groupId, parent = null }) {
   // Pick the first paused sub-group for the "Open project to pick" CTA per stage.
   const pausedAtRoughCutSg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_rough_cut')
   const pausedAtStrategySg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_strategy')
   const pausedAtPlanSg = subGroups.find(sg => sg.broll_chain_status === 'paused_at_plan')
+
+  // Hands-off "review while chain keeps running" hint surfaces inline on the
+  // rough cut row, not as a separate banner.
+  const showReviewRoughCutHint = shouldShowReviewRoughCutBanner({ parent, subGroups })
+  const reviewRoughCutSg = showReviewRoughCutHint ? subGroups[0] : null
 
   return (
     <div className="px-8 pb-4 space-y-2">
@@ -880,10 +896,17 @@ function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
           }
         }
 
+        const showInlineReviewHint = stage.id === 'rough_cut' && showReviewRoughCutHint && reviewRoughCutSg
+
         return (
           <div
             key={stage.id}
-            className="flex items-center gap-4 p-4 rounded-xl bg-surface-container-low/50 border border-white/5"
+            className={[
+              'flex items-center gap-4 p-4 rounded-xl border',
+              showInlineReviewHint
+                ? 'bg-lime/5 border-lime/30'
+                : 'bg-surface-container-low/50 border-white/5',
+            ].join(' ')}
           >
             <span className={`material-symbols-outlined text-2xl shrink-0 ${iconClass}`}>{icon}</span>
             <div className="flex-1 min-w-0">
@@ -900,6 +923,9 @@ function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
               {stage.paused && (
                 <p className="text-[12px] text-amber-400/80 mt-0.5">Paused — needs your input</p>
               )}
+              {showInlineReviewHint && (
+                <p className="text-[12px] text-lime/90 mt-0.5">Rough cut ready — review while we keep working</p>
+              )}
             </div>
             {stage.paused && pausedRoute && (
               <button
@@ -907,6 +933,14 @@ function StageTimeline({ stages, subGroups = [], navigate, groupId }) {
                 className="px-4 py-2 rounded-lg bg-amber-400/15 text-amber-300 border border-amber-400/30 font-bold text-xs uppercase tracking-wider hover:bg-amber-400/25 transition-colors shrink-0"
               >
                 {pausedLabel}
+              </button>
+            )}
+            {showInlineReviewHint && (
+              <button
+                onClick={() => navigate(`/editor/${reviewRoughCutSg.id}/roughcut`)}
+                className="px-4 py-2 rounded-lg bg-lime text-black font-bold text-xs uppercase tracking-wider hover:opacity-90 transition-colors shrink-0"
+              >
+                Review rough cut
               </button>
             )}
           </div>

@@ -356,9 +356,12 @@ export async function chainAfterClassify(groupId) {
 }
 
 // chainAfterRoughCut — called when rough cut reaches a TERMINAL state for a
-// (sub-)group. For 'guided' paths, sets broll_chain_status='paused_at_rough_cut'
-// and emails the user. For 'hands-off' / 'strategy-only', kicks off the b-roll
-// chain. No-op for null path_id (legacy / manual projects).
+// (sub-)group. Sets broll_chain_status='paused_at_rough_cut' (and emails the
+// user) when the path requires a rough-cut review checkpoint:
+//   - guided (legacy projects)
+//   - strategy-only with auto_rough_cut=true
+// Otherwise (hands-off, or strategy-only without auto_rough_cut) it kicks
+// off the b-roll chain. No-op for null path_id (legacy / manual projects).
 //
 // Safe to call from any rough-cut completion site (rough-cut-runner.js IIFE,
 // or multicam-sync.js for the already_exists / kickoff-failure cases).
@@ -366,20 +369,21 @@ export async function chainAfterClassify(groupId) {
 // is guarded by runFullAutoBrollChain's heartbeat lock.
 export async function chainAfterRoughCut(groupId) {
   const g = await db.prepare(
-    'SELECT user_id, path_id, broll_chain_status FROM video_groups WHERE id = ?'
+    'SELECT user_id, path_id, auto_rough_cut, broll_chain_status FROM video_groups WHERE id = ?'
   ).get(groupId)
   if (!g) return
   if (!['hands-off', 'strategy-only', 'guided'].includes(g.path_id)) return
 
   // Don't clobber a chain that's already advanced past rough-cut review.
-  // Possible if the previous (buggy) code paused prematurely and the user
-  // clicked through to strategy before the cut actually completed; we
-  // shouldn't reset their progress when the IIFE finally fires us.
   if (['running', 'paused_at_strategy', 'paused_at_plan', 'done', 'failed'].includes(g.broll_chain_status)) {
     return
   }
 
-  if (g.path_id === 'guided') {
+  const shouldPauseAtRoughCut =
+    g.path_id === 'guided' ||
+    (g.path_id === 'strategy-only' && g.auto_rough_cut)
+
+  if (shouldPauseAtRoughCut) {
     await db.prepare(
       "UPDATE video_groups SET broll_chain_status = 'paused_at_rough_cut' WHERE id = ?"
     ).run(groupId)
@@ -392,7 +396,7 @@ export async function chainAfterRoughCut(groupId) {
     return
   }
 
-  // hands-off or strategy-only — fire chain
+  // hands-off (or strategy-only with auto_rough_cut=false) — fire chain
   __orchestratorDeps.runFullAutoBrollChain(groupId)
     .catch(err => console.error(`[chain] ${err.message}`))
 }
@@ -488,6 +492,21 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   ).run(subGroupId)
   if (await isCancelled(subGroupId)) return
 
+  // Server-side annotation→cuts sync. Without this, full-auto projects whose
+  // user never opened the editor have empty editor_state_json.cuts even after
+  // the rough-cut runner produced annotations_json. The chain would then run
+  // generate_post_cut_transcript with no cuts → analysis sees raw transcript
+  // (filler, false starts) instead of the rough-cut version.
+  try {
+    const { ensureEditorCutsFromAnnotations } = await import('./cuts-from-annotations.js')
+    const result = await ensureEditorCutsFromAnnotations(subGroupId)
+    if (result.changed) {
+      console.log(`[chain] Synced ${result.derivedAnnCuts} annotation cuts → editor_state_json for group ${subGroupId}`)
+    }
+  } catch (err) {
+    console.warn(`[chain] ensureEditorCutsFromAnnotations failed for group ${subGroupId}:`, err.message)
+  }
+
   const heartbeat = setInterval(() => {
     db.prepare('UPDATE video_groups SET broll_chain_heartbeat_at = NOW() WHERE id = ?')
       .run(subGroupId)
@@ -495,10 +514,18 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   }, HEARTBEAT_INTERVAL_MS)
 
   const sg = await db.prepare(
-    'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
+    'SELECT id, user_id, path_id, parent_group_id, editor_state_json FROM video_groups WHERE id = ?'
   ).get(subGroupId)
   if (!sg) return
   const flags = pathToFlags(sg.path_id)
+
+  let editorCuts = null
+  if (sg.editor_state_json) {
+    try {
+      const state = JSON.parse(sg.editor_state_json)
+      if (state.cuts?.length) editorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
+    } catch {}
+  }
 
   try {
     const runner = await import('./broll-runner.js')
@@ -613,6 +640,7 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
         subGroupId, mainVideoId: mainVideo.id,
         prepPipelineId: refs.prepPipelineId,
         strategyPipelineIds: strats.strategyPipelineIds,
+        editorCuts,
       })
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
     }
@@ -657,7 +685,7 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
 //   fromStage = 'search'   → user picked plan; run search only
 export async function resumeChain(subGroupId, fromStage, opts = {}) {
   const sg = await db.prepare(
-    'SELECT id, user_id, path_id, parent_group_id FROM video_groups WHERE id = ?'
+    'SELECT id, user_id, path_id, parent_group_id, editor_state_json FROM video_groups WHERE id = ?'
   ).get(subGroupId)
   if (!sg) return
 
@@ -675,6 +703,14 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: err.message })
       return
     }
+  }
+
+  let resumeEditorCuts = null
+  if (sg.editor_state_json) {
+    try {
+      const state = JSON.parse(sg.editor_state_json)
+      if (state.cuts?.length) resumeEditorCuts = { cuts: state.cuts, cutExclusions: state.cutExclusions || [] }
+    } catch {}
   }
 
   const startSubstage = fromStage === 'plan' ? 'plan' : 'search'
@@ -707,6 +743,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
         subGroupId, mainVideoId: mainVideo.id,
         strategyPipelineIds: opts.strategyPipelineIds || [],
         prepPipelineId: opts.prepPipelineId,
+        editorCuts: resumeEditorCuts,
       })
       await runner.waitForPipelinesComplete(plans.planPipelineIds)
       if (await isCancelled(subGroupId)) return
