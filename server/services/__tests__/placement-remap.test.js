@@ -33,148 +33,79 @@ describe('cutsHash', () => {
   })
 })
 
-const W = (...spec) => spec.map(([word, start, end]) => ({ word, start, end }))
-
-describe('materializePlacementRemap — anchor_word_idx happy path', () => {
-  it('shifts placement to post-cut time using the anchor word', () => {
-    // Words: "There" at 19.94 in original time. Cuts remove [10,15] = 5s.
-    // Expected post-cut start: 19.94 - 5 = 14.94.
-    const words = W(
-      ['There', 19.94, 20.10],
-      ['is', 20.10, 20.18],
-      ['a', 20.18, 20.21],
-      ['bad', 20.21, 20.50],
-      ['piece', 20.50, 20.78],
-    )
+describe('materializePlacementRemap', () => {
+  it('shifts placement to post-cut time using LLM-emitted timecode (no anchor re-matching)', () => {
+    // Cut [10,15] removes 5s. Placement at original 19.94s shifts to 14.94s.
     const placements = [{
       uuid: 'p_a',
-      start: '[00:00:19.94]', end: '[00:00:21.94]',
+      start: '[00:00:19.94]',
+      end: '[00:00:21.94]',
       audio_anchor: 'There is a bad piece',
-      anchor_word_idx: 0,
+      // anchor_word_idx ignored — we trust the LLM timecode directly.
     }]
-    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
+    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], [])
     const p = out.get('p_a')
     expect(p.start_seconds).toBeCloseTo(14.94, 2)
     expect(p.end_seconds).toBeCloseTo(16.94, 2)
-    expect(p.anchor_state).toBe('idx')
+    expect(p.anchor_state).toBe('shifted')
   })
 
-  it('falls back to in_cut when anchor word lands inside a cut', () => {
-    const words = W(
-      ['Filler', 11.0, 11.5],   // inside cut [10,15]
-      ['There', 19.94, 20.10],
-    )
+  it('passes through original-time when there are no effective cuts', () => {
     const placements = [{
       uuid: 'p_b',
-      start: '[00:00:11.00]', end: '[00:00:13.00]',
-      audio_anchor: 'Filler',
-      anchor_word_idx: 0,
+      start: '[00:02:14]',
+      end: '[00:02:17]',
+      audio_anchor: "There's that bad piece of advice floating around the internet",
     }]
-    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
-    expect(out.get('p_b').anchor_state).toBe('in_cut')
+    const out = materializePlacementRemap(placements, [], [])
+    const p = out.get('p_b')
+    expect(p.start_seconds).toBeCloseTo(134, 2)
+    expect(p.end_seconds).toBeCloseTo(137, 2)
   })
-})
 
-describe('materializePlacementRemap — fuzzy fallback', () => {
-  it('uses anchor text to find the word when anchor_word_idx is missing', () => {
-    // Words: "From a tax standpoint" at 8.0s; "There" filler also exists.
-    const words = W(
-      ['Filler', 11.0, 11.5],
-      ['From', 8.0, 8.3],
-      ['a', 8.3, 8.4],
-      ['tax', 8.4, 8.7],
-      ['standpoint', 8.7, 9.2],
-    )
+  it('trusts the LLM timecode regardless of where the anchor phrase repeats in the transcript', () => {
+    // The phrase "bad piece" appears at words[1-2] AND words[8-9]. Without
+    // anchor matching, the placement stays at the LLM's emitted [00:02:14] =
+    // 134s — NOT the earlier "bad piece" occurrence at 128.86s.
+    const words = [
+      { word: 'a', start: 100, end: 100.1 },
+      { word: 'bad', start: 128.86, end: 129.0 },
+      { word: 'piece', start: 129.0, end: 129.4 },
+      { word: 'of', start: 129.4, end: 129.6 },
+      { word: 'something', start: 129.6, end: 130 },
+      { word: 'else', start: 130, end: 130.5 },
+      { word: "There's", start: 134.18, end: 134.5 },
+      { word: 'that', start: 134.5, end: 134.7 },
+      { word: 'bad', start: 134.76, end: 135 },
+      { word: 'piece', start: 135, end: 135.3 },
+    ]
     const placements = [{
       uuid: 'p_c',
-      start: '[00:00:08.00]', end: '[00:00:10.00]',
-      audio_anchor: 'From a tax standpoint',
-      // no anchor_word_idx
-    }]
-    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
-    const p = out.get('p_c')
-    expect(p.anchor_state).toBe('fuzzy')
-    expect(p.start_seconds).toBeCloseTo(8.0, 2)
-  })
-
-  it('skips fuzzy candidates that fall inside an effective cut', () => {
-    // "There" appears twice — once inside cut [10,15], once at 19.94.
-    const words = W(
-      ['There', 11.5, 11.7],   // in cut
-      ['Filler', 12.0, 12.5],
-      ['There', 19.94, 20.10], // valid candidate
-      ['is', 20.10, 20.18],
-    )
-    const placements = [{
-      uuid: 'p_d',
-      start: '[00:00:11.50]', end: '[00:00:13.50]',
-      audio_anchor: 'There is',
-      // no anchor_word_idx
-    }]
-    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
-    const p = out.get('p_d')
-    expect(p.anchor_state).toBe('fuzzy')
-    // post-cut: 19.94 - 5 = 14.94
-    expect(p.start_seconds).toBeCloseTo(14.94, 2)
-  })
-
-  it('marks orphaned when neither idx nor fuzzy match works', () => {
-    const words = W(['Hello', 1.0, 1.2], ['World', 1.2, 1.5])
-    const placements = [{
-      uuid: 'p_e',
-      start: '[00:00:50.00]', end: '[00:00:52.00]',
-      audio_anchor: 'completely unmatched phrase',
+      start: '[00:02:14]', end: '[00:02:17]',
+      audio_anchor: 'bad piece',
     }]
     const out = materializePlacementRemap(placements, [], words)
-    const p = out.get('p_e')
-    expect(p.anchor_state).toBe('orphaned')
-    expect(p.start_seconds).toBeCloseTo(50.0, 2) // falls back to LLM time
+    const p = out.get('p_c')
+    expect(p.start_seconds).toBeCloseTo(134, 2)
   })
 
-  it('promotes in_cut to fuzzy when idx points into a cut but anchor text exists in kept content', () => {
-    const words = W(
-      ['Filler', 11.0, 11.5],         // in cut [10,15] — anchor_word_idx points here
-      ['From', 19.0, 19.3],           // valid post-cut candidate
-      ['a', 19.3, 19.4],
-      ['tax', 19.4, 19.7],
-    )
-    const placements = [{
-      uuid: 'p_recover',
-      start: '[00:00:11.00]', end: '[00:00:13.00]',
-      audio_anchor: 'From a tax',
-      anchor_word_idx: 0,             // points to in-cut "Filler"
-    }]
-    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
-    const p = out.get('p_recover')
-    expect(p.anchor_state).toBe('fuzzy')   // promoted from in_cut
-    expect(p.start_seconds).toBeCloseTo(14.0, 2) // 19.0 - 5
-  })
-})
-
-describe('materializePlacementRemap — duration rules', () => {
-  it('bumps duration below 0.5s up to 0.5s', () => {
-    const words = W(['There', 5.0, 5.1])
+  it('enforces 0.5s minimum duration', () => {
     const placements = [{
       uuid: 'p_short',
       start: '[00:00:05.00]', end: '[00:00:05.30]',
       audio_anchor: 'There',
-      anchor_word_idx: 0,
     }]
-    const out = materializePlacementRemap(placements, [], words)
+    const out = materializePlacementRemap(placements, [], [])
     const p = out.get('p_short')
     expect(p.end_seconds - p.start_seconds).toBeCloseTo(0.5, 2)
   })
 
   it('trims earlier end when two placements overlap', () => {
-    const words = W(
-      ['A', 10.0, 10.2],
-      ['B', 10.8, 11.0],
-    )
     const placements = [
-      { uuid: 'p_first',  start: '[00:00:10.00]', end: '[00:00:11.50]', audio_anchor: 'A', anchor_word_idx: 0 },
-      { uuid: 'p_second', start: '[00:00:10.80]', end: '[00:00:12.00]', audio_anchor: 'B', anchor_word_idx: 1 },
+      { uuid: 'p_first',  start: '[00:00:10.00]', end: '[00:00:11.50]', audio_anchor: 'A' },
+      { uuid: 'p_second', start: '[00:00:10.80]', end: '[00:00:12.00]', audio_anchor: 'B' },
     ]
-    const out = materializePlacementRemap(placements, [], words)
+    const out = materializePlacementRemap(placements, [], [])
     const a = out.get('p_first')
     const b = out.get('p_second')
     expect(a.end_seconds).toBeCloseTo(10.8, 2)
@@ -182,17 +113,21 @@ describe('materializePlacementRemap — duration rules', () => {
   })
 
   it('marks overlap_squeezed when trim forces duration below 0.5s', () => {
-    const words = W(
-      ['A', 10.0, 10.2],
-      ['B', 10.3, 10.5],
-    )
     const placements = [
-      { uuid: 'p_first',  start: '[00:00:10.00]', end: '[00:00:11.00]', audio_anchor: 'A', anchor_word_idx: 0 },
-      { uuid: 'p_second', start: '[00:00:10.30]', end: '[00:00:11.30]', audio_anchor: 'B', anchor_word_idx: 1 },
+      { uuid: 'p_first',  start: '[00:00:10.00]', end: '[00:00:11.00]', audio_anchor: 'A' },
+      { uuid: 'p_second', start: '[00:00:10.30]', end: '[00:00:11.30]', audio_anchor: 'B' },
     ]
-    const out = materializePlacementRemap(placements, [], words)
+    const out = materializePlacementRemap(placements, [], [])
     const a = out.get('p_first')
     expect(a.anchor_state).toBe('overlap_squeezed')
-    expect(a.end_seconds).toBeCloseTo(10.3, 2)  // trimmed, not re-pushed
+    expect(a.end_seconds).toBeCloseTo(10.3, 2)
+  })
+
+  it('skips placements without uuid', () => {
+    const out = materializePlacementRemap(
+      [{ start: '[00:00:01]', end: '[00:00:02]' }],
+      [], []
+    )
+    expect(out.size).toBe(0)
   })
 })
