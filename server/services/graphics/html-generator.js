@@ -385,7 +385,7 @@ Every scene > 4s must include at least 2 of these patterns AFTER the entrance:
 1. **Counter animation** — animate a number from start→end via gsap.to({ value: 0 }, { value: target, onUpdate }) and write innerText each tick.
 2. **SVG stroke draw** — animate stroke-dashoffset from total length to 0 over 1-2s.
 3. **Character stagger** — split text into spans, gsap.from with stagger 0.04-0.12s.
-4. **Breathing float** — gsap.to with y: '+=8', yoyo: true, repeat: -1 (use bounded repeat per determinism rules: repeat: Math.ceil((sceneDuration-entranceDuration)/cycle)-1).
+4. **Breathing float** — gsap.to with y: '+=8', yoyo: true, repeat: Math.ceil((sceneDuration - entranceDuration) / cycleDuration) - 1 (bounded per determinism rules — never use repeat: -1).
 5. **Bar chart fill** — animate height or width from 0 to target with stagger.
 6. **Ken Burns zoom** — gsap.to image scale from 1.0 to 1.05-1.10 over the full scene duration with sine.inOut.
 7. **Highlight sweep** — animate a translucent band across text with sine.inOut.
@@ -413,7 +413,7 @@ Before emitting your HTML, verify:
 - [ ] First anchor scene in each shader group has tl.set opacity:1 at its start
 - [ ] Scene windows tile end-to-end (no gaps, no overlap unless intentional shader transition)
 - [ ] If using shader transitions: scenes.length === transitions.length + 1 invariant holds; transition.time = boundary - duration/2
-- [ ] No exit tweens except on the final scene (the boundary IS the cut)
+- [ ] No exit tweens except on non-anchor scene boundaries (non-anchor scenes need tl.set autoAlpha:0 at their end) and the final scene
 - [ ] No banned APIs (Math.random, Date.now, performance.now, setTimeout, setInterval, repeat:-1, stagger from:'random')
 - [ ] No banned fonts; weight contrast 300/900 not 400/700; size floors 60/20/16
 - [ ] tabular-nums on number columns
