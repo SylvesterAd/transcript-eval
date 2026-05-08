@@ -543,7 +543,7 @@ export default function TranscriptEditor() {
   // explicitly (Backspace adds source:'transcript').
   const isItemCut = useCallback((item) => {
     return state.cuts.some(c =>
-      c.source !== 'annotation' && !c.source?.startsWith('ai-') &&
+      c.source !== 'annotation' &&
       c.end > c.start + 0.01 &&
       item.start < c.end &&
       item.end > c.start
@@ -940,7 +940,7 @@ export default function TranscriptEditor() {
                       for (const ann of endingAnns) acceptSuggestion(ann)
                     }}
                     title="Accept this cut"
-                    className="absolute -top-2.5 -right-1 w-3.5 h-3.5 rounded-full bg-primary-fixed text-on-primary text-[9px] leading-none flex items-center justify-center shadow hover:scale-125 transition-transform z-10 cursor-pointer"
+                    className="absolute -top-2.5 -right-1 w-3.5 h-3.5 rounded-full bg-primary-fixed text-black text-[10px] font-bold leading-none flex items-center justify-center shadow hover:scale-125 transition-transform z-10 cursor-pointer"
                   >
                     ✓
                   </button>
