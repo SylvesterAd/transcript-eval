@@ -2,113 +2,44 @@ import crypto from 'node:crypto'
 import { postCutTime } from './time-translation.js'
 import { parseTimecode } from './placement-match.js'
 
-const isInCut = (t, effectiveCuts) =>
-  effectiveCuts.some(c => t >= c.start && t < c.end)
-
-function normalize(text) {
-  return String(text || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()
-}
-
 /**
- * Fuzzy-match audio_anchor against raw words, skipping any word inside an
- * effective cut. Returns the matched word's `start` (original time) or null.
+ * Materialize a per-placement remap from LLM-emitted timecodes + effective cuts.
  *
- * Mirrors the scoring loop from placement-match.js:matchPlacementsToTranscript
- * but with NO time window (anchor may be hundreds of seconds away from the
- * LLM-emitted timecode after our original→post-cut shift) and a cut-skip
- * filter on each candidate.
- */
-function fuzzyMatchAnchorOriginalTime(audioAnchor, words, effectiveCuts) {
-  const target = normalize(audioAnchor)
-  if (!target) return null
-  const targetTokens = target.split(' ')
-  const N = targetTokens.length
-
-  let bestScore = 0
-  let bestStart = null
-
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i]
-    if (isInCut(w.start, effectiveCuts)) continue
-
-    const phraseWords = []
-    for (let j = i; j < Math.min(i + N + 2, words.length); j++) {
-      phraseWords.push(normalize(words[j].word))
-    }
-    const phrase = phraseWords.join(' ')
-
-    let score = 0
-    let phraseIdx = 0
-    for (const aw of targetTokens) {
-      const found = phrase.indexOf(aw, phraseIdx)
-      if (found >= 0) { score++; phraseIdx = found + aw.length }
-    }
-
-    if (score > bestScore) {
-      bestScore = score
-      bestStart = w.start
-    }
-  }
-
-  // Require at least one matched token (any score > 0). Earlier match wins
-  // on ties via the strict `>` above.
-  return bestStart
-}
-
-/**
- * Materialize a per-placement remap from anchor + effective cuts.
+ * Trusts the timecodes the LLM emitted during plan generation as the canonical
+ * original-time anchor positions. Does NOT re-run anchor-text matching at runtime —
+ * matching is the LLM's job (once, during plan generation). At display time we
+ * just shift those original-time positions through the current effective cuts to
+ * get the placement's post-cut time.
  *
  * Pure function — no DB, no I/O. Caller is responsible for computing
- * `effectiveCuts` (via computeEffectiveCuts in broll.js) and providing the
- * raw transcript `words` ([{word,start,end}, ...]).
+ * `effectiveCuts` (via computeEffectiveCuts in broll.js).
+ *
+ * `words` is unused but kept in the signature for backwards compatibility with
+ * callers from earlier iterations.
  *
  * Returns Map<uuid, { start_seconds, end_seconds, anchor_state }>.
  *
- * `anchor_state`: 'idx' | 'fuzzy' | 'in_cut' | 'orphaned' | 'overlap_squeezed'.
+ * `anchor_state`: 'shifted' | 'overlap_squeezed'.
  */
 export function materializePlacementRemap(placements, effectiveCuts, words) {
   const MIN_DURATION = 0.5
 
-  // Pass 1 — anchor resolve + initial post-cut times + 0.5s minimum.
   const resolved = []
   for (const p of placements) {
     if (!p.uuid) continue
 
-    let anchorOriginal = null
-    let state = null
+    const startOrig = parseTimecode(p.start)
+    const endOrig = parseTimecode(p.end)
+    const origDur = endOrig - startOrig
+    const dur = origDur > 0 ? Math.max(MIN_DURATION, origDur) : MIN_DURATION
 
-    if (typeof p.anchor_word_idx === 'number' && p.anchor_word_idx >= 0) {
-      const w = words[p.anchor_word_idx]
-      if (!w) state = 'orphaned'
-      else if (isInCut(w.start, effectiveCuts)) state = 'in_cut'
-      else { anchorOriginal = w.start; state = 'idx' }
-    }
+    const startSec = postCutTime(startOrig, effectiveCuts)
+    const endSec = startSec + dur
 
-    if (anchorOriginal == null) {
-      const fuzzy = fuzzyMatchAnchorOriginalTime(p.audio_anchor, words, effectiveCuts)
-      if (fuzzy != null) {
-        anchorOriginal = fuzzy
-        state = 'fuzzy'
-      } else if (state === null) {
-        state = 'orphaned'
-      }
-    }
-
-    let startSec, endSec
-    if (anchorOriginal != null) {
-      startSec = postCutTime(anchorOriginal, effectiveCuts)
-      const origDur = parseTimecode(p.end) - parseTimecode(p.start)
-      endSec = startSec + Math.max(MIN_DURATION, origDur > 0 ? origDur : MIN_DURATION)
-    } else {
-      startSec = parseTimecode(p.start)
-      endSec = parseTimecode(p.end)
-      if (endSec - startSec < MIN_DURATION) endSec = startSec + MIN_DURATION
-    }
-
-    resolved.push({ uuid: p.uuid, startSec, endSec, state })
+    resolved.push({ uuid: p.uuid, startSec, endSec, state: 'shifted' })
   }
 
-  // Pass 2 — sort by start, trim overlaps, flag squeezed.
+  // Sort by start, trim overlaps, flag squeezed.
   resolved.sort((a, b) => a.startSec - b.startSec)
   for (let i = 0; i < resolved.length - 1; i++) {
     const cur = resolved[i]

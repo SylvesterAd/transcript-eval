@@ -44,7 +44,9 @@ const chapterRun = {
   }),
   output_text: JSON.stringify({
     placements: [{
-      start: '[00:00:14.94]', end: '[00:00:16.94]', // already post-cut (Task 1 invariant)
+      // LLM emits original time (per the original-time domain refactor).
+      // materializePlacementRemap shifts to post-cut at runtime: 19.94 - 5 = 14.94.
+      start: '[00:00:19.94]', end: '[00:00:21.94]',
       audio_anchor: 'There is a bad piece',
       anchor_word_idx: 0,
     }],
