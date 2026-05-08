@@ -52,20 +52,34 @@ async function main() {
     process.exit(0)
   }
 
-  // Resolve file_path → local path
+  // Resolve file_path → local audio. Mirrors whisper.js extractAudio:
+  // for any video format (mp4/webm/mov), ffmpeg streams just the audio
+  // track to a small mp3. For native audio (mp3/m4a/wav) we download as-is.
+  // Either way librosa reads a small audio file, not a multi-hundred-MB mp4.
   let localPath = video.file_path
   let tempPath = null
+  const isAudioFormat = /\.(mp3|m4a|wav)(\?|$)/i.test(video.file_path)
   if (/^https?:/.test(video.file_path)) {
     const dir = mkdtempSync(join(tmpdir(), 'acoustic-'))
-    const ext = video.file_path.match(/\.(mp3|mp4|wav|m4a|webm)(\?|$)/i)?.[1] || 'mp3'
-    tempPath = join(dir, `video.${ext.toLowerCase()}`)
-    console.log(`[backfill] Downloading ${video.file_path} → ${tempPath}`)
-    const resp = await fetch(video.file_path)
-    if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
-    const buf = Buffer.from(await resp.arrayBuffer())
-    writeFileSync(tempPath, buf)
+    if (isAudioFormat) {
+      const ext = video.file_path.match(/\.(mp3|m4a|wav)(\?|$)/i)[1].toLowerCase()
+      tempPath = join(dir, `audio.${ext}`)
+      console.log(`[backfill] Downloading audio ${video.file_path} → ${tempPath}`)
+      const resp = await fetch(video.file_path)
+      if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
+      const buf = Buffer.from(await resp.arrayBuffer())
+      writeFileSync(tempPath, buf)
+    } else {
+      tempPath = join(dir, 'audio.mp3')
+      console.log(`[backfill] ffmpeg-extracting audio from ${video.file_path} → ${tempPath}`)
+      // -vn (no video), -ac 1 (mono), -ar 22050 (matches librosa target sr),
+      // -b:a 48k (cheap), -y (overwrite). ffmpeg pulls remote input directly.
+      await execFileAsync('ffmpeg', [
+        '-i', video.file_path, '-vn', '-ac', '1', '-ar', '22050', '-b:a', '48k', '-y', tempPath,
+      ], { timeout: 600000, maxBuffer: 50 * 1024 * 1024 })
+    }
     localPath = tempPath
-    console.log(`[backfill] Downloaded ${(statSync(tempPath).size / 1024 / 1024).toFixed(1)} MB`)
+    console.log(`[backfill] Audio file size: ${(statSync(tempPath).size / 1024 / 1024).toFixed(1)} MB`)
   }
 
   // Pick interpreter
