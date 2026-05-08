@@ -108,8 +108,101 @@ export const FEW_SHOT_LOWER_THIRD_WITH_LOGO = `<!doctype html>
   </body>
 </html>`
 
-// Stub for multi-scene shader example — replaced by real content in Task 4.
-export const FEW_SHOT_MULTI_SCENE_WITH_SHADER = '<!-- multi-scene example added in Task 4 -->'
+export const FEW_SHOT_MULTI_SCENE_WITH_SHADER = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;700&display=swap" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hyperframes@0.5.3/runtime/shader.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; background: #0a0a0d; overflow: hidden; color: #fafaf5; font-family: "Bebas Neue", sans-serif; }
+      .scene-content { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; }
+      .kicker { font-family: "IBM Plex Mono", monospace; font-weight: 400; font-size: 20px; color: #f59e0b; letter-spacing: 0.3em; text-transform: uppercase; margin-bottom: 18px; }
+      .headline { font-size: 144px; line-height: 0.95; letter-spacing: 0.02em; }
+      .stat { font-family: "IBM Plex Mono", monospace; font-weight: 700; font-size: 240px; color: #f59e0b; font-variant-numeric: tabular-nums; }
+      .stat-label { font-family: "IBM Plex Mono", monospace; font-weight: 400; font-size: 24px; color: #9ca3af; letter-spacing: 0.2em; text-transform: uppercase; margin-top: 24px; }
+      .cta { font-size: 96px; }
+    </style>
+  </head>
+  <body>
+    <div id="main" data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="11">
+      <div class="scene clip" id="s1" data-start="0" data-duration="3" data-track-index="0">
+        <div class="scene-content">
+          <div class="kicker" id="s1-kicker">CHAPTER ONE</div>
+          <div class="headline" id="s1-headline">THE OPENING ARGUMENT</div>
+        </div>
+      </div>
+      <div class="scene clip" id="s2" data-start="3" data-duration="4" data-track-index="0" style="visibility:hidden;">
+        <div class="scene-content">
+          <div class="stat" id="s2-stat">0</div>
+          <div class="stat-label" id="s2-label">PERCENT GROWTH</div>
+        </div>
+      </div>
+      <div class="scene clip" id="s3" data-start="7" data-duration="4" data-track-index="0" style="opacity:0;">
+        <div class="scene-content">
+          <div class="cta" id="s3-cta">READ THE FULL STORY</div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // initial states
+      gsap.set("#s1-kicker", { autoAlpha: 0, y: 20 });
+      gsap.set("#s1-headline", { autoAlpha: 0, y: 30 });
+      gsap.set("#s2-stat", { autoAlpha: 0 });
+      gsap.set("#s2-label", { autoAlpha: 0, y: 8 });
+      gsap.set("#s3-cta", { autoAlpha: 0, scale: 0.94 });
+
+      const tl = gsap.timeline({ paused: true });
+
+      // SCENE 1 (anchor — visible at t=0; HyperShader will manage exit into shader transition)
+      tl.set("#s1", { opacity: 1 }, 0);                      // first anchor in shader group
+      tl.to("#s1-kicker", { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.1);
+      tl.to("#s1-headline", { autoAlpha: 1, y: 0, duration: 0.7, ease: "back.out(1.6)" }, 0.3);
+      tl.to("#s1-headline", { letterSpacing: "0.04em", duration: 1.8, ease: "sine.inOut", yoyo: true, repeat: 1 }, 1.0);
+
+      // SCENE 2 (non-anchor — appears after hard cut at t=3)
+      tl.set("#s2", { autoAlpha: 1 }, 3);
+      tl.to("#s2-stat", { autoAlpha: 1, duration: 0.4, ease: "power2.out" }, 3.1);
+      // counter animation 0 → 187
+      tl.to({ value: 0 }, {
+        value: 187, duration: 1.6, ease: "expo.out",
+        onUpdate: function() {
+          document.getElementById("s2-stat").innerText = Math.floor(this.targets()[0].value);
+        }
+      }, 3.1);
+      tl.to("#s2-label", { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 3.6);
+      // mid-scene glow pulse on the stat
+      tl.to("#s2-stat", { filter: "drop-shadow(0 0 12px rgba(245,158,11,0.6))", duration: 1.5, ease: "sine.inOut", yoyo: true, repeat: 1 }, 4.5);
+      tl.set("#s2", { autoAlpha: 0 }, 7);                    // hide before next scene
+
+      // SCENE 3 (anchor — receives shader transition entry from scene 2 boundary)
+      tl.to("#s3-cta", { autoAlpha: 1, scale: 1, duration: 0.7, ease: "back.out(1.6)" }, 7.2);
+      // mid-scene breathe
+      tl.to("#s3-cta", { letterSpacing: "0.06em", duration: 2.5, ease: "sine.inOut", yoyo: true, repeat: 1 }, 8.2);
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = tl;
+
+      // Shader transition between s1 (anchor) and s3 (anchor); s2 is non-anchor between them.
+      // Per canonical: scenes.length === transitions.length + 1 — here we wire only the s1↔s3 group.
+      // Hard cut s1→s2 (no shader); hard cut s2→s3 (no shader); the shader runs between the
+      // two anchor scenes (s1 and s3) via HyperShader's own boundary handling.
+      window.HyperShader && window.HyperShader.init({
+        bgColor: "#0a0a0d",
+        scenes: ["s1", "s3"],
+        timeline: tl,
+        transitions: [
+          { time: 6.75, shader: "cinematic-zoom", duration: 0.5 }
+        ]
+      });
+    </script>
+  </body>
+</html>`
 
 // Lottie adapter few-shot — demonstrates window.__hfLottie usage for scenes
 // that scrub a Lottie animation in lockstep with the GSAP timeline. The

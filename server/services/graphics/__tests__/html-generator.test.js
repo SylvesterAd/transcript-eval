@@ -381,3 +381,33 @@ describe('CREATE_HTML_SYSTEM_PROMPT — missing canonical rules now present', ()
     expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/at least 3/)
   })
 })
+
+describe('FEW_SHOT_MULTI_SCENE_WITH_SHADER', () => {
+  it('is exported and used inside CREATE_HTML_SYSTEM_PROMPT', async () => {
+    const mod = await import('../html-generator.js')
+    expect(mod.FEW_SHOT_MULTI_SCENE_WITH_SHADER).toBeDefined()
+    expect(mod.CREATE_HTML_SYSTEM_PROMPT).toContain(mod.FEW_SHOT_MULTI_SCENE_WITH_SHADER)
+  })
+
+  it('has composition root with 3 scenes', async () => {
+    const { FEW_SHOT_MULTI_SCENE_WITH_SHADER: f } = await import('../html-generator.js')
+    expect(f).toMatch(/data-composition-id="main"/)
+    expect(f).toMatch(/id="s1"/)
+    expect(f).toMatch(/id="s2"/)
+    expect(f).toMatch(/id="s3"/)
+  })
+
+  it('uses HyperShader.init with one transition', async () => {
+    const { FEW_SHOT_MULTI_SCENE_WITH_SHADER: f } = await import('../html-generator.js')
+    expect(f).toMatch(/HyperShader\.init/)
+    expect(f).toMatch(/transitions:\s*\[/)
+  })
+
+  it('uses anchor + non-anchor visibility patterns', async () => {
+    const { FEW_SHOT_MULTI_SCENE_WITH_SHADER: f } = await import('../html-generator.js')
+    expect(f).toMatch(/style="opacity:\s*0;?"/)
+    expect(f).toMatch(/style="visibility:\s*hidden;?"/)
+    expect(f).toMatch(/autoAlpha:\s*1/)
+    expect(f).toMatch(/opacity:\s*1/)
+  })
+})
