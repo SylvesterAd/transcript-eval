@@ -210,6 +210,52 @@ export default function TranscriptEditor() {
     return counts
   }, [state.annotations])
 
+  // Map: displayItem index → array of deletion annotations whose LAST word
+  // sits on that index. Used to render a one-click "accept this suggestion"
+  // checkmark above the final character of each suggested cut span.
+  const annEndingAt = useMemo(() => {
+    const endMap = new Map()  // idx → ann[]
+    if (!state.annotations?.items?.length) return endMap
+    for (const ann of state.annotations.items) {
+      if (ann.type !== 'deletion') continue
+      let lastIdx = -1
+      for (let i = 0; i < displayItems.length; i++) {
+        const item = displayItems[i]
+        if (item.type !== 'word') continue
+        const mid = (item.start + item.end) / 2
+        if (mid >= ann.startTime && mid < ann.endTime) lastIdx = i
+      }
+      if (lastIdx >= 0) {
+        if (!endMap.has(lastIdx)) endMap.set(lastIdx, [])
+        endMap.get(lastIdx).push(ann)
+      }
+    }
+    return endMap
+  }, [state.annotations, displayItems])
+
+  // Click the checkmark → add a user-applied cut over the annotation's range
+  // (same shape as the Backspace handler in EditorView produces, so the cut
+  // collapses the rough-cut timeline + skips playback + re-derives b-roll
+  // placements via the existing hash-diff remap).
+  const acceptSuggestion = useCallback((ann) => {
+    // Drop any exclusion that was specifically rejecting this annotation.
+    const remaining = (state.cutExclusions || []).filter(e =>
+      !(ann.startTime < e.end + 0.01 && ann.endTime > e.start - 0.01)
+    )
+    if (remaining.length !== (state.cutExclusions || []).length) {
+      dispatch({ type: 'SET_EXCLUSIONS', payload: remaining })
+    }
+    dispatch({
+      type: 'ADD_CUT',
+      payload: {
+        id: `cut-accept-${ann.id || Date.now()}`,
+        start: ann.startTime,
+        end: ann.endTime,
+        source: 'transcript',
+      },
+    })
+  }, [state.cutExclusions, dispatch])
+
   const [cutsOpen, setCutsOpen] = useState(false)
   const [identifyOpen, setIdentifyOpen] = useState(false)
   const cutsRef = useRef(null)
@@ -858,11 +904,17 @@ export default function TranscriptEditor() {
               ? 'rgba(255, 255, 255, 0.15)'
               : bgColor
 
-            return (
+            // Show an "accept this suggestion" checkmark above the LAST word
+            // of each deletion annotation — but only if the user hasn't
+            // already accepted (manually cut) this region.
+            const endingAnns = annEndingAt.get(idx)
+            const showAcceptCheck = endingAnns && endingAnns.length > 0 && !cut
+
+            const wordSpan = (
               <span
                 key={`${item.start}-${idx}`}
                 ref={el => itemRefs.current[idx] = el}
-                className={`cursor-text px-[1px] py-[2px] inline ${
+                className={`cursor-text px-[1px] py-[2px] ${showAcceptCheck ? 'inline-block relative' : 'inline'} ${
                   cut && !isUnsafeFiller ? 'line-through text-on-surface-variant' : ''
                 } ${
                   cut && !isUnsafeFiller && !selected && !isGap ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
@@ -878,9 +930,25 @@ export default function TranscriptEditor() {
                 onMouseEnter={hasAnn ? (e) => handleMouseEnter(idx, e) : undefined}
                 onMouseLeave={hasAnn ? handleMouseLeave : undefined}
               >
-                {item.word}{' '}
+                {item.word}
+                {showAcceptCheck && (
+                  <button
+                    onMouseDown={(e) => { e.stopPropagation(); e.preventDefault() }}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      // Multiple annotations may end at the same word (rare); accept all of them.
+                      for (const ann of endingAnns) acceptSuggestion(ann)
+                    }}
+                    title="Accept this cut"
+                    className="absolute -top-2.5 -right-1 w-3.5 h-3.5 rounded-full bg-primary-fixed text-on-primary text-[9px] leading-none flex items-center justify-center shadow hover:scale-125 transition-transform z-10 cursor-pointer"
+                  >
+                    ✓
+                  </button>
+                )}
+                {' '}
               </span>
             )
+            return wordSpan
           })}
           {displayItems.length === 0 && (
             <div className="text-on-surface-variant/40 text-sm italic mt-8 text-center">
