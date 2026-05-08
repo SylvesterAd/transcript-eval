@@ -70,3 +70,16 @@ describe('BRIEF_SYSTEM_PROMPT documents available adapters', () => {
     expect(BRIEF_SYSTEM_PROMPT).toMatch(/css-animations|css animation/i)
   })
 })
+
+describe('BRIEF_SYSTEM_PROMPT teaches single-HTML multi-scene', () => {
+  it('describes scenes as nested in one composition (not separate renders)', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/single (?:HTML|composition)|one composition|nested/i)
+  })
+
+  it('mentions HyperShader transitions are LLM-decided, sparingly', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/shader transition|HyperShader/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/sparingly|2.{0,5}3 |hard cuts|95%/i)
+  })
+})

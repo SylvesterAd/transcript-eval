@@ -15,12 +15,21 @@ Optional spec field:
     Include an entry only when the user mentions a logo, background, map, chart, or other image.
     Use Google Search to find a reliable URL — prefer Wikimedia, official brand sites, or stable
     publisher pages. If no imagery is mentioned, omit the field entirely (don't emit \`assets: []\`).
-  - scenes: array of scene objects for multi-scene graphics, format [{template, duration, mainText, subText, assets?}]
-      Use this when the user wants a sequence of clips (e.g. "intro then main then outro").
-      Each scene has its own template/duration/text and may have its own assets. Top-level
-      aspectRatio + tone apply to all scenes. When scenes is present, top-level
-      template/duration/mainText/subText are ignored. Defaults to single-scene (omit the field)
-      unless the user requests a sequence.
+  - scenes: array of scene entries — produces ONE multi-scene HTML composition (nested
+      <div class="scene clip"> elements inside a single composition root). All scenes share
+      one paused GSAP timeline that orchestrates entrances, mid-scene activity, and exits.
+      The composition's total duration = sum of scene durations.
+      Format: [{template, duration, mainText, subText, assets?, adapter?, anchor?}]
+        - anchor: true marks a scene as participating in shader transitions (default false)
+        - adapter: runtime override (see RUNTIME ADAPTERS section below)
+      Top-level aspectRatio + tone apply to all scenes. When scenes is present, top-level
+      template/duration/mainText/subText are ignored. Defaults to single-scene (omit the
+      field) unless the user requests a sequence.
+
+      Shader transitions between adjacent ANCHOR scenes are LLM-decided and sparingly used:
+      ~95% of cuts should be hard cuts; reserve 2-3 shader transitions per video for
+      energy-shift moments (hero reveal, CTA landing). Shorter videos (<6 scenes) prefer
+      hard cuts only.
 
 Rules:
 1. Ask ONE question at a time. Confirm understanding before moving on.
