@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo, useContext } from 'react'
+import { Scissors } from 'lucide-react'
 import { EditorContext } from './EditorView.jsx'
 
 const ANNOTATION_COLORS = {
@@ -939,10 +940,10 @@ export default function TranscriptEditor() {
                       // Multiple annotations may end at the same word (rare); accept all of them.
                       for (const ann of endingAnns) acceptSuggestion(ann)
                     }}
-                    title="Accept this cut"
-                    className="absolute -top-2.5 -right-1 w-3.5 h-3.5 rounded-full bg-primary-fixed text-black text-[10px] font-bold leading-none flex items-center justify-center shadow hover:scale-125 transition-transform z-10 cursor-pointer"
+                    title="Cut this segment"
+                    className="absolute -top-2.5 -right-1 w-3.5 h-3.5 rounded-full bg-primary-fixed text-black flex items-center justify-center shadow hover:scale-125 transition-transform z-10 cursor-pointer"
                   >
-                    ✓
+                    <Scissors size={9} strokeWidth={2.5} />
                   </button>
                 )}
                 {' '}
