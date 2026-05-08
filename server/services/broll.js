@@ -35,6 +35,7 @@ import {
   assertPriorsComplete,
 } from './broll-prior-strategies.js'
 import { findAnchorWordIdx } from './anchor-word.js'
+import { parseTimecode } from './placement-match.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -1191,12 +1192,21 @@ export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
   const shiftPlacement = (p) => {
     const next = { ...p, anchor_word_idx: findAnchorWordIdx(words, p.audio_anchor) }
     if (!effectiveCuts.length) return next
-    if (typeof p.start_seconds === 'number') {
-      next.start_seconds = shiftOriginalToPostCut(p.start_seconds, effectiveCuts)
+
+    // Resolve numeric seconds from either explicit field or the timecode string.
+    const startOrig = typeof p.start_seconds === 'number'
+      ? p.start_seconds
+      : (p.start ? parseTimecode(p.start) : null)
+    const endOrig = typeof p.end_seconds === 'number'
+      ? p.end_seconds
+      : (p.end ? parseTimecode(p.end) : null)
+
+    if (startOrig != null) {
+      next.start_seconds = shiftOriginalToPostCut(startOrig, effectiveCuts)
       next.start = tc(next.start_seconds)
     }
-    if (typeof p.end_seconds === 'number') {
-      next.end_seconds = shiftOriginalToPostCut(p.end_seconds, effectiveCuts)
+    if (endOrig != null) {
+      next.end_seconds = shiftOriginalToPostCut(endOrig, effectiveCuts)
       next.end = tc(next.end_seconds)
     }
     return next
