@@ -214,4 +214,14 @@ describe('orchestrator — iterating mode', () => {
     expect(result.renderId).toBeNull()
     expect(result.assistantText).toMatch(/iteration limit/i)
   })
+
+  it('throws when status=iterating but no complete parent render exists', async () => {
+    dbState.loadSessionResult = { id: 1, spec_json: {}, status: 'iterating' }
+    dbState.parentResult = null
+    dbState.iterationCountResult = { c: 1 }  // below cap
+
+    const { runChatTurn } = await import('../orchestrator.js')
+    await expect(runChatTurn({ sessionId: 1, userMessage: 'hi' }))
+      .rejects.toThrow(/no complete render exists/i)
+  })
 })
