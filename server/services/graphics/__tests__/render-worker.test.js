@@ -509,3 +509,64 @@ describe('drainOnce — multi-scene single-render flow', () => {
     expect(refineArgs.feedback).toMatch(/Scene 2: ok/)
   })
 });
+
+describe('renderWorker.drainOnce — final_html_text persistence', () => {
+  it('writes the final HTML into the completion UPDATE', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 200, session_id: 's-200', iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null)
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    const { runLint } = await import('../lint-runner.js')
+    const { renderHtml } = await import('../render-runner.js')
+    const { runCritic } = await import('../critic/critic-runner.js')
+    const { uploadRender } = await import('../uploader.js')
+
+    runLint.mockReset()
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
+    specToHtml.mockClear()
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="main" data-composition-id="main" data-duration="5">FINAL_HTML_MARKER</div></body></html>',
+      cost: 1, tokens: { in: 100, out: 100 },
+    })
+    refineHtml.mockClear()
+    renderHtml.mockClear()
+    renderHtml.mockResolvedValue({ outputPath: '/tmp/x.mp4', durationMs: 1000 })
+    uploadRender.mockClear()
+    uploadRender.mockResolvedValue({ url: 'http://supa/x.mp4' })
+    runCritic.mockReset()
+    runCritic.mockResolvedValue({
+      score: 0.9, criteria: {}, feedback: 'good',
+      retry_recommended: false, frameUrls: [], tokens: { in: 0, out: 0 },
+    })
+
+    // Spy on db.prepare, then re-wire db.transaction so the tx argument the
+    // worker receives also goes through the spy (the default mock closes over
+    // prepareMock directly, bypassing the spy wrapper).
+    const prepareSpy = vi.spyOn(db, 'prepare')
+    const origTransaction = db.transaction
+    db.transaction = vi.fn(async (fn) => fn({ prepare: (...args) => db.prepare(...args) }))
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    const sqls = prepareSpy.mock.calls.map((c) => c[0])
+    const completionUpdate = sqls.find(
+      (s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'complete'/.test(s)
+    )
+    expect(completionUpdate).toBeDefined()
+    expect(completionUpdate).toMatch(/final_html_text\s*=\s*\?/)
+    prepareSpy.mockRestore()
+    db.transaction = origTransaction
+  })
+})

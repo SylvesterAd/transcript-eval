@@ -105,7 +105,7 @@ async function runCriticLoop({ renderId, sessionId, spec }) {
       spec, sessionId,
     })
     emit({ sessionId, step: 'critic_scored', label: `Critic score ${critique.score.toFixed(2)} (iter ${iteration})`, renderId, iteration, score: critique.score })
-    const attempt = { iteration, score: critique.score, mp4Path: currentResult.outputPath, upload: currentUpload, durationMs: currentResult.durationMs }
+    const attempt = { iteration, score: critique.score, mp4Path: currentResult.outputPath, upload: currentUpload, durationMs: currentResult.durationMs, html: currentHtml }
     if (!bestAttempt || attempt.score > bestAttempt.score) bestAttempt = attempt
     if (!critique.retry_recommended || critique.score >= SCORE_THRESHOLD) break
     if (iteration >= MAX_ITERATIONS) break
@@ -125,6 +125,7 @@ async function runCriticLoop({ renderId, sessionId, spec }) {
     bestMp4Path: bestAttempt.mp4Path,
     bestUpload: bestAttempt.upload,
     bestScore: bestAttempt.score,
+    bestHtml: bestAttempt.html,
     totalIterations: iteration,
     totalDurationMs,
     cost: totalCost,
@@ -145,9 +146,9 @@ export async function drainOnce() {
         await tx.prepare(
           `UPDATE graphics_renders
            SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?,
-               iteration_count = ?, final_score = ?, scene_count = ?
+               iteration_count = ?, final_score = ?, scene_count = ?, final_html_text = ?
            WHERE id = ?`
-        ).run(r.bestUpload.url, r.totalDurationMs, r.cost, r.totalIterations, r.bestScore, sceneCount, row.id)
+        ).run(r.bestUpload.url, r.totalDurationMs, r.cost, r.totalIterations, r.bestScore, sceneCount, r.bestHtml, row.id)
         await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`).run(row.session_id)
       })
       emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore: r.bestScore })
