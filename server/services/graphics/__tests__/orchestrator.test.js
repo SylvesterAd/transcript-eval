@@ -146,10 +146,15 @@ describe('orchestrator — iterating mode', () => {
     expect(insertRender).toBeDefined()
     expect(insertRender.sql).toMatch(/parent_render_id/i)
     expect(insertRender.sql).toMatch(/human_feedback/i)
-    // The args contain parent.id, "make it bigger", and parent.iteration + 1
-    expect(insertRender.args).toContain(7)             // parent_render_id
-    expect(insertRender.args).toContain('make it bigger') // human_feedback
-    expect(insertRender.args).toContain(2)             // iteration = parent.iteration + 1
+    // I-1: Position-aware args checks (was: .toContain, value-only)
+    const argsArr = insertRender.args
+    expect(argsArr[0]).toBe(1)                      // sessionId
+    expect(argsArr[1]).toBe(2)                      // iteration = parent.iteration + 1
+    expect(typeof argsArr[2]).toBe('string')        // spec_snapshot_json (stringified)
+    expect(JSON.parse(argsArr[2]).template).toBe('lower-third')  // confirms it's the parent's spec
+    expect(argsArr[3]).toBe('lower-third')          // template (copied from parent.template)
+    expect(argsArr[4]).toBe(7)                      // parent_render_id (from parent.id)
+    expect(argsArr[5]).toBe('make it bigger')       // human_feedback (from userMessage)
     // Session flips to 'rendering'
     const sessionUpdate = dbState.txCalls.find(
       (c) => /UPDATE graphics_sessions/i.test(c.sql) && /status\s*=\s*'rendering'/i.test(c.sql)
@@ -158,5 +163,16 @@ describe('orchestrator — iterating mode', () => {
     // Returned shape
     expect(result.assistantText).toBe('Refining…')
     expect(result.renderId).toBe(8)
+    // I-2: Atomicity — user msg + ack msg + render insert + session update all inside the transaction
+    const messageInserts = dbState.txCalls.filter((c) => /INSERT INTO graphics_messages/i.test(c.sql))
+    expect(messageInserts).toHaveLength(2)
+    // First message insert: the user's message
+    expect(messageInserts[0].args).toContain(1)              // sessionId
+    expect(messageInserts[0].args).toContain('user')         // role
+    expect(messageInserts[0].args).toContain('make it bigger') // content
+    // Second message insert: the assistant ack
+    expect(messageInserts[1].args).toContain(1)              // sessionId
+    expect(messageInserts[1].args).toContain('assistant')    // role
+    expect(messageInserts[1].args).toContain('Refining…')    // content
   })
 })
