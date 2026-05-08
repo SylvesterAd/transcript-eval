@@ -17,7 +17,6 @@ import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStrea
 import { runAiRoughCut } from '../services/rough-cut-runner.js'
 import { estimateTokenCost, estimateProcessingTime } from '../services/token-pricing.js'
 import { isAudioFile, isAudioFilename } from '../lib/media-type.js'
-import { recomputePlacementsForCuts } from '../services/recompute-placement-times.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -905,13 +904,10 @@ router.post('/groups/:id/retrigger-classify', requireAuth, async (req, res) => {
 
 // Save editor state for a group.
 //
-// When `editor_state.cuts` differ from the previously-stored cuts, every
-// b-roll placement's post-cut start_seconds/end_seconds is recomputed via
-// recomputePlacementsForCuts using the placement's stable anchor_word_idx
-// against the raw transcript. Duration is preserved; placements with no
-// anchor (or whose anchor maps into a cut) are flagged for UI display.
-// The DB write happens unconditionally below so cut-only changes still
-// persist when there are no placements to recompute.
+// Stores editor_state verbatim. Placement remap (post-cut time recomputation)
+// is handled at read-time inside getBRollEditorData via cutsHash diff —
+// writing to editor_state.broll.placements here was dead work because the
+// modern b-roll editor never reads that storage path directly.
 //
 // Exported so tests can invoke directly (the codebase pattern; supertest
 // is not a project dependency).
@@ -921,32 +917,6 @@ export async function _putEditorStateHandler(req, res) {
   const { editor_state } = req.body
   if (!editor_state || typeof editor_state !== 'object') {
     return res.status(400).json({ error: 'editor_state required' })
-  }
-
-  const oldState = group.editor_state_json ? JSON.parse(group.editor_state_json) : {}
-  const oldCuts = oldState.cuts || []
-  const newCuts = editor_state.cuts || []
-
-  // JSON.stringify comparison is sufficient: cuts are produced by the same
-  // code paths on every save (drag handles emit sorted output), so order is
-  // stable. A false-positive would only trigger an idempotent recompute —
-  // perf concern, not correctness concern.
-  const cutsChanged = JSON.stringify(oldCuts) !== JSON.stringify(newCuts)
-  if (cutsChanged && editor_state.broll?.placements?.length) {
-    // Load words for the main video in this group (raw type only).
-    const mainVideo = await db.prepare("SELECT id FROM videos WHERE group_id = ? AND video_type = 'raw' LIMIT 1").get(req.params.id)
-    if (mainVideo) {
-      const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw' LIMIT 1").get(mainVideo.id)
-      if (t?.word_timestamps_json) {
-        const words = JSON.parse(t.word_timestamps_json)
-        editor_state.broll.placements = recomputePlacementsForCuts(
-          editor_state.broll.placements,
-          newCuts,
-          editor_state.cutExclusions || [],
-          words,
-        )
-      }
-    }
   }
 
   await db.prepare('UPDATE video_groups SET editor_state_json = ? WHERE id = ?')
