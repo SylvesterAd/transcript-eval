@@ -411,3 +411,17 @@ describe('FEW_SHOT_MULTI_SCENE_WITH_SHADER', () => {
     expect(f).toMatch(/opacity:\s*1/)
   })
 })
+
+describe('REFINE_HTML_SYSTEM_PROMPT — scene-scoped editing', () => {
+  it('explicitly teaches scene-scoped refinement', async () => {
+    const { REFINE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(REFINE_HTML_SYSTEM_PROMPT).toMatch(/scene[- ]scoped|scene N|scene-by-scene/i)
+    expect(REFINE_HTML_SYSTEM_PROMPT).toMatch(/Scene 1:|Scene N:/)
+  })
+
+  it('still inherits CREATE_HTML_SYSTEM_PROMPT under ORIGINAL CONSTRAINTS', async () => {
+    const { REFINE_HTML_SYSTEM_PROMPT, CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(REFINE_HTML_SYSTEM_PROMPT).toContain(CREATE_HTML_SYSTEM_PROMPT)
+    expect(REFINE_HTML_SYSTEM_PROMPT).toMatch(/ORIGINAL CONSTRAINTS/i)
+  })
+})
