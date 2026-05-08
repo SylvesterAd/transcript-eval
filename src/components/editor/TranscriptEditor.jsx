@@ -844,6 +844,20 @@ export default function TranscriptEditor() {
               bgColor = annColors.bg
             }
 
+            // Annotation suggestions (not yet user-applied as cuts) get dim
+            // text so they're visibly distinct from untouched words — same
+            // grey treatment a "cut" word had pre PR #59, minus the strike.
+            const isAnnSuggestion = hasAnn && !cut && !isUnsafeFiller && !isGap
+
+            // Playback highlight: white-15 should always show on the current
+            // word. When the word has an annotation bg, the inline style would
+            // normally override the className-based bg, hiding the playhead
+            // marker. Promote the playhead bg into the inline style so it
+            // wins over the annotation color while the playhead is on it.
+            const inlineBg = (isCurrent && !cut)
+              ? 'rgba(255, 255, 255, 0.15)'
+              : bgColor
+
             return (
               <span
                 key={`${item.start}-${idx}`}
@@ -853,13 +867,13 @@ export default function TranscriptEditor() {
                 } ${
                   cut && !isUnsafeFiller && !selected && !isGap ? (hasAnn ? 'opacity-50' : 'opacity-30') : ''
                 } ${
-                  isCurrent && !cut && !bgColor ? 'bg-white/15' : ''
+                  isAnnSuggestion ? 'text-on-surface-variant' : ''
                 } ${
                   isGap && !cut ? 'text-on-surface-variant/40 text-[11px]' : ''
                 } ${
                   isGap && cut ? 'text-[11px] opacity-50' : ''
                 }`}
-                style={bgColor ? { backgroundColor: bgColor } : undefined}
+                style={inlineBg ? { backgroundColor: inlineBg } : undefined}
                 onContextMenu={(e) => handleContextMenu(idx, e)}
                 onMouseEnter={hasAnn ? (e) => handleMouseEnter(idx, e) : undefined}
                 onMouseLeave={hasAnn ? handleMouseLeave : undefined}
