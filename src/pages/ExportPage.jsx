@@ -310,6 +310,20 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
   }, [state.additionalPlanPipelineIds])
 
   const onStart = useCallback(async ({ unifiedManifest, options, targetFolder }) => {
+    // Re-verify Envato session at start time. The preflight ping can be
+    // minutes stale by the time the user actually clicks "Start Export" —
+    // they might have logged out in another tab, or cookies might have
+    // expired. Catch this BEFORE we mint a JWT and trigger downloads that
+    // would all fail with envato_403.
+    const envatoCount = (unifiedManifest.totals?.by_source?.envato) || 0
+    if (envatoCount > 0) {
+      const fresh = await ext.ping()
+      if (fresh.envato_session !== 'ok') {
+        dispatch({ type: 'goto', phase: 'state_b' })
+        throw new Error('Envato session expired or not detected. Please log in to Envato Elements and try again.')
+      }
+    }
+
     // 1. POST /api/exports → returns export_id
     const variantLabels = unifiedManifest.variants.length ? unifiedManifest.variants : [variantLabel]
     const exportRow = await apiPost('/exports', {
