@@ -123,6 +123,63 @@ describe('materializePlacementRemap', () => {
     expect(a.end_seconds).toBeCloseTo(10.3, 2)
   })
 
+  describe('cut clipping', () => {
+    it('hides a placement that is fully inside a cut', () => {
+      const placements = [{
+        uuid: 'p_inside',
+        start: '[00:00:12.00]', end: '[00:00:14.00]',
+        audio_anchor: 'inside the cut',
+      }]
+      const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], [])
+      const p = out.get('p_inside')
+      expect(p.hidden).toBe(true)
+      expect(p.start_seconds).toBeUndefined()
+    })
+
+    it('clips end to cut.start when placement starts before cut and ends inside it', () => {
+      // Placement 8-12. Cut [10, 15]. Visible portion: 8-10 → post-cut 8-10.
+      const placements = [{
+        uuid: 'p_overruns',
+        start: '[00:00:08.00]', end: '[00:00:12.00]',
+        audio_anchor: 'overruns into cut',
+      }]
+      const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], [])
+      const p = out.get('p_overruns')
+      expect(p.start_seconds).toBeCloseTo(8, 2)
+      expect(p.end_seconds).toBeCloseTo(10, 2)
+      expect(p.anchor_state).toBe('cut_clipped')
+    })
+
+    it('clips start to cut.end when placement starts inside cut and ends after it', () => {
+      // Placement 12-18. Cut [10, 15]. Visible portion: 15-18 → post-cut 10-13.
+      const placements = [{
+        uuid: 'p_underruns',
+        start: '[00:00:12.00]', end: '[00:00:18.00]',
+        audio_anchor: 'underruns from cut',
+      }]
+      const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], [])
+      const p = out.get('p_underruns')
+      expect(p.start_seconds).toBeCloseTo(10, 2)
+      expect(p.end_seconds).toBeCloseTo(13, 2)
+      expect(p.anchor_state).toBe('cut_clipped')
+    })
+
+    it('preserves placement that spans across a cut (start before, end after)', () => {
+      // Placement 8-18 across cut [10, 15]. Both edges outside → no clipping
+      // flag, but postCutTime collapses the middle. Post-cut: 8 → 13 (5s gone).
+      const placements = [{
+        uuid: 'p_spans',
+        start: '[00:00:08.00]', end: '[00:00:18.00]',
+        audio_anchor: 'spans across cut',
+      }]
+      const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], [])
+      const p = out.get('p_spans')
+      expect(p.start_seconds).toBeCloseTo(8, 2)
+      expect(p.end_seconds).toBeCloseTo(13, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+  })
+
   it('skips placements without uuid', () => {
     const out = materializePlacementRemap(
       [{ start: '[00:00:01]', end: '[00:00:02]' }],
