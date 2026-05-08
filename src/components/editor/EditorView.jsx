@@ -1007,15 +1007,18 @@ export default function EditorView() {
           const items = words || []
           let cutCount = 0
           let uncutCount = 0
+          // Mirror TranscriptEditor.isItemCut — only user-applied cuts count
+          // toward cut/uncut detection. Annotation-source cuts are visual
+          // suggestions in the rough-cut tab and don't trigger UNCUT mode.
           for (const w of items) {
             const wEnd = w.end || w.start + 0.01
-            const isCut = state.cuts.some(c => w.start < c.end && wEnd > c.start)
+            const isCut = state.cuts.some(c => c.source !== 'annotation' && w.start < c.end && wEnd > c.start)
             if (isCut) cutCount++
             else uncutCount++
           }
-          // If no word info, fall back to overlap check
+          // If no word info, fall back to overlap check (same source filter)
           if (items.length === 0) {
-            const overlapping = state.cuts.filter(c => c.start < endTime && c.end > startTime)
+            const overlapping = state.cuts.filter(c => c.source !== 'annotation' && c.start < endTime && c.end > startTime)
             if (overlapping.length > 0) cutCount = 1
             else uncutCount = 1
           }

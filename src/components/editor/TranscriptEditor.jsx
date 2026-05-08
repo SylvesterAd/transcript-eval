@@ -489,9 +489,19 @@ export default function TranscriptEditor() {
   // Tooltip state
   const [tooltip, setTooltip] = useState(null) // {x, y, annotations}
 
-  // Check if an item overlaps any cut region
+  // Check if an item overlaps any *user-applied* cut region.
+  // Annotation-source cuts (auto-derived from rough-cut suggestions) are kept in
+  // state.cuts so the playback engine + b-roll pipeline see them, but they
+  // render only as colored highlights via hasAnn/annColors below — not as
+  // strike-through. Strike-through is reserved for cuts the user chose
+  // explicitly (Backspace adds source:'transcript').
   const isItemCut = useCallback((item) => {
-    return state.cuts.some(c => c.end > c.start + 0.01 && item.start < c.end && item.end > c.start)
+    return state.cuts.some(c =>
+      c.source !== 'annotation' &&
+      c.end > c.start + 0.01 &&
+      item.start < c.end &&
+      item.end > c.start
+    )
   }, [state.cuts])
 
   // Clear visual highlight when transcriptSelection is cleared externally (e.g. Backspace handler)
