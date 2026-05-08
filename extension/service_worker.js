@@ -40,14 +40,24 @@ async function handlePing() {
   //      truth and uses Chrome's own cookie jar via credentials:'include'.
   // Always reconcile chrome.storage.local so the popup + future pings
   // reflect reality, not a stale flag from a previous session.
+  // Cookie-presence is a NECESSARY but NOT SUFFICIENT signal: Envato can
+  // invalidate the server-side session without removing the client cookies
+  // (e.g. user logs out in another tab, session expires by inactivity).
+  // Always run the live preflight when cookies are present so we don't
+  // declare 'ok' for a stale session — that previously caused exports to
+  // start happily then fail at resolve/license time with confusing errors.
+  // If cookies are absent we can short-circuit without a network call.
   let envatoStatus
-  if (await hasEnvatoSession()) {
-    envatoStatus = 'ok'
+  if (!await hasEnvatoSession()) {
+    envatoStatus = 'missing'
   } else {
     try {
       const live = await checkEnvatoSessionLive()
       envatoStatus = live.status === 'ok' ? 'ok' : 'missing'
     } catch {
+      // Network error during preflight — be conservative and treat as
+      // missing so the user is prompted to re-authenticate rather than
+      // the export starting on a possibly-stale session.
       envatoStatus = 'missing'
     }
   }
