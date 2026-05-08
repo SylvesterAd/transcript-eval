@@ -316,6 +316,11 @@ try {
       ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS scene_count INTEGER NOT NULL DEFAULT 1;
     `);
     console.log('[migrate] graphics_render_iterations + critic + scene columns ready')
+    // Phase 5A: drop scene_index — single-HTML architecture renders one MP4 per render
+    await pool.query(`
+      ALTER TABLE graphics_render_iterations DROP COLUMN IF EXISTS scene_index
+    `);
+    console.log('[migrate] dropped scene_index from graphics_render_iterations')
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
