@@ -40,13 +40,14 @@ export async function runAgent(args) {
   const {
     assembledTranscript,
     wordTimestamps,
+    acousticFeatures = null,
     model,
     chaptersFetcher = null,
     maxTokens = DEFAULT_MAX_TOKENS,
   } = args
 
   const client = getClient()
-  const state = createState({ assembledTranscript, wordTimestamps })
+  const state = createState({ assembledTranscript, wordTimestamps, acousticFeatures })
 
   // First user message: pass the transcript so the agent can hold the whole
   // thing in its first prompt (cached). Tool calls below refine.
@@ -63,8 +64,11 @@ export async function runAgent(args) {
 
   let totalIn = 0
   let totalOut = 0
+  let totalCacheCreate = 0
+  let totalCacheRead = 0
   let toolCalls = 0
   let stopReason = 'unknown'
+  const toolCallLog = []
 
   while (toolCalls <= MAX_TOOL_CALLS) {
     const resp = await client.messages.create({
@@ -77,6 +81,8 @@ export async function runAgent(args) {
 
     totalIn += resp.usage?.input_tokens || 0
     totalOut += resp.usage?.output_tokens || 0
+    totalCacheCreate += resp.usage?.cache_creation_input_tokens || 0
+    totalCacheRead += resp.usage?.cache_read_input_tokens || 0
 
     const toolUses = (resp.content || []).filter(b => b.type === 'tool_use')
 
@@ -100,6 +106,10 @@ export async function runAgent(args) {
         result = { error: String(err.message || err) }
       }
       if (tu.name === 'finish') finishCalled = true
+      // Log scope-bearing args concisely so we can see the chunk plan after the fact.
+      const scope = tu.input?.scope
+      const scopeStr = scope ? `[${scope.start?.toFixed(1)}-${scope.end?.toFixed(1)}]` : ''
+      toolCallLog.push(`${tu.name}${scopeStr}`)
       toolResults.push({
         type: 'tool_result',
         tool_use_id: tu.id,
@@ -124,7 +134,13 @@ export async function runAgent(args) {
     cuts: state.cuts,
     uncertain: state.uncertain,
     stopReason,
-    totalTokens: { in: totalIn, out: totalOut },
+    totalTokens: {
+      in: totalIn,
+      out: totalOut,
+      cache_create: totalCacheCreate,
+      cache_read: totalCacheRead,
+    },
     toolCalls,
+    toolCallLog,
   }
 }

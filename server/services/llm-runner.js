@@ -700,15 +700,20 @@ export async function executeRun(experimentRunId) {
           if (grp?.assembled_transcript) assembledTranscript = grp.assembled_transcript
         }
         const wt = await db.prepare(
-          "SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'"
+          "SELECT word_timestamps_json, acoustic_features_json FROM transcripts WHERE video_id = ? AND type = 'raw'"
         ).get(run.video_id)
+        let acousticFeatures = null
         if (wt?.word_timestamps_json) {
           try { wordTimestamps = JSON.parse(wt.word_timestamps_json) } catch {}
+        }
+        if (wt?.acoustic_features_json) {
+          try { acousticFeatures = JSON.parse(wt.acoustic_features_json) } catch {}
         }
 
         const agentResult = await runAgent({
           assembledTranscript,
           wordTimestamps,
+          acousticFeatures,
           model: agentModel,
         })
 

@@ -6,10 +6,11 @@ let nextUncertainCounter = 0
 /**
  * @param {{assembledTranscript: string, wordTimestamps: Array}} init
  */
-export function createState({ assembledTranscript, wordTimestamps }) {
+export function createState({ assembledTranscript, wordTimestamps, acousticFeatures = null }) {
   const cuts = []
   const uncertain = []
   let chapters = null
+  let acoustic = acousticFeatures
 
   return {
     assembledTranscript,
@@ -18,6 +19,8 @@ export function createState({ assembledTranscript, wordTimestamps }) {
     uncertain,
     get chapters() { return chapters },
     setChapters(value) { chapters = value },
+    get acousticFeatures() { return acoustic },
+    setAcousticFeatures(value) { acoustic = value },
 
     addCut({ start, end, category, reason, confidence, evidence }) {
       const id = `cut_${++nextCutCounter}_${Math.random().toString(36).slice(2, 8)}`

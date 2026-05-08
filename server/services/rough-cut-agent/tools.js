@@ -137,6 +137,17 @@ export const TOOL_SCHEMAS = [
     },
   },
   {
+    name: 'get_acoustic_features',
+    description: 'Returns acoustic features (rms_db, f0, voicing, spectral centroid, ZCR) extracted from the source audio. Use SPARINGLY — only when text-only confidence is below 0.80 OR when discriminating discourse-marker boundaries / abandonment. Default granularity is "word" (per-word aggregates aligned to word_timestamps). Use "frame" for raw 100ms frames in a small scope, "sentence" for higher-level scans.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+        granularity: { type: 'string', enum: ['word', 'frame', 'sentence'], description: 'Default "word"' },
+      },
+    },
+  },
+  {
     name: 'commit_chunk',
     description: 'Lock in cuts for a chunk. Emit your prediction of what the chunk should READ LIKE after your cuts apply. The system applies the cuts, computes the actual surviving text, and reports match_percent + mismatches. If the score is low, your cuts and your understanding of them disagree — re-read preview_diff and fix before advancing.',
     input_schema: {
@@ -320,6 +331,154 @@ async function preview_diff(params, state) {
   return { preview: out.join('\n') }
 }
 
+// ── Acoustic feature aggregation ───────────────────────────────────────
+
+function framesInRange(acoustic, start, end) {
+  if (!acoustic?.frames?.length) return []
+  const hop = (acoustic.hop_ms || 100) / 1000
+  // Frames are stored at evenly spaced timestamps starting at 0; binary search
+  // would be tighter but the linear filter is fine at our scales.
+  return acoustic.frames.filter(f => f[0] + hop > start && f[0] < end)
+}
+
+function aggregate(frames) {
+  if (!frames.length) {
+    return { rms_mean: null, rms_max: null, f0_mean: null, voiced_ratio: 0, sc_mean: null, zcr_mean: null }
+  }
+  let rms_sum = 0, rms_max = -Infinity
+  let f0_sum = 0, f0_count = 0
+  let voiced = 0
+  let sc_sum = 0
+  let zcr_sum = 0
+  for (const f of frames) {
+    rms_sum += f[1]
+    if (f[1] > rms_max) rms_max = f[1]
+    if (f[3]) { f0_sum += f[2]; f0_count++; voiced++ }
+    sc_sum += f[4]
+    zcr_sum += f[5]
+  }
+  return {
+    rms_mean: +(rms_sum / frames.length).toFixed(1),
+    rms_max:  +rms_max.toFixed(1),
+    f0_mean:  f0_count > 0 ? +(f0_sum / f0_count).toFixed(1) : null,
+    voiced_ratio: +(voiced / frames.length).toFixed(2),
+    sc_mean:  +(sc_sum / frames.length).toFixed(0),
+    zcr_mean: +(zcr_sum / frames.length).toFixed(3),
+  }
+}
+
+async function get_acoustic_features(params, state) {
+  const acoustic = state.acousticFeatures
+  if (!acoustic?.frames?.length) {
+    return { available: false, reason: 'No acoustic_features_json on this transcript. Run scripts/backfill-acoustic-features.js or wait for re-transcription.' }
+  }
+  const granularity = params?.granularity || 'word'
+  const scope = params?.scope || null
+
+  if (granularity === 'frame') {
+    const start = scope?.start ?? 0
+    const end   = scope?.end   ?? acoustic.duration_s
+    const frames = framesInRange(acoustic, start, end)
+    return {
+      available: true,
+      granularity: 'frame',
+      hop_ms: acoustic.hop_ms,
+      features: acoustic.features,
+      frames,
+    }
+  }
+
+  if (granularity === 'word') {
+    const allWords = state.wordTimestamps
+    const filtered = scope
+      ? allWords.filter(w => inScope(w.start, w.end, scope))
+      : allWords
+    const out = []
+    for (let i = 0; i < filtered.length; i++) {
+      const w = filtered[i]
+      const wordFrames = framesInRange(acoustic, w.start, w.end)
+      const agg = aggregate(wordFrames)
+
+      // pause-before window: from previous word's end to this word's start.
+      // Use the FULL timestamp array (not the filtered one) so chunked agents
+      // still see correct boundary signals at chunk edges.
+      const fullIdx = allWords.indexOf(w)
+      const prevEnd = fullIdx > 0 ? allWords[fullIdx - 1].end : 0
+      const pauseFrames = framesInRange(acoustic, prevEnd, w.start)
+      const pauseAgg = aggregate(pauseFrames)
+
+      // Previous-word frames (for f0 reset and rms drop semantics).
+      const prevWordFrames = fullIdx > 0
+        ? framesInRange(acoustic, allWords[fullIdx-1].start, allWords[fullIdx-1].end)
+        : []
+      const prevAgg = prevWordFrames.length ? aggregate(prevWordFrames) : null
+
+      // rms_drop_before: how much energy fell from the previous word INTO the
+      // pause valley before this word. Positive = real boundary; >4 dB is the
+      // agent's "micro-pause" threshold.
+      const rms_drop_before = (prevAgg && prevAgg.rms_mean !== null && pauseAgg.rms_mean !== null)
+        ? +(prevAgg.rms_mean - pauseAgg.rms_mean).toFixed(1)
+        : null
+
+      // f0_reset_before: ratio of this word's f0 to previous word's f0.
+      // >1.3 or <0.77 indicates pitch reset (= sentence/clause boundary).
+      let f0_reset_before = null
+      if (prevAgg && prevAgg.f0_mean !== null && agg.f0_mean !== null) {
+        f0_reset_before = +(agg.f0_mean / prevAgg.f0_mean).toFixed(2)
+      }
+
+      out.push({
+        word: w.word,
+        start: w.start,
+        end: w.end,
+        rms_mean: agg.rms_mean,
+        rms_max: agg.rms_max,
+        rms_drop_at_end: null,  // computed below using next-word's start frames
+        rms_drop_before,
+        f0_mean: agg.f0_mean,
+        f0_reset_before,
+        voiced_ratio: agg.voiced_ratio,
+        pause_before_voiced_ratio: pauseAgg.voiced_ratio,
+        sc_mean: agg.sc_mean,
+        zcr_mean: agg.zcr_mean,
+      })
+    }
+    // Backfill rms_drop_at_end using each word's last frame vs next-word first frame.
+    for (let i = 0; i < out.length - 1; i++) {
+      const tailEnd = out[i].rms_mean
+      const nextHead = out[i + 1].rms_mean
+      if (tailEnd !== null && nextHead !== null) {
+        out[i].rms_drop_at_end = +(tailEnd - nextHead).toFixed(1)
+      }
+    }
+    return { available: true, granularity: 'word', hop_ms: acoustic.hop_ms, words: out }
+  }
+
+  if (granularity === 'sentence') {
+    // Approximate sentence boundary as transcript-line start times.
+    const lines = state.assembledTranscript.split('\n')
+    const sents = []
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\[[\d:\.]+\])\s*(.*)/)
+      if (!m) continue
+      const tcSec = parseTimecode(m[1])
+      // line ends at next timecode, or +5s fallback
+      let lineEnd = tcSec + 5
+      for (let j = i + 1; j < lines.length; j++) {
+        const m2 = lines[j].match(/^(\[[\d:\.]+\])/)
+        if (m2) { lineEnd = parseTimecode(m2[1]); break }
+      }
+      if (scope && !inScope(tcSec, lineEnd, scope)) continue
+      const frames = framesInRange(acoustic, tcSec, lineEnd)
+      const agg = aggregate(frames)
+      sents.push({ tc: m[1], text: m[2].slice(0, 80), start: tcSec, end: lineEnd, ...agg })
+    }
+    return { available: true, granularity: 'sentence', hop_ms: acoustic.hop_ms, sentences: sents }
+  }
+
+  return { available: false, reason: `unknown granularity: ${granularity}` }
+}
+
 function normalizeForCompare(text) {
   return text
     .toLowerCase()
@@ -401,6 +560,7 @@ const TOOLS = {
   get_audio_events,
   search_transcript,
   find_interruption_clusters,
+  get_acoustic_features,
   propose_cut,
   mark_uncertain,
   remove_cut,

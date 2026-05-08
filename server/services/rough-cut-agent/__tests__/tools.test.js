@@ -19,10 +19,10 @@ function makeState() {
 }
 
 describe('TOOL_SCHEMAS', () => {
-  it('exports all 13 tool schemas with Anthropic-compatible shape', () => {
+  it('exports all 14 tool schemas with Anthropic-compatible shape', () => {
     const expected = ['get_transcript', 'get_chapters', 'get_silences', 'get_audio_events',
       'search_transcript', 'find_interruption_clusters', 'propose_cut', 'mark_uncertain',
-      'remove_cut', 'adjust_cut', 'preview_diff', 'commit_chunk', 'finish']
+      'remove_cut', 'adjust_cut', 'preview_diff', 'commit_chunk', 'get_acoustic_features', 'finish']
     const names = TOOL_SCHEMAS.map(t => t.name)
     for (const e of expected) expect(names).toContain(e)
     for (const t of TOOL_SCHEMAS) {
@@ -219,6 +219,92 @@ describe('dispatchTool', () => {
 
   it('throws on unknown tool name', async () => {
     await expect(dispatchTool('does_not_exist', {}, makeState())).rejects.toThrow(/unknown/i)
+  })
+
+  describe('get_acoustic_features', () => {
+    function makeStateWithAcoustic() {
+      // 5 seconds of frames at 100ms hop. Word "Hello" 0–1s, "world" 1–2s,
+      // gap 2–4s, "Now" 4–5s. Voiced through speech, unvoiced in gap.
+      const frames = []
+      for (let i = 0; i < 50; i++) {
+        const t = i * 0.1
+        const inGap = t >= 2 && t < 4
+        frames.push([
+          +t.toFixed(1),
+          inGap ? -55 : -28,    // rms_db
+          inGap ? 0 : 140,      // f0
+          inGap ? 0 : 1,        // f0_voiced
+          inGap ? 3000 : 1800,  // spectral_centroid
+          inGap ? 0.05 : 0.15,  // zcr
+        ])
+      }
+      const acoustic = {
+        hop_ms: 100,
+        duration_s: 5,
+        features: ['rms_db', 'f0', 'f0_voiced', 'spectral_centroid', 'zcr'],
+        frames,
+      }
+      const words = [
+        { word: 'Hello', start: 0, end: 1 },
+        { word: 'world.', start: 1, end: 2 },
+        { word: 'Now', start: 4, end: 5 },
+      ]
+      const state = createState({ assembledTranscript: '', wordTimestamps: words })
+      state.setAcousticFeatures(acoustic)
+      return state
+    }
+
+    it('reports unavailable when transcripts.acoustic_features_json is null', async () => {
+      const state = makeState()  // no acoustic features set
+      const r = await dispatchTool('get_acoustic_features', {}, state)
+      expect(r.available).toBe(false)
+    })
+
+    it('default granularity is per-word, returns aggregate stats', async () => {
+      const state = makeStateWithAcoustic()
+      const r = await dispatchTool('get_acoustic_features', {}, state)
+      expect(r.available).toBe(true)
+      expect(r.granularity).toBe('word')
+      expect(r.words).toHaveLength(3)
+      const hello = r.words[0]
+      expect(hello.word).toBe('Hello')
+      expect(hello.rms_mean).toBeCloseTo(-28, 0)
+      expect(hello.voiced_ratio).toBeCloseTo(1, 1)
+      expect(hello.f0_mean).toBeCloseTo(140, 0)
+    })
+
+    it('per-word includes pause_before_voiced_ratio across the gap', async () => {
+      const state = makeStateWithAcoustic()
+      const r = await dispatchTool('get_acoustic_features', {}, state)
+      const now = r.words.find(w => w.word === 'Now')
+      // "Now" is preceded by a 2s gap (2–4s) where voiced=0, so the prior
+      // pause is mostly silence: pause_before_voiced_ratio should be near 0.
+      expect(now.pause_before_voiced_ratio).toBeLessThan(0.2)
+      // And rms_drop_before should be > 20 dB (-28 to -55)
+      expect(now.rms_drop_before).toBeGreaterThan(15)
+    })
+
+    it('frame granularity returns raw frames in scope', async () => {
+      const state = makeStateWithAcoustic()
+      const r = await dispatchTool('get_acoustic_features', {
+        granularity: 'frame',
+        scope: { start: 1, end: 3 },
+      }, state)
+      expect(r.granularity).toBe('frame')
+      expect(r.frames.length).toBeGreaterThan(15)  // ~20 frames at 100ms
+      expect(r.frames.length).toBeLessThan(25)
+      // First frame should be at t≈1.0
+      expect(r.frames[0][0]).toBeCloseTo(1, 1)
+    })
+
+    it('scope filter applies to per-word too', async () => {
+      const state = makeStateWithAcoustic()
+      const r = await dispatchTool('get_acoustic_features', {
+        scope: { start: 0, end: 2.5 },
+      }, state)
+      expect(r.words).toHaveLength(2)
+      expect(r.words.map(w => w.word)).toEqual(['Hello', 'world.'])
+    })
   })
 
   it('get_audio_events detects bracketed-word audio events without type field', async () => {
