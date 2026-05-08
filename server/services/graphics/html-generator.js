@@ -14,32 +14,42 @@ export const FEW_SHOT_LOWER_THIRD = `<!doctype html>
     <meta name="viewport" content="width=1920, height=1080" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700;900&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@300;700;900&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { width: 1920px; height: 1080px; background: transparent; overflow: hidden; font-family: "Roboto Condensed", sans-serif; }
       .lt-bar { position: absolute; bottom: 80px; left: 80px; height: 120px; background: rgba(0,0,0,0.78); border-left: 4px solid #9ca3af; padding: 14px 22px; opacity: 0; display: flex; flex-direction: column; justify-content: center; max-width: 1056px; }
-      .lt-main { font-weight: 700; font-size: 56px; color: #fafaf5; letter-spacing: 0.01em; line-height: 1.05; white-space: nowrap; }
-      .lt-sub { margin-top: 6px; font-family: "JetBrains Mono", monospace; font-weight: 400; font-size: 18px; color: #9ca3af; letter-spacing: 0.18em; text-transform: uppercase; }
+      .lt-main { font-weight: 900; font-size: 64px; color: #fafaf5; letter-spacing: 0.01em; line-height: 1.05; white-space: nowrap; }
+      .lt-sub { margin-top: 6px; font-family: "JetBrains Mono", monospace; font-weight: 400; font-size: 20px; color: #9ca3af; letter-spacing: 0.18em; text-transform: uppercase; }
     </style>
   </head>
   <body>
-    <div id="stage" data-composition-id="main" data-start="0" data-duration="8" data-width="1920" data-height="1080">
-      <div class="lt-bar" id="lt-bar">
-        <div class="lt-main" id="lt-main">Anna Rivera</div>
-        <div class="lt-sub" id="lt-sub">Senior journalist</div>
+    <div id="main" data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="8">
+      <div class="scene clip" id="s1" data-start="0" data-duration="8" data-track-index="0">
+        <div class="scene-content">
+          <div class="lt-bar" id="lt-bar">
+            <div class="lt-main" id="lt-main">Anna Rivera</div>
+            <div class="lt-sub" id="lt-sub">SENIOR JOURNALIST · BERLIN</div>
+          </div>
+        </div>
       </div>
     </div>
     <script>
-      window.__timelines = window.__timelines || {};
+      gsap.set("#lt-bar", { autoAlpha: 0, x: -40 });
+      gsap.set("#lt-main", { autoAlpha: 0, y: 12 });
+      gsap.set("#lt-sub",  { autoAlpha: 0, y: 8 });
+
       const tl = gsap.timeline({ paused: true });
-      tl.fromTo("#lt-bar", { autoAlpha: 0, x: -60 }, { autoAlpha: 1, x: 0, duration: 0.6, ease: "back.out(1.6)" }, 0.1);
-      tl.fromTo("#lt-main", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.4);
-      tl.fromTo("#lt-sub", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.6);
-      // mid-scene activity: subtle letter-spacing breathe on the headline
+      tl.to("#lt-bar",  { autoAlpha: 1, x: 0, duration: 0.6, ease: "back.out(1.6)" }, 0.2);
+      tl.to("#lt-main", { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.4);
+      tl.to("#lt-sub",  { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.55);
+      // mid-scene breathe
       tl.to("#lt-main", { letterSpacing: "0.02em", duration: 2, ease: "sine.inOut", yoyo: true, repeat: 1 }, 1.5);
-      tl.to("#lt-bar", { autoAlpha: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, 8 - 0.7));
+      // exit
+      tl.to(["#lt-bar", "#lt-main", "#lt-sub"], { autoAlpha: 0, duration: 0.5, ease: "power2.in" }, 7.3);
+
+      window.__timelines = window.__timelines || {};
       window.__timelines["main"] = tl;
     </script>
   </body>
@@ -52,41 +62,47 @@ export const FEW_SHOT_LOWER_THIRD_WITH_LOGO = `<!doctype html>
     <meta name="viewport" content="width=1920, height=1080" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700;900&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@300;700;900&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { width: 1920px; height: 1080px; background: transparent; overflow: hidden; font-family: "Roboto Condensed", sans-serif; }
-      .lt-bar { position: absolute; bottom: 80px; left: 80px; height: 130px; background: rgba(0,0,0,0.78); border-left: 4px solid #9ca3af; padding: 14px 22px; opacity: 0; display: flex; align-items: center; gap: 24px; max-width: 1100px; }
-      .lt-text { display: flex; flex-direction: column; justify-content: center; }
-      .lt-main { font-weight: 700; font-size: 56px; color: #fafaf5; letter-spacing: 0.01em; line-height: 1.05; white-space: nowrap; }
-      .lt-sub { margin-top: 6px; font-family: "JetBrains Mono", monospace; font-weight: 400; font-size: 18px; color: #9ca3af; letter-spacing: 0.18em; text-transform: uppercase; }
-      .lt-logo { height: 80px; display: flex; align-items: center; }
-      .lt-logo img { height: 100%; width: auto; filter: brightness(0) invert(1); }
+      .lt-bar { position: absolute; bottom: 80px; left: 80px; height: 120px; background: rgba(0,0,0,0.78); border-left: 4px solid #9ca3af; padding: 14px 22px 14px 80px; opacity: 0; display: flex; flex-direction: column; justify-content: center; max-width: 1056px; }
+      .lt-logo { position: absolute; left: 22px; top: 50%; transform: translateY(-50%); height: 60px; filter: brightness(0) invert(1); }
+      .lt-main { font-weight: 900; font-size: 64px; color: #fafaf5; letter-spacing: 0.01em; line-height: 1.05; white-space: nowrap; }
+      .lt-sub { margin-top: 6px; font-family: "JetBrains Mono", monospace; font-weight: 400; font-size: 20px; color: #9ca3af; letter-spacing: 0.18em; text-transform: uppercase; }
     </style>
   </head>
   <body>
-    <div id="stage" data-composition-id="main" data-start="0" data-duration="8" data-width="1920" data-height="1080">
-      <div class="lt-bar" id="lt-bar">
-        <div class="lt-text">
-          <div class="lt-main" id="lt-main">Anna Rivera</div>
-          <div class="lt-sub" id="lt-sub">Senior journalist, WSJ</div>
-        </div>
-        <div class="lt-logo" id="lt-logo">
-          <img src="https://upload.wikimedia.org/wikipedia/commons/4/4a/WSJ_Logo.svg" alt="WSJ logo" />
+    <div id="main" data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="8">
+      <div class="scene clip" id="s1" data-start="0" data-duration="8" data-track-index="0">
+        <div class="scene-content">
+          <div class="lt-bar" id="lt-bar">
+            <img class="lt-logo" id="lt-logo" src="{{LOGO_URL}}" alt="{{LOGO_ALT}}" />
+            <div class="lt-main" id="lt-main">Anna Rivera</div>
+            <div class="lt-sub" id="lt-sub">SENIOR JOURNALIST · BERLIN</div>
+          </div>
         </div>
       </div>
     </div>
     <script>
-      window.__timelines = window.__timelines || {};
+      gsap.set("#lt-bar", { autoAlpha: 0, x: -40 });
+      gsap.set("#lt-logo", { autoAlpha: 0, scale: 0.7 });
+      gsap.set("#lt-main", { autoAlpha: 0, y: 12 });
+      gsap.set("#lt-sub",  { autoAlpha: 0, y: 8 });
+
       const tl = gsap.timeline({ paused: true });
-      tl.fromTo("#lt-bar", { autoAlpha: 0, x: -60 }, { autoAlpha: 1, x: 0, duration: 0.6, ease: "back.out(1.6)" }, 0.1);
-      tl.fromTo("#lt-main", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.4);
-      tl.fromTo("#lt-sub", { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.6);
-      tl.fromTo("#lt-logo", { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.5, ease: "power2.out" }, 0.7);
-      // mid-scene activity: subtle letter-spacing breathe on the headline
+      tl.to("#lt-bar",  { autoAlpha: 1, x: 0, duration: 0.6, ease: "back.out(1.6)" }, 0.2);
+      tl.to("#lt-logo", { autoAlpha: 1, scale: 1, duration: 0.5, ease: "expo.out" }, 0.5);
+      tl.to("#lt-main", { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.6);
+      tl.to("#lt-sub",  { autoAlpha: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.75);
+      // mid-scene breathe + logo glow pulse
       tl.to("#lt-main", { letterSpacing: "0.02em", duration: 2, ease: "sine.inOut", yoyo: true, repeat: 1 }, 1.5);
-      tl.to("#lt-bar", { autoAlpha: 0, x: -40, duration: 0.5, ease: "power2.in" }, Math.max(0.1, 8 - 0.7));
+      tl.to("#lt-logo", { filter: "brightness(0) invert(1) drop-shadow(0 0 8px rgba(255,255,255,0.6))", duration: 1.5, ease: "sine.inOut", yoyo: true, repeat: 1 }, 2.0);
+      // exit
+      tl.to(["#lt-bar", "#lt-logo", "#lt-main", "#lt-sub"], { autoAlpha: 0, duration: 0.5, ease: "power2.in" }, 7.3);
+
+      window.__timelines = window.__timelines || {};
       window.__timelines["main"] = tl;
     </script>
   </body>

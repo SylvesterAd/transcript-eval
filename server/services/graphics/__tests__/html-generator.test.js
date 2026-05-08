@@ -280,6 +280,24 @@ describe('specToHtml additionalSystemContext', () => {
   })
 })
 
+describe('few-shots use canonical scene-clip pattern', () => {
+  it('FEW_SHOT_LOWER_THIRD has composition root + nested scene clip', async () => {
+    const { FEW_SHOT_LOWER_THIRD } = await import('../html-generator.js')
+    expect(FEW_SHOT_LOWER_THIRD).toMatch(/data-composition-id="main"/)
+    expect(FEW_SHOT_LOWER_THIRD).toMatch(/class="scene clip"\s+id="s1"/)
+    expect(FEW_SHOT_LOWER_THIRD).toMatch(/data-track-index="0"/)
+    expect(FEW_SHOT_LOWER_THIRD).toMatch(/class="scene-content"/)
+  })
+
+  it('FEW_SHOT_LOWER_THIRD_WITH_LOGO has composition root + nested scene clip', async () => {
+    const { FEW_SHOT_LOWER_THIRD_WITH_LOGO } = await import('../html-generator.js')
+    expect(FEW_SHOT_LOWER_THIRD_WITH_LOGO).toMatch(/data-composition-id="main"/)
+    expect(FEW_SHOT_LOWER_THIRD_WITH_LOGO).toMatch(/class="scene clip"\s+id="s1"/)
+    expect(FEW_SHOT_LOWER_THIRD_WITH_LOGO).toMatch(/data-track-index="0"/)
+    expect(FEW_SHOT_LOWER_THIRD_WITH_LOGO).toMatch(/class="scene-content"/)
+  })
+})
+
 describe('FEW_SHOT_LOTTIE_LOGO', () => {
   it('is exported and uses window.__hfLottie', async () => {
     const mod = await import('../html-generator.js')
