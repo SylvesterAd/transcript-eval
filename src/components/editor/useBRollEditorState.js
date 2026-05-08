@@ -455,8 +455,18 @@ export function useBRollEditorState(planPipelineId) {
   // visual playhead reaches it, we compare the post-cut equivalent of the
   // playback time (`currentTime` is original-time) against the placement's
   // [timelineStart, timelineEnd] range.
+  // Annotation-source cuts are visual suggestions only — they don't shift
+  // the b-roll editor's post-cut layout. Mirror the same source filter the
+  // server uses in getBRollEditorData (and the rest of the b-roll editor's
+  // client-side consumers) so visualTime here lines up with the placement
+  // positions returned by the server. Without this filter, visualTime
+  // collapses through annotation cuts and activePlacementAtTime returns null
+  // at the time the placement actually shows on screen.
   const effectiveCutsForTrigger = useMemo(
-    () => computeSkipRegions(editorCtx?.state?.cuts || [], editorCtx?.state?.cutExclusions || []),
+    () => computeSkipRegions(
+      (editorCtx?.state?.cuts || []).filter(c => c.source !== 'annotation'),
+      editorCtx?.state?.cutExclusions || [],
+    ),
     [editorCtx?.state?.cuts, editorCtx?.state?.cutExclusions]
   )
   const activePlacementAtTime = useCallback((time) => {
