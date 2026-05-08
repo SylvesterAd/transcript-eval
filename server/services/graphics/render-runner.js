@@ -54,3 +54,41 @@ export async function renderTemplate({ template, vars, renderId, fps = 30, quali
     workDir,
   };
 }
+
+const STAGE_MARKER_RE = /data-composition-id\s*=\s*"main"/i;
+
+export async function renderHtml({ html, renderId, fps = 30, quality = 'standard', subDir = null }) {
+  if (!STAGE_MARKER_RE.test(html)) {
+    throw new Error(`renderHtml: html missing data-composition-id="main"`);
+  }
+  const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
+  const workDir = subDir
+    ? path.join(baseDir, String(renderId), subDir)
+    : path.join(baseDir, String(renderId));
+  await mkdir(workDir, { recursive: true });
+
+  await writeFile(path.join(workDir, 'index.html'), html, 'utf8');
+  await writeFile(
+    path.join(workDir, 'hyperframes.json'),
+    JSON.stringify({ paths: { blocks: 'compositions', components: 'compositions/components', assets: 'assets' } })
+  );
+  await writeFile(
+    path.join(workDir, 'meta.json'),
+    JSON.stringify({ id: `render-${renderId}`, name: `Render ${renderId}` })
+  );
+
+  const outputPath = path.join(workDir, 'out.mp4');
+  const start = Date.now();
+  await exec(
+    'npx',
+    ['-y', 'hyperframes', 'render', '-q', quality, '-f', String(fps), '-w', '1', '-o', outputPath],
+    { cwd: workDir, timeout: 5 * 60 * 1000 }
+  );
+  const stats = await stat(outputPath);
+  return {
+    outputPath,
+    bytes: stats.size,
+    durationMs: Date.now() - start,
+    workDir,
+  };
+}

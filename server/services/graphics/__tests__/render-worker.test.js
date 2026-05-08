@@ -1,5 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../events/emitter.js', () => ({ emit: vi.fn() }));
+
+vi.mock('../lint-runner.js', () => ({
+  runLint: vi.fn().mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] }),
+  formatFindingsForPrompt: vi.fn((findings) => {
+    if (!findings || findings.length === 0) return '';
+    return `Lint findings:\n${findings.map((f) => `- [${(f.severity ?? 'error').toUpperCase()}] ${f.rule ?? 'lint'}: ${f.message}`).join('\n')}`;
+  }),
+}));
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual('node:fs/promises');
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockResolvedValue(undefined),
+    },
+    writeFile: vi.fn().mockResolvedValue(undefined),
+    mkdir: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 // All test paths are 3-up: __tests__ → graphics → services → server
 vi.mock('../../../db.js', () => {
   const queued = [
@@ -41,8 +65,22 @@ vi.mock('../../../db.js', () => {
   };
 });
 
+vi.mock('../html-generator.js', () => ({
+  specToHtml: vi.fn().mockResolvedValue({
+    html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">initial</div></body></html>',
+    cost: 5,
+    tokens: { in: 600, out: 400 },
+  }),
+  refineHtml: vi.fn().mockResolvedValue({
+    html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">refined</div></body></html>',
+    cost: 3,
+    tokens: { in: 800, out: 600 },
+  }),
+  CREATE_HTML_SYSTEM_PROMPT: 'mock-create-html-system-prompt',
+}));
+
 vi.mock('../render-runner.js', () => ({
-  renderTemplate: vi.fn().mockResolvedValue({
+  renderHtml: vi.fn().mockResolvedValue({
     outputPath: '/tmp/x.mp4',
     bytes: 12345,
     durationMs: 9000,
@@ -54,13 +92,19 @@ vi.mock('../uploader.js', () => ({
   uploadRender: vi.fn().mockResolvedValue({ url: 'https://supabase.example/x.mp4' }),
 }));
 
-vi.mock('../../../lib/llm/anthropic.js', () => ({
-  callAnthropic: vi.fn().mockResolvedValue({
-    text: '{"width":1920,"height":1080,"duration":5,"mainText":"Hi","subText":"Sub","accent":"#9ca3af","barBottom":80,"barLeft":80,"barHeight":120,"barMaxWidth":1056,"mainSize":48,"subSize":18}',
-    toolUses: [],
-    tokens: { in: 800, out: 100 },
-    stop: 'end_turn',
+vi.mock('../critic/critic-runner.js', () => ({
+  runCritic: vi.fn().mockResolvedValue({
+    score: 0.9,                                        // default = passing
+    criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
+    feedback: 'good',
+    retry_recommended: false,
+    frameUrls: ['https://x/0.png'],
+    tokens: { in: 0, out: 0 },
   }),
+}));
+
+vi.mock('../scene-concat.js', () => ({
+  concatScenes: vi.fn().mockResolvedValue({ durationMs: 50, outputPath: '/tmp/final.mp4' }),
 }));
 
 beforeEach(() => {
@@ -70,8 +114,341 @@ beforeEach(() => {
 describe('renderWorker.drainOnce', () => {
   it('claims one queued render, runs it, marks complete', async () => {
     const { drainOnce } = await import('../render-worker.js');
+    const { renderHtml } = await import('../render-runner.js');
     const result = await drainOnce();
     expect(result.processed).toBe(1);
     expect(result.errors).toHaveLength(0);
+    // Sanity check: renderHtml was called with an html string containing the stage marker
+    expect(renderHtml).toHaveBeenCalled();
+    const call = renderHtml.mock.calls[0][0];
+    expect(typeof call.html).toBe('string');
+    expect(call.html).toMatch(/data-composition-id\s*=\s*"main"/i);
   });
+});
+
+describe('renderWorker.drainOnce — retry path', () => {
+  it('retries up to 2 times when critic score is below threshold, then ships best', async () => {
+    // Reset the db sharedGet so claimNextRender returns the queued row again.
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 5, session_id: 1, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null)
+
+    // Reset runCritic to clear the default and set up 3 failing-then-passing returns.
+    const { runCritic } = await import('../critic/critic-runner.js')
+    runCritic.mockReset()
+    runCritic
+      .mockResolvedValueOnce({
+        score: 0.4, criteria: { fidelity: 0.4 }, feedback: 'too small',
+        retry_recommended: true, frameUrls: ['x'], tokens: { in: 0, out: 0 },
+      })
+      .mockResolvedValueOnce({
+        score: 0.5, criteria: { fidelity: 0.5 }, feedback: 'still small',
+        retry_recommended: true, frameUrls: ['x'], tokens: { in: 0, out: 0 },
+      })
+      .mockResolvedValueOnce({
+        score: 0.85, criteria: { fidelity: 0.85 }, feedback: 'good',
+        retry_recommended: false, frameUrls: ['x'], tokens: { in: 0, out: 0 },
+      })
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    specToHtml.mockClear()
+    refineHtml.mockClear()
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+    // 3 critic calls = 3 attempts (initial + 2 retries)
+    expect(runCritic).toHaveBeenCalledTimes(3)
+    // specToHtml only on iteration 0; refineHtml on iterations 1 and 2
+    expect(specToHtml).toHaveBeenCalledTimes(1)
+    expect(refineHtml).toHaveBeenCalledTimes(2)
+  })
+});
+
+describe('renderWorker.drainOnce — critic-loop refinement', () => {
+  it('calls refineHtml (not specToHtml) when critic recommends retry', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 99, session_id: 'sess-99', iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Test', subText: 'Subtext',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null)
+
+    const { runLint } = await import('../lint-runner.js')
+    runLint.mockReset()
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    specToHtml.mockClear()
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div data-composition-id="main">v1</div></body></html>',
+      cost: 1,
+      tokens: { in: 100, out: 100 },
+    })
+    refineHtml.mockClear()
+    refineHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div data-composition-id="main">v2</div></body></html>',
+      cost: 1,
+      tokens: { in: 100, out: 100 },
+    })
+
+    const { runCritic } = await import('../critic/critic-runner.js')
+    runCritic.mockReset()
+    runCritic
+      .mockResolvedValueOnce({
+        score: 0.5, criteria: {},
+        feedback: 'Lower-third bar moves too fast; extend hold to 4s',
+        retry_recommended: true, frameUrls: [], tokens: { in: 50, out: 50 },
+      })
+      .mockResolvedValueOnce({
+        score: 0.95, criteria: {},
+        feedback: 'much better',
+        retry_recommended: false, frameUrls: [], tokens: { in: 50, out: 50 },
+      })
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+    expect(specToHtml).toHaveBeenCalledTimes(1) // only iteration 0
+    expect(refineHtml).toHaveBeenCalledTimes(1) // iteration 1 retry
+    const refineCall = refineHtml.mock.calls[0][0]
+    expect(refineCall.html).toContain('v1')
+    expect(refineCall.feedback).toMatch(/extend hold to 4s/i)
+    expect(refineCall.spec).toBeDefined()
+    expect(refineCall.spec.template).toBe('lower-third')
+  })
+});
+
+describe('renderWorker.drainOnce — lint gate', () => {
+  it('lint clean: runs runLint once, specToHtml once, proceeds to renderHtml', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 11, session_id: 4, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null);
+
+    const { runLint } = await import('../lint-runner.js');
+    const { specToHtml } = await import('../html-generator.js');
+    const { renderHtml } = await import('../render-runner.js');
+    const { runCritic } = await import('../critic/critic-runner.js');
+
+    runLint.mockReset();
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] });
+
+    specToHtml.mockClear();
+    renderHtml.mockClear();
+
+    runCritic.mockReset();
+    runCritic.mockResolvedValue({
+      score: 0.9, criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
+      feedback: 'good', retry_recommended: false, frameUrls: ['x'], tokens: { in: 0, out: 0 },
+    });
+
+    const { drainOnce } = await import('../render-worker.js');
+    const result = await drainOnce();
+
+    expect(result.processed).toBe(1);
+    expect(result.errors).toHaveLength(0);
+    expect(runLint).toHaveBeenCalledTimes(1);
+    expect(specToHtml).toHaveBeenCalledTimes(1);
+    expect(renderHtml).toHaveBeenCalled();
+  });
+
+  it('lint dirty then clean: retries specToHtml with additionalSystemContext, then proceeds', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 12, session_id: 5, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null);
+
+    const { runLint } = await import('../lint-runner.js');
+    const { specToHtml } = await import('../html-generator.js');
+    const { renderHtml } = await import('../render-runner.js');
+    const { runCritic } = await import('../critic/critic-runner.js');
+
+    runLint.mockReset();
+    runLint
+      .mockResolvedValueOnce({
+        errorCount: 2, warningCount: 0, infoCount: 0,
+        findings: [{ severity: 'error', rule: 'determinism', message: 'Math.random' }],
+      })
+      .mockResolvedValueOnce({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] });
+
+    specToHtml.mockClear();
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div></body></html>',
+      cost: 5,
+      tokens: { in: 600, out: 400 },
+    });
+
+    renderHtml.mockClear();
+    runCritic.mockReset();
+    runCritic.mockResolvedValue({
+      score: 0.9, criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
+      feedback: 'good', retry_recommended: false, frameUrls: ['x'], tokens: { in: 0, out: 0 },
+    });
+
+    const { drainOnce } = await import('../render-worker.js');
+    const result = await drainOnce();
+
+    expect(result.processed).toBe(1);
+    expect(result.errors).toHaveLength(0);
+    expect(runLint).toHaveBeenCalledTimes(2);
+    expect(specToHtml).toHaveBeenCalledTimes(2);
+    // First call: no additionalSystemContext (or null/undefined)
+    const firstCall = specToHtml.mock.calls[0][0];
+    expect(firstCall.additionalSystemContext == null).toBe(true);
+    // Second call: WITH additionalSystemContext containing the finding
+    const secondCall = specToHtml.mock.calls[1][0];
+    expect(typeof secondCall.additionalSystemContext).toBe('string');
+    expect(secondCall.additionalSystemContext).toMatch(/determinism/);
+    expect(secondCall.additionalSystemContext).toMatch(/Math\.random/);
+    expect(renderHtml).toHaveBeenCalled();
+  });
+
+  it('lint still dirty after retry: marks render failed, does not call renderHtml', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 13, session_id: 6, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null);
+
+    const { runLint } = await import('../lint-runner.js');
+    const { specToHtml } = await import('../html-generator.js');
+    const { renderHtml } = await import('../render-runner.js');
+
+    runLint.mockReset();
+    runLint.mockResolvedValue({
+      errorCount: 1, warningCount: 0, infoCount: 0,
+      findings: [{ severity: 'error', rule: 'determinism', message: 'Math.random still present' }],
+    });
+
+    specToHtml.mockClear();
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div></body></html>',
+      cost: 5,
+      tokens: { in: 600, out: 400 },
+    });
+
+    renderHtml.mockClear();
+
+    // Capture the failure-marking UPDATE call — db.prepare returns a fresh object each call,
+    // so we instrument the prepare mock to track failure-marking SQL.
+    const prepareSpy = vi.spyOn(db, 'prepare');
+
+    const { drainOnce } = await import('../render-worker.js');
+    const result = await drainOnce();
+
+    expect(result.processed).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].error).toMatch(/lint failed/i);
+    expect(runLint).toHaveBeenCalledTimes(2);
+    expect(renderHtml).not.toHaveBeenCalled();
+    // The failure-marking SQL should have been prepared
+    const sqls = prepareSpy.mock.calls.map((c) => c[0]);
+    const failedMark = sqls.find((s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'failed'/.test(s));
+    expect(failedMark).toBeDefined();
+    prepareSpy.mockRestore();
+  });
+});
+
+describe('renderWorker.drainOnce — multi-scene', () => {
+  it('multi-scene: renders each scene and concatenates', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 7, session_id: 2, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          aspectRatio: '16:9',
+          tone: 'neutral',
+          scenes: [
+            { template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' },
+            { template: 'lower-third', duration: 5, mainText: 'B', subText: 'b' },
+          ],
+        },
+      })
+      .mockResolvedValue(null)
+
+    const { specToHtml } = await import('../html-generator.js')
+    const { renderHtml } = await import('../render-runner.js')
+    const { concatScenes } = await import('../scene-concat.js')
+    const { uploadRender } = await import('../uploader.js')
+    const { runCritic } = await import('../critic/critic-runner.js')
+    const { runLint } = await import('../lint-runner.js')
+
+    runLint.mockReset()
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
+
+    specToHtml.mockClear()
+    renderHtml.mockClear()
+    concatScenes.mockClear()
+    uploadRender.mockClear()
+    runCritic.mockReset()
+    // Two scenes, each passes on first iteration → 2 critic calls total.
+    runCritic.mockResolvedValue({
+      score: 0.9,
+      criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
+      feedback: 'good',
+      retry_recommended: false,
+      frameUrls: ['https://x/0.png'],
+      tokens: { in: 0, out: 0 },
+    })
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+    expect(specToHtml).toHaveBeenCalledTimes(2)
+    expect(renderHtml).toHaveBeenCalledTimes(2)
+    const subDirs = renderHtml.mock.calls.map((c) => c[0].subDir)
+    expect(subDirs).toEqual(['scene-0', 'scene-1'])
+    expect(concatScenes).toHaveBeenCalledTimes(1)
+    expect(concatScenes.mock.calls[0][0].sceneMp4Paths).toHaveLength(2)
+    // 2 per-scene uploads + 1 final concat upload = 3
+    expect(uploadRender).toHaveBeenCalledTimes(3)
+    expect(runCritic).toHaveBeenCalledTimes(2)
+  })
 });
