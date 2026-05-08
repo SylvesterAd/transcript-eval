@@ -299,7 +299,7 @@ Before emitting your HTML, verify:
 - [ ] Composition root has data-composition-id="main" + data-width + data-height + data-start="0" + data-duration=total
 - [ ] Every scene has class="scene clip" + sequential id (s1, s2, …) + data-start + data-duration + data-track-index="0"
 - [ ] Every scene has a <div class="scene-content"> wrapper
-- [ ] Anchor scenes have style="opacity:0;"; non-anchor have style="visibility:hidden;"
+- [ ] Anchor scenes have style="opacity:0;"; non-anchor scenes from Scene 2 onward have style="visibility:hidden;" (Scene 1 starts visible — no initial hidden style)
 - [ ] Every non-anchor scene has tl.set autoAlpha:1 at start and autoAlpha:0 at end (scene 1 only at end)
 - [ ] First anchor scene in each shader group has tl.set opacity:1 at its start
 - [ ] Scene windows tile end-to-end (no gaps, no overlap unless intentional shader transition)
