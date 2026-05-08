@@ -62,3 +62,40 @@ describe('isSpecComplete (multi-scene)', () => {
     })).toBe(true)
   })
 })
+
+describe('isSpecComplete with canonical multi-scene', () => {
+  it('rejects spec where any scene is missing template', async () => {
+    const { isSpecComplete } = await import('../session-state.js')
+    const spec = {
+      aspectRatio: '16:9',
+      tone: 'neutral',
+      scenes: [
+        { template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' },
+        { duration: 3, mainText: 'B', subText: 'b' }, // missing template
+      ],
+    }
+    expect(isSpecComplete(spec)).toBe(false)
+  })
+
+  it('accepts canonical multi-scene with all required fields', async () => {
+    const { isSpecComplete } = await import('../session-state.js')
+    const spec = {
+      aspectRatio: '16:9',
+      tone: 'neutral',
+      scenes: [
+        { template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' },
+        { template: 'lower-third', duration: 3, mainText: 'B', subText: 'b' },
+      ],
+    }
+    expect(isSpecComplete(spec)).toBe(true)
+  })
+})
+
+describe('isMultiScene', () => {
+  it('returns true if scenes is non-empty array', async () => {
+    const { isMultiScene } = await import('../session-state.js')
+    expect(isMultiScene({ scenes: [{ template: 'x', duration: 3, mainText: 't' }] })).toBe(true)
+    expect(isMultiScene({ scenes: [] })).toBe(false)
+    expect(isMultiScene({})).toBe(false)
+  })
+})

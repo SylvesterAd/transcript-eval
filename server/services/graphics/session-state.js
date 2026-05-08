@@ -23,7 +23,7 @@ export function mergeSpec(current = {}, update = {}) {
   return out;
 }
 
-function isMultiScene(spec) {
+export function isMultiScene(spec) {
   return Array.isArray(spec.scenes) && spec.scenes.length > 0;
 }
 
