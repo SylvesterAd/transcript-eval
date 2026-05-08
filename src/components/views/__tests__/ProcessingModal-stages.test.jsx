@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { deriveMode, deriveStages, FailedView } from '../ProcessingModal.jsx'
+import { deriveMode, deriveStages, shouldShowReviewRoughCutBanner, FailedView } from '../ProcessingModal.jsx'
 
 describe('deriveMode', () => {
   it('returns uploading when any file is still uploading', () => {
@@ -148,6 +148,70 @@ describe('deriveStages', () => {
     const c = stages.find(s => s.id === 'classify')
     expect(c.paused).toBe(false)
     expect(c.done).toBe(true)
+  })
+})
+
+describe('ProcessingModal — review your rough cut banner condition', () => {
+  const sg = (overrides) => ({ id: 1, rough_cut_status: 'done', broll_chain_status: 'running', ...overrides })
+
+  it('returns true for hands-off + auto_rough_cut + RC done + chain running', () => {
+    expect(shouldShowReviewRoughCutBanner({
+      parent: { path_id: 'hands-off', auto_rough_cut: true },
+      subGroups: [sg()],
+    })).toBe(true)
+  })
+
+  it('returns false when path_id is strategy-only', () => {
+    expect(shouldShowReviewRoughCutBanner({
+      parent: { path_id: 'strategy-only', auto_rough_cut: true },
+      subGroups: [sg()],
+    })).toBe(false)
+  })
+
+  it('returns false when auto_rough_cut is off', () => {
+    expect(shouldShowReviewRoughCutBanner({
+      parent: { path_id: 'hands-off', auto_rough_cut: false },
+      subGroups: [sg()],
+    })).toBe(false)
+  })
+
+  it('returns false when rough cut not yet done', () => {
+    expect(shouldShowReviewRoughCutBanner({
+      parent: { path_id: 'hands-off', auto_rough_cut: true },
+      subGroups: [sg({ rough_cut_status: 'running' })],
+    })).toBe(false)
+  })
+
+  it('returns false when chain is fully done', () => {
+    expect(shouldShowReviewRoughCutBanner({
+      parent: { path_id: 'hands-off', auto_rough_cut: true },
+      subGroups: [sg({ broll_chain_status: 'done' })],
+    })).toBe(false)
+  })
+
+  it('returns true when chain is paused at strategy (still in flight)', () => {
+    expect(shouldShowReviewRoughCutBanner({
+      parent: { path_id: 'hands-off', auto_rough_cut: true },
+      subGroups: [sg({ broll_chain_status: 'paused_at_strategy' })],
+    })).toBe(true)
+  })
+})
+
+describe('ProcessingModal — strategy-only + auto_rough_cut pause', () => {
+  it('treats paused_at_rough_cut on strategy-only as a rough-cut paused state', () => {
+    const parent = {
+      auto_rough_cut: true,
+      path_id: 'strategy-only',
+    }
+    const subGroups = [{
+      id: 1,
+      assembly_status: 'done',
+      rough_cut_status: 'done',
+      broll_chain_status: 'paused_at_rough_cut',
+    }]
+    const stages = deriveStages({ parent, subGroups })
+    const rc = stages.find(s => s.id === 'rough_cut')
+    expect(rc.paused).toBe(true)
   })
 })
 

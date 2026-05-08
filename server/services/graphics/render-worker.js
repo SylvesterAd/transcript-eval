@@ -6,21 +6,65 @@
 //
 // Per iteration:
 //   1. Claim ONE queued render
-//   2. Opus: spec -> template variables JSON
-//   3. renderTemplate (Task 7) -> local MP4
+//   2. Opus: spec -> full HTML (specToHtml)
+//   3. renderHtml -> local MP4
 //   4. uploadRender -> Supabase signed URL
 //   5. Atomic: mark render complete + flip session status
 
+import path from 'node:path';
+import { writeFile, mkdir } from 'node:fs/promises';
 import db from '../../db.js';                          // default import
-import { renderTemplate } from './render-runner.js';
+import { renderHtml } from './render-runner.js';
 import { uploadRender } from './uploader.js';
-import { callAnthropic } from '../../lib/llm/anthropic.js';
-import { MODEL_FOR, costCents } from './models.js';
-import { CREATE_SYSTEM_PROMPT } from './create-prompt.js';
+import { specToHtml, refineHtml } from './html-generator.js';
+import { runCritic } from './critic/critic-runner.js';
+import { concatScenes } from './scene-concat.js';
+import { runLint, formatFindingsForPrompt } from './lint-runner.js';
+import { emit } from './events/emitter.js';
 
 const POLL_INTERVAL_MS = 2000;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
+const MAX_ITERATIONS = 3;       // initial + 2 retries
+const SCORE_THRESHOLD = 0.7;
 let running = false;
+
+async function generateHtmlWithLintGate({ spec, renderId, sceneIndex = null }) {
+  const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
+  const htmlDir = path.join(baseDir, String(renderId));
+  await mkdir(htmlDir, { recursive: true });
+  // hyperframes lint requires a directory containing index.html (errors with
+  // "Not a directory" if given a single file), so each scene gets its own
+  // project dir. Single-scene uses `lint/`; multi-scene uses `lint-scene-N/`.
+  const lintProjectDir = path.join(htmlDir, sceneIndex != null ? `lint-scene-${sceneIndex}` : 'lint');
+  await mkdir(lintProjectDir, { recursive: true });
+  const htmlPath = path.join(lintProjectDir, 'index.html');
+
+  const first = await specToHtml({ spec });
+  let html = first.html;
+  let cost = first.cost;
+  let tokens = first.tokens;
+  await writeFile(htmlPath, html, 'utf8');
+
+  let lint = await runLint({ projectDir: lintProjectDir });
+  if (lint.errorCount === 0) {
+    return { html, cost, tokens, lintFindings: lint.findings };
+  }
+
+  // One feedback retry
+  const feedback = formatFindingsForPrompt(lint.findings);
+  const retry = await specToHtml({ spec, additionalSystemContext: feedback });
+  html = retry.html;
+  cost += retry.cost;
+  tokens = { in: tokens.in + retry.tokens.in, out: tokens.out + retry.tokens.out };
+  await writeFile(htmlPath, html, 'utf8');
+
+  lint = await runLint({ projectDir: lintProjectDir });
+  if (lint.errorCount > 0) {
+    const scenePrefix = sceneIndex != null ? `Scene ${sceneIndex} ` : '';
+    throw new Error(`${scenePrefix}lint failed after 1 retry: ${formatFindingsForPrompt(lint.findings)}`);
+  }
+  return { html, cost, tokens, lintFindings: lint.findings };
+}
 
 async function claimNextRender() {
   return await db
@@ -39,23 +83,57 @@ async function claimNextRender() {
     .get();
 }
 
-async function specToVars(spec) {
-  const r = await callAnthropic({
-    model: MODEL_FOR.create,
-    system: CREATE_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(spec)}` }],
-    max_tokens: 1024,
+async function runSceneCriticLoop({ renderId, sessionId, sceneSpec, sceneIndex = null }) {
+  const subDir = sceneIndex !== null ? `scene-${sceneIndex}` : null;
+  let totalCost = 0;
+  const { html: initialHtml, cost } = await generateHtmlWithLintGate({
+    spec: sceneSpec, renderId, sceneIndex,
   });
-  const cost = costCents(MODEL_FOR.create, r.tokens);
-  // Defensively strip markdown fences in case Opus wraps output despite the prompt
-  const text = r.text.trim().replace(/^```json\s*/i, '').replace(/```$/, '');
-  let vars;
-  try {
-    vars = JSON.parse(text);
-  } catch (e) {
-    throw new Error(`creator returned invalid JSON: ${r.text.slice(0, 200)}`);
+  totalCost += cost;
+  let currentHtml = initialHtml;
+  let currentResult = await renderHtml({ html: currentHtml, renderId, subDir });
+  emit({ sessionId, step: 'render_finished', label: `Render complete (iter 1)`, renderId, iteration: 1, sceneIndex })
+  let currentUpload = await uploadRender({ renderId, sessionId, localPath: currentResult.outputPath });
+  let bestAttempt = null;
+  let iteration = 1;
+  let totalDurationMs = currentResult.durationMs;
+
+  while (iteration <= MAX_ITERATIONS) {
+    const critique = await runCritic({
+      renderId, iterationIndex: iteration, sceneIndex,
+      mp4Path: currentResult.outputPath,
+      durationSec: sceneSpec.duration || 5,
+      spec: sceneSpec, sessionId,
+    });
+    emit({ sessionId, step: 'critic_scored', label: `Critic score ${critique.score.toFixed(2)} (iter ${iteration})`, renderId, iteration, score: critique.score, sceneIndex });
+    const attempt = { iteration, score: critique.score, mp4Path: currentResult.outputPath, upload: currentUpload, durationMs: currentResult.durationMs };
+    if (!bestAttempt || attempt.score > bestAttempt.score) bestAttempt = attempt;
+    if (!critique.retry_recommended || critique.score >= SCORE_THRESHOLD) break;
+    if (iteration >= MAX_ITERATIONS) break;
+
+    emit({ sessionId, step: 'retry_triggered', label: `Refining (iter ${iteration + 1})`, renderId, sceneIndex });
+    const refineRes = await refineHtml({
+      html: currentHtml,
+      feedback: critique.feedback,
+      spec: sceneSpec,
+    });
+    currentHtml = refineRes.html;
+    totalCost += refineRes.cost;
+    iteration += 1;
+    currentResult = await renderHtml({ html: currentHtml, renderId, subDir });
+    emit({ sessionId, step: 'render_finished', label: `Render complete (iter ${iteration})`, renderId, iteration, sceneIndex });
+    totalDurationMs += currentResult.durationMs;
+    currentUpload = await uploadRender({ renderId, sessionId, localPath: currentResult.outputPath });
   }
-  return { vars, cost };
+
+  return {
+    bestMp4Path: bestAttempt.mp4Path,
+    bestUpload: bestAttempt.upload,
+    bestScore: bestAttempt.score,
+    totalIterations: iteration,
+    totalDurationMs,
+    cost: totalCost,
+  };
 }
 
 export async function drainOnce() {
@@ -64,30 +142,61 @@ export async function drainOnce() {
   let row;
   while ((row = await claimNextRender())) {
     try {
-      const { vars, cost } = await specToVars(row.spec_snapshot_json);
-      const result = await renderTemplate({
-        template: row.template,
-        vars,
-        renderId: row.id,
-      });
-      const upload = await uploadRender({
-        renderId: row.id,
-        sessionId: row.session_id,
-        localPath: result.outputPath,
-      });
-      // Wrap completion writes in a transaction for atomicity
-      await db.transaction(async (tx) => {
-        await tx
-          .prepare(
+      emit({ sessionId: row.session_id, step: 'render_started', label: 'Rendering…', renderId: row.id, iteration: 1 });
+
+      const spec = row.spec_snapshot_json;
+      const isMultiScene = Array.isArray(spec.scenes) && spec.scenes.length > 0;
+
+      if (isMultiScene) {
+        const sceneResults = [];
+        let aggregateCost = 0;
+        for (let i = 0; i < spec.scenes.length; i++) {
+          const sceneSpec = { ...spec, ...spec.scenes[i] };
+          delete sceneSpec.scenes;
+          const r = await runSceneCriticLoop({
+            renderId: row.id, sessionId: row.session_id, sceneSpec, sceneIndex: i,
+          });
+          sceneResults.push(r);
+          aggregateCost += r.cost;
+        }
+        const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders';
+        const finalLocalPath = path.join(baseDir, String(row.id), 'final.mp4');
+        await concatScenes({ sceneMp4Paths: sceneResults.map((r) => r.bestMp4Path), outputPath: finalLocalPath });
+        const finalUpload = await uploadRender({ renderId: row.id, sessionId: row.session_id, localPath: finalLocalPath });
+        const finalScore = Math.min(...sceneResults.map((r) => r.bestScore));
+        const totalIters = sceneResults.reduce((s, r) => s + r.totalIterations, 0);
+        const totalDuration = sceneResults.reduce((s, r) => s + r.totalDurationMs, 0);
+        await db.transaction(async (tx) => {
+          await tx.prepare(
             `UPDATE graphics_renders
-             SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?
+             SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?,
+                 iteration_count = ?, final_score = ?, scene_count = ?
              WHERE id = ?`
-          )
-          .run(upload.url, result.durationMs, cost, row.id);
-        await tx
-          .prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`)
-          .run(row.session_id);
+          ).run(finalUpload.url, totalDuration, aggregateCost, totalIters, finalScore, spec.scenes.length, row.id);
+          await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`).run(row.session_id);
+        });
+        emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore });
+        processed += 1;
+        continue;
+      }
+
+      // Single-scene path (back-compat)
+      const r = await runSceneCriticLoop({
+        renderId: row.id, sessionId: row.session_id, sceneSpec: spec, sceneIndex: null,
       });
+
+      await db.transaction(async (tx) => {
+        await tx.prepare(
+          `UPDATE graphics_renders
+           SET status = 'complete', output_url = ?, duration_ms = ?, cost_cents = ?,
+               iteration_count = ?, final_score = ?
+           WHERE id = ?`
+        ).run(
+          r.bestUpload.url, r.totalDurationMs, r.cost, r.totalIterations, r.bestScore, row.id
+        );
+        await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`).run(row.session_id);
+      });
+      emit({ sessionId: row.session_id, step: 'render_complete', label: 'Done', renderId: row.id, finalScore: r.bestScore });
       processed += 1;
     } catch (e) {
       errors.push({ renderId: row.id, error: e.message });

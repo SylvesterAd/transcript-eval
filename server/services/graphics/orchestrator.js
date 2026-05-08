@@ -4,6 +4,7 @@ import { callGemini } from '../../lib/llm/gemini.js';
 import { MODEL_FOR, costCents } from './models.js';
 import { BRIEF_SYSTEM_PROMPT } from './brief-prompt.js';
 import { mergeSpec, isSpecComplete } from './session-state.js';
+import { emit } from './events/emitter.js';
 
 const SPEC_BLOCK = /\[SPEC\]\s*(\{[^}]*\})/m;
 
@@ -43,12 +44,15 @@ export async function runChatTurn({ sessionId, userMessage }) {
   history.push({ role: 'user', content: userMessage });
 
   // LLM call stays outside the transaction (long network call must not hold a connection)
+  emit({ sessionId, step: 'brief_thinking', label: 'Thinking…' })
   const briefResp = await callGemini({
     model: MODEL_FOR.brief,
     system: BRIEF_SYSTEM_PROMPT,
     messages: history,
     thinkingLevel: 'low',
+    tools: [{ googleSearch: {} }],
   });
+  emit({ sessionId, step: 'brief_replied', label: 'Reply received' })
   const specUpdate = extractSpec(briefResp.text);
   const visibleText = stripSpecBlock(briefResp.text);
 
@@ -92,6 +96,8 @@ export async function runChatTurn({ sessionId, userMessage }) {
 
     return null;
   });
+
+  if (renderId) emit({ sessionId, step: 'render_queued', label: 'Render queued', renderId })
 
   return {
     assistantText: safeText,

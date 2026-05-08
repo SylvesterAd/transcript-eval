@@ -27,27 +27,17 @@ const enumDefinitions = `# Enum Values (use ONLY these exact strings in JSON out
 "informative" | "exciting" | "tense" | "humorous" | "reflective" | "inspirational" | "dramatic" | "calm"`
 
 const stages = [
-  // ── Stage 1: Generate post-cut transcript (programmatic) ──
+  // ── Stage 1: Generate transcript with cuts removed (programmatic) ──
   {
     name: 'Generate post-cut transcript',
     type: 'programmatic',
     target: 'text_only',
     action: 'generate_post_cut_transcript',
     actionParams: {},
-    description: 'Remove cut words and recalculate timecodes to match the post-rough-cut video',
+    description: 'Remove cut words from the transcript while preserving original timecodes',
   },
 
-  // ── Stage 2: Export post-cut video (programmatic) ──
-  {
-    name: 'Export post-cut video',
-    type: 'programmatic',
-    target: 'text_only',
-    action: 'export_post_cut_video',
-    actionParams: {},
-    description: 'FFmpeg trim+concat to produce the post-cut video file for visual analysis',
-  },
-
-  // ── Stage 3: Analyze A-Roll + Chapters & Beats of post-cut video ──
+  // ── Stage 2: Analyze A-Roll + Chapters & Beats ──
   {
     name: 'Analyze A-Roll + Chapters & Beats',
     type: 'video_llm',
@@ -58,7 +48,7 @@ const stages = [
 ${enumDefinitions}
 
 You are a video structure analyst. Watch the video and output ONLY valid JSON. No commentary.`,
-    prompt: `Watch this post-cut video and identify:
+    prompt: `Watch this video and identify:
 1. Every A-Roll scene (when location, framing, or setup changes — each gets its own entry)
 2. All chapters (major phases of the video)
 3. All beats within each chapter (moments where something changes)
@@ -68,7 +58,12 @@ You are a video structure analyst. Watch the video and output ONLY valid JSON. N
 - Beat: A single moment where something changes (a decision, a setback, a discovery, a reaction).
 - A-Roll: When the camera setup, location, or framing changes significantly, it is a new A-Roll.
 
-## Post-cut transcript for context:
+## Transcript (cut text already removed; timecodes are in the original video)
+The transcript below shows ONLY the kept content of the rough cut. \`[Ns]\` gap
+markers between sentences mean a rough-cut deletion happened there — chapters
+and beats must NOT span those gaps, and timestamps for chapters/beats must come
+from the transcript verbatim (do not emit timestamps from the video that have
+no corresponding transcript line):
 {{transcript}}
 
 IMPORTANT: For ALL timestamps, include BOTH seconds (integer) AND timecodes in [HH:MM:SS] format.
@@ -121,7 +116,7 @@ Return JSON:
     params: { temperature: 1, thinking_level: 'MEDIUM' },
   },
 
-  // ── Stage 4: Create B-Roll strategy using reference patterns ──
+  // ── Stage 3: Create B-Roll strategy using reference patterns ──
   {
     name: 'Create B-Roll strategy',
     type: 'transcript_question',
@@ -147,7 +142,7 @@ Output ONLY valid JSON.`,
 ## New video A-Roll + Chapters & Beats:
 {{llm_answer_3}}
 
-## New video transcript:
+## New video transcript (cut text already removed; timecodes are in the original video; \`[Ns]\` markers are rough-cut deletions — never place B-Roll inside those gaps):
 {{transcript}}
 
 For each chapter, define:
@@ -194,17 +189,17 @@ Return JSON:
     params: { temperature: 1, thinking_level: 'HIGH' },
   },
 
-  // ── Stage 5: Split by chapter (programmatic) ──
+  // ── Stage 4: Split by chapter (programmatic) ──
   {
     name: 'Split by chapter',
     type: 'programmatic',
     target: 'text_only',
     action: 'split_by_chapter',
-    actionParams: { chaptersStageIndex: 2 },
+    actionParams: { chaptersStageIndex: 1 },
     description: 'Prepare per-chapter data (transcript slices, beats, context) for per-chapter plan generation',
   },
 
-  // ── Stage 6: Per-chapter detailed B-Roll plan ──
+  // ── Stage 5: Per-chapter detailed B-Roll plan ──
   {
     name: 'Per-chapter B-Roll plan',
     type: 'transcript_question',
@@ -234,7 +229,7 @@ Output ONLY valid JSON.`,
 **Beats:**
 {{chapter_beats}}
 
-## ── CHAPTER TRANSCRIPT (use these timecodes for placements) ──
+## ── CHAPTER TRANSCRIPT (use these timecodes for placements; \`[Ns]\` markers are rough-cut deletions — never place B-Roll inside those gaps) ──
 {{chapter_transcript}}
 
 ## ── B-ROLL STRATEGY (follow these targets and rules) ──
@@ -313,7 +308,7 @@ Return JSON:
     params: { temperature: 1, thinking_level: 'HIGH' },
   },
 
-  // ── Stage 7: Assemble full B-Roll plan (programmatic) ──
+  // ── Stage 6: Assemble full B-Roll plan (programmatic) ──
   {
     name: 'Assemble full plan',
     type: 'programmatic',
@@ -334,7 +329,7 @@ let stratId
 if (existing) {
   stratId = existing.id
   await db.prepare("UPDATE broll_strategies SET description = $1, main_strategy_id = $2, analysis_model = $3 WHERE id = $4").run(
-    '7-step: post-cut transcript, post-cut video export, A-Roll+Chapters, B-Roll strategy, split by chapter, per-chapter plan, assemble',
+    '6-step: post-cut transcript, A-Roll+Chapters, B-Roll strategy, split by chapter, per-chapter plan, assemble',
     refId, 'gemini-3.1-pro-preview', stratId
   )
   console.log('Plan strategy updated:', stratId)
@@ -344,7 +339,7 @@ if (existing) {
     VALUES ($1, $2, $3, $4, $5)
   `).run(
     'B-Roll Plan (Post Rough Cut)',
-    '7-step: post-cut transcript, post-cut video export, A-Roll+Chapters, B-Roll strategy, split by chapter, per-chapter plan, assemble',
+    '6-step: post-cut transcript, A-Roll+Chapters, B-Roll strategy, split by chapter, per-chapter plan, assemble',
     'plan', refId, 'gemini-3.1-pro-preview'
   )
   stratId = strat.lastInsertRowid
@@ -357,22 +352,21 @@ const existingVer = await db.prepare("SELECT id FROM broll_strategy_versions WHE
 let ver
 if (existingVer) {
   await db.prepare('UPDATE broll_strategy_versions SET stages_json = ?, notes = ? WHERE id = ?')
-    .run(JSON.stringify(stages), '7-stage B-Roll planning pipeline for post-rough-cut videos', existingVer.id)
+    .run(JSON.stringify(stages), '6-stage B-Roll planning pipeline for raw video, with cut ranges injected into prompts', existingVer.id)
   ver = { lastInsertRowid: existingVer.id }
 } else {
   ver = await db.prepare(`
     INSERT INTO broll_strategy_versions (strategy_id, name, notes, stages_json)
     VALUES ($1, $2, $3, $4)
-  `).run(stratId, 'Version 1', '7-stage B-Roll planning pipeline for post-rough-cut videos', JSON.stringify(stages))
+  `).run(stratId, 'Version 1', '6-stage B-Roll planning pipeline for raw video, with cut ranges injected into prompts', JSON.stringify(stages))
 }
 
 console.log('Version:', ver.lastInsertRowid)
-console.log('7 stages:')
+console.log('6 stages:')
 console.log('  1. Generate post-cut transcript (programmatic)')
-console.log('  2. Export post-cut video (programmatic, FFmpeg)')
-console.log('  3. Analyze A-Roll + Chapters & Beats (video_llm, Main Video)')
-console.log('  4. Create B-Roll strategy (transcript_question, uses reference analysis)')
-console.log('  5. Split by chapter (programmatic)')
-console.log('  6. Per-chapter B-Roll plan (transcript_question, per_chapter)')
-console.log('  7. Assemble full plan (programmatic)')
+console.log('  2. Analyze A-Roll + Chapters & Beats (video_llm, Main Video)')
+console.log('  3. Create B-Roll strategy (transcript_question, uses reference analysis)')
+console.log('  4. Split by chapter (programmatic)')
+console.log('  5. Per-chapter B-Roll plan (transcript_question, per_chapter)')
+console.log('  6. Assemble full plan (programmatic)')
 process.exit(0)

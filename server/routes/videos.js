@@ -17,6 +17,7 @@ import { createDirectUpload, deleteStream, getStreamStatus, isEnabled as cfStrea
 import { runAiRoughCut } from '../services/rough-cut-runner.js'
 import { estimateTokenCost, estimateProcessingTime } from '../services/token-pricing.js'
 import { isAudioFile, isAudioFilename } from '../lib/media-type.js'
+import { recomputePlacementsForCuts } from '../services/recompute-placement-times.js'
 // Lazy import to avoid blocking server startup
 const annotationMapper = () => import('../services/annotation-mapper.js')
 
@@ -682,7 +683,19 @@ router.get('/groups/:id/status', requireAuth, async (req, res) => {
 })
 
 router.get('/groups/:id/full-auto-status', requireAuth, async (req, res) => {
-  const groupId = parseInt(req.params.id)
+  let groupId = parseInt(req.params.id)
+  // Subgroup → parent: callers occasionally pass a subgroup id (race conditions
+  // where groupDetail.parent_group_id wasn't loaded yet, or hand-typed URLs).
+  // The processing modal expects the parent's id; resolving here keeps the
+  // contract on one server-side spot instead of fanning the lookup out across
+  // every navigate() call.
+  const initial = await db.prepare(`
+    SELECT id, parent_group_id FROM video_groups
+    WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}
+  `).get(groupId, ...(isAdmin(req) ? [] : [req.auth.userId]))
+  if (!initial) return res.status(404).json({ error: 'Group not found' })
+  if (initial.parent_group_id) groupId = initial.parent_group_id
+
   const parent = await db.prepare(`
     SELECT id, name, path_id, auto_rough_cut, assembly_status, assembly_error, rough_cut_status, broll_chain_status
     FROM video_groups
@@ -890,15 +903,57 @@ router.post('/groups/:id/retrigger-classify', requireAuth, async (req, res) => {
   }
 })
 
-// Save editor state for a group
-router.put('/groups/:id/editor-state', requireAuth, async (req, res) => {
-  const group = await db.prepare(`SELECT id FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
+// Save editor state for a group.
+//
+// When `editor_state.cuts` differ from the previously-stored cuts, every
+// b-roll placement's post-cut start_seconds/end_seconds is recomputed via
+// recomputePlacementsForCuts using the placement's stable anchor_word_idx
+// against the raw transcript. Duration is preserved; placements with no
+// anchor (or whose anchor maps into a cut) are flagged for UI display.
+// The DB write happens unconditionally below so cut-only changes still
+// persist when there are no placements to recompute.
+//
+// Exported so tests can invoke directly (the codebase pattern; supertest
+// is not a project dependency).
+export async function _putEditorStateHandler(req, res) {
+  const group = await db.prepare(`SELECT id, editor_state_json FROM video_groups WHERE id = ? ${isAdmin(req) ? '' : 'AND user_id = ?'}`).get(req.params.id, ...(isAdmin(req) ? [] : [req.auth.userId]))
   if (!group) return res.status(404).json({ error: 'Group not found' })
   const { editor_state } = req.body
+  if (!editor_state || typeof editor_state !== 'object') {
+    return res.status(400).json({ error: 'editor_state required' })
+  }
+
+  const oldState = group.editor_state_json ? JSON.parse(group.editor_state_json) : {}
+  const oldCuts = oldState.cuts || []
+  const newCuts = editor_state.cuts || []
+
+  // JSON.stringify comparison is sufficient: cuts are produced by the same
+  // code paths on every save (drag handles emit sorted output), so order is
+  // stable. A false-positive would only trigger an idempotent recompute —
+  // perf concern, not correctness concern.
+  const cutsChanged = JSON.stringify(oldCuts) !== JSON.stringify(newCuts)
+  if (cutsChanged && editor_state.broll?.placements?.length) {
+    // Load words for the main video in this group (raw type only).
+    const mainVideo = await db.prepare("SELECT id FROM videos WHERE group_id = ? AND video_type = 'raw' LIMIT 1").get(req.params.id)
+    if (mainVideo) {
+      const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw' LIMIT 1").get(mainVideo.id)
+      if (t?.word_timestamps_json) {
+        const words = JSON.parse(t.word_timestamps_json)
+        editor_state.broll.placements = recomputePlacementsForCuts(
+          editor_state.broll.placements,
+          newCuts,
+          editor_state.cutExclusions || [],
+          words,
+        )
+      }
+    }
+  }
+
   await db.prepare('UPDATE video_groups SET editor_state_json = ? WHERE id = ?')
     .run(JSON.stringify(editor_state), req.params.id)
   res.json({ ok: true })
-})
+}
+router.put('/groups/:id/editor-state', requireAuth, _putEditorStateHandler)
 
 // Beacon endpoint for auto-save on unmount/tab close (sendBeacon sends POST with text/plain)
 router.post('/groups/:id/editor-state-beacon', requireAuth, async (req, res) => {

@@ -433,7 +433,7 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
 //
 // Returns { planPipelineIds }.
 export async function runPlanForEachVariant({
-  subGroupId, mainVideoId, prepPipelineId, strategyPipelineIds,
+  subGroupId, mainVideoId, prepPipelineId, strategyPipelineIds, editorCuts = null,
 }) {
   if (!prepPipelineId || !strategyPipelineIds?.length || !mainVideoId) {
     throw new Error('runPlanForEachVariant: prepPipelineId, strategyPipelineIds, and mainVideoId required')
@@ -441,7 +441,7 @@ export async function runPlanForEachVariant({
   const { executeCreatePlan } = await import('./broll.js')
 
   const promises = strategyPipelineIds.map(stratId =>
-    executeCreatePlan(prepPipelineId, stratId, mainVideoId, subGroupId || null)
+    executeCreatePlan(prepPipelineId, stratId, mainVideoId, subGroupId || null, editorCuts)
       .then(result => ({ ok: true, planPipelineId: result.planPipelineId, stratId }))
       .catch(err => {
         console.error(`[broll-runner] Create plan failed for strategy ${stratId}: ${err.message}`)

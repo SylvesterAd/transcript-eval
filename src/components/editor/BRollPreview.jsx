@@ -1,12 +1,14 @@
-import { useContext, useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { EditorContext } from './EditorView.jsx'
 import { BRollContext } from './useBRollEditorState.js'
 import RoughCutPreview from './RoughCutPreview.jsx'
+import { computeSkipRegions } from './usePlaybackSkipRegions.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 import { Loader2 } from 'lucide-react'
 import { attachVideoSource, detachVideoSource } from '../../hooks/useHlsSource.js'
 
 export default function BRollPreview() {
-  const { state } = useContext(EditorContext)
+  const { state, videoRefs } = useContext(EditorContext)
   const broll = useContext(BRollContext)
   const brollVideoRef = useRef(null)
   const [showBRoll, setShowBRoll] = useState(false)
@@ -15,6 +17,45 @@ export default function BRollPreview() {
 
   const stateRef = useRef(state); stateRef.current = state
   const brollRef = useRef(broll); brollRef.current = broll
+
+  // Compute skip regions from the editor's cut state (same cuts as the rough-cut
+  // editor — synced via editor_state_json). The actual timeupdate listeners are
+  // attached below to every a-roll video element in videoRefs (there can be
+  // multiple tracks), so we call computeSkipRegions directly instead of the hook.
+  const skipRegions = useMemo(
+    () => computeSkipRegions(state.cuts, state.cutExclusions),
+    [state.cuts, state.cutExclusions],
+  )
+  const skipRegionsRef = useRef(skipRegions)
+  skipRegionsRef.current = skipRegions
+
+  useEffect(() => {
+    const videoRefsMap = videoRefs.current
+    if (!skipRegionsRef.current.length) return
+    const handlers = []
+    const attach = () => {
+      Object.values(videoRefsMap).forEach(el => {
+        if (!el) return
+        const handleTimeupdate = () => {
+          const t = el.currentTime
+          for (const r of skipRegionsRef.current) {
+            if (t >= r.start && t < r.end) {
+              el.currentTime = r.end + 0.001
+              return
+            }
+          }
+        }
+        el.addEventListener('timeupdate', handleTimeupdate)
+        handlers.push({ el, handleTimeupdate })
+      })
+    }
+    attach()
+    return () => {
+      handlers.forEach(({ el, handleTimeupdate }) =>
+        el.removeEventListener('timeupdate', handleTimeupdate)
+      )
+    }
+  }, [videoRefs, skipRegions])
 
   useEffect(() => {
     let rafId = 0
@@ -39,7 +80,12 @@ export default function BRollPreview() {
             setVideoLoadState('loading')
             attachVideoSource(v, desired)
           }
-          const localTime = s.currentTime - activePlacement.timelineStart
+          // Visual time = where the playhead sits on the post-cut ruler. Each
+          // placement's timelineStart/End are in those same post-cut seconds
+          // (b-rolls render at `timelineStart * zoom` with no translation), so
+          // the elapsed-within-clip is `visualTime - placement.timelineStart`.
+          const visualTime = postCutTime(s.currentTime, skipRegionsRef.current)
+          const localTime = visualTime - activePlacement.timelineStart
           const clampedTime = Math.max(0, Math.min(localTime, activeResult.duration || 30))
           if (Math.abs(v.currentTime - clampedTime) > 0.5) v.currentTime = clampedTime
           if (s.isPlaying && v.paused) v.play().catch(() => {})

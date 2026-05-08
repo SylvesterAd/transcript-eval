@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>auto-login</title></head>
+<body><h1 id="s">Logging in…</h1>
+<script>
+const session = {"access_token": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjRkOTU1N2M1LTUwZjctNDI1MS1hMTlhLWM1ZjYzNThhZTFiMyIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL3d5bW15d3Noa2ltemJ4Ym1wdWtwLnN1cGFiYXNlLmNvL2F1dGgvdjEiLCJzdWIiOiIwOTgwNGY4YS0xZjRhLTRlNjAtYTkyZC01NTczMTBkOGUzMmEiLCJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoxNzc4MDcwODc0LCJpYXQiOjE3NzgwNjcyNzQsImVtYWlsIjoic2lsdmVzdHJhcy5zdG9ua0BnbWFpbC5jb20iLCJwaG9uZSI6IiIsImFwcF9tZXRhZGF0YSI6eyJwcm92aWRlciI6ImVtYWlsIiwicHJvdmlkZXJzIjpbImVtYWlsIl19LCJ1c2VyX21ldGFkYXRhIjp7ImVtYWlsX3ZlcmlmaWVkIjp0cnVlfSwicm9sZSI6ImF1dGhlbnRpY2F0ZWQiLCJhYWwiOiJhYWwxIiwiYW1yIjpbeyJtZXRob2QiOiJvdHAiLCJ0aW1lc3RhbXAiOjE3NzgwNjcyNzR9XSwic2Vzc2lvbl9pZCI6ImRjN2U2ZGMzLTYzYmItNGUxOS1hYmEzLTkwZTMzNTFhZTk3YSIsImlzX2Fub255bW91cyI6ZmFsc2V9.Xwx09bEi8XdoOhHJTxuEGPYlyVsYiJ469GPjnu0PnKx6iivHqWNxm6gpt4sfPpLyTd8JbCzSRGPzTRjdoP_lHQ", "token_type": "bearer", "expires_in": 3600, "expires_at": 1778070874, "refresh_token": "6elvyzeo4bqc", "user": {"id": "09804f8a-1f4a-4e60-a92d-557310d8e32a", "aud": "authenticated", "role": "authenticated", "email": "silvestras.stonk@gmail.com", "app_metadata": {"provider": "email", "providers": ["email"]}, "user_metadata": {"email_verified": true}}};
+const key = 'sb-wymmywshkimzbxbmpukp-auth-token';
+localStorage.setItem(key, JSON.stringify(session));
+document.getElementById('s').textContent = 'Logged in as ' + session.user.email + '. Redirecting…';
+setTimeout(() => location.href = '/', 800);
+</script>
+</body></html>

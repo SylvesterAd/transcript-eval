@@ -117,3 +117,86 @@ describe('POST /sessions', () => {
     expect(res.statusCode).toBe(401);
   });
 });
+
+describe('GET /renders/:id/iterations', () => {
+  beforeEach(() => {
+    nextRow = null;
+    nextRows = [];
+  });
+
+  it('admin owner: 200 + iteration array (sorted)', async () => {
+    nextRow = { id: 5 }; // ownership row
+    nextRows = [
+      {
+        id: 11,
+        render_id: 5,
+        iteration_index: 0,
+        frame_urls_json: ['u0a', 'u0b', 'u0c', 'u0d'],
+        critic_score: 0.45,
+        critic_criteria_json: { fidelity: 0.5, legibility: 0.6, style: 0.4, timing: 0.3 },
+        critic_feedback: 'too dim',
+        created_at: '2026-05-07T12:00:00Z',
+      },
+      {
+        id: 12,
+        render_id: 5,
+        iteration_index: 1,
+        frame_urls_json: ['u1a', 'u1b', 'u1c', 'u1d'],
+        critic_score: 0.85,
+        critic_criteria_json: { fidelity: 0.9, legibility: 0.85, style: 0.8, timing: 0.85 },
+        critic_feedback: 'looks good',
+        created_at: '2026-05-07T12:01:00Z',
+      },
+    ];
+    const handlers = extractHandlers('/renders/:id/iterations', 'get');
+    const req = {
+      auth: { userId: 'user-1', email: 'admin@test', isAdminFlag: true },
+      params: { id: '5' },
+    };
+    const res = makeRes();
+    await runChain(handlers, req, res);
+    expect(res.statusCode).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0].iteration_index).toBe(0);
+    expect(res.body[0].frame_urls).toEqual(['u0a', 'u0b', 'u0c', 'u0d']);
+    expect(res.body[0].critic_criteria.fidelity).toBe(0.5);
+    expect(res.body[0]).not.toHaveProperty('mp4_path');
+    expect(res.body[0]).not.toHaveProperty('frame_urls_json');
+    expect(res.body[1].critic_score).toBe(0.85);
+  });
+
+  it('not owner / not found: 404', async () => {
+    nextRow = null; // no ownership match
+    const handlers = extractHandlers('/renders/:id/iterations', 'get');
+    const req = {
+      auth: { userId: 'user-1', email: 'admin@test', isAdminFlag: true },
+      params: { id: '999' },
+    };
+    const res = makeRes();
+    await runChain(handlers, req, res);
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('non-admin: 403', async () => {
+    const handlers = extractHandlers('/renders/:id/iterations', 'get');
+    const req = {
+      auth: { userId: 'user-2', email: 'rando@test', isAdminFlag: false },
+      params: { id: '5' },
+    };
+    const res = makeRes();
+    await runChain(handlers, req, res);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('bad id: 400', async () => {
+    const handlers = extractHandlers('/renders/:id/iterations', 'get');
+    const req = {
+      auth: { userId: 'user-1', email: 'admin@test', isAdminFlag: true },
+      params: { id: 'abc' },
+    };
+    const res = makeRes();
+    await runChain(handlers, req, res);
+    expect(res.statusCode).toBe(400);
+  });
+});

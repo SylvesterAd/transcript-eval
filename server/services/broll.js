@@ -34,6 +34,7 @@ import {
   assertNoSelfReference,
   assertPriorsComplete,
 } from './broll-prior-strategies.js'
+import { findAnchorWordIdx } from './anchor-word.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -1005,57 +1006,62 @@ export async function listReferenceAnalysisRuns(strategyId) {
   }))
 }
 
+/**
+ * Cumulative duration of effective cuts ending before `time`.
+ * Pure function — `effectiveCuts` must already be sorted by start
+ * (use `computeEffectiveCuts` to produce the input).
+ *
+ * Half-open at end: a cut ending exactly at `time` does NOT contribute,
+ * so a placement starting at the moment a cut ends is unaffected by it.
+ */
+export function getCumulativeCutOffset(time, effectiveCuts) {
+  if (!effectiveCuts || !effectiveCuts.length) return 0
+  let offset = 0
+  for (const c of effectiveCuts) {
+    if (c.end < time) offset += (c.end - c.start)
+    else break
+  }
+  return offset
+}
+
+/**
+ * Convert an original-video timestamp to the post-cut domain by subtracting
+ * the cumulative duration of all cuts ending before it.
+ */
+export function shiftOriginalToPostCut(time, effectiveCuts) {
+  return time - getCumulativeCutOffset(time, effectiveCuts)
+}
+
 // ── Post-cut transcript generator ───────────────────────────────────
 /**
- * Generate a transcript with timecodes adjusted for rough cut removals.
- * Words inside cut regions are removed; remaining words get shifted timecodes.
+ * Generate a transcript that drops words inside rough-cut regions while
+ * preserving each kept word's ORIGINAL timecode (no shift). Cuts surface as
+ * `[Ns]` gap markers between sentences. Downstream LLM stages anchor
+ * placements directly to the original video — `persistPlacementOutput`
+ * shifts those placements into the post-cut storage domain at the
+ * persistence boundary.
  */
 export async function generatePostCutTranscript(videoId, cuts, cutExclusions = []) {
   const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
   if (!t?.word_timestamps_json) throw new Error(`No word timestamps for video ${videoId}`)
   const words = JSON.parse(t.word_timestamps_json)
 
-  // 1. Compute effective cuts: merge cuts, subtract exclusions
   const effectiveCuts = computeEffectiveCuts(cuts, cutExclusions)
 
-  // 2. Filter out words whose midpoint falls inside any cut
+  // Filter out words whose midpoint falls inside any cut. Kept words keep
+  // their ORIGINAL start/end timestamps — no shifting. Cut text vanishes from
+  // the transcript but timecodes remain in the original-video domain so
+  // downstream LLM stages can anchor placements directly to the raw video.
   const keptWords = words.filter(w => {
     const mid = (w.start + w.end) / 2
     return !effectiveCuts.some(c => mid >= c.start && mid < c.end)
   })
 
-  // 3. Pre-compute cumulative cut durations for offset calculation
-  const sortedCuts = [...effectiveCuts].sort((a, b) => a.start - b.start)
-  const cutEnds = sortedCuts.map(c => c.end)
-  const cutDurations = sortedCuts.map(c => c.end - c.start)
-  const cumDurations = []
-  let cum = 0
-  for (const d of cutDurations) { cum += d; cumDurations.push(cum) }
-
-  function getOffset(time) {
-    // Binary search: sum of cut durations for all cuts ending before this time
-    let lo = 0, hi = cutEnds.length
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (cutEnds[mid] <= time) lo = mid + 1
-      else hi = mid
-    }
-    return lo > 0 ? cumDurations[lo - 1] : 0
-  }
-
-  // 4. Adjust timecodes
-  const adjusted = keptWords.map(w => ({
-    word: w.word,
-    start: w.start - getOffset(w.start),
-    end: w.end - getOffset(w.end),
-  }))
-
-  // 5. Format as [HH:MM:SS] timecoded transcript
   const toTC = (s) => {
     const h = String(Math.floor(s / 3600)).padStart(2, '0')
     const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
     const sec = String(Math.floor(s % 60)).padStart(2, '0')
-    const cs = Math.round((s % 1) * 100)
+    const cs = Math.min(99, Math.round((s % 1) * 100))
     const base = `${h}:${m}:${sec}`
     return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
   }
@@ -1065,13 +1071,13 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
   let lineStartTime = null
   let prevLineEnd = null
 
-  for (let i = 0; i < adjusted.length; i++) {
-    const w = adjusted[i]
+  for (let i = 0; i < keptWords.length; i++) {
+    const w = keptWords[i]
     if (lineStartTime === null) lineStartTime = w.start
     currentLine.push(w.word)
 
     const endsWithPunctuation = /[.!?]$/.test(w.word.trim())
-    const isLastWord = i === adjusted.length - 1
+    const isLastWord = i === keptWords.length - 1
 
     if (endsWithPunctuation || isLastWord) {
       if (prevLineEnd !== null) {
@@ -1081,7 +1087,7 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
       const tc = toTC(lineStartTime)
       const text = currentLine.join(' ').replace(/\s+([.,!?;:])/g, '$1')
       lines.push(`${tc} ${text.trim()}`)
-      prevLineEnd = adjusted[i].end
+      prevLineEnd = keptWords[i].end
       currentLine = []
       lineStartTime = null
     }
@@ -1093,7 +1099,7 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
 /**
  * Merge cuts and subtract exclusions to get effective cut regions.
  */
-function computeEffectiveCuts(cuts, cutExclusions = []) {
+export function computeEffectiveCuts(cuts, cutExclusions = []) {
   if (!cuts || !cuts.length) return []
 
   // Filter real cuts (not zero-width razor markers)
@@ -1131,6 +1137,90 @@ function computeEffectiveCuts(cuts, cutExclusions = []) {
     }
   }
   return result.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * Persists LLM placement output. Two responsibilities:
+ *
+ *   1. Attach `anchor_word_idx` to each placement (audio_anchor → raw word index)
+ *      for stable identity across cut edits.
+ *   2. Shift placement timestamps from the LLM's ORIGINAL-time domain into the
+ *      post-cut canonical storage format used by the editor.
+ *
+ * Handles three shapes:
+ *   - Top-level array: [{ start, end, audio_anchor, ... }, ...]
+ *   - Wrapped in chapters: { chapters: [{ placements: [...] }, ...] }
+ *   - Per-chapter sub-run: { placements: [{ start, end, audio_anchor }] }
+ *
+ * @param {string} stageOutput - LLM output (possibly markdown-fenced JSON)
+ * @param {{cuts:Array, cutExclusions:Array}|null} editorCuts - cuts used to
+ *        shift original→post-cut. When null/empty, no shift is applied.
+ * @param {number|null} videoId - main video ID for word_timestamps lookup; if
+ *        null/undefined, returns stageOutput unchanged.
+ * @returns {Promise<string>} stage output with anchor_word_idx + post-cut times
+ */
+export async function persistPlacementOutput(stageOutput, editorCuts, videoId) {
+  if (!videoId) return stageOutput
+
+  let parsed
+  try { parsed = extractJSON(stageOutput) }
+  catch { return stageOutput }
+
+  let words = []
+  try {
+    const t = await db.prepare("SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'").get(videoId)
+    if (t?.word_timestamps_json) words = JSON.parse(t.word_timestamps_json)
+  } catch (err) {
+    console.warn('[persistPlacementOutput] failed to load words:', err.message)
+    return stageOutput
+  }
+  if (!words.length) return stageOutput
+
+  const effectiveCuts = computeEffectiveCuts(editorCuts?.cuts || [], editorCuts?.cutExclusions || [])
+
+  const tc = (s) => {
+    if (s == null || Number.isNaN(s)) return null
+    const h = String(Math.floor(s / 3600)).padStart(2, '0')
+    const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
+    const sec = String(Math.floor(s % 60)).padStart(2, '0')
+    const cs = Math.min(99, Math.round((s % 1) * 100))
+    const base = `${h}:${m}:${sec}`
+    return cs > 0 ? `[${base}.${String(cs).padStart(2, '0')}]` : `[${base}]`
+  }
+
+  const shiftPlacement = (p) => {
+    const next = { ...p, anchor_word_idx: findAnchorWordIdx(words, p.audio_anchor) }
+    if (!effectiveCuts.length) return next
+    if (typeof p.start_seconds === 'number') {
+      next.start_seconds = shiftOriginalToPostCut(p.start_seconds, effectiveCuts)
+      next.start = tc(next.start_seconds)
+    }
+    if (typeof p.end_seconds === 'number') {
+      next.end_seconds = shiftOriginalToPostCut(p.end_seconds, effectiveCuts)
+      next.end = tc(next.end_seconds)
+    }
+    return next
+  }
+
+  const annotate = (placements) => placements.map(shiftPlacement)
+
+  let result
+  if (Array.isArray(parsed)) {
+    result = annotate(parsed)
+  } else if (parsed && Array.isArray(parsed.chapters)) {
+    result = {
+      ...parsed,
+      chapters: parsed.chapters.map(ch => ({
+        ...ch,
+        placements: Array.isArray(ch.placements) ? annotate(ch.placements) : ch.placements,
+      })),
+    }
+  } else if (parsed && Array.isArray(parsed.placements)) {
+    result = { ...parsed, placements: annotate(parsed.placements) }
+  } else {
+    return stageOutput
+  }
+  return JSON.stringify(result, null, 2)
 }
 
 // ── Pipeline progress & abort tracking ───────────────────────────────
@@ -2657,8 +2747,11 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   }
 
   const transcriptRun = findPrepStage('Generate post-cut transcript')
-  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
-  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+  // plan_prep merged A-Roll + Chapters & Beats into one stage; old runs that
+  // pre-date the merge still have separate stages, so fall back to those names.
+  const mergedAnalysisRun = findPrepStage('Analyze A-Roll + Chapters & Beats')
+  const aRollRun = mergedAnalysisRun || findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = mergedAnalysisRun || findPrepStage('Analyze Chapters & Beats')
 
   const currentTranscript = transcriptRun?.output_text || ''
   const aRollOutput = aRollRun?.output_text || ''
@@ -3063,8 +3156,11 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   }
 
   const transcriptRun = findPrepStage('Generate post-cut transcript')
-  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
-  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+  // plan_prep merged A-Roll + Chapters & Beats into one stage; old runs that
+  // pre-date the merge still have separate stages, so fall back to those names.
+  const mergedAnalysisRun = findPrepStage('Analyze A-Roll + Chapters & Beats')
+  const aRollRun = mergedAnalysisRun || findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = mergedAnalysisRun || findPrepStage('Analyze Chapters & Beats')
 
   const currentTranscript = transcriptRun?.output_text || ''
   const aRollOutput = aRollRun?.output_text || ''
@@ -3600,7 +3696,7 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   }
 }
 
-export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId) {
+export async function executeCreatePlan(prepPipelineId, strategyPipelineId, videoId, groupId, editorCuts = null) {
   // 1. Load create_plan strategy, preferring audio-only variant when audio.
   const mainVideoRow = videoId ? await db.prepare('SELECT media_type FROM videos WHERE id = ?').get(videoId) : null
   const strategy = await pickStrategyByKind('create_plan', mainVideoRow?.media_type)
@@ -3624,8 +3720,11 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   }
 
   const transcriptRun = findPrepStage('Generate post-cut transcript')
-  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
-  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+  // plan_prep merged A-Roll + Chapters & Beats into one stage; old runs that
+  // pre-date the merge still have separate stages, so fall back to those names.
+  const mergedAnalysisRun = findPrepStage('Analyze A-Roll + Chapters & Beats')
+  const aRollRun = mergedAnalysisRun || findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = mergedAnalysisRun || findPrepStage('Analyze Chapters & Beats')
 
   const currentTranscript = transcriptRun?.output_text || ''
   const aRollOutput = aRollRun?.output_text || ''
@@ -3857,7 +3956,8 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
             abortSignal: pipelineAbort.signal,
           })
 
-          chapterResults[c] = result.text
+          const chapterOutput = await persistPlacementOutput(result.text, editorCuts, videoId)
+          chapterResults[c] = chapterOutput
           stageTokensIn += result.tokensIn || 0
           stageTokensOut += result.tokensOut || 0
           stageCost += result.cost || 0; if (result.apiKeyLast5) stageApiKeyLast5 = result.apiKeyLast5
@@ -3867,7 +3967,7 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
           // Store sub-run — stageName MUST be 'Per-chapter B-Roll plan' for downstream consumers
           await db.prepare(`INSERT INTO broll_runs (strategy_id, video_id, step_name, status, input_text, output_text, prompt_used, system_instruction_used, model, tokens_in, tokens_out, cost, runtime_ms, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             strategy.id, videoId, 'analysis', 'complete',
-            ch.transcript.slice(0, 500), result.text, chPrompt, chSystem,
+            ch.transcript.slice(0, 500), chapterOutput, chPrompt, chSystem,
             stage.model || 'gemini-3.1-pro-preview',
             result.tokensIn || 0, result.tokensOut || 0, result.cost || 0, 0,
             JSON.stringify({ pipelineId, stageIndex: i, stageName: 'Per-chapter B-Roll plan', subIndex: c, subLabel: `Chapter ${ch.chapter_number}: ${ch.chapter_name}`, isSubRun: true, phase: 'create_plan', prepPipelineId, strategyPipelineId }),
@@ -3956,7 +4056,12 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
 // main_video would crash on the missing video file; programmatic stages are
 // not covered by this filter (out of scope for Task 7).
 const VIDEO_STAGE_TYPES = new Set(['video_llm', 'video_question'])
-const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set(['export_post_cut_video'])
+// Programmatic stages that need a video file (the audio-defense filter drops them
+// when main video is audio-only). Empty for now — `export_post_cut_video` was
+// removed when LLM stages switched to the original raw video. Kept as an empty
+// Set so the filter logic still has a stable surface for future video-only
+// programmatic actions.
+const VIDEO_ONLY_PROGRAMMATIC_ACTIONS = new Set()
 
 function filterStagesForMedia(stages, mediaType) {
   if (mediaType !== 'audio') return stages
@@ -4008,9 +4113,11 @@ function filterStagesForMedia(stages, mediaType) {
   return result
 }
 
-// Exported as a __test__ alias so unit tests can exercise the helper without
-// driving the full executePipeline.
+// Exported as __test__ aliases so unit tests can exercise the helpers without
+// driving the full executePipeline. The Set export lets tests temporarily add
+// synthetic action names to exercise the video-only filter path.
 export { filterStagesForMedia as __test__filterStagesForMedia }
+export { VIDEO_ONLY_PROGRAMMATIC_ACTIONS as __test__VIDEO_ONLY_PROGRAMMATIC_ACTIONS }
 
 export async function executePipeline(strategyId, versionId, videoId, groupId, transcriptSource = 'raw', editorCuts = null, referenceRunId = null, resumeData = null, { stopAfterStrategy = false, exampleVideoId = null, pipelineIdOverride = null } = {}) {
   const strategy = await getStrategy(strategyId)
@@ -5218,7 +5325,7 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             chapters,
           }, null, 2)
         } else if (action === 'generate_post_cut_transcript') {
-          // Generate transcript with timecodes adjusted for rough cut
+          // Generate transcript with cut text removed; kept words preserve original timecodes
           if (!editorCuts?.cuts?.length) {
             // No cuts — use raw transcript as-is (plan prep without rough cut)
             console.log('[broll-pipeline] No editor cuts — using raw transcript')
@@ -5232,50 +5339,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
               await db.prepare("DELETE FROM transcripts WHERE video_id = ? AND type = 'rough_cut_adjusted'").run(videoId)
               await db.prepare("INSERT INTO transcripts (video_id, type, content) VALUES (?, 'rough_cut_adjusted', ?)").run(videoId, postCutTranscript)
             } catch (e) { console.warn('[broll-pipeline] Could not persist rough_cut_adjusted transcript:', e.message) }
-          }
-        } else if (action === 'export_post_cut_video') {
-          // Export post-cut 360p video, upload to Supabase for persistence across deploys
-          if (!editorCuts?.cuts?.length) {
-            // No cuts — skip video export, use original video
-            console.log('[broll-pipeline] No editor cuts — skipping post-cut video export')
-            output = 'No editor cuts — using original video'
-          } else {
-            const storagePath = `temp/postcut-${pipelineId}.mp4`
-            let postCutPath = null
-
-            // On resume: try downloading cached post-cut from Supabase (seconds vs minutes of FFmpeg)
-            if (isResumedStage) {
-              try {
-                const cachedUrl = getPublicUrl('videos', storagePath)
-                postCutPath = await downloadToTemp(cachedUrl, `postcut-${pipelineId}.mp4`)
-                console.log(`[broll-pipeline] Resume: reused cached post-cut from storage (skipped FFmpeg)`)
-                output = resumeData.completedStages[i] || `Post-cut video restored from cache`
-              } catch (e) {
-                console.warn(`[broll-pipeline] Resume: cached post-cut not available, falling back to FFmpeg: ${e.message}`)
-                postCutPath = null
-              }
-            }
-
-            // Initial run or resume fallback: run FFmpeg
-            if (!postCutPath) {
-              const { exportPostCutVideo } = await import('./video-processor.js')
-              const { getVideoDuration } = await import('./video-processor.js')
-              const originalPath = await getVideoFilePath(videoId)
-              const duration = await getVideoDuration(originalPath) || 600
-              const effectiveCuts = computeEffectiveCuts(editorCuts.cuts, editorCuts.cutExclusions || [])
-              postCutPath = await exportPostCutVideo(originalPath, effectiveCuts, duration)
-              // Upload to Supabase — kept for future resumes (not added to cleanup list)
-              try {
-                const url = await uploadFile('videos', storagePath, postCutPath)
-                console.log(`[broll-pipeline] Post-cut uploaded to storage: ${url}`)
-                output = `Post-cut video exported (360p) and uploaded: ${url}`
-              } catch (e) {
-                console.warn(`[broll-pipeline] Post-cut upload failed (using local): ${e.message}`)
-                output = `Post-cut video exported (360p, local only): ${postCutPath}`
-              }
-            }
-
-            mainVideoFilePath = postCutPath
           }
         } else if (action === 'assemble_broll_plan') {
           // Merge per-chapter B-Roll plan outputs into one document
@@ -5306,12 +5369,14 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
             plan: parsedPlans[idx] || null,
           }))
 
-          output = JSON.stringify({
+          const rawOutput = JSON.stringify({
             video_context: allChaptersCtx,
             total_chapters: chapters.length,
             chapters,
           }, null, 2)
+          output = await persistPlacementOutput(rawOutput, editorCuts, videoId)
         } else {
+          console.warn(`[broll-pipeline] Unknown programmatic action "${action}" — passing transcript through unchanged. Likely a stale stages_json from before a strategy update.`)
           output = currentTranscript
         }
       }
@@ -5378,9 +5443,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
     snapshot.outcome = { event: 'complete', at: new Date().toISOString() }
     writePipelineSnapshot(pipelineId, snapshot)
     console.log(`[broll-snapshot] pipeline_complete | ${stages.length} stages | $${totalCost.toFixed(4)} | ${(totalRuntime / 1000).toFixed(1)}s`)
-
-    // Clean up Supabase postcut file only on success (preserve for resume on failure)
-    try { await deleteFile('videos', `temp/postcut-${pipelineId}.mp4`) } catch {}
 
     // Clean up temp files from Supabase storage
     cleanupTempFiles(pipelineTempFiles)

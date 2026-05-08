@@ -62,6 +62,22 @@ export function isAdmin(req) {
   return false
 }
 
+export async function verifyTokenString(token) {
+  if (!token) return null
+  try {
+    const payload = await verifyAccessToken(token)
+    return {
+      token,
+      userId: payload.sub,
+      email: payload.email || null,
+      role: payload.role || payload.user_metadata?.role || payload.app_metadata?.role || 'authenticated',
+      payload,
+    }
+  } catch {
+    return null
+  }
+}
+
 export function requireAuth(req, res, next) {
   if (!hasServerAuthConfig) {
     return res.status(503).json({ error: 'Server auth is not configured' })

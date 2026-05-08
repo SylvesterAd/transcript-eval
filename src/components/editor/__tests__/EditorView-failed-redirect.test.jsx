@@ -41,20 +41,27 @@ describe('shouldRedirectFailedPrePause', () => {
     })).toBe(false)
   })
 
-  it('returns true for guided + failed at refs/strategy/plan', () => {
+  // After commit 49ec14c, guided's pre-pause boundary moved to
+  // 'rough_cut' (earliest auto-chain stage). Anything failing AFTER
+  // rough_cut means the user already saw the rough-cut hand-off point
+  // and is being routed into the editor; the failure shows as a banner
+  // there, not via redirect to <FailedView>.
+  it('returns true for guided + failed at rough_cut (pre-pause boundary)', () => {
     expect(shouldRedirectFailedPrePause({
       path_id: 'guided',
       broll_chain_status: 'failed',
-      broll_chain_substage: 'plan',
+      broll_chain_substage: 'rough_cut',
     })).toBe(true)
   })
 
-  it('returns false for guided + failed at search (post-pause)', () => {
-    expect(shouldRedirectFailedPrePause({
-      path_id: 'guided',
-      broll_chain_status: 'failed',
-      broll_chain_substage: 'search',
-    })).toBe(false)
+  it('returns false for guided + failed at refs/strategy/plan/search (post-pause)', () => {
+    for (const substage of ['refs', 'strategy', 'plan', 'search']) {
+      expect(shouldRedirectFailedPrePause({
+        path_id: 'guided',
+        broll_chain_status: 'failed',
+        broll_chain_substage: substage,
+      })).toBe(false)
+    }
   })
 
   it('returns false for null path (manual mode — no auto-chain expected)', () => {

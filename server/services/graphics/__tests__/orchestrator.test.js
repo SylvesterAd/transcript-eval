@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../events/emitter.js', () => ({ emit: vi.fn() }));
+
 // Correction #1: paths use 3-up traversal (__tests__ → graphics → services → server)
 vi.mock('../../../lib/llm/gemini.js', () => ({
   callGemini: vi.fn().mockResolvedValue({
@@ -39,4 +41,32 @@ describe('orchestrator', () => {
     expect(result.assistantText).not.toContain('[SPEC]');  // strip check
     expect(result.specUpdate).toEqual({ template: 'lower-third' });
   });
+
+  it('passes Google Search grounding tools on the brief callGemini call', async () => {
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+    callGemini.mockResolvedValue({
+      text: '[SPEC]{"template":"lower-third"}',
+      toolUses: [],
+      tokens: { in: 100, out: 10 },
+      stop: 'STOP',
+    })
+    const { runChatTurn } = await import('../orchestrator.js')
+    await runChatTurn({ sessionId: 1, userMessage: 'use the WSJ logo' })
+    const lastCall = callGemini.mock.calls.at(-1)[0]
+    expect(lastCall.tools).toEqual([{ googleSearch: {} }])
+    expect(lastCall.model).toBe('gemini-3-flash-preview')
+  })
 });
+
+describe('BRIEF_SYSTEM_PROMPT documents available adapters', () => {
+  it('lists gsap, lottie, three, animejs, waapi, css-animations as adapter options', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/gsap/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/lottie/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/three/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/animejs|anime\.js/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/waapi|web animations/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/css-animations|css animation/i)
+  })
+})

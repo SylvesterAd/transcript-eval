@@ -449,3 +449,21 @@ CREATE TABLE IF NOT EXISTS graphics_renders (
 );
 CREATE INDEX IF NOT EXISTS idx_graphics_renders_session ON graphics_renders(session_id, iteration);
 CREATE INDEX IF NOT EXISTS idx_graphics_renders_status ON graphics_renders(status) WHERE status IN ('queued', 'running');
+
+-- Critic-loop iteration history (per-render attempt)
+CREATE TABLE IF NOT EXISTS graphics_render_iterations (
+  id                    SERIAL PRIMARY KEY,
+  render_id             INTEGER NOT NULL REFERENCES graphics_renders(id) ON DELETE CASCADE,
+  iteration_index       INTEGER NOT NULL,
+  mp4_path              TEXT,
+  frame_urls_json       JSONB NOT NULL DEFAULT '[]'::jsonb,
+  critic_score          NUMERIC(3,2),
+  critic_criteria_json  JSONB,
+  critic_feedback       TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_graphics_render_iterations_render
+  ON graphics_render_iterations(render_id, iteration_index);
+
+ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS iteration_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS final_score NUMERIC(3,2);

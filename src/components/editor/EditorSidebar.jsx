@@ -17,8 +17,10 @@ export default function EditorSidebar({
   hasVideos = true,
   hasBrollSearch = false,
   brollChainStatus = null,
+  parentGroupId = null,
   onTabChange,
   onResumeFromRoughCut,
+  onNavigateToProcessing,
 }) {
   const { isAdmin } = useRole()
   const pausedAtRoughCut = brollChainStatus === 'paused_at_rough_cut'
@@ -37,10 +39,17 @@ export default function EditorSidebar({
             ? activeTab === item.tab && (item.id === 'brolls-strategy' ? activeSub !== 'edit' : activeSub === 'edit')
             : item.id === activeTab
 
+          const chainInFlight =
+            brollChainStatus === 'running' || brollChainStatus === 'pending'
+
           const handleClick = () => {
             if (disabled) return
             if (pausedAtRoughCut && item.id === 'brolls-strategy') {
               onResumeFromRoughCut?.()
+              return
+            }
+            if (chainInFlight && item.id === 'brolls-strategy') {
+              onNavigateToProcessing?.(parentGroupId)
               return
             }
             onTabChange?.(item.navTo || item.id)

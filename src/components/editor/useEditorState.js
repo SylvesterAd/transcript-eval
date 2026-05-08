@@ -1,5 +1,6 @@
 import { useReducer, useEffect, useRef, useCallback, useMemo } from 'react'
-import { apiPut } from '../../hooks/useApi.js'
+import { apiGet, apiPut } from '../../hooks/useApi.js'
+import { ADD_CUT, UPDATE_CUT, REMOVE_CUT } from './sharedCutLogic.js'
 
 const GROUP_COLORS = ['#cefc00', '#c180ff', '#65fde6', '#ff7351', '#48e5d0', '#dbb4ff']
 
@@ -452,9 +453,9 @@ function reducer(state, action) {
     }
     case 'CLEAR_ROUGH_CUT':
       return { ...state, cuts: [], segmentVideoOverrides: {}, segmentAudioOverrides: {}, roughcutTranscriptState: null, isDirty: true }
-    case 'ADD_CUT':
+    case ADD_CUT:
       return { ...state, cuts: [...state.cuts, action.payload], isDirty: true }
-    case 'REMOVE_CUT':
+    case REMOVE_CUT:
       return { ...state, cuts: state.cuts.filter(c => c.id !== action.payload), isDirty: true }
     case 'EXCLUDE_FROM_CUT': {
       const { wordStart, wordEnd } = action.payload
@@ -520,7 +521,7 @@ function reducer(state, action) {
       }
       return { ...state, cutExclusions: mergedEx, cuts: trimmedCuts, isDirty: true }
     }
-    case 'UPDATE_CUT': {
+    case UPDATE_CUT: {
       const updated = state.cuts.map(c => {
         if (c.id !== action.payload.id) return c
         const patched = { ...c, ...action.payload.updates, manuallyEdited: true }
@@ -541,6 +542,14 @@ function reducer(state, action) {
       const { prefix, cuts } = action.payload
       // AI regeneration replaces all cuts with this prefix — exclusions are the authority for manual edits
       return { ...state, cuts: [...state.cuts.filter(c => !c.id.startsWith(prefix)), ...cuts], isDirty: true }
+    }
+    case 'REFRESH_CUTS_FROM_SERVER': {
+      const { cuts, cutExclusions } = action.payload || {}
+      return {
+        ...state,
+        cuts: cuts || state.cuts,
+        cutExclusions: cutExclusions || state.cutExclusions,
+      }
     }
     case 'SET_AI_CUTS_SELECTED':
       return { ...state, aiCutsSelected: { ...state.aiCutsSelected, ...action.payload }, isDirty: true }
@@ -691,6 +700,27 @@ export default function useEditorState() {
       flushSave()
     }
   }, [])
+
+  // Refetch cuts on window focus (cross-tab sync: b-roll editor may have written new cuts)
+  useEffect(() => {
+    if (!state.groupId) return
+    const handler = async () => {
+      try {
+        const detail = await apiGet(`/videos/groups/${state.groupId}/detail`)
+        if (detail?.editor_state) {
+          dispatch({
+            type: 'REFRESH_CUTS_FROM_SERVER',
+            payload: {
+              cuts: detail.editor_state.cuts || [],
+              cutExclusions: detail.editor_state.cutExclusions || [],
+            },
+          })
+        }
+      } catch {}
+    }
+    window.addEventListener('focus', handler)
+    return () => window.removeEventListener('focus', handler)
+  }, [state.groupId])
 
   // Dep is state.tracks, not state — SET_CURRENT_TIME (and other non-track-mutating
   // actions) return { ...state, ... } which makes state a new object but preserves the

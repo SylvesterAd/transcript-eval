@@ -9,9 +9,7 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mxf', '.mkv', '.webm', '.wmv', '.flv', '.m4v', '.ts', '.mts']
 const AUDIO_EXTS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']
-const SCRIPT_EXTS = ['.docx', '.pdf', '.txt']
 const VIDEO_ACCEPT = [...VIDEO_EXTS, ...AUDIO_EXTS].join(',')
-const SCRIPT_ACCEPT = SCRIPT_EXTS.join(',')
 const MAX_SIZE = 50 * 1024 * 1024 * 1024 // 50GB
 
 // Probe a video file's duration + pixel dimensions locally before upload
@@ -74,12 +72,10 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
   }, [onFilesChange])
   const [groupId, setGroupId] = useState(initialGroupId || null)
   const [videoUrl, setVideoUrl] = useState('')
-  const [scriptUrl, setScriptUrl] = useState('')
   const [groupError, setGroupError] = useState(null)
   const groupIdRef = useRef(initialGroupId || null)
   const groupPromiseRef = useRef(null)
   const videoInputRef = useRef(null)
-  const scriptInputRef = useRef(null)
 
   useEffect(() => { groupIdRef.current = groupId }, [groupId])
 
@@ -260,10 +256,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
   }, [ensureGroup, uploadFileWithProgress])
 
   const validateAndAddFiles = useCallback((fileList, type) => {
-    const exts = type === 'video' ? [...VIDEO_EXTS, ...AUDIO_EXTS] : SCRIPT_EXTS
-    const errorMsg = type === 'video'
-      ? `Unsupported format. Accepted: ${[...VIDEO_EXTS, ...AUDIO_EXTS].join(', ')}`
-      : `Unsupported format. Accepted: ${SCRIPT_EXTS.join(', ')}`
+    const exts = [...VIDEO_EXTS, ...AUDIO_EXTS]
+    const errorMsg = `Unsupported format. Accepted: ${exts.join(', ')}`
 
     const entries = []
     for (const file of fileList) {
@@ -342,7 +336,6 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
     }
 
     if (type === 'video') setVideoUrl('')
-    else setScriptUrl('')
   }, [ensureGroup])
 
   const retryFile = useCallback((fileEntry) => {
@@ -465,73 +458,6 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
 
             </div>
           </section>
-
-          {/* ── SECTION 2: SCRIPT / BRIEF ── */}
-          <section className="space-y-4 p-5 rounded-xl bg-black/40 border border-border-subtle/5">
-            <h3 className="text-sm font-bold uppercase tracking-widest text-lime">
-              2. Upload Script / Brief
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-
-              {/* A. Local File */}
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-muted uppercase tracking-tight">A. Local File</label>
-                <div
-                  onDrop={(e) => handleDrop(e, 'script')}
-                  onDragOver={prevent}
-                  onClick={() => scriptInputRef.current?.click()}
-                  className="custom-dashed rounded-lg p-6 bg-surface/30 flex flex-col items-center justify-center gap-3 hover:bg-surface/50 transition-colors cursor-pointer group text-center min-h-[140px]"
-                >
-                  <span className="text-3xl text-lime/70 group-hover:text-lime transition-colors">
-                    <Description />
-                  </span>
-                  <span className="text-xs font-medium text-muted">Click to upload .docx, .pdf, .txt</span>
-                  <input
-                    ref={scriptInputRef}
-                    type="file"
-                    accept={SCRIPT_ACCEPT}
-                    multiple
-                    className="hidden"
-                    onChange={(e) => { if (e.target.files?.length) validateAndAddFiles(e.target.files, 'script'); e.target.value = '' }}
-                  />
-                </div>
-              </div>
-
-              {/* C. Link from Web */}
-              <div className="space-y-2 flex flex-col">
-                <label className="text-[10px] font-bold text-muted uppercase tracking-tight">B. Link from Web</label>
-                <div className="flex-1 bg-surface/30 rounded-lg p-4 flex flex-col justify-between border border-border-subtle/5 min-h-[140px]">
-                  <p className="text-xs text-muted mb-2">Paste a link to your script or brief</p>
-                  <div className="space-y-2 mt-auto">
-                    <input
-                      type="url"
-                      placeholder="https://docs.google.com/..."
-                      value={scriptUrl}
-                      onChange={(e) => setScriptUrl(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleUrlFetch(scriptUrl, 'script') }}
-                      className="w-full bg-black border border-border-subtle/30 focus:ring-1 focus:ring-lime/30 focus:border-lime/30 rounded-md py-2 px-3 text-sm text-white placeholder:text-muted/30 outline-none"
-                    />
-                    <button
-                      onClick={() => handleUrlFetch(scriptUrl, 'script')}
-                      disabled={!scriptUrl.trim()}
-                      className="w-full py-2 bg-surface text-muted hover:text-white text-xs font-bold rounded transition-colors uppercase tracking-tight disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      Fetch Document
-                    </button>
-                  </div>
-                  {/* Notion pill — disabled / coming soon */}
-                  <div className="mt-3">
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-surface text-xs text-muted opacity-40 cursor-not-allowed border border-border-subtle/10" title="Coming soon">
-                      <svg width="14" height="14" viewBox="0 0 100 100" fill="currentColor"><path d="M6.6 12.1c4.7 3.8 6.5 3.5 15.3 2.9l58.2-3.5c1.8 0 .3-1.8-.3-2L73.3 4.6c-2.9-2.1-6.8-4.4-14.2-3.8L19.1 5.2C16 5.5 15.4 7 16.6 8l-10 4.1zM11.6 23.6v62.8c0 3.4 1.7 4.6 5.5 4.4l64.2-3.7c3.8-.2 4.3-2.5 4.3-5.2V19.5c0-2.7-1-4.1-3.3-3.8L17.1 19.3c-2.5.2-5.5 1.5-5.5 4.3zm63.4 1.9c.4 1.9 0 3.8-1.9 4l-3.1.6v46.4c-2.7 1.5-5.2 2.3-7.2 2.3-3.4 0-4.2-1.1-6.7-4.1L36.5 41.1v32.5l6.4 1.5s0 3.7-5.2 3.7l-14.3.8c-.4-.8 0-2.9 1.5-3.3l3.7-1V34.2L24 33.8c-.4-1.9.7-4.6 3.7-4.8l15.4-.9 21 32.1V30.7l-5.4-.6c-.4-2.3 1.2-4 3.3-4.2l15-1z"/></svg>
-                      Notion / Other
-                      <span className="text-[10px] ml-1 opacity-70">Coming soon</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-            </div>
-          </section>
         </div>
 
         {/* ── STICKY FOOTER ── */}
@@ -556,10 +482,7 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
                   <div key={f.id} className="group flex items-center gap-4 p-2 bg-black/30 rounded-lg border border-border-subtle/10 hover:border-border-subtle/30 transition-all">
                     {/* Icon */}
                     <div className="w-8 h-8 bg-surface flex items-center justify-center rounded shrink-0">
-                      {f.type === 'video'
-                        ? <span className="text-purple-accent text-lg"><Film /></span>
-                        : <span className="text-teal-400 text-lg"><Description /></span>
-                      }
+                      <span className="text-purple-accent text-lg"><Film /></span>
                     </div>
                     {/* Name + Progress */}
                     <div className="flex-1 min-w-0">
@@ -586,10 +509,8 @@ export default function UploadModal({ onClose, onComplete, initialGroupId, onFil
                     </div>
                     {/* Type select + actions */}
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${
-                        f.type === 'video' ? 'bg-purple-accent/10 text-purple-accent' : 'bg-teal-400/10 text-teal-400'
-                      }`}>
-                        {f.type === 'video' ? 'Video' : 'Script'}
+                      <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-purple-accent/10 text-purple-accent">
+                        Video
                       </span>
                       {f.status === 'error' ? (
                         <button onClick={() => retryFile(f)} className="p-1 hover:bg-surface rounded text-muted hover:text-white transition-all" title="Retry">
@@ -638,10 +559,3 @@ function Film() {
   )
 }
 
-function Description() {
-  return (
-    <svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
-    </svg>
-  )
-}

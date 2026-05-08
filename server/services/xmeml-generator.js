@@ -237,6 +237,7 @@ export function generateXmeml({
   frameRate = 50,
   sequenceSize = { w: 1920, h: 1080 },
   aroll = null,  // optional: { filename, frameRate, width, height, sourceDurationSeconds } — emits a V1 track spanning the entire timeline
+  arollSegments = null, // NEW: [{filename, start, end, sourceFrameRate?, sourceDurationSeconds?, width?, height?}] — emits one V1 clipitem per segment; takes precedence over aroll when non-empty
   mediaFolderAbsolute = null,  // absolute filesystem folder, e.g. "/Users/laurynas/Downloads/transcript-eval/export-370-a"; when null we emit bare filenames (Premiere relinks via Match File Properties → File Name when the XML sits next to the media)
 }) {
   if (typeof sequenceName !== 'string' || !sequenceName) {
@@ -350,51 +351,73 @@ export function generateXmeml({
   lines.push(`          </samplecharacteristics>`)
   lines.push(`        </format>`)
 
-  // Emit A-roll track first (V1) so b-rolls land on V2/V3 above it.
-  // A-roll spans the entire sequence: source IN=0, OUT=sequenceDuration,
-  // timeline start=0, end=sequenceDuration. Only emitted when caller
-  // passed the optional `aroll` arg with a non-empty filename.
-  if (aroll && typeof aroll === 'object' && aroll.filename) {
-    const arollFilename = sanitizeFilename(String(aroll.filename))
-    const arollFrameRate = Number.isFinite(aroll.frameRate) && aroll.frameRate > 0 ? aroll.frameRate : frameRate
-    const arollWidth = Number.isFinite(aroll.width) && aroll.width > 0 ? aroll.width : seqW
-    const arollHeight = Number.isFinite(aroll.height) && aroll.height > 0 ? aroll.height : seqH
-    // A-roll source length: prefer the explicit value; default to the
-    // sequence length (matches the historical behavior where aroll covers
-    // the whole timeline).
-    const arollSourceFrames = Number.isFinite(aroll.sourceDurationSeconds) && aroll.sourceDurationSeconds > 0
-      ? Math.round(aroll.sourceDurationSeconds * arollFrameRate)
-      : sequenceDuration
-    const arollClipId = `clip-${seqSlug}-aroll`
-    const arollFileId = `file-aroll`
+  // A-Roll track emission. New `arollSegments` (per-segment) takes precedence
+  // over legacy `aroll` (single continuous clip). Both produce V1 track output;
+  // the difference is one clipitem (legacy) vs N clipitems (segments).
+  const useSegments = Array.isArray(arollSegments) && arollSegments.length > 0
+  const segs = useSegments
+    ? arollSegments
+    : (aroll && typeof aroll === 'object' && aroll.filename
+      ? [{
+          filename: aroll.filename,
+          start: 0,
+          end: sequenceDuration / frameRate,
+          sourceFrameRate: aroll.frameRate,
+          sourceDurationSeconds: aroll.sourceDurationSeconds,
+          width: aroll.width,
+          height: aroll.height,
+        }]
+      : [])
+
+  if (segs.length > 0) {
     lines.push(`        <track>`)
-    lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
-    lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
-    // <out> is in SOURCE-rate frames (FCP7 spec), so convert:
-    // sequenceDuration (sequence frames) → seconds → source frames.
-    const arollOutSrcFrames = Math.round((sequenceDuration / frameRate) * arollFrameRate)
-    lines.push(`            <duration>${arollSourceFrames}</duration>`)
-    lines.push(`            <start>0</start>`)
-    lines.push(`            <end>${sequenceDuration}</end>`)
-    lines.push(`            <in>0</in>`)
-    lines.push(`            <out>${arollOutSrcFrames}</out>`)
-    // Sub-frame precision (Adobe extension). A-roll spans the full
-    // sequence so source IN=0 and source OUT = sequenceDuration in
-    // sequence frames. Convert frames → seconds → ticks.
-    lines.push(`            <pproTicksIn>0</pproTicksIn>`)
-    lines.push(`            <pproTicksOut>${secondsToPproTicks(sequenceDuration / frameRate)}</pproTicksOut>`)
-    lines.push(`            <file id="${escapeXml(arollFileId)}">`)
-    lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
-    lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
-    lines.push(`              <duration>${arollSourceFrames}</duration>`)
-    lines.push(`              <rate><timebase>${arollFrameRate}</timebase></rate>`)
-    lines.push(`              <media>`)
-    lines.push(`                <video><samplecharacteristics>`)
-    lines.push(`                  <width>${arollWidth}</width><height>${arollHeight}</height>`)
-    lines.push(`                </samplecharacteristics></video>`)
-    lines.push(`              </media>`)
-    lines.push(`            </file>`)
-    lines.push(`          </clipitem>`)
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i]
+      if (!seg?.filename) continue
+      const arollFilename = sanitizeFilename(String(seg.filename))
+      const arollFrameRate = Number.isFinite(seg.sourceFrameRate) && seg.sourceFrameRate > 0 ? seg.sourceFrameRate : frameRate
+      const arollWidth = Number.isFinite(seg.width) && seg.width > 0 ? seg.width : seqW
+      const arollHeight = Number.isFinite(seg.height) && seg.height > 0 ? seg.height : seqH
+      const sourceDurationSec = Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0
+        ? seg.sourceDurationSeconds
+        : (seg.end - seg.start)
+      const arollSourceFrames = Math.round(sourceDurationSec * arollFrameRate)
+      const startFrame = secondsToFrames(seg.start, frameRate)
+      const endFrame = secondsToFrames(seg.end, frameRate)
+      const inSrcFrames = Math.round(seg.start * arollFrameRate)
+      const outSrcFrames = Math.round(seg.end * arollFrameRate)
+      // Legacy aroll uses the original bare id (no index suffix) for backwards
+      // compat with existing tests and any saved Premiere XML references.
+      const arollClipId = useSegments ? `clip-${seqSlug}-aroll-${i + 1}` : `clip-${seqSlug}-aroll`
+      const arollFileId = i === 0 ? `file-aroll` : `file-aroll-${i + 1}`
+
+      lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
+      lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
+      lines.push(`            <duration>${arollSourceFrames}</duration>`)
+      lines.push(`            <start>${startFrame}</start>`)
+      lines.push(`            <end>${endFrame}</end>`)
+      lines.push(`            <in>${inSrcFrames}</in>`)
+      lines.push(`            <out>${outSrcFrames}</out>`)
+      lines.push(`            <pproTicksIn>${secondsToPproTicks(seg.start)}</pproTicksIn>`)
+      lines.push(`            <pproTicksOut>${secondsToPproTicks(seg.end)}</pproTicksOut>`)
+      if (i === 0) {
+        // First clipitem owns the <file> block; later clipitems reference it by id.
+        lines.push(`            <file id="${escapeXml(arollFileId)}">`)
+        lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
+        lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
+        lines.push(`              <duration>${arollSourceFrames}</duration>`)
+        lines.push(`              <rate><timebase>${arollFrameRate}</timebase></rate>`)
+        lines.push(`              <media>`)
+        lines.push(`                <video><samplecharacteristics>`)
+        lines.push(`                  <width>${arollWidth}</width><height>${arollHeight}</height>`)
+        lines.push(`                </samplecharacteristics></video>`)
+        lines.push(`              </media>`)
+        lines.push(`            </file>`)
+      } else {
+        lines.push(`            <file id="${escapeXml(`file-aroll`)}"/>`)
+      }
+      lines.push(`          </clipitem>`)
+    }
     lines.push(`        </track>`)
   }
 

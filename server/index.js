@@ -14,6 +14,7 @@ import adminRouter from './routes/admin.js'
 import gpuRouter from './routes/gpu.js'
 import exportsRouter, { sessionTokenRouter, exportEventsRouter, pexelsUrlRouter, freepikUrlRouter } from './routes/exports.js'
 import graphicsRouter from './routes/graphics.js'
+import graphicsEventsRouter from './routes/graphics-events.js'
 import { startWorker as startGraphicsWorker } from './services/graphics/render-worker.js'
 import adminExportsRouter from './routes/admin/exports.js'
 import adminSupportBundlesRouter from './routes/admin/support-bundles.js'
@@ -80,6 +81,7 @@ app.use('/api/rankings', rankingsRouter)
 app.use('/api/broll', brollRouter)
 app.use('/api/broll-searches', brollSearchesRouter)
 app.use('/api/graphics', graphicsRouter)
+app.use('/api/graphics', graphicsEventsRouter)
 app.use('/api/storyblocks', storyblocksRouter)
 app.use('/api/pexels', pexelsRouter)
 app.use('/api/admin', adminRouter)

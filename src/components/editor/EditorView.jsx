@@ -24,6 +24,8 @@ import BRollPanel from './BRollPanel.jsx'
 import EstimationModal from './EstimationModal.jsx'
 import ProcessingModal from '../views/ProcessingModal.jsx'
 import InspectingBanner from './InspectingBanner.jsx'
+import { computeSkipRegions } from './usePlaybackSkipRegions.js'
+import { postCutTime } from '../../lib/timeTranslation.js'
 
 export const EditorContext = createContext(null)
 
@@ -126,7 +128,8 @@ export default function EditorView() {
   // renders as designed.
   useEffect(() => {
     if (shouldRedirectFailedPrePause(groupDetail)) {
-      navigate(`/?step=processing&group=${id}`, { replace: true })
+      const targetGroup = groupDetail?.parent_group_id || id
+      navigate(`/?step=processing&group=${targetGroup}`, { replace: true })
     }
   }, [groupDetail, id, navigate])
 
@@ -417,11 +420,24 @@ export default function EditorView() {
     }
   }, [id])
 
+  // Continue button on the rough-cut tab. For strategy-only + auto_rough_cut
+  // (and legacy guided), the chain is paused at paused_at_rough_cut and we
+  // need to fire the resume before navigating. For hands-off the chain is
+  // already running — Continue is just navigation back to the processing
+  // page so the user can see what's still in flight.
+  const handleContinueFromRoughCut = async () => {
+    if (groupDetail?.broll_chain_status === 'paused_at_rough_cut') {
+      try { await fireResumeFromRoughCut() } catch {}
+    }
+    const targetGroupId = groupDetail?.parent_group_id ?? id
+    navigate(`/?step=processing&group=${targetGroupId}`)
+  }
+
   // Sidebar B-Roll Strategy click during paused_at_rough_cut: fire resume +
   // navigate to the strategy tab. The useEffect below is the safety net for
   // any other entry point (direct URL, BRollPanel auto-redirect, etc.).
   const handleResumeFromRoughCut = async () => {
-    await fireResumeFromRoughCut()
+    try { await fireResumeFromRoughCut() } catch {}
     navigate(`/editor/${id}/brolls/strategy`)
   }
 
@@ -656,6 +672,38 @@ export default function EditorView() {
   stateRefs.current.segmentAudioOverrides = state.segmentAudioOverrides
   stateRefs.current.totalDuration = totalDuration
 
+  // UI: the cut the user is currently inspecting in b-roll mode, identified
+  // by an anchor timestamp (original-time, typically the cut's center at
+  // click). When set, the effective cut whose interval contains the anchor
+  // is rendered as a popover overlay (rough-cut style dark gap + draggable
+  // edges + transcript) sitting on top of the post-cut timeline. Layout does
+  // NOT change — ruler stays put, b-rolls stay put — so the overlay overlaps
+  // with content to its right. Anchor-based identity (vs `${start}-${end}`
+  // string) survives edge-resize drags that would otherwise change the key
+  // and flicker the overlay. Reset whenever the active tab leaves b-rolls.
+  const [expandedCutAnchor, setExpandedCutAnchor] = useState(null)
+  useEffect(() => {
+    if (state.activeTab !== 'brolls' && expandedCutAnchor != null) setExpandedCutAnchor(null)
+  }, [state.activeTab, expandedCutAnchor])
+
+  // Segment selection (b-roll editor): the user clicks a kept segment (an
+  // "a-roll + its trailing cut") and it lights up with a full 4-side white
+  // border. Identified by the segment's global original-time start (matches
+  // both V's and A's per-segment box for the same source).
+  const [selectedSegmentKey, setSelectedSegmentKey] = useState(null)
+  useEffect(() => {
+    if (state.activeTab !== 'brolls' && selectedSegmentKey != null) setSelectedSegmentKey(null)
+  }, [state.activeTab, selectedSegmentKey])
+
+  // Effective cuts (cuts minus exclusions) for b-roll post-cut playhead
+  // translation. Computed once per relevant change so the 60fps rAF tick
+  // reads it without recomputing.
+  const brollEffectiveCuts = useMemo(
+    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts, state.cutExclusions) : null,
+    [state.activeTab, state.cuts, state.cutExclusions]
+  )
+  stateRefs.current.brollEffectiveCuts = brollEffectiveCuts
+
   // Declared before tick so tick's deps can include stopAllVideos without TDZ.
   const stopAllVideos = useCallback(() => {
     Object.values(videoRefs.current).forEach(el => {
@@ -852,9 +900,13 @@ export default function EditorView() {
       }
     }
 
-    // Update playhead via ref (60fps, no React re-render)
+    // Update playhead via ref (60fps, no React re-render).
+    // In b-roll mode the timeline is in post-cut space — translate so the
+    // marker lines up with the displayed (collapsed) content.
     if (playheadRef.current) {
-      const x = newTime * s.zoom
+      const cuts = s.brollEffectiveCuts
+      const displayT = cuts && cuts.length ? postCutTime(newTime, cuts) : newTime
+      const x = displayT * s.zoom
       playheadRef.current.style.transform = `translateX(${x}px)`
     }
 
@@ -907,7 +959,9 @@ export default function EditorView() {
           }
         })
         if (playheadRef.current) {
-          playheadRef.current.style.transform = `translateX(${time * state.zoom}px)`
+          const cuts = stateRefs.current.brollEffectiveCuts
+          const displayT = cuts && cuts.length ? postCutTime(time, cuts) : time
+          playheadRef.current.style.transform = `translateX(${displayT * state.zoom}px)`
         }
       },
       setRate(rate) {
@@ -1014,8 +1068,8 @@ export default function EditorView() {
   const mediaType = mainVideo?.media_type || 'video'
 
   const editorContextValue = useMemo(
-    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, isAdminUser, autoV2StrategyId, handleRunAutoV2 }),
-    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, isAdminUser, autoV2StrategyId, handleRunAutoV2]
+    () => ({ state, dispatch, videoRefs, playbackEngine, playheadRef, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, cutDragRef, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, isAdminUser, autoV2StrategyId, handleRunAutoV2, expandedCutAnchor, setExpandedCutAnchor, selectedSegmentKey, setSelectedSegmentKey }),
+    [state, dispatch, totalDuration, formatTime, refetchDetail, refetchTimestamps, flowRunState, tokenBalance, handleStartAIRoughCut, estimationLoading, mediaType, isAdminUser, autoV2StrategyId, handleRunAutoV2, expandedCutAnchor, selectedSegmentKey]
   )
 
   if (loading) {
@@ -1082,12 +1136,21 @@ export default function EditorView() {
                 <span className="text-xs font-bold text-on-surface-variant">{tokenBalance.toLocaleString()}</span>
               </div>
             )}
-            <button
-              onClick={() => window.open(`/editor/${id}/export`, '_blank')}
-              className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
-            >
-              Export
-            </button>
+            {activeTab === 'roughcut' ? (
+              <button
+                onClick={handleContinueFromRoughCut}
+                className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
+              >
+                Continue
+              </button>
+            ) : activeTab === 'brolls' ? null : (
+              <button
+                onClick={() => window.open(`/editor/${id}/export`, '_blank')}
+                className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
+              >
+                Export
+              </button>
+            )}
             <div className="w-8 h-8 rounded-full bg-surface-variant flex items-center justify-center border border-outline-variant/30">
               <span className="text-primary-fixed font-bold text-sm">S</span>
             </div>
@@ -1120,7 +1183,9 @@ export default function EditorView() {
             hasVideos={groupDetail?.videos?.length > 0}
             hasBrollSearch={hasBrollSearch}
             brollChainStatus={groupDetail?.broll_chain_status}
+            parentGroupId={groupDetail?.parent_group_id ?? id}
             onResumeFromRoughCut={handleResumeFromRoughCut}
+            onNavigateToProcessing={(gid) => navigate(`/?step=processing&group=${gid}`)}
             onTabChange={(newTab) => {
               // Warn when leaving roughcut with progress
               const hasRoughCutProgress = state.cuts.length > 0 || Object.keys(state.segmentVideoOverrides).length > 0 || Object.keys(state.segmentAudioOverrides).length > 0
@@ -1397,12 +1462,14 @@ function SyncingScreen({ groupId, status, onDone }) {
 }
 
 function applyConfigDefaults(config, dispatch) {
-  // When no config exists, default all deletion categories ON — the LLM found
-  // things to cut, so they should be applied as cuts by default
+  // Deletion categories (false_starts/filler_words/meta_commentary) default OFF — annotations
+  // still highlight in the transcript via their category bg color, but no cut is performed.
+  // Silences default ON (dead-air gaps, not LLM-tagged content).
   dispatch({ type: 'SET_AI_CUTS_SELECTED', payload: {
-    false_starts: config?.false_starts ?? true,
-    filler_words: config?.filler_words ?? true,
-    meta_commentary: config?.meta_commentary ?? true,
+    silences: config?.silences ?? true,
+    false_starts: config?.false_starts ?? false,
+    filler_words: config?.filler_words ?? false,
+    meta_commentary: config?.meta_commentary ?? false,
   }})
   dispatch({ type: 'SET_AI_IDENTIFY_SELECTED', payload: {
     repetition: config?.repetition ?? true,
