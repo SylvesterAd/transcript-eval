@@ -540,7 +540,7 @@ export default function EditorView() {
     // playback skips on the rough-cut tab. Mirror TranscriptEditor.isItemCut +
     // the Timeline visual filter so playback, the timeline, and the transcript
     // all show the same "cut" state to the user.
-    const valid = state.cuts.filter(c => c.end > c.start + 0.01 && c.source !== 'annotation')
+    const valid = state.cuts.filter(c => c.end > c.start + 0.01 && c.source !== 'annotation' && !c.source?.startsWith('ai-'))
     if (!valid.length) return []
     const sorted = [...valid].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
@@ -696,7 +696,7 @@ export default function EditorView() {
   // reads it without recomputing. Annotation-source cuts are visual
   // suggestions only — same filter as Timeline.userCuts + BRollPreview.
   const brollEffectiveCuts = useMemo(
-    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions) : null,
+    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation' && !c.source?.startsWith('ai-')), state.cutExclusions) : null,
     [state.activeTab, state.cuts, state.cutExclusions]
   )
   stateRefs.current.brollEffectiveCuts = brollEffectiveCuts
@@ -1017,13 +1017,13 @@ export default function EditorView() {
           // suggestions in the rough-cut tab and don't trigger UNCUT mode.
           for (const w of items) {
             const wEnd = w.end || w.start + 0.01
-            const isCut = state.cuts.some(c => c.source !== 'annotation' && w.start < c.end && wEnd > c.start)
+            const isCut = state.cuts.some(c => c.source !== 'annotation' && !c.source?.startsWith('ai-') && w.start < c.end && wEnd > c.start)
             if (isCut) cutCount++
             else uncutCount++
           }
           // If no word info, fall back to overlap check (same source filter)
           if (items.length === 0) {
-            const overlapping = state.cuts.filter(c => c.source !== 'annotation' && c.start < endTime && c.end > startTime)
+            const overlapping = state.cuts.filter(c => c.source !== 'annotation' && !c.source?.startsWith('ai-') && c.start < endTime && c.end > startTime)
             if (overlapping.length > 0) cutCount = 1
             else uncutCount = 1
           }

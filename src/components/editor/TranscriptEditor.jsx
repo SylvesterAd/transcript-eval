@@ -497,7 +497,7 @@ export default function TranscriptEditor() {
   // explicitly (Backspace adds source:'transcript').
   const isItemCut = useCallback((item) => {
     return state.cuts.some(c =>
-      c.source !== 'annotation' &&
+      c.source !== 'annotation' && !c.source?.startsWith('ai-') &&
       c.end > c.start + 0.01 &&
       item.start < c.end &&
       item.end > c.start
