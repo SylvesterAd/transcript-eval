@@ -36,6 +36,7 @@ import {
 } from './broll-prior-strategies.js'
 import { findAnchorWordIdx } from './anchor-word.js'
 import { parseTimecode } from './placement-match.js'
+import { cutsHash, materializePlacementRemap } from './placement-remap.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
@@ -5986,17 +5987,79 @@ export async function getBRollEditorData(planPipelineId) {
   }
 
   // 4. Merge user edits from broll_editor_state (hidden, manual positions, selected result, userPlacements)
-  let editorState = {}, editorVersion = 0
+  let loaded = { state: {}, version: 0 }
   try {
-    const loaded = await loadBrollEditorState(planPipelineId)
-    editorState = loaded.state || {}
-    editorVersion = loaded.version
+    loaded = await loadBrollEditorState(planPipelineId)
   } catch (err) {
     console.error('[getBRollEditorData] Failed to load editor-state:', err.message)
   }
 
+  // ─── Cut-hash remap ───────────────────────────────────────────────
+  // Re-derive post-cut placement times from the *current* editor cuts
+  // any time they differ from the cuts the remap last ran against.
+  // First open: stored hash is null → always runs. Subsequent cut edits
+  // invalidate via hash diff.
+  try {
+    const groupRow = await db.prepare(
+      `SELECT vg.id AS group_id, vg.editor_state_json
+         FROM video_groups vg
+         JOIN videos v ON v.group_id = vg.id
+         JOIN broll_runs br ON br.video_id = v.id
+        WHERE (br.metadata_json::jsonb ->> 'pipelineId') = ?
+        LIMIT 1`,
+    ).get(planPipelineId)
+    if (groupRow?.editor_state_json) {
+      const groupState = JSON.parse(groupRow.editor_state_json)
+      const cuts = groupState.cuts || []
+      const exclusions = groupState.cutExclusions || []
+      const currentHash = cutsHash(cuts, exclusions)
+
+      if ((loaded.state.lastRemappedCutsHash || null) !== currentHash) {
+        const videoRow = await db.prepare(
+          `SELECT v.id AS video_id
+             FROM videos v JOIN broll_runs br ON br.video_id = v.id
+            WHERE (br.metadata_json::jsonb ->> 'pipelineId') = ? LIMIT 1`,
+        ).get(planPipelineId)
+        let words = []
+        if (videoRow?.video_id) {
+          const t = await db.prepare(
+            `SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw' LIMIT 1`,
+          ).get(videoRow.video_id)
+          if (t?.word_timestamps_json) {
+            try { words = JSON.parse(t.word_timestamps_json) } catch {}
+          }
+        }
+        if (words.length) {
+          const effective = computeEffectiveCuts(cuts, exclusions)
+          const remap = materializePlacementRemap(placements, effective, words)
+          const remappedPositions = Object.fromEntries(remap)
+          const nextState = {
+            ...loaded.state,
+            remappedPositions,
+            lastRemappedCutsHash: currentHash,
+          }
+          const saveResult = await saveBrollEditorState(planPipelineId, nextState, loaded.version)
+          if (saveResult.status !== 'conflict') {
+            // Inject for the merge step below — read fresh state to avoid races.
+            const refreshed = await loadBrollEditorState(planPipelineId)
+            loaded = refreshed
+          }
+        } else {
+          // Words missing — skip the remap, do NOT update hash so a later retry recovers.
+          console.warn(`[getBRollEditorData] remap skipped for ${planPipelineId}: no raw word_timestamps`)
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[getBRollEditorData] remap pass failed for ${planPipelineId}:`, err.message)
+  }
+
+  const editorState = loaded.state || {}
+  const editorVersion = loaded.version
+
   const edits = editorState.edits || {}
   const userPlacements = Array.isArray(editorState.userPlacements) ? editorState.userPlacements : []
+  const remappedPositions = editorState.remappedPositions || {}
 
   const editedPlacements = []
   for (const p of placements) {
@@ -6007,6 +6070,11 @@ export async function getBRollEditorData(planPipelineId) {
     if (e?.timelineStart != null && e?.timelineEnd != null) {
       p.userTimelineStart = e.timelineStart
       p.userTimelineEnd = e.timelineEnd
+    } else if (p.uuid && remappedPositions[p.uuid]) {
+      const r = remappedPositions[p.uuid]
+      p.userTimelineStart = r.start_seconds
+      p.userTimelineEnd = r.end_seconds
+      p.anchor_state = r.anchor_state
     }
     if (e?.selectedResult != null) {
       p.persistedSelectedResult = e.selectedResult
