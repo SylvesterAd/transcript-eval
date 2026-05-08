@@ -87,8 +87,37 @@ async function claimNextRender() {
 // which handles per-scene frame sampling + aggregation internally.
 async function runCriticLoop({ renderId, sessionId, spec, parentRenderId = null, humanFeedback = null }) {
   let totalCost = 0
-  const { html: initialHtml, cost } = await generateHtmlWithLintGate({ spec, renderId })
-  totalCost += cost
+  let initialHtml
+
+  if (parentRenderId) {
+    const parent = await db
+      .prepare(`SELECT final_html_text FROM graphics_renders WHERE id = ?`)
+      .get(parentRenderId)
+    if (!parent || !parent.final_html_text) {
+      throw new Error(`parent render ${parentRenderId} missing final_html_text`)
+    }
+    if (!humanFeedback) {
+      throw new Error(`render ${renderId} has parent_render_id but no human_feedback`)
+    }
+    const refined = await refineHtml({ html: parent.final_html_text, feedback: humanFeedback, spec })
+    initialHtml = refined.html
+    totalCost += refined.cost
+    // Lint once on the refined HTML — no retry on this path. If the LLM produced
+    // broken HTML for human feedback, surface the error rather than synthesizing.
+    const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders'
+    const lintProjectDir = path.join(baseDir, String(renderId), 'lint')
+    await mkdir(lintProjectDir, { recursive: true })
+    await writeFile(path.join(lintProjectDir, 'index.html'), initialHtml, 'utf8')
+    const lint = await runLint({ projectDir: lintProjectDir })
+    if (lint.errorCount > 0) {
+      throw new Error(`refined HTML failed lint: ${formatFindingsForPrompt(lint.findings)}`)
+    }
+  } else {
+    const fresh = await generateHtmlWithLintGate({ spec, renderId })
+    initialHtml = fresh.html
+    totalCost += fresh.cost
+  }
+
   let currentHtml = initialHtml
   let currentResult = await renderHtml({ html: currentHtml, renderId })
   emit({ sessionId, step: 'render_finished', label: `Render complete (iter 1)`, renderId, iteration: 1 })

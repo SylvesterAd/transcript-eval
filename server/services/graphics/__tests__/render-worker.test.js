@@ -510,6 +510,69 @@ describe('drainOnce — multi-scene single-render flow', () => {
   })
 });
 
+describe('renderWorker.drainOnce — refine-from-parent path', () => {
+  it('uses refineHtml(parent_final_html, human_feedback, spec) when parent_render_id is set', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      // 1st call: claimNextRender returns a row with parent_render_id set
+      .mockResolvedValueOnce({
+        id: 300, session_id: 's-300', iteration: 2, template: 'lower-third',
+        parent_render_id: 200,
+        human_feedback: 'make the title bigger',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      // 2nd call: parent lookup returns parent's final_html_text
+      .mockResolvedValueOnce({
+        final_html_text: '<!doctype html><html><body><div id="main" data-composition-id="main" data-duration="5">PARENT</div></body></html>',
+      })
+      // subsequent calls: queue empty
+      .mockResolvedValue(null)
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    const { runLint } = await import('../lint-runner.js')
+    const { renderHtml } = await import('../render-runner.js')
+    const { runCritic } = await import('../critic/critic-runner.js')
+    const { uploadRender } = await import('../uploader.js')
+
+    specToHtml.mockClear()
+    refineHtml.mockClear()
+    refineHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="main" data-composition-id="main" data-duration="5">REFINED</div></body></html>',
+      cost: 2, tokens: { in: 200, out: 300 },
+    })
+    runLint.mockReset()
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
+    renderHtml.mockClear()
+    renderHtml.mockResolvedValue({ outputPath: '/tmp/x.mp4', durationMs: 1000 })
+    uploadRender.mockClear()
+    uploadRender.mockResolvedValue({ url: 'http://supa/x.mp4' })
+    runCritic.mockReset()
+    runCritic.mockResolvedValue({
+      score: 0.9, criteria: {}, feedback: 'good',
+      retry_recommended: false, frameUrls: [], tokens: { in: 0, out: 0 },
+    })
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+    // The refine path bypasses specToHtml entirely
+    expect(specToHtml).not.toHaveBeenCalled()
+    // refineHtml gets called with parent's HTML + user feedback + spec
+    expect(refineHtml).toHaveBeenCalledTimes(1)
+    const refineCall = refineHtml.mock.calls[0][0]
+    expect(refineCall.html).toMatch(/PARENT/)
+    expect(refineCall.feedback).toBe('make the title bigger')
+    expect(refineCall.spec.template).toBe('lower-third')
+  })
+})
+
 describe('renderWorker.drainOnce — final_html_text persistence', () => {
   it('writes the final HTML into the completion UPDATE', async () => {
     const db = (await import('../../../db.js')).default
