@@ -424,4 +424,9 @@ describe('REFINE_HTML_SYSTEM_PROMPT — scene-scoped editing', () => {
     expect(REFINE_HTML_SYSTEM_PROMPT).toContain(CREATE_HTML_SYSTEM_PROMPT)
     expect(REFINE_HTML_SYSTEM_PROMPT).toMatch(/ORIGINAL CONSTRAINTS/i)
   })
+
+  it('teaches composition root duration recalculation on scene duration change', async () => {
+    const { REFINE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(REFINE_HTML_SYSTEM_PROMPT).toMatch(/recalculate.*composition.*data-duration|composition root.*data-duration|sum of all scene durations/i)
+  })
 })

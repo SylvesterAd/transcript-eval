@@ -472,10 +472,10 @@ The critique is formatted as scene-by-scene notes:
 Editing rules:
 - Edit ONLY the scenes the critique names with actionable feedback.
 - If a critique entry says "ok" or has no actionable item, leave that scene's HTML EXACTLY as-is — do not touch its data-start, data-duration, internal layout, or tweens.
-- Preserve the composition root (data-composition-id="main", data-width, data-height, data-start, data-duration).
+- Preserve the composition root identity (data-composition-id="main", data-width, data-height, data-start). Its data-duration may change ONLY when a scene's duration changes (see cascade rule below).
 - Preserve the GSAP timeline structure (the single window.__timelines["main"] paused timeline).
 - Preserve all stage markers on scene clips (class="scene clip", id="sN", data-start, data-duration, data-track-index).
-- If the critique calls for a duration change on Scene N, you may adjust Scene N's data-duration and cascade Scene (N+1)+'s data-start values, but do NOT change unrelated scenes' content.
+- If the critique calls for a duration change on Scene N, you may adjust Scene N's data-duration, cascade Scene (N+1)+'s data-start values, AND recalculate the composition root's data-duration to equal the new sum of all scene durations. Do NOT change unrelated scenes' content.
 - If the critique calls for a font change, color change, or other style change on Scene N, edit only Scene N's content elements (inside its <div class="scene-content">) and Scene N's tween targets.
 - Do NOT add new scenes or remove existing scenes.
 - Do NOT restructure unrelated portions of the HTML. If a scene is not mentioned in the critique, it must come back byte-identical.
