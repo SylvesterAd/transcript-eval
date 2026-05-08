@@ -26,7 +26,7 @@ export default function BRollPreview() {
   // element in videoRefs (there can be multiple tracks), so we call
   // computeSkipRegions directly instead of the hook.
   const skipRegions = useMemo(
-    () => computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation' && !c.source?.startsWith('ai-')), state.cutExclusions),
+    () => computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions),
     [state.cuts, state.cutExclusions],
   )
   const skipRegionsRef = useRef(skipRegions)

@@ -6139,7 +6139,7 @@ export async function getBRollEditorData(planPipelineId) {
       // TranscriptEditor.isItemCut + Timeline.userCuts: only user-applied
       // cuts (Backspace adds source:'transcript') drive the post-cut layout
       // and placement remap on the b-roll tab.
-      const cuts = (groupState.cuts || []).filter(c => c.source !== 'annotation' && !c.source?.startsWith('ai-'))
+      const cuts = (groupState.cuts || []).filter(c => c.source !== 'annotation')
       const exclusions = groupState.cutExclusions || []
       const currentHash = cutsHash(cuts, exclusions)
 
