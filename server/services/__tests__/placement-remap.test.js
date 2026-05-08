@@ -130,4 +130,23 @@ describe('materializePlacementRemap — fuzzy fallback', () => {
     expect(p.anchor_state).toBe('orphaned')
     expect(p.start_seconds).toBeCloseTo(50.0, 2) // falls back to LLM time
   })
+
+  it('promotes in_cut to fuzzy when idx points into a cut but anchor text exists in kept content', () => {
+    const words = W(
+      ['Filler', 11.0, 11.5],         // in cut [10,15] — anchor_word_idx points here
+      ['From', 19.0, 19.3],           // valid post-cut candidate
+      ['a', 19.3, 19.4],
+      ['tax', 19.4, 19.7],
+    )
+    const placements = [{
+      uuid: 'p_recover',
+      start: '[00:00:11.00]', end: '[00:00:13.00]',
+      audio_anchor: 'From a tax',
+      anchor_word_idx: 0,             // points to in-cut "Filler"
+    }]
+    const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
+    const p = out.get('p_recover')
+    expect(p.anchor_state).toBe('fuzzy')   // promoted from in_cut
+    expect(p.start_seconds).toBeCloseTo(14.0, 2) // 19.0 - 5
+  })
 })
