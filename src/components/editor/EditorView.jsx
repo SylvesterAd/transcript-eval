@@ -536,7 +536,11 @@ export default function EditorView() {
     const peaks = primaryAudio?.waveformPeaks
     const offset = primaryAudio?.offset || 0
 
-    const valid = state.cuts.filter(c => c.end > c.start + 0.01)
+    // Annotation-source cuts are visual suggestions only — they don't trigger
+    // playback skips on the rough-cut tab. Mirror TranscriptEditor.isItemCut +
+    // the Timeline visual filter so playback, the timeline, and the transcript
+    // all show the same "cut" state to the user.
+    const valid = state.cuts.filter(c => c.end > c.start + 0.01 && c.source !== 'annotation')
     if (!valid.length) return []
     const sorted = [...valid].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
