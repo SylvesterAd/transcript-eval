@@ -69,7 +69,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   // mirrors TranscriptEditor.isItemCut. The user treats them as visual
   // suggestions until they explicitly Backspace to apply.
   const userCuts = useMemo(
-    () => state.cuts.filter(c => c.source !== 'annotation'),
+    () => state.cuts.filter(c => c.source !== 'annotation' && !c.source?.startsWith('ai-')),
     [state.cuts]
   )
 

@@ -108,9 +108,9 @@ export default function RoughCutPreview({ useHls = false }) {
         <span className="text-[10px] font-mono text-on-surface-variant">
           Total: {formatTime(totalDuration)}
         </span>
-        {state.cuts.some(c => c.source !== 'annotation') && (
+        {state.cuts.some(c => c.source !== 'annotation' && !c.source?.startsWith('ai-')) && (
           <span className="text-[10px] font-mono text-primary-fixed">
-            After cuts: {formatTime(Math.max(0, totalDuration - state.cuts.filter(c => c.source !== 'annotation').reduce((s, c) => s + Math.max(0, Math.min(c.end, totalDuration) - Math.max(c.start, 0)), 0)))}
+            After cuts: {formatTime(Math.max(0, totalDuration - state.cuts.filter(c => c.source !== 'annotation' && !c.source?.startsWith('ai-')).reduce((s, c) => s + Math.max(0, Math.min(c.end, totalDuration) - Math.max(c.start, 0)), 0)))}
           </span>
         )}
       </div>
