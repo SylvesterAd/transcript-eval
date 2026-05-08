@@ -8,6 +8,9 @@ import { emit } from './events/emitter.js';
 
 const SPEC_BLOCK = /\[SPEC\]\s*(\{[^}]*\})/m;
 
+const MAX_ITERATIONS_PER_SESSION = parseInt(process.env.GRAPHICS_MAX_ITERATIONS_PER_SESSION || '10', 10);
+const ACK_TEXT = 'Refining…';
+
 function extractSpec(text) {
   const m = text.match(SPEC_BLOCK);
   if (!m) return {};
@@ -38,6 +41,53 @@ export async function runChatTurn({ sessionId, userMessage }) {
   // Reads stay outside the transaction (no long-running lock needed)
   const session = await loadSession(sessionId);
   if (!session) throw new Error(`session ${sessionId} not found`);
+
+  if (session.status === 'iterating') {
+    // Find latest complete parent
+    const parent = await db.prepare(
+      `SELECT id, iteration, template, spec_snapshot_json, final_html_text
+       FROM graphics_renders
+       WHERE session_id = ? AND status = 'complete'
+       ORDER BY iteration DESC
+       LIMIT 1`
+    ).get(sessionId);
+    if (!parent) {
+      throw new Error(`session ${sessionId} status='iterating' but no complete render exists`);
+    }
+    if (!parent.final_html_text) {
+      throw new Error(`parent render ${parent.id} missing final_html_text`);
+    }
+
+    const renderId = await db.transaction(async (tx) => {
+      await tx.prepare(
+        `INSERT INTO graphics_messages (session_id, role, content) VALUES (?, ?, ?)`
+      ).run(sessionId, 'user', userMessage);
+      await tx.prepare(
+        `INSERT INTO graphics_messages (session_id, role, content) VALUES (?, ?, ?)`
+      ).run(sessionId, 'assistant', ACK_TEXT);
+      const inserted = await tx.prepare(
+        `INSERT INTO graphics_renders
+          (session_id, iteration, spec_snapshot_json, template, status,
+           parent_render_id, human_feedback)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?)
+         RETURNING id`
+      ).get(
+        sessionId,
+        parent.iteration + 1,
+        typeof parent.spec_snapshot_json === 'string'
+          ? parent.spec_snapshot_json
+          : JSON.stringify(parent.spec_snapshot_json),
+        parent.template,
+        parent.id,
+        userMessage,
+      );
+      await tx.prepare(`UPDATE graphics_sessions SET status = 'rendering' WHERE id = ?`).run(sessionId);
+      return inserted.id;
+    });
+
+    emit({ sessionId, step: 'render_queued', label: 'Refine queued', renderId });
+    return { assistantText: ACK_TEXT, specUpdate: {}, newSpec: session.spec_json || {}, renderId, cost: 0 };
+  }
 
   // Bug 1 fix: load history BEFORE inserting user message, then push in-memory
   const history = await loadHistory(sessionId);
