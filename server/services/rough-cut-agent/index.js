@@ -14,6 +14,10 @@ import { SYSTEM_PROMPT } from './system-prompt.js'
 // test (200K in / 50K out) is the hard ceiling on cost.
 const MAX_TOOL_CALLS = 100
 const DEFAULT_MAX_TOKENS = 4096
+// Extended thinking budget per turn. Anthropic API requires
+// max_tokens > budget_tokens; we add THINKING_HEADROOM for visible output.
+const DEFAULT_THINKING_BUDGET = 8000
+const THINKING_HEADROOM = 4096
 
 let _client = null
 function getClient() {
@@ -30,11 +34,8 @@ function getClient() {
  *   model: string,
  *   chaptersFetcher?: Function,
  *   maxTokens?: number,
+ *   thinking?: boolean | { budget_tokens: number },
  * }} args
- * @returns {Promise<{
- *   cuts: Array, uncertain: Array, stopReason: string,
- *   totalTokens: {in: number, out: number}, toolCalls: number,
- * }>}
  */
 export async function runAgent(args) {
   const {
@@ -44,7 +45,24 @@ export async function runAgent(args) {
     model,
     chaptersFetcher = null,
     maxTokens = DEFAULT_MAX_TOKENS,
+    thinking = false,
   } = args
+
+  // Resolve thinking config. true → default budget; object → custom.
+  const thinkingConfig = thinking
+    ? {
+        type: 'enabled',
+        budget_tokens: typeof thinking === 'object' && thinking.budget_tokens
+          ? thinking.budget_tokens
+          : DEFAULT_THINKING_BUDGET,
+      }
+    : null
+
+  // When thinking is on, max_tokens must exceed budget_tokens. Otherwise the
+  // API rejects the request.
+  const effectiveMaxTokens = thinkingConfig
+    ? Math.max(maxTokens, thinkingConfig.budget_tokens + THINKING_HEADROOM)
+    : maxTokens
 
   const client = getClient()
   const state = createState({ assembledTranscript, wordTimestamps, acousticFeatures })
@@ -69,15 +87,18 @@ export async function runAgent(args) {
   let toolCalls = 0
   let stopReason = 'unknown'
   const toolCallLog = []
+  const thinkingLog = []
 
   while (toolCalls <= MAX_TOOL_CALLS) {
-    const resp = await client.messages.create({
+    const apiArgs = {
       model,
-      max_tokens: maxTokens,
+      max_tokens: effectiveMaxTokens,
       system: systemBlocks,
       tools: TOOL_SCHEMAS,
       messages,
-    })
+    }
+    if (thinkingConfig) apiArgs.thinking = thinkingConfig
+    const resp = await client.messages.create(apiArgs)
 
     totalIn += resp.usage?.input_tokens || 0
     totalOut += resp.usage?.output_tokens || 0
@@ -85,6 +106,20 @@ export async function runAgent(args) {
     totalCacheRead += resp.usage?.cache_read_input_tokens || 0
 
     const toolUses = (resp.content || []).filter(b => b.type === 'tool_use')
+
+    // Capture thinking + visible text from this turn for post-run inspection.
+    // The thinking blocks must also be passed back verbatim in subsequent
+    // assistant messages — we already do that via `messages.push({role:'assistant', content: resp.content})` below.
+    const thinkingBlocks = (resp.content || []).filter(b => b.type === 'thinking' || b.type === 'redacted_thinking')
+    const textBlocks    = (resp.content || []).filter(b => b.type === 'text')
+    if (thinkingBlocks.length || textBlocks.length || toolUses.length) {
+      thinkingLog.push({
+        turn: thinkingLog.length + 1,
+        thinking: thinkingBlocks.map(b => b.thinking || '[redacted]').join('\n\n'),
+        text:     textBlocks.map(b => b.text).join('\n\n'),
+        toolNames: toolUses.map(t => t.name),
+      })
+    }
 
     if (resp.stop_reason !== 'tool_use' || toolUses.length === 0) {
       stopReason = resp.stop_reason || 'end_turn'
@@ -142,5 +177,7 @@ export async function runAgent(args) {
     },
     toolCalls,
     toolCallLog,
+    thinkingLog,
+    thinkingEnabled: !!thinkingConfig,
   }
 }

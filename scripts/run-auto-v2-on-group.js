@@ -42,11 +42,20 @@ async function main() {
 
   console.log(`[auto_v2] running on group ${groupId} (${group.assembled_transcript.length} chars, ${words.length} words, acoustic=${acoustic ? acoustic.frames.length + ' frames' : 'none'})`)
   const model = process.env.AUTO_V2_MODEL || 'claude-opus-4-7'
+  // AUTO_V2_THINKING: '1'|'true' enables with default budget; numeric value
+  // sets a custom budget in tokens (e.g. AUTO_V2_THINKING=12000).
+  let thinking = false
+  const thinkingEnv = process.env.AUTO_V2_THINKING
+  if (thinkingEnv) {
+    const n = parseInt(thinkingEnv, 10)
+    thinking = Number.isFinite(n) && n > 0 ? { budget_tokens: n } : (thinkingEnv === '1' || thinkingEnv === 'true')
+  }
   const r = await runAgent({
     assembledTranscript: group.assembled_transcript,
     wordTimestamps: words,
     acousticFeatures: acoustic,
     model,
+    thinking,
   })
   // Anthropic 2026 pricing per MTok
   const PRICING = {
@@ -67,6 +76,26 @@ async function main() {
     console.log(`  ${String(i+1).padStart(3)}.  ${r.toolCallLog[i]}`)
   }
   console.log()
+
+  if (r.thinkingEnabled || (r.thinkingLog && r.thinkingLog.length > 0)) {
+    console.log(`[auto_v2] turn-by-turn log (${r.thinkingLog.length} turns):`)
+    for (const t of r.thinkingLog) {
+      console.log()
+      console.log(`--- Turn ${t.turn} ---`)
+      if (t.thinking) {
+        console.log('[thinking]')
+        console.log('  ' + t.thinking.replace(/\n/g, '\n  '))
+      }
+      if (t.text) {
+        console.log('[text]')
+        console.log('  ' + t.text.replace(/\n/g, '\n  '))
+      }
+      if (t.toolNames.length > 0) {
+        console.log('[tools]', t.toolNames.join(', '))
+      }
+    }
+    console.log()
+  }
   for (const c of r.cuts) {
     console.log(`  [${c.start.toFixed(2)}–${c.end.toFixed(2)}]  ${c.category.padEnd(18)}  conf=${c.confidence.toFixed(2)}  ${c.reason}`)
     for (const e of c.evidence) console.log(`     · ${e}`)

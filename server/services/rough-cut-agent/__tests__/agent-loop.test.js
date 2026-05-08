@@ -24,6 +24,65 @@ const sampleWords = [
 ]
 
 describe('runAgent', () => {
+  it('does NOT pass thinking config when thinking flag is omitted', async () => {
+    messagesCreateMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'done' }],
+      usage: { input_tokens: 100, output_tokens: 5 },
+      stop_reason: 'end_turn',
+    })
+    const { runAgent } = await import('../index.js')
+    await runAgent({
+      assembledTranscript: '[00:00:00] hi',
+      wordTimestamps: sampleWords,
+      model: 'claude-opus-4-7',
+    })
+    const apiArgs = messagesCreateMock.mock.calls[0][0]
+    expect(apiArgs.thinking).toBeUndefined()
+    expect(apiArgs.max_tokens).toBe(4096)
+  })
+
+  it('passes thinking config and bumps max_tokens when thinking=true', async () => {
+    messagesCreateMock.mockResolvedValueOnce({
+      content: [
+        { type: 'thinking', thinking: 'Let me plan…', signature: 'sig' },
+        { type: 'text', text: 'done' },
+      ],
+      usage: { input_tokens: 100, output_tokens: 5 },
+      stop_reason: 'end_turn',
+    })
+    const { runAgent } = await import('../index.js')
+    const r = await runAgent({
+      assembledTranscript: '[00:00:00] hi',
+      wordTimestamps: sampleWords,
+      model: 'claude-opus-4-7',
+      thinking: true,
+    })
+    const apiArgs = messagesCreateMock.mock.calls[0][0]
+    expect(apiArgs.thinking).toEqual({ type: 'enabled', budget_tokens: 8000 })
+    expect(apiArgs.max_tokens).toBe(8000 + 4096)
+    expect(r.thinkingEnabled).toBe(true)
+    expect(r.thinkingLog[0].thinking).toContain('Let me plan')
+    expect(r.thinkingLog[0].text).toContain('done')
+  })
+
+  it('honors custom thinking budget', async () => {
+    messagesCreateMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+      stop_reason: 'end_turn',
+    })
+    const { runAgent } = await import('../index.js')
+    await runAgent({
+      assembledTranscript: 'x',
+      wordTimestamps: sampleWords,
+      model: 'claude-opus-4-7',
+      thinking: { budget_tokens: 12000 },
+    })
+    const apiArgs = messagesCreateMock.mock.calls[0][0]
+    expect(apiArgs.thinking).toEqual({ type: 'enabled', budget_tokens: 12000 })
+    expect(apiArgs.max_tokens).toBe(12000 + 4096)
+  })
+
   it('terminates when the model returns stop_reason=end_turn (no tool_use)', async () => {
     messagesCreateMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'Nothing to cut.' }],
