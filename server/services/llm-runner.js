@@ -681,6 +681,59 @@ export async function executeRun(experimentRunId) {
         llmAnswer = stageOutput
         llmAnswers[llmQuestionCount] = stageOutput
 
+      } else if (stageType === 'agent') {
+        // Rough-cut V2 agent — single Opus 4.7 with tool use.
+        // See server/services/rough-cut-agent/. Spec at
+        // docs/superpowers/specs/2026-05-07-rough-cut-v2-agent-design.md.
+        const { runAgent } = await import('../services/rough-cut-agent/index.js')
+        const agentModel = stage.model || 'claude-opus-4-7'
+
+        // Pull the merged-track transcript when available so the agent
+        // sees the same source the editor renders. Fallback to currentInput
+        // (which is the raw transcript at this point in the pipeline).
+        let assembledTranscript = currentInput
+        let wordTimestamps = []
+        if (video?.group_id) {
+          const grp = await db.prepare(
+            'SELECT assembled_transcript FROM video_groups WHERE id = ?'
+          ).get(video.group_id)
+          if (grp?.assembled_transcript) assembledTranscript = grp.assembled_transcript
+        }
+        const wt = await db.prepare(
+          "SELECT word_timestamps_json, acoustic_features_json FROM transcripts WHERE video_id = ? AND type = 'raw'"
+        ).get(run.video_id)
+        let acousticFeatures = null
+        if (wt?.word_timestamps_json) {
+          try { wordTimestamps = JSON.parse(wt.word_timestamps_json) } catch {}
+        }
+        if (wt?.acoustic_features_json) {
+          try { acousticFeatures = JSON.parse(wt.acoustic_features_json) } catch {}
+        }
+
+        const agentResult = await runAgent({
+          assembledTranscript,
+          wordTimestamps,
+          acousticFeatures,
+          model: agentModel,
+        })
+
+        // Persist the cut list as JSON in llm_response_raw so annotation-mapper
+        // picks it up alongside legacy 'deletion' / 'identify' modes.
+        llmResponseRaw = JSON.stringify(agentResult.cuts)
+        stageOutput = JSON.stringify({
+          cuts: agentResult.cuts,
+          uncertain: agentResult.uncertain,
+          stopReason: agentResult.stopReason,
+          toolCalls: agentResult.toolCalls,
+        })
+        tokensIn = agentResult.totalTokens.in
+        tokensOut = agentResult.totalTokens.out
+        const pricing = { 'claude-opus-4-7': { input: 15, output: 75 } }
+        const p = pricing[agentModel] || { input: 15, output: 75 }
+        stageCost = (tokensIn * p.input + tokensOut * p.output) / 1_000_000
+        promptUsed = '[Agent] Opus 4.7 tool-use loop'
+        modelUsed = agentModel
+
       } else {
         // Standard LLM stage
         const prompt = replaceAnswerPlaceholders(insertTranscript(stage.prompt || '{{transcript}}', currentInput))

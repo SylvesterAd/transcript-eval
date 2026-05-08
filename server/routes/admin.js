@@ -172,4 +172,59 @@ router.post('/test-alert', requireAuth, requireAdmin, (_req, res) => {
   res.json({ ok: true })
 })
 
+// Admin-only: run an arbitrary strategy on a group without touching the
+// group's annotations_json or rough_cut_status. The result lives only as
+// a separate experiment_run row, viewable in /admin/runs?run=<id>. Used
+// for beta-evaluating new strategies (e.g. auto_v2) before flipping is_main.
+// Spec: docs/superpowers/specs/2026-05-07-rough-cut-v2-agent-design.md
+//       §Beta deployment plan.
+router.post('/groups/:id/run-strategy', requireAuth, requireAdmin, async (req, res) => {
+  const groupId = parseInt(req.params.id, 10)
+  if (Number.isNaN(groupId)) return res.status(400).json({ error: 'invalid group id' })
+  const strategyId = parseInt(req.body?.strategy_id, 10)
+  if (Number.isNaN(strategyId)) return res.status(400).json({ error: 'strategy_id is required' })
+
+  const group = await db.prepare('SELECT * FROM video_groups WHERE id = ?').get(groupId)
+  if (!group) return res.status(404).json({ error: 'Group not found' })
+
+  const strategy = await db.prepare('SELECT * FROM strategies WHERE id = ?').get(strategyId)
+  if (!strategy) return res.status(404).json({ error: 'Strategy not found' })
+
+  const version = await db.prepare(
+    'SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY version_number DESC LIMIT 1'
+  ).get(strategyId)
+  if (!version) return res.status(400).json({ error: 'Strategy has no versions' })
+
+  const video = await db.prepare(`
+    SELECT v.* FROM videos v
+    JOIN transcripts t ON t.video_id = v.id AND t.type = 'raw'
+    WHERE (v.group_id = ? OR v.group_id IN (SELECT id FROM video_groups WHERE parent_group_id = ?))
+      AND v.video_type = 'raw'
+    ORDER BY v.id LIMIT 1
+  `).get(groupId, groupId)
+  if (!video) return res.status(400).json({ error: 'No video with transcript found in group' })
+
+  const expResult = await db.prepare(
+    'INSERT INTO experiments (strategy_version_id, name, notes, video_ids_json, user_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(version.id, `Beta: ${strategy.name}`, `Admin beta run for group ${groupId}`, JSON.stringify([video.id]), req.auth.userId)
+  const experimentId = Number(expResult.lastInsertRowid)
+
+  const runResult = await db.prepare(
+    'INSERT INTO experiment_runs (experiment_id, video_id, run_number, status) VALUES (?, ?, 1, ?)'
+  ).run(experimentId, video.id, 'pending')
+  const runId = Number(runResult.lastInsertRowid)
+
+  // Fire and forget — admin-only, no token deduction, no annotations write.
+  ;(async () => {
+    try {
+      const { executeRun } = await import('../services/llm-runner.js')
+      await executeRun(runId)
+    } catch (err) {
+      console.error(`[admin/run-strategy] run ${runId} failed:`, err.message)
+    }
+  })()
+
+  res.json({ runId, experimentId, strategyId, strategyName: strategy.name })
+})
+
 export default router

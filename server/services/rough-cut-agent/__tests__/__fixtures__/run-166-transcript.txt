@@ -1,0 +1,239 @@
+[00:00:02.36] Okay, so in, uh, the outlines that Josh sent me, there was video number six that said you don't need an LLC to write things off.
+
+[00:00:08.64] So I, I'm gonna go through two different scripts I put together.
+
+[00:00:12.10] Hopefully one's short form, one's long, long form, and then you guys will work your editing magic on this.
+
+[4s]
+
+[00:00:21] All right, so the internet told you you need to form an LLC before you can deduct anything, or even worse, the internet told you you could set up an LLC and write everything off.
+
+[00:00:30.94] That's wrong.
+
+[00:00:32.92] You do not need an LLC to write off business expenses.
+
+[00:00:36.90] If you're a sole proprietor, which means you just operate under your own Social Security number, maybe you set up a fictitious name or something like that, or a DBA, you're gonna end up filing what's called a Schedule C on your taxes.
+
+[00:00:50.16] But if you're a single-member LLC, and you don't make an S corporation election, you also file Schedule C for your business income and your expenses.
+
+[00:00:59.03] So from a tax perspective, they're basically the same.
+
+[00:01:03.16] The IRS doesn't care whether you have an LLC or not.
+
+[00:01:06.22] They care whether your expenses are ordinary and necessary for your business.
+
+[00:01:11.02] That's the standard.
+
+[00:01:12.44] An LLC doesn't really unlock secret deductions.
+
+[00:01:15.80] It doesn't magically lower your taxes.
+
+[00:01:18] It doesn't suddenly make your groceries deductible.
+
+[00:01:21.08] [clears throat] What an LLC actually does is provide liability protection.
+
+[00:01:29.12] It gives you some flexibility with your structure, which is especially important if you're gonna have partners or investors.
+
+[00:01:35.12] And it gives you the ability to elect an S corporation status later, and that's a big one, but really, that's the only difference.
+
+[00:01:42.90] So you should form an LLC when it makes legal or strategic sense, not because somebody on YouTube told you it would save money on your taxes.
+
+[2s]
+
+[00:01:52.98] Those are two different conversations.
+
+[2s]
+
+[00:01:56.22] Okay, now I got the long form script.
+
+[00:01:58.81] [clears throat] [coughs] All right, so there's that bad piece of advice floating around the internet that you shouldn't buy anything your bus-- Ooh.
+
+[00:02:14.18] There's that bad piece of advice floating around the internet that you shouldn't buy anything for your business until you form an LLC.
+
+[00:02:20.48] Let's clear this up.
+
+[00:02:22.16] From a s- from a tax standpoint, that advice is pretty misguided.
+
+[00:02:26.24] You do not need an LLC to deduct legitimate business expenses, and in fact, in most instances, setting up an LLC doesn't allow you to take any additional deductions.
+
+[00:02:37] Now, there's a difference when you go to make your S corporation election, but just setting at a...
+
+[00:02:41.16] Just setting up an LLC isn't some magic wand that magically reduce-- Just setting up an LLC isn't some magic wand that reduces your taxes for you.
+
+[00:02:51.80] So setting up an LLC or-- And so forming an LLC doesn't create new deductions for you, and if you understand this, you'll make better decisions early in your business.
+
+[00:03:02.24] And it...
+
+[3s]
+
+[00:03:05.38] And if you understand this, you'll make better decisions early in your business.
+
+[00:03:08.65] And, and it doesn't matter whether you're starting your first business or whether you've got one successful one or three other businesses and you're creating a new one, these tips are really important.
+
+[00:03:18.82] So let's break this down clearly.
+
+[3s]
+
+[00:03:23.24] If you're a sole proprietor, you report income and expenses on Schedule C of your federal tax form, and the numbers from your Schedule C flow onto your 1040.
+
+[00:03:34.14] That's your individual tax return, and that's where you really end up paying your taxes.
+
+[00:03:38.64] Now, if you form a single-member LLC, which many business owners do, by default, the IRS treats it as what's called a disregarded entity.
+
+[00:03:48.36] So what's the translation of that?
+
+[00:03:50.60] You still file a Schedule C.
+
+[00:03:52.98] It's the same form, it's the same deductions, it's the same rules.
+
+[4s]
+
+[00:03:59.94] Now, if you have a multi-member LLC, that actually fil-- If you have a multi-member LLC, that's gonna file a Form 1065, which is a partnership tax return, and multi-member is just a way of saying partners or multiple owners.
+
+[3s]
+
+[00:04:18.48] But the deductions that are available are still based on the same standard, ordinary and necessary business expenses, and that phrase is key.
+
+[00:04:26.98] Not LLC expenses, not business vibes, not TikTok-approved write-offs, n-not TikTok-approved write-offs.
+
+[00:04:35.42] Those are the worst.
+
+[00:04:36.62] Ordinary and necessary.
+
+[00:04:38.98] Now, of course, there's a really broad interpretation of what those phras-phrases mean, and we're gonna do some other videos on that.
+
+[00:04:44.76] But if it qualifies by that standard, you can deduct it.
+
+[00:04:48.32] It'll reduce your taxes.
+
+[00:04:49.88] If it doesn't qualify for that standard, the IRS won't allow you to take that deduction.
+
+[00:04:54.88] Entity choice doesn't really change that.
+
+[00:04:58.14] So here's what an LLC actually does.
+
+[00:05:00.44] Now, this doesn't mean LLCs are useless, right?
+
+[00:05:03.04] There's, there's a lot of benefits to this.
+
+[00:05:04.74] They matter, just not for a lot of the reasons that the internet says.
+
+[00:05:09] An LLC primarily provides liability protection, meaning it separates your personal assets from your business liabilities, and I don't know a business owner out there that doesn't want to have that protection in place.
+
+[00:05:20.90] So if you're structured and operated properly and you follow the formalities, you can gain this legal protection.
+
+[00:05:28.36] If you're signing contracts or working with clients or selling physical products or carrying real risk, this matters.
+
+[00:05:34.84] Now, of course, you also want to have insurance in place, and there's gonna be some other potential liability issues if you personally are creating these problems.
+
+[00:05:42.84] But the li-- but the LLC can add an additional layer of protection.
+
+[00:05:46.84] Second, I think LLCs are really important for credibility.
+
+[00:05:50.22] Some vendors and clients prefer working with an entity.
+
+[00:05:54] I always use the example that Williams Landscaping on the side of a truck looks a little different than Williams Landscaping LLC.Third, an LLC can give you structural flexibility.
+
+[00:06:06.42] You can elect S corp status.
+
+[00:06:08.40] You can have multiple owners, and you can, you can elect S corp status, and that can reduce your self-employment tax when your revenue's high enough and if the business qualifies, and there's some hoops to jump through, and of course, there's gonna be a lot of rules to follow.
+
+[00:06:22.28] But in some instances, that S corp election can save you five or 10 or $15,000 a year.
+
+[00:06:29.06] But the LLC itself, that's the entity that you create under state law.
+
+[00:06:33.64] The S corporation is just an election that you make for tax purposes.
+
+[00:06:37.10] But the actual entity, the LLC that you set up, it doesn't reduce your tax bill simply by existing.
+
+[2s]
+
+[00:06:45.18] Now, here's another little bonus for you.
+
+[00:06:47.60] Startup cost deductions.
+
+[00:06:49.10] This is a whole under-- other section under the Internal Revenue Code, and here's where people get really confused.
+
+[00:06:54.35] They think, "I need the LLC before I can spend money, so I can deduct it," but that's not true.
+
+[2s]
+
+[00:07:01.76] Startup costs have their own rules regardless of your choice of entity.
+
+[3s]
+
+[00:07:08.72] Ooh, gotta pause for a second and look something up.
+
+[2s]
+
+[00:07:12.14] [keyboard clacking] Nice.
+
+[00:07:19.60] Okay.
+
+[3s]
+
+[00:07:22.40] You can deduct up to $5,000 in startup costs in the year you open for business.
+
+[00:07:28.02] Anything above that $5,000, you have to spread out over 15 years.
+
+[00:07:31.33] That's 180 months.
+
+[00:07:32.34] That's a pretty long time.
+
+[00:07:34.08] But that $5,000 immediate deduction phase-- also phases out once your total startup costs exceed $50,000.
+
+[00:07:41.65] So if you're planning on spending that much to set up your business, yeah, maybe having an LLC in place will help with that, and especially if you're gonna have partners and investors that are involved in it.
+
+[00:07:51.18] But if you're setting up a smaller side hustle or a work from home business and your costs are not gonna exceed five grand, you don't need that LLC to take those deductions.
+
+[00:08:00.36] So what counts as a startup costs if you're creating a new business?
+
+[00:08:05.22] Well, you may have market research.
+
+[00:08:07.58] You may have legal fees.
+
+[00:08:08.74] Frankly, I hope you have legal fees because you should be getting advice from day one.
+
+[00:08:12.96] If you have your incorporation or your entity setup costs or any advertising you did before your opening-- any advertising you did before you opened, or other professional fees like talking to an accountant.
+
+[00:08:24.04] So you notice something?
+
+[00:08:25.70] Incorporation costs are deductible, so of course, you would have to deduct that before the LLC exists because the LLC couldn't pay those.
+
+[00:08:33.89] So again, this has nothing to do with entity choice.
+
+[6s]
+
+[00:08:41.94] So when should you actually form an LLC or a corporation?
+
+[00:08:46.06] Here's the real framework.
+
+[2s]
+
+[00:08:48.80] Form an LLC when you have real liability exposure, when you're signing contracts, when you're generating meaningful revenue, and of course, that phrase is a little ambiguous, but that's intentional, and when you're ready to qualify and elect S corporation status.
+
+[00:09:05.22] Your state filing costs make sense-- Oh, and when your state filing costs make sense relative to your income.
+
+[00:09:14.18] If you're in California, that's an $800 minimum annual tax if you set up the entity.
+
+[00:09:19.20] If you're in Wyoming, it's about 100 bucks.
+
+[00:09:21.62] That matters.
+
+[00:09:23.40] If you're testing an idea and only made $4,000 this year, you might not need that additional overhead yet, so be strategic about it.
+
+[6s]
+
+[00:09:38] So to wrap this up, you primarily want to set up an LLC for legal protection and structural planning, not to cram in some additional deductions, not because someone online told you it unlocks magical tax deductions.
+
+[00:09:50.80] The IRS doesn't reward the additional paperwork and administrative headache.
+
+[00:09:54.48] They reward compliance with the ordinary and necessary standard, and those are two very different things.
+
+[3s]
+
+[00:10:02.14] Boom.
+
+[3s]
+
+[00:10:05.38] [phone thudding]

@@ -1,7 +1,9 @@
 FROM node:20-slim
 
-RUN apt-get update && apt-get install -y ffmpeg python3 pip && rm -rf /var/lib/apt/lists/* \
-    && pip install --break-system-packages yt-dlp
+RUN apt-get update && apt-get install -y ffmpeg python3 pip && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --break-system-packages -r requirements.txt
 
 WORKDIR /app
 

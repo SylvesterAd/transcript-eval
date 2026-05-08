@@ -253,6 +253,41 @@ export async function buildAnnotationsFromRun(experimentRunId, wordTimestamps, a
     const stageConfig = stages[stageOutput.stage_index]
     if (!stageConfig) continue
 
+    // Rough-cut V2 agent stages: cuts come pre-shaped in llm_response_raw
+    // as an array of {id, start, end, category, reason, confidence, evidence}.
+    // Skip the timecode-mapping pipeline entirely — the agent already
+    // emits raw seconds.
+    if (stageConfig.type === 'agent') {
+      let cuts = []
+      try { cuts = JSON.parse(stageOutput.llm_response_raw || '[]') } catch {}
+      if (!Array.isArray(cuts)) cuts = []
+      for (const c of cuts) {
+        if (typeof c.start !== 'number' || typeof c.end !== 'number') continue
+        annId++
+        items.push({
+          id: `ann-${annId}`,
+          type: 'deletion',
+          category: c.category || 'meta_commentary',
+          reason: c.reason || '',
+          // New typed shape: strength + evidence items[]. Legacy back-compat:
+          // if no strength but legacy confidence/evidence are present, the
+          // agent state already migrated them, so pass through what's there.
+          strength: c.strength || null,
+          evidence: Array.isArray(c.evidence) ? c.evidence : [],
+          // Keep legacy confidence for pre-existing rows that have it.
+          confidence: typeof c.confidence === 'number' ? c.confidence : null,
+          text: '',
+          timecode: '',
+          startTime: c.start,
+          endTime: c.end,
+          stageName: stageOutput.stage_name,
+          stageIndex: stageOutput.stage_index,
+          agent_emitted: true,
+        })
+      }
+      continue
+    }
+
     const outputMode = stageConfig.output_mode
     if (!outputMode || outputMode === 'passthrough' || outputMode === 'keep_only') continue
 
