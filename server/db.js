@@ -335,6 +335,17 @@ try {
       ALTER TABLE graphics_render_iterations DROP COLUMN IF EXISTS scene_index
     `);
     console.log('[migrate] dropped scene_index from graphics_render_iterations')
+    // Phase 5C: human-feedback persistence — parent_render_id (lineage),
+    // final_html_text (durable HTML), human_feedback (verbatim user message)
+    await pool.query(`
+      ALTER TABLE graphics_renders
+        ADD COLUMN IF NOT EXISTS parent_render_id INTEGER REFERENCES graphics_renders(id),
+        ADD COLUMN IF NOT EXISTS final_html_text  TEXT,
+        ADD COLUMN IF NOT EXISTS human_feedback   TEXT;
+      CREATE INDEX IF NOT EXISTS idx_graphics_renders_parent
+        ON graphics_renders(parent_render_id);
+    `);
+    console.log('[migrate] graphics_renders human-feedback columns ready')
   } catch {}
 } catch (e) {
   console.error('[db] Schema error:', e.message)
