@@ -54,6 +54,12 @@ try {
     await pool.query(`ALTER TABLE deletion_annotations ADD COLUMN IF NOT EXISTS category TEXT`)
     await pool.query(`ALTER TABLE deletion_annotations ADD COLUMN IF NOT EXISTS confidence REAL`)
     await pool.query(`ALTER TABLE deletion_annotations ADD COLUMN IF NOT EXISTS evidence_json TEXT`)
+    // Rough Cut V2 acoustic pre-pass — librosa-derived per-frame features.
+    // Schema: { hop_ms: 100, features: [...names], frames: [[t, v1, v2, ...], ...] }.
+    // Populated post-Scribe (see whisper.js transcribeVideo). NULL for legacy
+    // rows; the agent's get_acoustic_features tool reports { available: false }
+    // when missing.
+    await pool.query(`ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS acoustic_features_json TEXT`)
     await pool.query(`ALTER TABLE spending_log ADD COLUMN IF NOT EXISTS api_key_last5 TEXT`)
     await pool.query(`ALTER TABLE broll_example_sources ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE`)
     // Liveness signal for downloadYouTubeVideo. Refreshed every
