@@ -30,13 +30,14 @@ export async function uploadRender({ renderId, sessionId, localPath }) {
   return { url: signed.signedUrl };
 }
 
-export async function uploadFrames({ renderId, iterationIndex, framePaths }) {
+export async function uploadFrames({ renderId, iterationIndex, framePaths, sceneIndex = null }) {
   const bucket = process.env.GRAPHICS_FRAMES_BUCKET || 'graphics-frames'
   const sb = getClient()
   const urls = []
+  const scenePrefix = sceneIndex != null ? `scene-${sceneIndex}/` : ''
   for (let i = 0; i < framePaths.length; i++) {
     const data = await readFile(framePaths[i])
-    const key = `renders/${renderId}/iter-${iterationIndex}/frame-${i}.png`
+    const key = `renders/${renderId}/iter-${iterationIndex}/${scenePrefix}frame-${i}.png`
     const { error } = await sb.storage.from(bucket).upload(key, data, {
       contentType: 'image/png',
       upsert: true,
