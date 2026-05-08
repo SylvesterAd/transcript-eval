@@ -578,6 +578,28 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
     }
     if (await isCancelled(subGroupId)) return
 
+    // Bail with a clear message when zero references analyzed (fresh-fire
+    // path only). Without this, runStrategies throws "analysisPipelineIds
+    // required" which surfaces as a cryptic chain error. Most common cause:
+    // every reference YouTube download failed (DRM, removed, network) so
+    // loadExampleVideos returned empty. The chain doesn't try to fail-and-
+    // continue here — strategy generation requires at least one analyzed
+    // reference.
+    //
+    // In resume mode (resumeFromSubstage set), an empty pipelineId list from
+    // the skip-path recovery means the recovery query couldn't find the
+    // expected runs — different failure mode, handled by the downstream
+    // phase's own validation if/when it actually needs the IDs.
+    if (!resumeFromSubstage && (!refs.analysisPipelineIds || refs.analysisPipelineIds.length === 0)) {
+      const msg = 'No reference videos available for analysis. All references either failed to download or are still processing — check your reference video URLs and retry.'
+      console.warn(`[orchestrator] ${msg} (group ${subGroupId})`)
+      await db.prepare(
+        "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
+      ).run(msg.slice(0, 500), subGroupId)
+      await emailNotifier.send('failed', { subGroupId, userId: sg.user_id, error: msg })
+      return
+    }
+
     // Phase 2: strategy
     await db.prepare("UPDATE video_groups SET broll_chain_substage = 'strategy' WHERE id = ?").run(subGroupId)
     let strats = { strategyPipelineIds: [] }

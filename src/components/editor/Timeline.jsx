@@ -63,9 +63,19 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   // Stable empty-cuts reference for the falsy branch of track `cuts` props
   const EMPTY_CUTS = useMemo(() => [], [])
 
+  // Cuts visible in the rough-cut tab UI: only user-applied cuts. Annotation-
+  // source cuts stay in state.cuts so the b-roll pipeline + export still see
+  // them, but they shouldn't render as cut regions in the rough-cut timeline —
+  // mirrors TranscriptEditor.isItemCut. The user treats them as visual
+  // suggestions until they explicitly Backspace to apply.
+  const userCuts = useMemo(
+    () => state.cuts.filter(c => c.source !== 'annotation'),
+    [state.cuts]
+  )
+
   // Merge cuts for display and refine edges using waveform
   const mergedDisplayCuts = useMemo(() => {
-    if (!state.cuts.length) return []
+    if (!userCuts.length) return []
 
     // Build word list and waveform helpers
     const primaryAudio = state.tracks
@@ -76,8 +86,8 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
       end: w.end + (primaryAudio.offset || 0),
     })) || []
     // Separate zero-width cuts (razor markers) from real cuts
-    const zeroWidth = state.cuts.filter(c => c.end <= c.start + 0.01 && c.end >= c.start)
-    const valid = state.cuts.filter(c => c.end > c.start + 0.01)
+    const zeroWidth = userCuts.filter(c => c.end <= c.start + 0.01 && c.end >= c.start)
+    const valid = userCuts.filter(c => c.end > c.start + 0.01)
     if (!valid.length) return [...zeroWidth]
     const sorted = [...valid].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
@@ -96,7 +106,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
     }
 
     return [...merged, ...zeroWidth]
-  }, [state.cuts, state.tracks])
+  }, [userCuts, state.tracks])
 
   // B-roll editor: cuts collapse to thin purple bars. Clicking a bar expands
   // that one cut as a popover overlay (rough-cut style dark gap + draggable
@@ -112,8 +122,8 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   // - expandedCut:   the cut currently rendered as a popover (or null),
   //   resolved by anchor-contains lookup.
   const effectiveCuts = useMemo(
-    () => isBroll ? computeSkipRegions(state.cuts, state.cutExclusions) : [],
-    [isBroll, state.cuts, state.cutExclusions]
+    () => isBroll ? computeSkipRegions(userCuts, state.cutExclusions) : [],
+    [isBroll, userCuts, state.cutExclusions]
   )
   // expandedCutAnchor is an original-time timestamp (typically the cut's
   // center at click). Resolve to the effective cut whose interval contains
@@ -853,7 +863,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                   : <VideoTrack track={videoTrack} zoom={state.zoom} />
               )
               const audioEl = (
-                <AudioTrack track={audioTrack} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={!item.topIsVideo} groupedAbove={item.topIsVideo} />
+                <AudioTrack track={audioTrack} zoom={state.zoom} cuts={isRoughCut ? userCuts : null} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={!item.topIsVideo} groupedAbove={item.topIsVideo} />
               )
               const videoLabel = (
                 <div
@@ -921,7 +931,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                 : null
               const segGlobalEnd = selectedSeg ? audioTrack.offset + selectedSeg.origEnd : null
               const followingCut = selectedSeg
-                ? state.cuts.find(c => Math.abs(c.start - segGlobalEnd) < 0.05 && c.end > c.start)
+                ? userCuts.find(c => Math.abs(c.start - segGlobalEnd) < 0.05 && c.end > c.start)
                 : null
               return (
                 <div
@@ -1063,7 +1073,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                       ? (showVideoFrames
                           ? <VideoFrameTrack track={track} zoom={state.zoom} cuts={isRoughCut ? mergedDisplayCuts : EMPTY_CUTS} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={groupedBelow} groupedAbove={item.groupedAbove} />
                           : <VideoTrack track={track} zoom={state.zoom} />)
-                      : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? state.cuts : null} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={groupedBelow} groupedAbove={item.groupedAbove} />
+                      : <AudioTrack track={track} zoom={state.zoom} cuts={isRoughCut ? userCuts : null} postCutCuts={isBroll ? effectiveCuts : null} scrollRef={scrollRef} scrollX={scrollX} groupedBelow={groupedBelow} groupedAbove={item.groupedAbove} />
                     }
                   </div>
                 </div>

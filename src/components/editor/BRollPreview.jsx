@@ -19,11 +19,14 @@ export default function BRollPreview() {
   const brollRef = useRef(broll); brollRef.current = broll
 
   // Compute skip regions from the editor's cut state (same cuts as the rough-cut
-  // editor — synced via editor_state_json). The actual timeupdate listeners are
-  // attached below to every a-roll video element in videoRefs (there can be
-  // multiple tracks), so we call computeSkipRegions directly instead of the hook.
+  // editor — synced via editor_state_json). Annotation-source cuts are visual
+  // suggestions only — they don't drive playback skipping. Mirror the filter
+  // used by TranscriptEditor.isItemCut + Timeline.userCuts.
+  // The actual timeupdate listeners are attached below to every a-roll video
+  // element in videoRefs (there can be multiple tracks), so we call
+  // computeSkipRegions directly instead of the hook.
   const skipRegions = useMemo(
-    () => computeSkipRegions(state.cuts, state.cutExclusions),
+    () => computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions),
     [state.cuts, state.cutExclusions],
   )
   const skipRegionsRef = useRef(skipRegions)

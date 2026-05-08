@@ -455,8 +455,18 @@ export function useBRollEditorState(planPipelineId) {
   // visual playhead reaches it, we compare the post-cut equivalent of the
   // playback time (`currentTime` is original-time) against the placement's
   // [timelineStart, timelineEnd] range.
+  // Annotation-source cuts are visual suggestions only — they don't shift
+  // the b-roll editor's post-cut layout. Mirror the same source filter the
+  // server uses in getBRollEditorData (and the rest of the b-roll editor's
+  // client-side consumers) so visualTime here lines up with the placement
+  // positions returned by the server. Without this filter, visualTime
+  // collapses through annotation cuts and activePlacementAtTime returns null
+  // at the time the placement actually shows on screen.
   const effectiveCutsForTrigger = useMemo(
-    () => computeSkipRegions(editorCtx?.state?.cuts || [], editorCtx?.state?.cutExclusions || []),
+    () => computeSkipRegions(
+      (editorCtx?.state?.cuts || []).filter(c => c.source !== 'annotation'),
+      editorCtx?.state?.cutExclusions || [],
+    ),
     [editorCtx?.state?.cuts, editorCtx?.state?.cutExclusions]
   )
   const activePlacementAtTime = useCallback((time) => {
@@ -964,7 +974,10 @@ export function useBRollEditorState(planPipelineId) {
     }
     const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
     const allResults = placement.results || []
-    const slim = allResults[resultIdx] ? [allResults[resultIdx]] : []
+    // Carry ALL search results (not just the user's currently-selected one) so
+    // the duplicate behaves like an initial b-roll on the target — the user
+    // can switch between options on the duplicate just like they can on the
+    // original. Carrying only the selected result removed that affordance.
     // Caller may supply a uuid so an optimistic insert into the target's track shares the same
     // id with the eventually-saved server entry — that lets React reconcile by key without remount.
     const uuid = externalUuid || ('u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12))
@@ -977,8 +990,9 @@ export function useBRollEditorState(planPipelineId) {
       sourcePlacementIndex: placement.placementIndex ?? null,
       timelineStart: targetStartSec,
       timelineEnd: targetStartSec + dur,
-      selectedResult: 0,
-      results: slim,
+      // Preserve the user's currently-selected option index on the duplicate.
+      selectedResult: resultIdx,
+      results: allResults,
       snapshot: {
         description: placement.description,
         audio_anchor: placement.audio_anchor,

@@ -118,6 +118,23 @@ describe('persistPlacementOutput (original→post-cut shift)', () => {
     expect(out).toBe(stageOutput)
   })
 
+  it('parses start/end timecode strings when start_seconds/end_seconds missing', async () => {
+    const stageOutput = JSON.stringify({
+      placements: [{
+        start: '[00:00:19.94]',
+        end: '[00:00:23.94]',
+        // No start_seconds / end_seconds — mirrors what the LLM actually emits.
+        audio_anchor: 'There is a bad piece',
+      }],
+    })
+    const out = await persistPlacementOutput(stageOutput, editorCuts, 449)
+    const p = JSON.parse(out).placements[0]
+    expect(p.start_seconds).toBeCloseTo(14.94, 2)
+    expect(p.end_seconds).toBeCloseTo(18.94, 2)
+    expect(p.start).toBe('[00:00:14.94]')
+    expect(p.end).toBe('[00:00:18.94]')
+  })
+
   it('shifts a placement that straddles a cut boundary by independently shifting each endpoint', async () => {
     // Cut [15, 17] removes 2s. Placement runs from original 12 to 20:
     //   start=12 has 0 preceding cut → post-cut start = 12

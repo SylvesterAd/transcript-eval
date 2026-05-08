@@ -272,14 +272,6 @@ export default function EditorView() {
     }
   }, [activeTab, state.cuts, dispatch])
 
-  // Apply annotation defaults when entering roughcut tab with existing annotations
-  useEffect(() => {
-    if (activeTab !== 'roughcut' || !state.groupId) return
-    if (groupDetail?.annotations?.items?.length > 0) {
-      applyConfigDefaults(groupDetail.rough_cut_config, dispatch)
-    }
-  }, [activeTab, state.groupId, groupDetail, dispatch])
-
   // Poll flow progress
   useEffect(() => {
     if (!flowRunState?.experimentId || flowRunState.status !== 'running') return
@@ -544,7 +536,11 @@ export default function EditorView() {
     const peaks = primaryAudio?.waveformPeaks
     const offset = primaryAudio?.offset || 0
 
-    const valid = state.cuts.filter(c => c.end > c.start + 0.01)
+    // Annotation-source cuts are visual suggestions only — they don't trigger
+    // playback skips on the rough-cut tab. Mirror TranscriptEditor.isItemCut +
+    // the Timeline visual filter so playback, the timeline, and the transcript
+    // all show the same "cut" state to the user.
+    const valid = state.cuts.filter(c => c.end > c.start + 0.01 && c.source !== 'annotation')
     if (!valid.length) return []
     const sorted = [...valid].sort((a, b) => a.start - b.start)
     const merged = [{ ...sorted[0] }]
@@ -697,9 +693,10 @@ export default function EditorView() {
 
   // Effective cuts (cuts minus exclusions) for b-roll post-cut playhead
   // translation. Computed once per relevant change so the 60fps rAF tick
-  // reads it without recomputing.
+  // reads it without recomputing. Annotation-source cuts are visual
+  // suggestions only — same filter as Timeline.userCuts + BRollPreview.
   const brollEffectiveCuts = useMemo(
-    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts, state.cutExclusions) : null,
+    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions) : null,
     [state.activeTab, state.cuts, state.cutExclusions]
   )
   stateRefs.current.brollEffectiveCuts = brollEffectiveCuts
@@ -1015,15 +1012,18 @@ export default function EditorView() {
           const items = words || []
           let cutCount = 0
           let uncutCount = 0
+          // Mirror TranscriptEditor.isItemCut — only user-applied cuts count
+          // toward cut/uncut detection. Annotation-source cuts are visual
+          // suggestions in the rough-cut tab and don't trigger UNCUT mode.
           for (const w of items) {
             const wEnd = w.end || w.start + 0.01
-            const isCut = state.cuts.some(c => w.start < c.end && wEnd > c.start)
+            const isCut = state.cuts.some(c => c.source !== 'annotation' && w.start < c.end && wEnd > c.start)
             if (isCut) cutCount++
             else uncutCount++
           }
-          // If no word info, fall back to overlap check
+          // If no word info, fall back to overlap check (same source filter)
           if (items.length === 0) {
-            const overlapping = state.cuts.filter(c => c.start < endTime && c.end > startTime)
+            const overlapping = state.cuts.filter(c => c.source !== 'annotation' && c.start < endTime && c.end > startTime)
             if (overlapping.length > 0) cutCount = 1
             else uncutCount = 1
           }
@@ -1143,7 +1143,7 @@ export default function EditorView() {
               >
                 Continue
               </button>
-            ) : activeTab === 'brolls' ? null : (
+            ) : (
               <button
                 onClick={() => window.open(`/editor/${id}/export`, '_blank')}
                 className="px-6 py-1.5 rounded-md font-bold text-sm bg-gradient-to-br from-primary-fixed to-primary-dim text-on-primary-fixed hover:opacity-90 transition-all"
