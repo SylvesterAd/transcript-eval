@@ -272,14 +272,6 @@ export default function EditorView() {
     }
   }, [activeTab, state.cuts, dispatch])
 
-  // Apply annotation defaults when entering roughcut tab with existing annotations
-  useEffect(() => {
-    if (activeTab !== 'roughcut' || !state.groupId) return
-    if (groupDetail?.annotations?.items?.length > 0) {
-      applyConfigDefaults(groupDetail.rough_cut_config, dispatch)
-    }
-  }, [activeTab, state.groupId, groupDetail, dispatch])
-
   // Poll flow progress
   useEffect(() => {
     if (!flowRunState?.experimentId || flowRunState.status !== 'running') return
