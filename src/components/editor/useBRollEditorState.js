@@ -964,7 +964,10 @@ export function useBRollEditorState(planPipelineId) {
     }
     const resultIdx = state.selectedResults[sourceIndex] ?? placement.persistedSelectedResult ?? 0
     const allResults = placement.results || []
-    const slim = allResults[resultIdx] ? [allResults[resultIdx]] : []
+    // Carry ALL search results (not just the user's currently-selected one) so
+    // the duplicate behaves like an initial b-roll on the target — the user
+    // can switch between options on the duplicate just like they can on the
+    // original. Carrying only the selected result removed that affordance.
     // Caller may supply a uuid so an optimistic insert into the target's track shares the same
     // id with the eventually-saved server entry — that lets React reconcile by key without remount.
     const uuid = externalUuid || ('u_' + (crypto.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 12))
@@ -977,8 +980,9 @@ export function useBRollEditorState(planPipelineId) {
       sourcePlacementIndex: placement.placementIndex ?? null,
       timelineStart: targetStartSec,
       timelineEnd: targetStartSec + dur,
-      selectedResult: 0,
-      results: slim,
+      // Preserve the user's currently-selected option index on the duplicate.
+      selectedResult: resultIdx,
+      results: allResults,
       snapshot: {
         description: placement.description,
         audio_anchor: placement.audio_anchor,
