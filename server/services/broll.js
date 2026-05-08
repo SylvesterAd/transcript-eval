@@ -79,37 +79,161 @@ function ytDlpCommonArgs() {
 }
 
 // Build an Oxylabs residential proxy URL when creds are set. Used as a paid
-// fallback after the player_client trick fails — datacenter IPs (Railway)
-// get bot-blocked even with mobile/TV clients, so we route through a US
-// residential exit node. ~$0.02 per request, only used on retry.
-function oxylabsProxyUrl() {
+// fallback after the datacenter (Railway) attempt fails on bot-block, rate
+// limit, network error, or geo-block — all conditions a different exit IP
+// can plausibly fix. ~$0.02 per request, only used on retry.
+//
+// `sessId` (optional): pin a sticky Oxylabs session. Different sessId =
+// different residential exit IP. Passing a fresh sessId per retry is how we
+// force IP rotation between attempts. When sessId is null, Oxylabs's gateway
+// picks a fresh IP per request from the pool (their default behavior).
+function oxylabsProxyUrl(sessId = null) {
   const user = process.env.OXYLABS_USER
   const pass = process.env.OXYLABS_PASS
   const host = process.env.OXYLABS_HOST
   const cc = process.env.OXYLABS_CC || 'US'
   if (!user || !pass || !host) return null
-  return `http://customer-${user}-cc-${cc}:${encodeURIComponent(pass)}@${host}`
+  const userPart = sessId
+    ? `customer-${user}-cc-${cc}-sessid-${sessId}`
+    : `customer-${user}-cc-${cc}`
+  return `http://${userPart}:${encodeURIComponent(pass)}@${host}`
 }
 
-// Detect YouTube's bot/sign-in challenge — the only error worth burning a
-// proxy retry on. Other errors (private video, geo-blocked, network) won't
-// be fixed by a different IP.
-function isYoutubeBotBlock(stderr) {
-  return /Sign in to confirm|requires.*sign[\s-]in|Use --cookies/i.test(stderr || '')
+// Classify yt-dlp stderr into a discrete error class. Drives the retry
+// decision in ytDlpRunWithRetries. Order matters — DRM/unavailable patterns
+// must be tested before generic network/unknown so a server-side block
+// doesn't burn proxy budget.
+function classifyYtDlpError(stderr) {
+  const s = stderr || ''
+  if (/DRM protected|drm.protected/i.test(s)) return 'drm'
+  if (/Video unavailable|This video has been removed|Private video|Video is no longer available/i.test(s)) return 'unavailable'
+  if (/Sign in to confirm|requires.*sign[\s-]in|Use --cookies/i.test(s)) return 'bot_block'
+  if (/HTTP Error 429|too many requests|rate.?limit/i.test(s)) return 'rate_limit'
+  if (/HTTP Error 5\d\d|ETIMEDOUT|ECONNRESET|Connection reset|Got error reading|Connection timed out/i.test(s)) return 'network'
+  if (/geo[\s-]?block|not available in your country/i.test(s)) return 'geo_block'
+  return 'unknown'
 }
 
-// Run yt-dlp; on bot-block error, retry once via the Oxylabs proxy.
-async function ytDlpRun(args, options) {
-  try {
-    return await execFileAsync('yt-dlp', args, options)
-  } catch (err) {
-    const proxy = oxylabsProxyUrl()
-    if (proxy && isYoutubeBotBlock(err.stderr)) {
-      console.log('[broll-dl] YouTube bot-block detected, retrying via Oxylabs proxy...')
-      return await execFileAsync('yt-dlp', ['--proxy', proxy, ...args], options)
-    }
-    throw err
+// True if a different exit IP can plausibly fix the error.
+//   bot_block / rate_limit / network → IP change is exactly the fix
+//   geo_block → if the proxy exit is in a different country
+//   unknown → one shot via proxy as a last resort
+//   drm / unavailable → server-side, no IP will help
+function isProxyRetryable(errorClass) {
+  return ['bot_block', 'rate_limit', 'network', 'geo_block', 'unknown'].includes(errorClass)
+}
+
+// Pure retry loop. Extracted from ytDlpRun for testability — production
+// wires it up in ytDlpRun below; tests inject a fake runner / sleep / proxy
+// builder so retry behavior can be exercised without spawning yt-dlp or
+// blocking the test for 30 s of real wall-clock waits.
+//
+// Behavior:
+//   1. Probe whether proxy is configured + whether the initial error is
+//      proxy-retryable. Bail (rethrow) if not.
+//   2. Up to 3 attempts via the Oxylabs proxy, each preceded by a wait
+//      (5 s, 10 s, 15 s) so the gateway has time to assign a fresh exit
+//      IP and any previous IP-level rate limit can cool down.
+//   3. Each attempt uses a fresh sessId — guaranteed different exit IP per
+//      attempt rather than relying solely on Oxylabs's default rotation.
+//   4. If a mid-loop error becomes non-retryable (e.g. proxy resolves the
+//      geo-block but the video then reports DRM), bail immediately rather
+//      than burning the remaining attempts.
+async function ytDlpRunWithRetries(initialErr, args, options, deps) {
+  const { runner, sleep, buildProxy } = deps
+  const errorClass = classifyYtDlpError(initialErr.stderr)
+  const proxyProbe = buildProxy(null)
+  if (!proxyProbe || !isProxyRetryable(errorClass)) {
+    if (!proxyProbe) console.log(`[broll-dl] yt-dlp failed (class: ${errorClass}); no proxy configured, not retrying`)
+    else console.log(`[broll-dl] yt-dlp failed (class: ${errorClass}); not retryable via proxy`)
+    throw initialErr
   }
+
+  const ROTATION_WAITS_MS = [5000, 10000, 15000]
+  let lastErr = initialErr
+
+  for (let i = 0; i < ROTATION_WAITS_MS.length; i++) {
+    const waitMs = ROTATION_WAITS_MS[i]
+    console.log(`[broll-dl] Waiting ${waitMs}ms before proxy attempt ${i + 1}/${ROTATION_WAITS_MS.length} (last error class: ${classifyYtDlpError(lastErr.stderr)})`)
+    await sleep(waitMs)
+
+    const sessId = `s${Date.now()}${Math.floor(Math.random() * 1e6)}`
+    const proxyUrl = buildProxy(sessId)
+    console.log(`[broll-dl] Proxy attempt ${i + 1}/${ROTATION_WAITS_MS.length} via Oxylabs (sessId=${sessId})`)
+    try {
+      return await runner(['--proxy', proxyUrl, ...args], options)
+    } catch (proxyErr) {
+      lastErr = proxyErr
+      const newClass = classifyYtDlpError(proxyErr.stderr)
+      console.log(`[broll-dl] Proxy attempt ${i + 1} failed (class: ${newClass})`)
+      if (!isProxyRetryable(newClass)) {
+        console.log(`[broll-dl] Stopping retries — error class '${newClass}' is non-retryable`)
+        throw proxyErr
+      }
+    }
+  }
+
+  console.log(`[broll-dl] All ${ROTATION_WAITS_MS.length} proxy attempts exhausted`)
+  throw lastErr
+}
+
+// Pure datacenter-retry logic. Extracted from ytDlpRun for testability.
+//   1. First attempt fires before this function — caller passes the error.
+//   2. For non-retryable errors (DRM, unavailable), fail fast.
+//   3. Otherwise wait DATACENTER_RETRY_PAUSE_MS and try datacenter once
+//      more — covers transient flakes (random connection resets, manifest
+//      hiccups) without burning proxy budget.
+//   4. If second datacenter attempt also fails, hand off to the proxy
+//      retry loop (3 more attempts with IP rotation).
+const DATACENTER_RETRY_PAUSE_MS = 3000
+
+async function ytDlpRunWithDatacenterRetry(initialErr, args, options, deps) {
+  const { runner, sleep, proxyRetry } = deps
+  const firstClass = classifyYtDlpError(initialErr.stderr)
+
+  if (!isProxyRetryable(firstClass)) {
+    console.log(`[broll-dl] First datacenter attempt failed (class: ${firstClass}); not retryable, failing fast`)
+    throw initialErr
+  }
+
+  console.log(`[broll-dl] First datacenter attempt failed (class: ${firstClass}); waiting ${DATACENTER_RETRY_PAUSE_MS}ms before retrying datacenter once`)
+  await sleep(DATACENTER_RETRY_PAUSE_MS)
+
+  try {
+    return await runner(args, options)
+  } catch (secondErr) {
+    console.log(`[broll-dl] Second datacenter attempt also failed (class: ${classifyYtDlpError(secondErr.stderr)}); falling through to proxy retries`)
+    return proxyRetry(secondErr)
+  }
+}
+
+// Run yt-dlp on the datacenter (Railway) IP first; on a proxy-retryable
+// error, retry the datacenter once after a short pause, then fan out to
+// up to 3 attempts via the Oxylabs residential proxy with rotation waits
+// between attempts. Total: 2 datacenter + 3 proxy = up to 5 attempts.
+async function ytDlpRun(args, options) {
+  const runner = (a, o) => execFileAsync('yt-dlp', a, o)
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+  try {
+    return await runner(args, options)
+  } catch (err) {
+    return ytDlpRunWithDatacenterRetry(err, args, options, {
+      runner,
+      sleep,
+      proxyRetry: (latestErr) => ytDlpRunWithRetries(latestErr, args, options, {
+        runner,
+        sleep,
+        buildProxy: (sessId) => oxylabsProxyUrl(sessId),
+      }),
+    })
+  }
+}
+
+export {
+  classifyYtDlpError as __test__classifyYtDlpError,
+  isProxyRetryable as __test__isProxyRetryable,
+  ytDlpRunWithRetries as __test__ytDlpRunWithRetries,
+  ytDlpRunWithDatacenterRetry as __test__ytDlpRunWithDatacenterRetry,
 }
 
 // yt-dlp dumps stderr with command + warnings on failure. Pull the first
