@@ -58,13 +58,12 @@ You are a video structure analyst. Watch the video and output ONLY valid JSON. N
 - Beat: A single moment where something changes (a decision, a setback, a discovery, a reaction).
 - A-Roll: When the camera setup, location, or framing changes significantly, it is a new A-Roll.
 
-## Cut ranges to IGNORE
-The following time ranges have been removed in the rough cut. Do NOT analyze
-them, do NOT include chapters, beats, or A-Roll scenes within them, and do NOT
-emit timestamps that fall inside them. Treat them as if they are not in the video:
-{{cut_ranges}}
-
-## Transcript (cut text already removed; timecodes are in the original video):
+## Transcript (cut text already removed; timecodes are in the original video)
+The transcript below shows ONLY the kept content of the rough cut. \`[Ns]\` gap
+markers between sentences mean a rough-cut deletion happened there — chapters
+and beats must NOT span those gaps, and timestamps for chapters/beats must come
+from the transcript verbatim (do not emit timestamps from the video that have
+no corresponding transcript line):
 {{transcript}}
 
 IMPORTANT: For ALL timestamps, include BOTH seconds (integer) AND timecodes in [HH:MM:SS] format.
@@ -143,10 +142,7 @@ Output ONLY valid JSON.`,
 ## New video A-Roll + Chapters & Beats:
 {{llm_answer_3}}
 
-## Cut ranges removed from the new video (do not place anything inside these):
-{{cut_ranges}}
-
-## New video transcript (cut text already removed; timecodes are in the original video):
+## New video transcript (cut text already removed; timecodes are in the original video; \`[Ns]\` markers are rough-cut deletions — never place B-Roll inside those gaps):
 {{transcript}}
 
 For each chapter, define:
@@ -233,10 +229,7 @@ Output ONLY valid JSON.`,
 **Beats:**
 {{chapter_beats}}
 
-## ── CUT RANGES (NEVER place anything inside these — they were removed in the rough cut) ──
-{{cut_ranges}}
-
-## ── CHAPTER TRANSCRIPT (use these timecodes for placements) ──
+## ── CHAPTER TRANSCRIPT (use these timecodes for placements; \`[Ns]\` markers are rough-cut deletions — never place B-Roll inside those gaps) ──
 {{chapter_transcript}}
 
 ## ── B-ROLL STRATEGY (follow these targets and rules) ──

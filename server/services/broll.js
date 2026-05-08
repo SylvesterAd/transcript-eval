@@ -1032,25 +1032,6 @@ export function shiftOriginalToPostCut(time, effectiveCuts) {
   return time - getCumulativeCutOffset(time, effectiveCuts)
 }
 
-/**
- * Format effective cut ranges as a human-readable block for LLM prompts.
- * Returns '' when there are no cuts, otherwise newline-separated lines like
- *   [00:00:00] - [00:02:02]
- * Sub-second values are rounded to the nearest whole second so the LLM gets a
- * clean, easy-to-match block.
- */
-export function formatCutRangesForPrompt(effectiveCuts) {
-  if (!effectiveCuts || !effectiveCuts.length) return ''
-  const tc = (s) => {
-    const r = Math.round(s)
-    const h = String(Math.floor(r / 3600)).padStart(2, '0')
-    const m = String(Math.floor((r % 3600) / 60)).padStart(2, '0')
-    const sec = String(r % 60).padStart(2, '0')
-    return `[${h}:${m}:${sec}]`
-  }
-  return effectiveCuts.map(c => `${tc(c.start)} - ${tc(c.end)}`).join('\n')
-}
-
 // ── Post-cut transcript generator ───────────────────────────────────
 /**
  * Generate a transcript that drops words inside rough-cut regions while
@@ -1529,11 +1510,9 @@ export async function executeAltPlans(planPipelineId) {
     let llmAnswer = '', questionCount = 0
     const llmAnswers = {}
 
-    const cutRangesText = '' // editorCuts not threaded into this branch — no cut-ranges available
     function replacePlaceholders(text) {
       let result = text
         .replace(/\{\{transcript\}\}/g, currentTranscript)
-        .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
         .replace(/\{\{llm_answer\}\}/g, llmAnswer)
         .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
         .replace(/\{\{favorite_plan\}\}/g, favoriteOutput)
@@ -2768,8 +2747,11 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   }
 
   const transcriptRun = findPrepStage('Generate post-cut transcript')
-  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
-  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+  // plan_prep merged A-Roll + Chapters & Beats into one stage; old runs that
+  // pre-date the merge still have separate stages, so fall back to those names.
+  const mergedAnalysisRun = findPrepStage('Analyze A-Roll + Chapters & Beats')
+  const aRollRun = mergedAnalysisRun || findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = mergedAnalysisRun || findPrepStage('Analyze Chapters & Beats')
 
   const currentTranscript = transcriptRun?.output_text || ''
   const aRollOutput = aRollRun?.output_text || ''
@@ -2906,11 +2888,9 @@ export async function executeCreateStrategy(prepPipelineId, analysisPipelineId, 
   let llmAnswer = '', questionCount = 0
   const llmAnswers = {}
 
-  const cutRangesText = '' // editorCuts not threaded into this branch — no cut-ranges available
   function replacePlaceholders(text) {
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
-      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{reference_analysis_slim\}\}/g, slimReferenceAnalysis)
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
@@ -3176,8 +3156,11 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   }
 
   const transcriptRun = findPrepStage('Generate post-cut transcript')
-  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
-  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+  // plan_prep merged A-Roll + Chapters & Beats into one stage; old runs that
+  // pre-date the merge still have separate stages, so fall back to those names.
+  const mergedAnalysisRun = findPrepStage('Analyze A-Roll + Chapters & Beats')
+  const aRollRun = mergedAnalysisRun || findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = mergedAnalysisRun || findPrepStage('Analyze Chapters & Beats')
 
   const currentTranscript = transcriptRun?.output_text || ''
   const aRollOutput = aRollRun?.output_text || ''
@@ -3340,11 +3323,9 @@ export async function executeCreateCombinedStrategy(prepPipelineId, analysisPipe
   let llmAnswer = '', questionCount = 0
   const llmAnswers = {}
 
-  const cutRangesText = '' // editorCuts not threaded into this branch — no cut-ranges available
   function replacePlaceholders(text) {
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
-      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{all_reference_analyses_slim\}\}/g, slimReferenceAnalyses)
       .replace(/\{\{all_reference_analyses\}\}/g, allReferenceAnalyses)
@@ -3739,8 +3720,11 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   }
 
   const transcriptRun = findPrepStage('Generate post-cut transcript')
-  const aRollRun = findPrepStage('Analyze A-Roll Appearances')
-  const chaptersRun = findPrepStage('Analyze Chapters & Beats')
+  // plan_prep merged A-Roll + Chapters & Beats into one stage; old runs that
+  // pre-date the merge still have separate stages, so fall back to those names.
+  const mergedAnalysisRun = findPrepStage('Analyze A-Roll + Chapters & Beats')
+  const aRollRun = mergedAnalysisRun || findPrepStage('Analyze A-Roll Appearances')
+  const chaptersRun = mergedAnalysisRun || findPrepStage('Analyze Chapters & Beats')
 
   const currentTranscript = transcriptRun?.output_text || ''
   const aRollOutput = aRollRun?.output_text || ''
@@ -3891,11 +3875,9 @@ export async function executeCreatePlan(prepPipelineId, strategyPipelineId, vide
   let llmAnswer = '', questionCount = 0
   const llmAnswers = {}
 
-  const cutRangesText = formatCutRangesForPrompt(computeEffectiveCuts(editorCuts?.cuts || [], editorCuts?.cutExclusions || []))
   function replacePlaceholders(text) {
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
-      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{audience\}\}/g, audienceText)
       .replace(/\{\{audience_block\}\}/g, audienceBlock)
@@ -4353,7 +4335,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
   brollPipelineProgress.set(pipelineId, { ...pipelineMeta, stageIndex: 0, totalStages: stages.length, status: 'running', stageName: resumeData ? 'Resuming...' : '' })
 
-  const cutRangesText = formatCutRangesForPrompt(computeEffectiveCuts(editorCuts?.cuts || [], editorCuts?.cutExclusions || []))
   function replacePlaceholders(text) {
     // Build all_chapter_analyses from completed videos
     const allChapters = Object.entries(chapterAnalyses).map(([key, json]) => {
@@ -4364,7 +4345,6 @@ export async function executePipeline(strategyId, versionId, videoId, groupId, t
 
     let result = text
       .replace(/\{\{transcript\}\}/g, currentTranscript)
-      .replace(/\{\{cut_ranges\}\}/g, cutRangesText)
       .replace(/\{\{llm_answer\}\}/g, llmAnswer)
       .replace(/\{\{examples_output\}\}/g, examplesOutput)
       .replace(/\{\{reference_analysis\}\}/g, referenceAnalysis)
