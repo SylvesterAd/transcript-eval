@@ -6203,6 +6203,10 @@ export async function getBRollEditorData(planPipelineId) {
     // for entries on broll_editor_state rows that predate Task 9's migration.
     const e = (p.uuid && edits[p.uuid]) || edits[`${p.chapterIndex}:${p.placementIndex}`]
     if (e?.hidden) continue
+    // Cut-clipping: a placement that the materialize pass detected as fully
+    // inside a cut is hidden from the editor entirely. Re-appears when the
+    // user shrinks/removes the offending cut (next remap re-evaluates it).
+    if (p.uuid && remappedPositions[p.uuid]?.hidden) continue
     if (e?.timelineStart != null && e?.timelineEnd != null) {
       p.userTimelineStart = e.timelineStart
       p.userTimelineEnd = e.timelineEnd
