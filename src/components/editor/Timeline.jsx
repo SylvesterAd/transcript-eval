@@ -122,8 +122,8 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   // - expandedCut:   the cut currently rendered as a popover (or null),
   //   resolved by anchor-contains lookup.
   const effectiveCuts = useMemo(
-    () => isBroll ? computeSkipRegions(state.cuts, state.cutExclusions) : [],
-    [isBroll, state.cuts, state.cutExclusions]
+    () => isBroll ? computeSkipRegions(userCuts, state.cutExclusions) : [],
+    [isBroll, userCuts, state.cutExclusions]
   )
   // expandedCutAnchor is an original-time timestamp (typically the cut's
   // center at click). Resolve to the effective cut whose interval contains
@@ -931,7 +931,7 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                 : null
               const segGlobalEnd = selectedSeg ? audioTrack.offset + selectedSeg.origEnd : null
               const followingCut = selectedSeg
-                ? state.cuts.find(c => Math.abs(c.start - segGlobalEnd) < 0.05 && c.end > c.start)
+                ? userCuts.find(c => Math.abs(c.start - segGlobalEnd) < 0.05 && c.end > c.start)
                 : null
               return (
                 <div
