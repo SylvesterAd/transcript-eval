@@ -172,6 +172,51 @@ describe('getBRollEditorData hash-diff remap', () => {
     expect(p.userTimelineEnd).toBeCloseTo(16.94, 1)
   })
 
+  it('conflict path: race-loser adopts winner state and version so merge sees fresh data', async () => {
+    // Simulate the concurrent-fetch race: saveBrollEditorState returns
+    // { status: 'conflict', state, version } because another caller already
+    // wrote a newer version.  Before the fix, the loser left `loaded` at its
+    // stale pre-remap value; after the fix it replaces `loaded` with the
+    // winner's { state, version }.
+    //
+    // Observable invariant: editorStateVersion in the response must equal the
+    // winner's version (99), not the initial loaded.version (0).  This guards
+    // the exact `loaded = { state: saveResult.state, version: saveResult.version }`
+    // assignment in the conflict branch.
+
+    const winnerVersion = 99
+    const winnerState = {
+      lastRemappedCutsHash: 'winner-hash',
+      remappedPositions: {},
+      edits: {},
+    }
+
+    // loaded.version starts at 0 (no stored state). The FOR UPDATE lock row
+    // returns version=99 → mismatch → conflict (see saveBrollEditorState logic).
+    mockPoolConnect.mockReset()
+    mockPoolConnect.mockResolvedValue({
+      query: vi.fn().mockImplementation(async (sql) => {
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return {}
+        if (sql.includes('FOR UPDATE')) {
+          // Row exists with version=99; loaded.version is 0 → conflict.
+          return { rows: [{ state_json: JSON.stringify(winnerState), version: winnerVersion }] }
+        }
+        return { rows: [] }
+      }),
+      release: vi.fn(),
+    })
+
+    const data = await getBRollEditorData(planPipelineId)
+
+    // The function must not throw and must return the placements array.
+    expect(data.placements).toHaveLength(1)
+
+    // Core assertion: editorStateVersion reflects the winner's version (99),
+    // not the stale initial version (0).  Before the fix, the conflict branch
+    // did nothing, so loaded.version stayed 0 and editorStateVersion returned 0.
+    expect(data.editorStateVersion).toBe(winnerVersion)
+  })
+
   it('does not re-run remap when cuts hash is unchanged', async () => {
     const { cutsHash: hashFn } = await import('../placement-remap.js')
     const storedHash = hashFn([{ start: 10, end: 15 }], [])
