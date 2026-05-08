@@ -16,6 +16,7 @@ import {
   __test__classifyYtDlpError as classifyYtDlpError,
   __test__isProxyRetryable as isProxyRetryable,
   __test__ytDlpRunWithRetries as ytDlpRunWithRetries,
+  __test__ytDlpRunWithDatacenterRetry as ytDlpRunWithDatacenterRetry,
 } from '../broll.js'
 
 describe('classifyYtDlpError', () => {
@@ -196,5 +197,77 @@ describe('ytDlpRunWithRetries', () => {
     expect(args[1]).toMatch(/^http:\/\/customer-x-cc-US-sessid-/)
     expect(args.slice(2)).toEqual(['--dump-json', 'http://x'])
     expect(options).toEqual({ timeout: 1000 })
+  })
+})
+
+describe('ytDlpRunWithDatacenterRetry', () => {
+  function err(stderrText) {
+    const e = new Error('yt-dlp failed')
+    e.stderr = stderrText
+    return e
+  }
+  const botBlockErr = () => err("ERROR: Sign in to confirm you're not a bot")
+  const drmErr = () => err('ERROR: This video is DRM protected')
+  const networkErr = () => err('read ECONNRESET')
+  const unavailableErr = () => err('ERROR: Private video')
+
+  const fakeSleep = vi.fn(async () => {})
+
+  it('fails fast on DRM error without retrying datacenter or proxy', async () => {
+    const runner = vi.fn()
+    const proxyRetry = vi.fn()
+    await expect(ytDlpRunWithDatacenterRetry(drmErr(), [], {}, { runner, sleep: fakeSleep, proxyRetry }))
+      .rejects.toThrow()
+    expect(runner).not.toHaveBeenCalled()
+    expect(proxyRetry).not.toHaveBeenCalled()
+  })
+
+  it('fails fast on unavailable error', async () => {
+    const runner = vi.fn()
+    const proxyRetry = vi.fn()
+    await expect(ytDlpRunWithDatacenterRetry(unavailableErr(), [], {}, { runner, sleep: fakeSleep, proxyRetry }))
+      .rejects.toThrow()
+    expect(runner).not.toHaveBeenCalled()
+    expect(proxyRetry).not.toHaveBeenCalled()
+  })
+
+  it('retries datacenter once on network error and succeeds', async () => {
+    fakeSleep.mockClear()
+    const runner = vi.fn().mockResolvedValueOnce({ stdout: 'OK', stderr: '' })
+    const proxyRetry = vi.fn()
+    const result = await ytDlpRunWithDatacenterRetry(networkErr(), [], {}, { runner, sleep: fakeSleep, proxyRetry })
+    expect(result.stdout).toBe('OK')
+    expect(runner).toHaveBeenCalledTimes(1) // one retry
+    expect(proxyRetry).not.toHaveBeenCalled()
+    expect(fakeSleep).toHaveBeenCalledWith(3000)
+  })
+
+  it('retries datacenter once on bot_block and succeeds (lucky retry)', async () => {
+    const runner = vi.fn().mockResolvedValueOnce({ stdout: 'OK', stderr: '' })
+    const proxyRetry = vi.fn()
+    const result = await ytDlpRunWithDatacenterRetry(botBlockErr(), [], {}, { runner, sleep: fakeSleep, proxyRetry })
+    expect(result.stdout).toBe('OK')
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(proxyRetry).not.toHaveBeenCalled()
+  })
+
+  it('falls through to proxyRetry when datacenter retry also fails', async () => {
+    const runner = vi.fn().mockRejectedValueOnce(networkErr())
+    const proxyRetry = vi.fn().mockResolvedValueOnce({ stdout: 'PROXY_OK', stderr: '' })
+    const result = await ytDlpRunWithDatacenterRetry(networkErr(), [], {}, { runner, sleep: fakeSleep, proxyRetry })
+    expect(result.stdout).toBe('PROXY_OK')
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(proxyRetry).toHaveBeenCalledTimes(1)
+    // proxyRetry called with the second-attempt error, not the initial one
+    expect(proxyRetry.mock.calls[0][0].stderr).toBe('read ECONNRESET')
+  })
+
+  it('hands the LATEST error (not the initial one) to proxyRetry', async () => {
+    const initialErr = err('ECONNRESET initial')
+    const secondErr = err('HTTP Error 429 second')
+    const runner = vi.fn().mockRejectedValueOnce(secondErr)
+    const proxyRetry = vi.fn().mockResolvedValueOnce({ stdout: 'OK', stderr: '' })
+    await ytDlpRunWithDatacenterRetry(initialErr, [], {}, { runner, sleep: fakeSleep, proxyRetry })
+    expect(proxyRetry.mock.calls[0][0]).toBe(secondErr)
   })
 })

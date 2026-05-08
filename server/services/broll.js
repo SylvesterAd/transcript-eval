@@ -175,17 +175,54 @@ async function ytDlpRunWithRetries(initialErr, args, options, deps) {
   throw lastErr
 }
 
-// Run yt-dlp on the datacenter (Railway) IP first; on a proxy-retryable
-// error, fan out to up to 3 attempts via the Oxylabs residential proxy
-// with rotation waits between attempts.
-async function ytDlpRun(args, options) {
+// Pure datacenter-retry logic. Extracted from ytDlpRun for testability.
+//   1. First attempt fires before this function — caller passes the error.
+//   2. For non-retryable errors (DRM, unavailable), fail fast.
+//   3. Otherwise wait DATACENTER_RETRY_PAUSE_MS and try datacenter once
+//      more — covers transient flakes (random connection resets, manifest
+//      hiccups) without burning proxy budget.
+//   4. If second datacenter attempt also fails, hand off to the proxy
+//      retry loop (3 more attempts with IP rotation).
+const DATACENTER_RETRY_PAUSE_MS = 3000
+
+async function ytDlpRunWithDatacenterRetry(initialErr, args, options, deps) {
+  const { runner, sleep, proxyRetry } = deps
+  const firstClass = classifyYtDlpError(initialErr.stderr)
+
+  if (!isProxyRetryable(firstClass)) {
+    console.log(`[broll-dl] First datacenter attempt failed (class: ${firstClass}); not retryable, failing fast`)
+    throw initialErr
+  }
+
+  console.log(`[broll-dl] First datacenter attempt failed (class: ${firstClass}); waiting ${DATACENTER_RETRY_PAUSE_MS}ms before retrying datacenter once`)
+  await sleep(DATACENTER_RETRY_PAUSE_MS)
+
   try {
-    return await execFileAsync('yt-dlp', args, options)
+    return await runner(args, options)
+  } catch (secondErr) {
+    console.log(`[broll-dl] Second datacenter attempt also failed (class: ${classifyYtDlpError(secondErr.stderr)}); falling through to proxy retries`)
+    return proxyRetry(secondErr)
+  }
+}
+
+// Run yt-dlp on the datacenter (Railway) IP first; on a proxy-retryable
+// error, retry the datacenter once after a short pause, then fan out to
+// up to 3 attempts via the Oxylabs residential proxy with rotation waits
+// between attempts. Total: 2 datacenter + 3 proxy = up to 5 attempts.
+async function ytDlpRun(args, options) {
+  const runner = (a, o) => execFileAsync('yt-dlp', a, o)
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+  try {
+    return await runner(args, options)
   } catch (err) {
-    return ytDlpRunWithRetries(err, args, options, {
-      runner: (a, o) => execFileAsync('yt-dlp', a, o),
-      sleep: (ms) => new Promise(r => setTimeout(r, ms)),
-      buildProxy: (sessId) => oxylabsProxyUrl(sessId),
+    return ytDlpRunWithDatacenterRetry(err, args, options, {
+      runner,
+      sleep,
+      proxyRetry: (latestErr) => ytDlpRunWithRetries(latestErr, args, options, {
+        runner,
+        sleep,
+        buildProxy: (sessId) => oxylabsProxyUrl(sessId),
+      }),
     })
   }
 }
@@ -194,6 +231,7 @@ export {
   classifyYtDlpError as __test__classifyYtDlpError,
   isProxyRetryable as __test__isProxyRetryable,
   ytDlpRunWithRetries as __test__ytDlpRunWithRetries,
+  ytDlpRunWithDatacenterRetry as __test__ytDlpRunWithDatacenterRetry,
 }
 
 // yt-dlp dumps stderr with command + warnings on failure. Pull the first
