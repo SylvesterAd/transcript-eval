@@ -281,17 +281,33 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
            AND metadata_json NOT LIKE '%"isSubRun":true%'`
       ).all(mainVideoId, createStrategy.id)
     : []
-  const alreadyDoneAnalysisIds = new Set()
+  // Map analysisPipelineId → its completed strategy's pipelineId so dedup
+  // can both (a) skip re-firing the strategy and (b) propagate the existing
+  // strategy pipelineId forward to plan phase. Without (b), fresh-fire on a
+  // previously-completed project returns strategyPipelineIds=[] and plan
+  // phase crashes with "strategyPipelineIds required".
+  const existingStratByAnalysis = new Map()
   for (const r of existingStratRuns) {
     try {
       const m = JSON.parse(r.metadata_json || '{}')
-      if (m.analysisPipelineId) alreadyDoneAnalysisIds.add(m.analysisPipelineId)
+      if (m.analysisPipelineId && m.pipelineId) {
+        existingStratByAnalysis.set(m.analysisPipelineId, m.pipelineId)
+      }
     } catch {}
   }
 
-  const newAnalysisIds = analysisPipelineIds.filter(id => !alreadyDoneAnalysisIds.has(id))
+  const newAnalysisIds = analysisPipelineIds.filter(id => !existingStratByAnalysis.has(id))
   const skippedCount = analysisPipelineIds.length - newAnalysisIds.length
   if (skippedCount) console.log(`[broll-runner] Skipping ${skippedCount} strategies (already exist)`)
+
+  // Existing strategy pipelineIds for the dedup-skipped analyses, in input
+  // order. Returned alongside any newly-fired strategy IDs so plan phase
+  // sees the full set whether each strategy was fresh or cached.
+  const existingStrategyPipelineIds = []
+  for (const aId of analysisPipelineIds) {
+    const sId = existingStratByAnalysis.get(aId)
+    if (sId) existingStrategyPipelineIds.push(sId)
+  }
 
   // ── Order analysis IDs: favorite first, then variants in example order ──
   // Map each analysis pipeline ID to its reference video via the -ex<videoId>
@@ -406,9 +422,12 @@ export async function runStrategies({ subGroupId, mainVideoId, prepPipelineId, a
     })
   }
 
-  console.log(`[broll-runner] runStrategies: reserved ${allPipelineIds.length} pipelines (1 favorite + ${variantPlan.length} variants + ${shouldFireCombined ? 1 : 0} combined)`)
+  console.log(`[broll-runner] runStrategies: reserved ${allPipelineIds.length} pipelines (1 favorite + ${variantPlan.length} variants + ${shouldFireCombined ? 1 : 0} combined); ${existingStrategyPipelineIds.length} cached strategies forwarded`)
 
-  return { strategyPipelineIds: allPipelineIds, combinedPipelineId }
+  return {
+    strategyPipelineIds: [...allPipelineIds, ...existingStrategyPipelineIds],
+    combinedPipelineId,
+  }
 }
 
 // runPlanForEachVariant — fires executeCreatePlan once per strategy variant.
@@ -440,7 +459,41 @@ export async function runPlanForEachVariant({
   }
   const { executeCreatePlan } = await import('./broll.js')
 
-  const promises = strategyPipelineIds.map(stratId =>
+  // Dedup: for each strategy, find an existing complete plan run if one
+  // exists. executeCreatePlan itself doesn't dedup — it always re-runs
+  // and burns Gemini tokens — so the dedup has to live here. Without
+  // this, fresh-fire on a previously-completed project would re-run the
+  // entire plan stage for every strategy.
+  const createPlan = await db.prepare(
+    "SELECT id FROM broll_strategies WHERE strategy_kind = 'create_plan' ORDER BY id LIMIT 1"
+  ).get()
+  const existingPlanByStratId = new Map()
+  if (createPlan) {
+    const planRuns = await db.prepare(
+      `SELECT metadata_json FROM broll_runs
+       WHERE video_id = ? AND strategy_id = ? AND status = 'complete'
+         AND metadata_json NOT LIKE '%"isSubRun":true%'`
+    ).all(mainVideoId, createPlan.id)
+    for (const r of planRuns) {
+      try {
+        const m = JSON.parse(r.metadata_json || '{}')
+        if (m.strategyPipelineId && m.pipelineId) {
+          existingPlanByStratId.set(m.strategyPipelineId, m.pipelineId)
+        }
+      } catch {}
+    }
+  }
+
+  const stratsToFire = strategyPipelineIds.filter(s => !existingPlanByStratId.has(s))
+  const cachedPlanPipelineIds = strategyPipelineIds
+    .filter(s => existingPlanByStratId.has(s))
+    .map(s => existingPlanByStratId.get(s))
+
+  if (cachedPlanPipelineIds.length) {
+    console.log(`[broll-runner] runPlanForEachVariant: ${cachedPlanPipelineIds.length} plans already exist (forwarding cached pipelineIds), firing ${stratsToFire.length} new`)
+  }
+
+  const promises = stratsToFire.map(stratId =>
     executeCreatePlan(prepPipelineId, stratId, mainVideoId, subGroupId || null, editorCuts)
       .then(result => ({ ok: true, planPipelineId: result.planPipelineId, stratId }))
       .catch(err => {
@@ -450,10 +503,11 @@ export async function runPlanForEachVariant({
   )
 
   const results = await Promise.all(promises)
-  const planPipelineIds = results.filter(r => r.ok).map(r => r.planPipelineId)
+  const newPlanPipelineIds = results.filter(r => r.ok).map(r => r.planPipelineId)
+  const planPipelineIds = [...newPlanPipelineIds, ...cachedPlanPipelineIds]
 
-  if (planPipelineIds.length < strategyPipelineIds.length) {
-    console.warn(`[broll-runner] runPlanForEachVariant: ${planPipelineIds.length}/${strategyPipelineIds.length} plans succeeded`)
+  if (newPlanPipelineIds.length < stratsToFire.length) {
+    console.warn(`[broll-runner] runPlanForEachVariant: ${newPlanPipelineIds.length}/${stratsToFire.length} new plans succeeded`)
   }
 
   return { planPipelineIds }

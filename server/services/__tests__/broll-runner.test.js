@@ -33,6 +33,8 @@ const state = {
   completedAnalysis: [],
   group: { id: 1, editor_state_json: null },
   existingStratRuns: [],
+  existingPlanRuns: [],
+  createPlanStrategy: { id: 9 },
   // Cross-main reuse fixtures: candidate is the assemble-stage row of a
   // prior project's analysis for the same reference video. When set,
   // sourcePipelineRowsByPid maps the source pipelineId to all of its
@@ -69,6 +71,7 @@ vi.mock('../../db.js', () => ({
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'plan_prep'/.test(sql)) return state.planPrepStrategy
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_strategy'/.test(sql)) return state.createStrategy
           if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_combined_strategy'/.test(sql)) return state.combinedStrategy
+          if (/SELECT id FROM broll_strategies WHERE strategy_kind = 'create_plan'/.test(sql)) return state.createPlanStrategy
           if (/SELECT \* FROM broll_strategies WHERE strategy_kind = 'main_analysis'/.test(sql)) return state.analysisStrategy
           if (/SELECT \* FROM broll_strategy_versions/.test(sql)) return state.analysisVersion
           // existingPrep lookup (post-e229184): finds latest non-subRun complete plan_prep run
@@ -100,8 +103,14 @@ vi.mock('../../db.js', () => ({
         },
         async all(...args) {
           if (/FROM broll_runs WHERE strategy_id = \? AND video_id = \?/.test(sql)) return state.completedAnalysis
-          // existingStratRuns (post-e229184): WHERE video_id = ? AND strategy_id = ?
-          if (/FROM broll_runs[\s\S]*WHERE video_id = \? AND strategy_id = \?/.test(sql)) return state.existingStratRuns
+          // existingStratRuns + existingPlanRuns share the same SQL pattern but
+          // hit different strategy_ids. Discriminate by the strategy_id arg
+          // ([videoId, strategyId]).
+          if (/FROM broll_runs[\s\S]*WHERE video_id = \? AND strategy_id = \?/.test(sql)) {
+            const stratId = args[1]
+            if (stratId === state.createPlanStrategy?.id) return state.existingPlanRuns
+            return state.existingStratRuns
+          }
           // Cross-main reuse: fetch every row for a source pipelineId so the copy
           // step can re-INSERT them under the new pipelineId.
           if (/SELECT \* FROM broll_runs WHERE metadata_json LIKE \?/.test(sql)) {
@@ -298,15 +307,23 @@ describe('runStrategies', () => {
 
   it('skips analysis IDs that already have a completed strategy', async () => {
     state.existingStratRuns = [
-      { metadata_json: JSON.stringify({ phase: 'create_strategy', analysisPipelineId: '5-387-1-ex901' }) },
+      { metadata_json: JSON.stringify({
+        phase: 'create_strategy',
+        analysisPipelineId: '5-387-1-ex901',
+        pipelineId: 'strat-cached-ex901', // forwardable existing pipelineId
+      }) },
     ]
     const { runStrategies } = await import('../broll-runner.js?strat2=' + Date.now())
     const r = await runStrategies({
       subGroupId: 1, mainVideoId: 387,
       prepPipelineId: '7-387-1', analysisPipelineIds: ['5-387-1-ex901', '5-387-1-ex902'],
     })
-    // 1 new individual + 1 combined (re-fired because new analyses present)
-    expect(r.strategyPipelineIds).toHaveLength(2)
+    // 1 new individual (ex902) + 1 combined (re-fired because new analyses present)
+    // + 1 forwarded cached pipelineId (for the dedup-skipped ex901). Without
+    // the forward, plan phase would later crash with "strategyPipelineIds
+    // required" when called from a fresh-fire on a previously-completed project.
+    expect(r.strategyPipelineIds).toHaveLength(3)
+    expect(r.strategyPipelineIds).toContain('strat-cached-ex901')
     expect(r.combinedPipelineId).toBeTruthy()
   })
 
