@@ -3,21 +3,14 @@
 // Real-DB integration tests for the cut-edit handler in
 // PUT /groups/:id/editor-state.
 //
-// When the user edits cuts (drag handle, add/delete cut) in the editor and
-// saves, every placement's post-cut start_seconds/end_seconds must shift
-// accordingly so the timeline stays consistent. This file verifies:
-//   - cut change → recompute fires, anchor_word_idx drives new times
+// The legacy recomputePlacementsForCuts path has been removed from
+// _putEditorStateHandler (Task 7). Modern remap runs inside getBRollEditorData
+// via cutsHash diff. This file verifies:
+//   - cut change → placements are NOT mutated (modern remap is elsewhere)
 //   - cuts unchanged → route is a passthrough (preserves caller-set times)
-//   - missing/invalid anchor_word_idx → placement flagged orphan, not recomputed
 //
-// Uses real Postgres because the route reads transcripts.word_timestamps_json
-// from the same DB it writes editor_state_json into; mocking that surface
-// would defeat the purpose of integration coverage. All fixtures live under
-// the seeded video_groups.id and are torn down in afterAll.
-//
-// Pattern: direct handler invocation with real DB. Mirrors
-// videos-register-duration.test.js (mock req/res shape) and
-// broll-placement-uuid.test.js (real-DB fixture lifecycle). Supertest is
+// Uses real Postgres because the route reads/writes editor_state_json from
+// the same DB. Pattern: direct handler invocation with real DB. Supertest is
 // not a project dependency, so we call _putEditorStateHandler directly.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -87,7 +80,7 @@ describe('PUT /editor-state cut-edit handler', () => {
     }
   }
 
-  it('recomputes placement post-cut times when cuts change', async () => {
+  it('does not mutate editor_state.broll.placements when cuts change (modern remap is in getBRollEditorData)', async () => {
     const editor_state = {
       cuts: [{ start: 2, end: 4, source: 'manual' }],  // 2s cut before anchor word at orig t=5
       cutExclusions: [],
@@ -106,9 +99,9 @@ describe('PUT /editor-state cut-edit handler', () => {
     expect(res._body).toEqual({ ok: true })
     const row = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
     const stored = JSON.parse(row.editor_state_json)
-    // Original word 'c' at t=5. Cut [2,4] removes 2s. Post-cut t = 3. Duration 3 preserved.
-    expect(stored.broll.placements[0].start_seconds).toBe(3)
-    expect(stored.broll.placements[0].end_seconds).toBe(6)
+    // Placements must be stored exactly as sent — no legacy recompute in the save path.
+    expect(stored.broll.placements[0].start_seconds).toBe(5)
+    expect(stored.broll.placements[0].end_seconds).toBe(8)
   })
 
   it('does not recompute when cuts unchanged', async () => {
@@ -137,10 +130,12 @@ describe('PUT /editor-state cut-edit handler', () => {
     expect(stored.broll.placements[0].end_seconds).toBe(102)
   })
 
-  it('handles missing word_timestamps gracefully (no recompute attempt)', async () => {
-    // Test with a placement that has no anchor_word_idx — should be flagged orphan.
+  it('stores placements as-sent even when cuts change and anchor_word_idx is absent', async () => {
+    // No legacy recompute means placements with missing anchor_word_idx are no longer flagged
+    // orphan at save-time — they are stored verbatim; orphan detection is the concern of the
+    // read path (getBRollEditorData).
     const editor_state = {
-      cuts: [{ start: 7, end: 9, source: 'manual' }],  // different cut to trigger recompute
+      cuts: [{ start: 7, end: 9, source: 'manual' }],  // different cut from DB state
       cutExclusions: [],
       broll: {
         placements: [{
@@ -157,6 +152,9 @@ describe('PUT /editor-state cut-edit handler', () => {
     expect(res._body).toEqual({ ok: true })
     const row = await db.prepare('SELECT editor_state_json FROM video_groups WHERE id = ?').get(groupId)
     const stored = JSON.parse(row.editor_state_json)
-    expect(stored.broll.placements[0].anchor_orphaned).toBe(true)
+    // Stored verbatim — no orphan flag injected by the save handler.
+    expect(stored.broll.placements[0].start_seconds).toBe(10)
+    expect(stored.broll.placements[0].end_seconds).toBe(13)
+    expect(stored.broll.placements[0].anchor_orphaned).toBeUndefined()
   })
 })
