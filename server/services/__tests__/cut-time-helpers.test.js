@@ -13,7 +13,7 @@ vi.mock('../../db.js', () => ({
   },
 }))
 
-import { getCumulativeCutOffset, shiftOriginalToPostCut, formatCutRangesForPrompt } from '../broll.js'
+import { getCumulativeCutOffset, shiftOriginalToPostCut } from '../broll.js'
 
 describe('getCumulativeCutOffset', () => {
   it('returns 0 when no cuts precede time', () => {
@@ -47,19 +47,3 @@ describe('shiftOriginalToPostCut', () => {
   })
 })
 
-describe('formatCutRangesForPrompt', () => {
-  it('returns empty string when there are no cuts', () => {
-    expect(formatCutRangesForPrompt([])).toBe('')
-  })
-
-  it('formats each cut as a [HH:MM:SS] - [HH:MM:SS] line', () => {
-    const out = formatCutRangesForPrompt([{ start: 0, end: 122 }, { start: 255, end: 278 }])
-    expect(out).toContain('[00:00:00] - [00:02:02]')
-    expect(out).toContain('[00:04:15] - [00:04:38]')
-  })
-
-  it('rounds sub-second start/end to nearest second for the prompt', () => {
-    const out = formatCutRangesForPrompt([{ start: 122.49, end: 124.51 }])
-    expect(out).toContain('[00:02:02] - [00:02:05]')
-  })
-})

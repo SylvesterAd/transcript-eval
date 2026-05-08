@@ -178,12 +178,44 @@ export async function transcribeVideo(filePath, onProgress, signal) {
 
     console.log(`[scribe] Transcription complete: ${words.length} words, ${duration.toFixed(1)}s`)
 
-    return { text, formatted, words, segments: [], duration, alignment: alignmentInfo }
+    // Step 4: Acoustic feature pre-pass (librosa, ~10–20s for a 10-min video).
+    // Best-effort — failure logs but does not block transcription.
+    // Skipped in unit tests (NODE_ENV=test) and via SKIP_ACOUSTIC for
+    // environments where librosa isn't installed.
+    let acousticFeatures = null
+    if (process.env.NODE_ENV !== 'test' && !process.env.SKIP_ACOUSTIC) {
+      onProgress?.('extracting_features')
+      try {
+        acousticFeatures = await extractAcousticFeatures(fileToTranscribe, signal)
+        console.log(`[acoustic] Extracted ${acousticFeatures?.frames?.length || 0} frames at ${acousticFeatures?.hop_ms || '?'}ms hop`)
+      } catch (err) {
+        console.warn(`[acoustic] Feature extraction failed (non-blocking): ${err.message}`)
+      }
+    }
+
+    return { text, formatted, words, segments: [], duration, alignment: alignmentInfo, acousticFeatures }
   } finally {
     if (audioPath) {
       try { unlinkSync(audioPath) } catch {}
     }
   }
+}
+
+/** Run extract_acoustic_features.py on the audio file. */
+async function extractAcousticFeatures(filePath, signal) {
+  if (signal?.aborted) throw new Error('Acoustic extraction cancelled')
+  const script = join(__dirname, 'extract_acoustic_features.py')
+  // Use venv python in dev if present; else system python3 (production deploys
+  // install librosa system-wide via Dockerfile/nixpacks).
+  const repoRoot = join(__dirname, '..', '..')
+  const venvPython = join(repoRoot, '.venv', 'bin', 'python')
+  let py = 'python3'
+  try { if (statSync(venvPython)) py = venvPython } catch {}
+  const { stdout } = await execFileAsync(py, [script, filePath], {
+    timeout: 600000,
+    maxBuffer: 200 * 1024 * 1024,  // up to 200MB JSON for very long videos
+  })
+  return JSON.parse(stdout)
 }
 
 /**

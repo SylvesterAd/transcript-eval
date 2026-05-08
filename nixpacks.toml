@@ -1,8 +1,11 @@
 [phases.setup]
-aptPkgs = ["ffmpeg"]
+aptPkgs = ["ffmpeg", "python3", "python3-pip"]
 
 [phases.build]
-cmds = ["echo 'Backend only - skip frontend build'"]
+cmds = [
+  "pip install --break-system-packages -r requirements.txt",
+  "echo 'Backend only - skip frontend build'",
+]
 
 [start]
 cmd = "node server/index.js"

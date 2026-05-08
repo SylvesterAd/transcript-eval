@@ -669,6 +669,10 @@ export async function runFullAutoBrollChain(subGroupId, { resumeFromSubstage = n
   } catch (err) {
     // Keep broll_chain_substage so the frontend can show WHERE the chain broke
     // (loader vs editor decision lives in src/lib/projectRoute.js#failedPrePause).
+    // Log the full stack trace — bare err.message often loses the call site of
+    // a TypeError like "Cannot read properties of undefined" and we end up
+    // debugging blind (see group 374 / 2026-05-08).
+    console.error(`[chain] subGroup ${subGroupId} failed:`, err.stack || err)
     await db.prepare(
       "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
@@ -697,6 +701,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
     try {
       return await __orchestratorDeps.runFullAutoBrollChain(subGroupId)
     } catch (err) {
+      console.error(`[resumeChain:strategy] subGroup ${subGroupId} failed:`, err.stack || err)
       await db.prepare(
         "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
       ).run(String(err.message).slice(0, 500), subGroupId)
@@ -779,6 +784,7 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
     }
   } catch (err) {
+    console.error(`[resumeChain] subGroup ${subGroupId} failed:`, err.stack || err)
     await db.prepare(
       "UPDATE video_groups SET broll_chain_status = 'failed', broll_chain_error = ? WHERE id = ?"
     ).run(String(err.message).slice(0, 500), subGroupId)
