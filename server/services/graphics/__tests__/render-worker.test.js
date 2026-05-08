@@ -392,63 +392,124 @@ describe('renderWorker.drainOnce — lint gate', () => {
   });
 });
 
-describe('renderWorker.drainOnce — multi-scene', () => {
-  it('multi-scene: renders each scene and concatenates', async () => {
+describe('drainOnce — multi-scene single-render flow', () => {
+  it('produces ONE render for a multi-scene spec; critic returns aggregate score', async () => {
     const db = (await import('../../../db.js')).default
     const sharedGet = db.prepare().get
     sharedGet.mockReset()
     sharedGet
       .mockResolvedValueOnce({
-        id: 7, session_id: 2, iteration: 1, template: 'lower-third',
+        id: 100, session_id: 's-100',
         spec_snapshot_json: {
-          aspectRatio: '16:9',
-          tone: 'neutral',
+          aspectRatio: '16:9', tone: 'analytical',
           scenes: [
-            { template: 'lower-third', duration: 3, mainText: 'A', subText: 'a' },
-            { template: 'lower-third', duration: 5, mainText: 'B', subText: 'b' },
+            { template: 'opener', duration: 3, mainText: 'A', subText: 'kicker' },
+            { template: 'stat', duration: 4, mainText: '187', subText: 'PCT' },
+            { template: 'cta', duration: 4, mainText: 'READ' },
           ],
         },
+        iteration_count: 0,
       })
       .mockResolvedValue(null)
 
-    const { specToHtml } = await import('../html-generator.js')
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
     const { renderHtml } = await import('../render-runner.js')
-    const { concatScenes } = await import('../scene-concat.js')
-    const { uploadRender } = await import('../uploader.js')
     const { runCritic } = await import('../critic/critic-runner.js')
     const { runLint } = await import('../lint-runner.js')
+    const { uploadRender } = await import('../uploader.js')
 
     runLint.mockReset()
     runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
 
     specToHtml.mockClear()
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="main" data-composition-id="main" data-duration="11">' +
+        '<div class="scene clip" id="s1" data-start="0" data-duration="3"></div>' +
+        '<div class="scene clip" id="s2" data-start="3" data-duration="4"></div>' +
+        '<div class="scene clip" id="s3" data-start="7" data-duration="4"></div>' +
+        '</div></body></html>',
+      cost: 1, tokens: { in: 100, out: 100 },
+    })
+    refineHtml.mockClear()
     renderHtml.mockClear()
-    concatScenes.mockClear()
+    renderHtml.mockResolvedValue({ outputPath: '/tmp/out.mp4', durationMs: 200 })
     uploadRender.mockClear()
+    uploadRender.mockResolvedValue({ url: 'http://supa/r.mp4' })
+
     runCritic.mockReset()
-    // Two scenes, each passes on first iteration → 2 critic calls total.
     runCritic.mockResolvedValue({
-      score: 0.9,
-      criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
-      feedback: 'good',
-      retry_recommended: false,
-      frameUrls: ['https://x/0.png'],
-      tokens: { in: 0, out: 0 },
+      score: 0.85, criteria: {}, feedback: 'Scene 1: ok\nScene 2: ok\nScene 3: ok',
+      retry_recommended: false, frameUrls: [], tokens: { in: 50, out: 50 },
     })
 
     const { drainOnce } = await import('../render-worker.js')
     const result = await drainOnce()
 
     expect(result.processed).toBe(1)
-    expect(result.errors).toHaveLength(0)
-    expect(specToHtml).toHaveBeenCalledTimes(2)
-    expect(renderHtml).toHaveBeenCalledTimes(2)
-    const subDirs = renderHtml.mock.calls.map((c) => c[0].subDir)
-    expect(subDirs).toEqual(['scene-0', 'scene-1'])
-    expect(concatScenes).toHaveBeenCalledTimes(1)
-    expect(concatScenes.mock.calls[0][0].sceneMp4Paths).toHaveLength(2)
-    // 2 per-scene uploads + 1 final concat upload = 3
-    expect(uploadRender).toHaveBeenCalledTimes(3)
+    expect(specToHtml).toHaveBeenCalledTimes(1)
+    expect(renderHtml).toHaveBeenCalledTimes(1)
+    expect(runCritic).toHaveBeenCalledTimes(1)
+    expect(refineHtml).not.toHaveBeenCalled()
+  })
+
+  it('refines once when critic returns low score with scene-scoped feedback', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 101, session_id: 's-101',
+        spec_snapshot_json: {
+          aspectRatio: '16:9', tone: 'neutral',
+          scenes: [
+            { template: 'lower-third', duration: 5, mainText: 'A', subText: 'a' },
+            { template: 'lower-third', duration: 5, mainText: 'B', subText: 'b' },
+          ],
+        },
+        iteration_count: 0,
+      })
+      .mockResolvedValue(null)
+
+    const { specToHtml, refineHtml } = await import('../html-generator.js')
+    const { renderHtml } = await import('../render-runner.js')
+    const { runCritic } = await import('../critic/critic-runner.js')
+    const { runLint } = await import('../lint-runner.js')
+    const { uploadRender } = await import('../uploader.js')
+
+    runLint.mockReset()
+    runLint.mockResolvedValue({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] })
+
+    specToHtml.mockClear()
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="main" data-composition-id="main" data-duration="10">v1</div></body></html>',
+      cost: 1, tokens: { in: 100, out: 100 },
+    })
+    refineHtml.mockClear()
+    refineHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="main" data-composition-id="main" data-duration="10">v2</div></body></html>',
+      cost: 1, tokens: { in: 100, out: 100 },
+    })
+    renderHtml.mockClear()
+    renderHtml.mockResolvedValue({ outputPath: '/tmp/out.mp4', durationMs: 200 })
+    uploadRender.mockClear()
+    uploadRender.mockResolvedValue({ url: 'http://supa/r.mp4' })
+
+    runCritic.mockReset()
+    runCritic
+      .mockResolvedValueOnce({ score: 0.5, criteria: {}, feedback: 'Scene 1: too fast\nScene 2: ok', retry_recommended: true, frameUrls: [], tokens: { in: 50, out: 50 } })
+      .mockResolvedValueOnce({ score: 0.95, criteria: {}, feedback: 'Scene 1: better\nScene 2: ok', retry_recommended: false, frameUrls: [], tokens: { in: 50, out: 50 } })
+
+    const { drainOnce } = await import('../render-worker.js')
+    const result = await drainOnce()
+
+    expect(result.processed).toBe(1)
+    expect(specToHtml).toHaveBeenCalledTimes(1)
+    expect(refineHtml).toHaveBeenCalledTimes(1)
     expect(runCritic).toHaveBeenCalledTimes(2)
+    expect(renderHtml).toHaveBeenCalledTimes(2)
+
+    const refineArgs = refineHtml.mock.calls[0][0]
+    expect(refineArgs.feedback).toMatch(/Scene 1: too fast/)
+    expect(refineArgs.feedback).toMatch(/Scene 2: ok/)
   })
 });
