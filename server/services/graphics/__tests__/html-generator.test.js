@@ -281,12 +281,85 @@ describe('specToHtml additionalSystemContext', () => {
 })
 
 describe('FEW_SHOT_LOTTIE_LOGO', () => {
-  it('is interpolated into CREATE_HTML_SYSTEM_PROMPT and uses window.__hfLottie', async () => {
+  it('is exported and uses window.__hfLottie', async () => {
     const mod = await import('../html-generator.js')
     expect(mod.FEW_SHOT_LOTTIE_LOGO).toBeDefined()
     expect(mod.FEW_SHOT_LOTTIE_LOGO).toMatch(/window\.__hfLottie|hfLottie/)
     expect(mod.FEW_SHOT_LOTTIE_LOGO).toMatch(/lottie-web|@hyperframes\/lottie/)
     expect(mod.FEW_SHOT_LOTTIE_LOGO).toMatch(/data-composition-id="main"/)
-    expect(mod.CREATE_HTML_SYSTEM_PROMPT).toContain(mod.FEW_SHOT_LOTTIE_LOGO)
+  })
+})
+
+describe('CREATE_HTML_SYSTEM_PROMPT — canonical multi-scene schema', () => {
+  it('teaches canonical scene-clip pattern', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/class="scene clip"/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/data-track-index/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/scene-content/)
+  })
+
+  it('teaches anchor vs non-anchor scenes', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/anchor scene/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/visibility:\s*hidden/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/style="opacity:\s*0;?"/)
+  })
+
+  it('teaches HyperShader.init pattern', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/HyperShader\.init/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/scenes\.length === transitions\.length \+ 1/)
+  })
+
+  it('lists transition strategy: hard cuts default, shaders sparingly', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/95%|hard cuts.*default/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/2.{0,5}3 shader|2-3 shader/i)
+  })
+})
+
+describe('CREATE_HTML_SYSTEM_PROMPT — missing canonical rules now present', () => {
+  it('bans known web fonts', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Inter\b/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Roboto\b/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Poppins\b/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Playfair Display/)
+  })
+
+  it('bans known font pairings', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Fraunces.*JetBrains/)
+  })
+
+  it('teaches mid-scene pattern catalog', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    const patterns = ['counter', 'breathing', 'glow', 'stagger', 'Ken Burns', 'highlight sweep', 'orbit']
+    const hits = patterns.filter((p) => new RegExp(p, 'i').test(CREATE_HTML_SYSTEM_PROMPT))
+    expect(hits.length).toBeGreaterThanOrEqual(5)
+  })
+
+  it('maps eases to feelings with durations', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    const feelings = ['Smooth', 'Snappy', 'Bouncy', 'Dramatic', 'Dreamy', 'Mechanical']
+    const hits = feelings.filter((f) => new RegExp(`\\b${f}\\b`, 'i').test(CREATE_HTML_SYSTEM_PROMPT))
+    expect(hits.length).toBeGreaterThanOrEqual(5)
+  })
+
+  it('requires tabular-nums on number columns', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/tabular-nums/)
+  })
+
+  it('includes a self-review checklist', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/self-review|before output|verify/i)
+  })
+
+  it('preserves Phase 4 rules (determinism, autoAlpha, ≥3 eases)', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/Math\.random/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/autoAlpha/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/at least 3/)
   })
 })
