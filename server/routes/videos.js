@@ -365,10 +365,17 @@ async function runTranscription(videoId, signal) {
     const result = await transcribeVideo(actualPath, onProgress, signal)
 
     await db.prepare(`
-      INSERT INTO transcripts (video_id, type, content, word_timestamps_json, alignment_json)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(video_id, type) DO UPDATE SET content = excluded.content, word_timestamps_json = excluded.word_timestamps_json, alignment_json = excluded.alignment_json
-    `).run(videoId, transcriptType, result.formatted, JSON.stringify(result.words), result.alignment ? JSON.stringify(result.alignment) : null)
+      INSERT INTO transcripts (video_id, type, content, word_timestamps_json, alignment_json, acoustic_features_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(video_id, type) DO UPDATE SET content = excluded.content, word_timestamps_json = excluded.word_timestamps_json, alignment_json = excluded.alignment_json, acoustic_features_json = excluded.acoustic_features_json
+    `).run(
+      videoId,
+      transcriptType,
+      result.formatted,
+      JSON.stringify(result.words),
+      result.alignment ? JSON.stringify(result.alignment) : null,
+      result.acousticFeatures ? JSON.stringify(result.acousticFeatures) : null,
+    )
 
     if (result.duration && !video.duration_seconds) {
       await db.prepare('UPDATE videos SET duration_seconds = ? WHERE id = ?').run(Math.round(result.duration), videoId)
