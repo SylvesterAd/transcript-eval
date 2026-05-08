@@ -191,8 +191,16 @@ export async function drainOnce() {
     } catch (e) {
       errors.push({ renderId: row.id, error: e.message })
       try {
-        await db.prepare(`UPDATE graphics_renders SET status = 'failed', error_message = ? WHERE id = ?`)
-          .run(e.message.slice(0, 500), row.id)
+        await db.transaction(async (tx) => {
+          await tx.prepare(`UPDATE graphics_renders SET status = 'failed', error_message = ? WHERE id = ?`)
+            .run(e.message.slice(0, 500), row.id)
+          // If this was an iteration off a parent, the parent is still complete and
+          // the user can retry. Unstick the session so they're not blocked.
+          if (row.parent_render_id) {
+            await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`)
+              .run(row.session_id)
+          }
+        })
       } catch (markErr) {
         console.error('[graphics-worker] failed to mark render failed', row.id, markErr)
       }

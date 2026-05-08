@@ -368,23 +368,30 @@ describe('renderWorker.drainOnce — lint gate', () => {
 
     renderHtml.mockClear();
 
-    // Capture the failure-marking UPDATE call — db.prepare returns a fresh object each call,
-    // so we instrument the prepare mock to track failure-marking SQL.
+    // Capture the failure-marking UPDATE call. The catch block now wraps
+    // failure marking in db.transaction — override it so inner tx.prepare
+    // calls route through the spy.
+    const origTransaction = db.transaction;
+    db.transaction = async (fn) => fn({ prepare: (...args) => db.prepare(...args) });
     const prepareSpy = vi.spyOn(db, 'prepare');
 
-    const { drainOnce } = await import('../render-worker.js');
-    const result = await drainOnce();
+    try {
+      const { drainOnce } = await import('../render-worker.js');
+      const result = await drainOnce();
 
-    expect(result.processed).toBe(0);
-    expect(result.errors).toHaveLength(1);
-    expect(result.errors[0].error).toMatch(/lint failed/i);
-    expect(runLint).toHaveBeenCalledTimes(2);
-    expect(renderHtml).not.toHaveBeenCalled();
-    // The failure-marking SQL should have been prepared
-    const sqls = prepareSpy.mock.calls.map((c) => c[0]);
-    const failedMark = sqls.find((s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'failed'/.test(s));
-    expect(failedMark).toBeDefined();
-    prepareSpy.mockRestore();
+      expect(result.processed).toBe(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].error).toMatch(/lint failed/i);
+      expect(runLint).toHaveBeenCalledTimes(2);
+      expect(renderHtml).not.toHaveBeenCalled();
+      // The failure-marking SQL should have been prepared
+      const sqls = prepareSpy.mock.calls.map((c) => c[0]);
+      const failedMark = sqls.find((s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'failed'/.test(s));
+      expect(failedMark).toBeDefined();
+    } finally {
+      prepareSpy.mockRestore();
+      db.transaction = origTransaction;
+    }
   });
 });
 
@@ -663,6 +670,46 @@ describe('renderWorker.drainOnce — refine-from-parent path', () => {
     expect(refineHtml).toHaveBeenCalledTimes(1)
     expect(runLint).toHaveBeenCalledTimes(1)
     expect(renderHtml).not.toHaveBeenCalled()
+  })
+
+  it('unsticks session back to iterating when a refine render fails', async () => {
+    const db = (await import('../../../db.js')).default
+    const sharedGet = db.prepare().get
+    sharedGet.mockReset()
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 304, session_id: 's-304', iteration: 2, template: 'lower-third',
+        parent_render_id: 204,
+        human_feedback: 'thing',
+        spec_snapshot_json: { template: 'lower-third', mainText: 'X', subText: 'Y', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      })
+      .mockResolvedValueOnce({ final_html_text: null })  // triggers the throw
+      .mockResolvedValue(null)
+
+    const origTransaction = db.transaction
+    db.transaction = async (fn) => fn({ prepare: (...args) => db.prepare(...args) })
+    const prepareSpy = vi.spyOn(db, 'prepare')
+
+    try {
+      const { drainOnce } = await import('../render-worker.js')
+      const result = await drainOnce()
+
+      expect(result.processed).toBe(0)
+      expect(result.errors).toHaveLength(1)
+
+      const sqls = prepareSpy.mock.calls.map((c) => c[0])
+      const failedMark = sqls.find(
+        (s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'failed'/.test(s)
+      )
+      const unstickSession = sqls.find(
+        (s) => /UPDATE graphics_sessions/.test(s) && /status\s*=\s*'iterating'/.test(s)
+      )
+      expect(failedMark).toBeDefined()
+      expect(unstickSession).toBeDefined()
+    } finally {
+      prepareSpy.mockRestore()
+      db.transaction = origTransaction
+    }
   })
 })
 
