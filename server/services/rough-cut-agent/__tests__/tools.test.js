@@ -19,9 +19,10 @@ function makeState() {
 }
 
 describe('TOOL_SCHEMAS', () => {
-  it('exports all 14 tool schemas with Anthropic-compatible shape', () => {
+  it('exports all 15 tool schemas with Anthropic-compatible shape', () => {
     const expected = ['get_transcript', 'get_chapters', 'get_silences', 'get_audio_events',
-      'search_transcript', 'find_interruption_clusters', 'propose_cut', 'mark_uncertain',
+      'search_transcript', 'find_interruption_clusters', 'find_acoustic_boundaries',
+      'propose_cut', 'mark_uncertain',
       'remove_cut', 'adjust_cut', 'preview_diff', 'commit_chunk', 'get_acoustic_features', 'finish']
     const names = TOOL_SCHEMAS.map(t => t.name)
     for (const e of expected) expect(names).toContain(e)

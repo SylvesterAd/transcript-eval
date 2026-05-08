@@ -1,5 +1,7 @@
 // Per-run mutable state for the rough-cut agent. Pure JS — no DB, no I/O.
 
+import { computeBaselines } from './boundaries.js'
+
 let nextCutCounter = 0
 let nextUncertainCounter = 0
 
@@ -11,6 +13,7 @@ export function createState({ assembledTranscript, wordTimestamps, acousticFeatu
   const uncertain = []
   let chapters = null
   let acoustic = acousticFeatures
+  let baselines = null
 
   return {
     assembledTranscript,
@@ -20,7 +23,14 @@ export function createState({ assembledTranscript, wordTimestamps, acousticFeatu
     get chapters() { return chapters },
     setChapters(value) { chapters = value },
     get acousticFeatures() { return acoustic },
-    setAcousticFeatures(value) { acoustic = value },
+    setAcousticFeatures(value) { acoustic = value; baselines = null },
+    // Lazy per-video baselines. Computed once on first access.
+    get acousticBaselines() {
+      if (baselines) return baselines
+      if (!acoustic?.frames?.length) return null
+      baselines = computeBaselines(acoustic.frames, wordTimestamps || [])
+      return baselines
+    },
 
     addCut({ start, end, category, reason, confidence, evidence }) {
       const id = `cut_${++nextCutCounter}_${Math.random().toString(36).slice(2, 8)}`

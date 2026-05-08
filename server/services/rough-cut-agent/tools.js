@@ -5,6 +5,7 @@
 
 import { deriveSilences } from './silences.js'
 import { findInterruptionClusters } from './clusters.js'
+import { findAcousticBoundaries } from './boundaries.js'
 
 // ── JSON Schemas (Anthropic Messages API tool format) ─────────────────
 
@@ -133,6 +134,17 @@ export const TOOL_SCHEMAS = [
       type: 'object',
       properties: {
         scope: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+      },
+    },
+  },
+  {
+    name: 'find_acoustic_boundaries',
+    description: 'Returns boundary candidates scored by THIS VIDEO\'s own distribution of acoustic signals — not absolute thresholds. A noisy outdoor video and a quiet podcast surface comparable boundaries despite very different absolute dB. Each boundary has a percentile-based score and typed signals. Call this once per chunk before propose_cut to get a pre-filtered list of candidates instead of scanning per-word stats yourself.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+        min_score: { type: 'number', description: 'Drop boundaries below this score (0..1). Default 0.7.' },
       },
     },
   },
@@ -329,6 +341,36 @@ async function preview_diff(params, state) {
     if (!overlaps(p.tcSec, lineEnd)) out.push(line)
   }
   return { preview: out.join('\n') }
+}
+
+async function find_acoustic_boundaries(params, state) {
+  const acoustic = state.acousticFeatures
+  if (!acoustic?.frames?.length) {
+    return { available: false, reason: 'No acoustic_features_json on this transcript.' }
+  }
+  const baselines = state.acousticBaselines
+  if (!baselines) {
+    return { available: false, reason: 'Could not compute per-video baselines.' }
+  }
+  const boundaries = findAcousticBoundaries(
+    acoustic.frames,
+    state.wordTimestamps,
+    baselines,
+    {
+      scope: params?.scope || null,
+      minScore: typeof params?.min_score === 'number' ? params.min_score : 0.7,
+    },
+  )
+  return {
+    available: true,
+    baselines: {
+      rms_speech_med: baselines.rms_speech_med,
+      pause_p50: baselines.pause_p50,
+      pause_p90: baselines.pause_p90,
+      rms_drop_p95: baselines.rms_drop_p95,
+    },
+    boundaries,
+  }
 }
 
 // ── Acoustic feature aggregation ───────────────────────────────────────
@@ -560,6 +602,7 @@ const TOOLS = {
   get_audio_events,
   search_transcript,
   find_interruption_clusters,
+  find_acoustic_boundaries,
   get_acoustic_features,
   propose_cut,
   mark_uncertain,
