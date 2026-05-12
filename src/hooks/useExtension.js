@@ -31,6 +31,18 @@ export const EXT_LATEST_VERSION =
 // pinned EXT_ID) keeps working past the initial probe.
 let _activeExtId = EXT_ID
 
+// Compose the most-informative human-readable error from an extension
+// reject response. Different code paths in the SW carry the reason on
+// different fields: queue.js uses `reason`, Ext.9's config gate uses
+// `error_code`, older paths use `error`. Pick whichever is present.
+export function extensionErrorMessage(r) {
+  if (!r || typeof r !== 'object') return ''
+  const code = r.error || r.reason || r.error_code || ''
+  const detail = r.detail || ''
+  if (code && detail) return `${code} — ${detail}`
+  return code || detail || ''
+}
+
 // Chrome reports a few distinct phrasings when the extension isn't
 // reachable. Match on substrings rather than exact equality so we
 // stay tolerant across Chrome versions / locales.
@@ -150,24 +162,26 @@ export function useExtension() {
     sendSession: async ({ token, kid, user_id, expires_at }) => {
       const backend_url = resolveBackendUrl()
       const r = await send({ type: 'session', version: 1, token, kid, user_id, expires_at, backend_url })
-      if (!r?.ok) throw new Error(r?.error || 'extension rejected session')
+      if (!r) throw new Error('extension returned no response to session message')
+      if (r.ok === false) throw new Error(extensionErrorMessage(r) || 'extension rejected session')
+      if (!r.ok && r.error) throw new Error(r.error)
       return r
     },
 
-    // Phase A: one-shot export send. Ext.5 will replace this with a
-    // long-lived Port; State D wiring lives in the next webapp plan.
-    // Manifest is the array buildManifest produced; target_folder is
-    // the display string we showed in State C; options is the
-    // checkbox state from State C.
+    // Phase A: one-shot export send. Ext.5 returns either { ok:true,
+    // run_id } from queue.startRun or { ok:false, reason|error_code,
+    // detail, ... } from queue rejection / Ext.9 config gate. Treat
+    // any explicit ok:false as failure regardless of which field
+    // carries the reason.
     sendExport: async ({ export_id, manifest, target_folder, options }) => {
       const r = await send({
         type: 'export', version: 1,
         export_id, manifest, target_folder, options,
       }, { timeoutMs: 10000 })
-      // Extension ack shape isn't strictly defined yet (Ext.5 owns it);
-      // accept anything truthy that doesn't carry .error as success.
-      if (r?.error) throw new Error(r.error)
-      return r ?? { ok: true }
+      if (!r) throw new Error('extension returned no response to export message')
+      if (r.ok === false) throw new Error(extensionErrorMessage(r) || 'extension rejected export')
+      if (r.error) throw new Error(r.error)
+      return r
     },
 
     // Open a long-lived Port to the extension. Unlike sendMessage (one-

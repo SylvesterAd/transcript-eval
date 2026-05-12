@@ -135,6 +135,18 @@ const StartButton = styled.button`
   &:disabled { background: #9ca3af; cursor: not-allowed; }
 `
 
+const StartError = styled.div`
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #991b1b;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+`
+
 export default function StateC_Summary({
   variant, manifestResp, additionalManifests, ping, diskValue,
   onStart, onChangeFolder, onTogglePlan, otherPlans = [],
@@ -143,6 +155,7 @@ export default function StateC_Summary({
   const [forceRedownload, setForceRedownload] = useState(false)
   const [includeExtras, setIncludeExtras] = useState({})  // {planPipelineId: true}
   const [starting, setStarting] = useState(false)
+  const [startError, setStartError] = useState(null)
 
   // Build the unified manifest from the current selection.
   const unified = useMemo(() => {
@@ -177,6 +190,7 @@ export default function StateC_Summary({
 
   async function handleStart() {
     if (starting) return
+    setStartError(null)
     setStarting(true)
     try {
       await onStart({
@@ -184,9 +198,12 @@ export default function StateC_Summary({
         options: { force_redownload: forceRedownload },
         targetFolder: folderName,
       })
+    } catch (e) {
+      // Surface the failure inline so the user isn't left with a
+      // dead button. Full error to console for DevTools debugging.
+      console.error('[StateC handleStart]', e)
+      setStartError(e?.message || String(e) || 'Export failed to start.')
     } finally {
-      // Parent transitions us out of state_c on success; only release
-      // local lock here on failure (parent re-throws in that case).
       setStarting(false)
     }
   }
@@ -274,6 +291,7 @@ export default function StateC_Summary({
           <Play size={16} />
           {starting ? 'Starting…' : 'Start Export'}
         </StartButton>
+        {startError ? <StartError>Export couldn't start: {startError}</StartError> : null}
       </Card>
     </Wrap>
   )
