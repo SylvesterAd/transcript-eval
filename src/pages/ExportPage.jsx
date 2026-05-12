@@ -404,7 +404,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
     await onStart({
       unifiedManifest: filteredManifest,
       options: { force_redownload: false, variants: state.variant_labels },
-      targetFolder: '~/Downloads/transcript-eval/',  // same default as State C
+      targetFolder: '~/Downloads/',  // same default as State C
     })
   }, [state.unified_manifest, state.variant_labels, onStart])
 

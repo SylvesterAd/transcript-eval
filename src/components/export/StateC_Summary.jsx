@@ -181,8 +181,8 @@ export default function StateC_Summary({
   // Default folder per spec § "Multi-variant exports" (multi: -all suffix).
   // User-edited override (via "Change folder") wins when present.
   const defaultFolder = unified.variants.length > 1
-    ? `~/Downloads/transcript-eval/export-${folderRoot}-all/`
-    : `~/Downloads/transcript-eval/export-${folderRoot}-${variantLetter}/`
+    ? `~/Downloads/export-${folderRoot}-all/`
+    : `~/Downloads/export-${folderRoot}-${variantLetter}/`
   const folderName = targetFolderOverride || defaultFolder
 
   const diskAvailable = diskValue?.available ?? null
