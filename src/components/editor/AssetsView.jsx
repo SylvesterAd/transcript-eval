@@ -188,13 +188,18 @@ export default function AssetsView() {
     })()
   }, [id, data?.group?.assembly_status, data?.group?.path_id, groups, isSubGroup])
 
-  // After auto-confirm completes, jump straight to the editor — skipping the
-  // "Proceed to Editor" click. Only fires for the auto-confirm path; users who
-  // confirmed manually still see the button so they can review before advancing.
+  // Skip the assets page when there's nothing to review. Two cases:
+  //   1. Auto-confirm just fired (auto path / single-video) — the user never
+  //      asked to see the classification, so drop them straight in the editor.
+  //   2. Revisit to an already-confirmed single-video parent — the assets page
+  //      has one sub-group with one clip and a single "Proceed to Editor"
+  //      button. Showing it is pure friction.
+  // Multi-video single-group (multicam) parents confirmed manually keep the
+  // page so the user can confirm the grouping before sync.
   useEffect(() => {
-    if (!autoConfirmRef.current) return
     if (!effectiveConfirmedGroups || effectiveConfirmedGroups.length !== 1) return
     const target = effectiveConfirmedGroups[0]
+    if (!autoConfirmRef.current && target.videoCount !== 1) return
     const tab = target.videoCount === 1 ? 'roughcut' : 'sync'
     navigate(`/editor/${target.id}/${tab}`, { replace: true })
   }, [effectiveConfirmedGroups, navigate])
