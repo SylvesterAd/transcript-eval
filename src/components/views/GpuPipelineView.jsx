@@ -112,7 +112,9 @@ function VideoThumbnail({ item, showScore, scoreLabel }) {
   // <video> element. Route through useHlsSource which handles HLS via hls.js
   // (or Safari native) and falls back to MP4 for other providers.
   const url = playing ? (item.preview_url || '') : ''
-  const isHls = url.includes('.m3u8')
+  // `.m3u8` may be followed by query params (e.g. signed-URL tokens), so match
+  // either end-of-string or `?` rather than substring-include.
+  const isHls = /\.m3u8(\?|$)/i.test(url)
   useHlsSource(videoRef, {
     hlsUrl: isHls ? url : null,
     mp4Url: !isHls && url ? url : null,
