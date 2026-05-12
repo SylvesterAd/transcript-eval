@@ -95,6 +95,95 @@ describe('orchestrator', () => {
   })
 });
 
+describe('extractSpec', () => {
+  it('parses flat single-scene JSON without a code fence', async () => {
+    const { extractSpec } = await import('../orchestrator.js')
+    const text = 'Need a tone.\n[SPEC]{"template":"lower-third","aspectRatio":"16:9"}'
+    expect(extractSpec(text)).toEqual({ template: 'lower-third', aspectRatio: '16:9' })
+  })
+
+  it('parses JSON wrapped in a ```json code fence', async () => {
+    const { extractSpec } = await import('../orchestrator.js')
+    const text = 'Looks good.\n\n[SPEC]\n```json\n{"template":"lower-third","duration":8}\n```\n'
+    expect(extractSpec(text)).toEqual({ template: 'lower-third', duration: 8 })
+  })
+
+  it('parses multi-scene JSON with nested objects and arrays', async () => {
+    const { extractSpec } = await import('../orchestrator.js')
+    const text = '[SPEC]\n```json\n{\n  "template":"lower-third",\n  "aspectRatio":"16:9",\n  "tone":"neutral",\n  "scenes":[{"template":"lower-third","duration":1,"mainText":"A","subText":"B"},{"template":"lower-third","duration":2,"mainText":"C","subText":"D"}]\n}\n```\n'
+    const spec = extractSpec(text)
+    expect(spec.aspectRatio).toBe('16:9')
+    expect(Array.isArray(spec.scenes)).toBe(true)
+    expect(spec.scenes).toHaveLength(2)
+    expect(spec.scenes[1].mainText).toBe('C')
+  })
+
+  it('tolerates braces inside string values', async () => {
+    const { extractSpec } = await import('../orchestrator.js')
+    const text = '[SPEC]{"template":"lower-third","mainText":"hello {world}","subText":"x"}'
+    expect(extractSpec(text)).toEqual({
+      template: 'lower-third',
+      mainText: 'hello {world}',
+      subText: 'x',
+    })
+  })
+
+  it('returns {} when no [SPEC] marker is present', async () => {
+    const { extractSpec } = await import('../orchestrator.js')
+    expect(extractSpec('just asking a question')).toEqual({})
+  })
+
+  it('returns {} when JSON is malformed', async () => {
+    const { extractSpec } = await import('../orchestrator.js')
+    expect(extractSpec('[SPEC]{not json}')).toEqual({})
+  })
+})
+
+describe('stripSpecBlock', () => {
+  it('removes flat [SPEC]{...} from visible text', async () => {
+    const { stripSpecBlock } = await import('../orchestrator.js')
+    const text = 'What aspect ratio?\n[SPEC]{"template":"lower-third"}'
+    expect(stripSpecBlock(text)).toBe('What aspect ratio?')
+  })
+
+  it('removes a code-fenced [SPEC] block including the closing fence', async () => {
+    const { stripSpecBlock } = await import('../orchestrator.js')
+    const text = 'Rendering now.\n\n[SPEC]\n```json\n{"template":"lower-third","scenes":[{"duration":1}]}\n```\nbye'
+    const stripped = stripSpecBlock(text)
+    expect(stripped).not.toContain('[SPEC]')
+    expect(stripped).not.toContain('```')
+    expect(stripped).toContain('Rendering now.')
+    expect(stripped).toContain('bye')
+  })
+})
+
+describe('orchestrator — multi-scene spec extraction', () => {
+  it('queues a render when Gemini wraps a complete multi-scene spec in ```json', async () => {
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+    const fencedReply = 'Looks good. Rendering now.\n\n[SPEC]\n```json\n{\n  "template":"lower-third",\n  "aspectRatio":"16:9",\n  "tone":"neutral",\n  "scenes":[\n    {"template":"lower-third","duration":1,"mainText":"Title","subText":"Date"},\n    {"template":"lower-third","duration":2,"mainText":"Body","subText":"Detail"}\n  ]\n}\n```'
+    callGemini.mockResolvedValue({
+      text: fencedReply,
+      toolUses: [],
+      tokens: { in: 200, out: 50 },
+      stop: 'STOP',
+    })
+
+    const { runChatTurn } = await import('../orchestrator.js')
+    const result = await runChatTurn({ sessionId: 1, userMessage: 'classic serif works' })
+
+    expect(result.specUpdate.aspectRatio).toBe('16:9')
+    expect(result.specUpdate.scenes).toHaveLength(2)
+    expect(result.assistantText).not.toContain('[SPEC]')
+    expect(result.assistantText).not.toContain('```')
+    expect(result.renderId).not.toBeNull()
+    const sessionUpdate = dbState.txCalls.find(
+      (c) => /UPDATE graphics_sessions/i.test(c.sql) && /status\s*=\s*'rendering'/i.test(c.sql)
+    )
+    expect(sessionUpdate).toBeDefined()
+  })
+})
+
 describe('BRIEF_SYSTEM_PROMPT documents available adapters', () => {
   it('lists gsap, lottie, three, animejs, waapi, css-animations as adapter options', async () => {
     const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
@@ -104,6 +193,38 @@ describe('BRIEF_SYSTEM_PROMPT documents available adapters', () => {
     expect(BRIEF_SYSTEM_PROMPT).toMatch(/animejs|anime\.js/i)
     expect(BRIEF_SYSTEM_PROMPT).toMatch(/waapi|web animations/i)
     expect(BRIEF_SYSTEM_PROMPT).toMatch(/css-animations|css animation/i)
+  })
+})
+
+describe('BRIEF_SYSTEM_PROMPT teaches scene template vocabulary', () => {
+  it('lists more than just lower-third as available scene templates', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/title-card/)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/\bmap\b/)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/\bchart\b/)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/freeform/)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/lower-third/)
+  })
+
+  it('does NOT tell the model lower-third is the only available template', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).not.toMatch(/only template.*available.*lower-third/i)
+    expect(BRIEF_SYSTEM_PROMPT).not.toMatch(/only.*lower-third/i)
+  })
+
+  it('warns against defaulting every scene to lower-third', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/do NOT default|not.*default.*lower-third|pick honestly|honestly/i)
+  })
+})
+
+describe('CREATE_HTML_SYSTEM_PROMPT interprets scene template hints', () => {
+  it('teaches Opus how to render map and title-card scenes', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/template.*hint|scene intent|drive layout/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/title-card/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/\bmap\b/)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/chart\.js|chart/)
   })
 })
 

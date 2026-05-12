@@ -6,23 +6,77 @@ import { BRIEF_SYSTEM_PROMPT } from './brief-prompt.js';
 import { mergeSpec, isSpecComplete } from './session-state.js';
 import { emit } from './events/emitter.js';
 
-const SPEC_BLOCK = /\[SPEC\]\s*(\{[^}]*\})/m;
-
 const MAX_ITERATIONS_PER_SESSION = parseInt(process.env.GRAPHICS_MAX_ITERATIONS_PER_SESSION || '10', 10);
 const ACK_TEXT = 'Refining…';
 
-function extractSpec(text) {
-  const m = text.match(SPEC_BLOCK);
-  if (!m) return {};
+// Locate `[SPEC] {...}` in an assistant reply. Gemini emits two shapes the old
+// regex couldn't handle: markdown code fences (```json...```) and nested JSON
+// (multi-scene specs with `scenes: [{...}]`). This walks balanced braces while
+// respecting string literals so both shapes parse.
+export function findSpecRange(text) {
+  const marker = '[SPEC]';
+  const blockStart = text.indexOf(marker);
+  if (blockStart === -1) return null;
+
+  let i = blockStart + marker.length;
+  while (i < text.length && /\s/.test(text[i])) i++;
+
+  let hadFence = false;
+  if (text.startsWith('```', i)) {
+    hadFence = true;
+    i += 3;
+    while (i < text.length && /[a-zA-Z0-9_-]/.test(text[i])) i++;
+    while (i < text.length && /\s/.test(text[i])) i++;
+  }
+
+  if (text[i] !== '{') return null;
+  const jsonStart = i;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (inString) {
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) { i++; break; }
+    }
+  }
+  if (depth !== 0) return null;
+  const jsonEnd = i;
+
+  let blockEnd = jsonEnd;
+  if (hadFence) {
+    let j = jsonEnd;
+    while (j < text.length && /\s/.test(text[j])) j++;
+    if (text.startsWith('```', j)) blockEnd = j + 3;
+  }
+
+  return { blockStart, blockEnd, jsonStart, jsonEnd };
+}
+
+export function extractSpec(text) {
+  const range = findSpecRange(text);
+  if (!range) return {};
   try {
-    return JSON.parse(m[1]);
+    return JSON.parse(text.slice(range.jsonStart, range.jsonEnd));
   } catch {
     return {};
   }
 }
 
-function stripSpecBlock(text) {
-  return text.replace(SPEC_BLOCK, '').trim();
+export function stripSpecBlock(text) {
+  const range = findSpecRange(text);
+  if (!range) return text.trim();
+  return (text.slice(0, range.blockStart) + text.slice(range.blockEnd)).trim();
 }
 
 async function loadSession(sessionId) {

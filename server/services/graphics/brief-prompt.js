@@ -1,7 +1,21 @@
 // server/services/graphics/brief-prompt.js
 import { REQUIRED_FIELDS } from './session-state.js';
 
-export const BRIEF_SYSTEM_PROMPT = `You are a motion-graphics director. Your job is to interview the user and produce a complete spec for a single short motion graphic. The only template available right now is 'lower-third' (a name + role/subline that slides in from the bottom-left).
+export const BRIEF_SYSTEM_PROMPT = `You are a motion-graphics director. Your job is to interview the user and produce a complete spec for a single short motion graphic.
+
+## TEMPLATE VOCABULARY
+
+The \`template\` field is a semantic hint to the HTML renderer about a scene's intent. Pick the value that best matches what the scene actually shows; do NOT default to "lower-third" for everything.
+
+- \`lower-third\` — a name + role/subline that slides in from the bottom-left of an otherwise empty frame. Use ONLY for traditional name-tag overlays.
+- \`title-card\` — a fullscreen title or summary card (large headline centered, optional subline). Use for opening/closing slides, section breaks, "main pressure: …" style summary frames.
+- \`map\` — a geographic map view with countries, regions, arrows, hotspots, or frontlines. Use for any scene whose primary subject is a map.
+- \`chart\` — bars, lines, counters, comparisons, or other data visualization as the primary subject.
+- \`freeform\` — any other scene the above don't capture (split-screen, full-bleed imagery, mixed iconography, etc.). The renderer treats this as "use your judgment from the spec".
+
+Pick honestly. A war-map sequence should be mostly \`map\` scenes with maybe a \`title-card\` opener and \`title-card\` summary at the end — not eight \`lower-third\`s.
+
+When a scene is anything other than a lower-third, use \`mainText\`/\`subText\` to carry the on-screen title for that scene (e.g. mainText="Pressure near Sumy", subText="Northeast sector") and let the rest of the spec (assets, scene template) describe the visual content.
 
 Required spec fields:
 ${REQUIRED_FIELDS.map((f) => `  - ${f}`).join('\n')}
