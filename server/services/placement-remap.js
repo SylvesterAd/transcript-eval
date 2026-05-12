@@ -71,18 +71,25 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
     const llmDuration = llmEnd - llmStart
 
     // Prefer the actual transcript word position when the LLM-assigned
-    // anchor_word_idx points to a real word. Falls back to the LLM timecode
-    // for legacy placements (no idx), unmatched anchors (idx === -1), or
-    // post-edit drift (idx now out of range).
+    // anchor_word_idx points to a real word that's close to where the
+    // LLM placed it. The ±30s sanity gate rejects indices that
+    // `findAnchorWordIdx` (in server/services/anchor-word.js) returned
+    // from its first-token fallback path — when the full anchor phrase
+    // didn't match verbatim and the function fell back to the first
+    // occurrence of the first word. Without the gate, a placement
+    // intended for [00:02:52] could snap to "and" at 12.4s 160s away.
+    // The legacy placement-match.js used the same ±30s window for its
+    // anchor search, so the threshold matches that domain expectation.
     const idx = p.anchor_word_idx
     const idxValid =
       Number.isInteger(idx) &&
       idx >= 0 &&
       idx < wordsList.length &&
       Number.isFinite(wordsList[idx]?.start)
-    const usedWordSnap = idxValid
-    const startOrig = usedWordSnap ? wordsList[idx].start : llmStart
-    const endOrig = usedWordSnap ? startOrig + llmDuration : llmEnd
+    const wordStart = idxValid ? wordsList[idx].start : null
+    const usedWordSnap = idxValid && Math.abs(wordStart - llmStart) <= 30
+    const startOrig = usedWordSnap ? wordStart : llmStart
+    const endOrig = usedWordSnap ? wordStart + llmDuration : llmEnd
 
     // Clip the placement to the visible (non-cut) portion of the timeline.
     const startCut = cutContaining(startOrig, effectiveCuts)
