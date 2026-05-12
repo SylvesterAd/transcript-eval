@@ -1013,7 +1013,7 @@ function DoneView({ subGroups = [], navigate, onComplete }) {
       <div className="px-8 pb-4 space-y-3">
         {single && (
           <button
-            onClick={() => navigate(`/editor/${subGroups[0].id}/sync`)}
+            onClick={() => navigate(`/editor/${subGroups[0].id}`)}
             className="w-full p-5 rounded-2xl bg-primary-container text-on-primary-fixed font-bold text-sm uppercase tracking-wider hover:opacity-90 transition-opacity"
           >
             Open project
@@ -1022,7 +1022,7 @@ function DoneView({ subGroups = [], navigate, onComplete }) {
         {multi && subGroups.map(sg => (
           <button
             key={sg.id}
-            onClick={() => navigate(`/editor/${sg.id}/sync`)}
+            onClick={() => navigate(`/editor/${sg.id}`)}
             className="w-full p-4 rounded-2xl bg-surface-container-low/50 border border-white/5 hover:bg-surface-container-highest/40 transition-colors text-left flex items-center gap-3"
           >
             <span className="material-symbols-outlined text-primary-container">folder_open</span>

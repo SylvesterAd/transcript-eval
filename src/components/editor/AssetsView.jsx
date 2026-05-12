@@ -194,7 +194,9 @@ export default function AssetsView() {
   useEffect(() => {
     if (!autoConfirmRef.current) return
     if (!effectiveConfirmedGroups || effectiveConfirmedGroups.length !== 1) return
-    navigate(`/editor/${effectiveConfirmedGroups[0].id}/sync`, { replace: true })
+    const target = effectiveConfirmedGroups[0]
+    const tab = target.videoCount === 1 ? 'roughcut' : 'sync'
+    navigate(`/editor/${target.id}/${tab}`, { replace: true })
   }, [effectiveConfirmedGroups, navigate])
 
   const handleReclassify = async () => {
@@ -345,7 +347,7 @@ export default function AssetsView() {
               </div>
               {confirmedGroup && (
                 <button
-                  onClick={() => navigate(`/editor/${confirmedGroup.id}/sync`)}
+                  onClick={() => navigate(`/editor/${confirmedGroup.id}/${confirmedGroup.videoCount === 1 ? 'roughcut' : 'sync'}`)}
                   className={`group flex items-center gap-3 px-6 py-2.5 rounded-md transition-all active:scale-95 ${
                     isMain
                       ? 'bg-gradient-to-r from-primary-fixed to-primary-container text-on-primary-fixed hover:shadow-[0_0_20px_rgba(206,252,0,0.4)]'

@@ -77,7 +77,7 @@ function VideoCell({ track, num, videoRefs, currentTime, state }) {
         <video
           ref={ref}
           src={src}
-          className="w-full h-full object-cover"
+          className="w-full h-full object-contain"
           preload="auto"
           playsInline
           muted

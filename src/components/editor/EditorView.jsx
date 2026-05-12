@@ -185,7 +185,16 @@ export default function EditorView() {
 
   // URL tab is source of truth — sync to state before paint
   const assetsStatuses = ['classifying', 'classified', 'classification_failed', 'confirmed']
-  const activeTab = tab || (assetsStatuses.includes(groupDetail?.assembly_status) ? 'assets' : 'sync')
+  // Multicam sync is a no-op with a single source video — references (broll
+  // examples) have no group_id so they're absent from groupDetail.videos;
+  // filtering on video_type='raw' also excludes human_edited derivatives.
+  const rawVideoCount = (groupDetail?.videos || []).filter(v => v.video_type === 'raw').length
+  const singleVideo = rawVideoCount === 1
+  const activeTab = tab || (
+    assetsStatuses.includes(groupDetail?.assembly_status)
+      ? 'assets'
+      : (singleVideo ? 'roughcut' : 'sync')
+  )
   useLayoutEffect(() => {
     if (state.activeTab !== activeTab) {
       dispatch({ type: 'SET_ACTIVE_TAB', payload: activeTab })
@@ -1205,6 +1214,7 @@ export default function EditorView() {
             activeSub={sub}
             assemblyStatus={groupDetail?.assembly_status}
             hasVideos={groupDetail?.videos?.length > 0}
+            singleVideo={singleVideo}
             hasBrollSearch={hasBrollSearch}
             brollChainStatus={groupDetail?.broll_chain_status}
             parentGroupId={groupDetail?.parent_group_id ?? id}
