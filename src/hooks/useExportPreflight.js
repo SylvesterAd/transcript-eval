@@ -76,9 +76,13 @@ export function useExportPreflight({ pipelineId, phase, additionalPlanPipelineId
     }
 
     pingOnce()
-    if (phase === 'state_a') {
-      timer = setInterval(pingOnce, 2000)
-    }
+    // state_a: poll fast (2s) so install detection feels instant.
+    // All other phases: poll every 5s so the cached envato_session
+    // doesn't go stale — the popup + state_d banner read this value
+    // and previously showed "sign in required" indefinitely after a
+    // single early miss, even when downloads were succeeding.
+    const intervalMs = phase === 'state_a' ? 2000 : 5000
+    timer = setInterval(pingOnce, intervalMs)
 
     return () => {
       cancelled = true

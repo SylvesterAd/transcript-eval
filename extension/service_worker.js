@@ -47,32 +47,14 @@ async function handlePing() {
   // declare 'ok' for a stale session — that previously caused exports to
   // start happily then fail at resolve/license time with confusing errors.
   // If cookies are absent we can short-circuit without a network call.
-  // Cookie probe is authoritative. The live check (commit 48b24e3) was
-  // intended to catch server-invalidated Elements sessions, but it
-  // hits app.envato.com — a different domain with separate session
-  // cookies that valid Elements-only users don't necessarily have.
-  // Result was false negatives blocking real users from exporting.
-  //
-  // We still RUN the live check for diagnostics so envato_session_detail
-  // can show the HTTP status, but we don't gate on it. Real stale
-  // Elements sessions will surface as download failures in state_d/f
-  // where the user can re-auth and retry.
-  let envatoStatus
-  let envatoDetail = null
-  if (!await hasEnvatoSession()) {
-    envatoStatus = 'missing'
-    envatoDetail = 'cookies_missing'
-  } else {
-    envatoStatus = 'ok'
-    try {
-      const live = await checkEnvatoSessionLive()
-      envatoDetail = live.httpStatus
-        ? `live_http_${live.httpStatus}`
-        : `live_error: ${live.detail || 'unknown'}`
-    } catch (err) {
-      envatoDetail = `live_threw: ${String(err?.message || err)}`
-    }
-  }
+  // Cookie probe is authoritative. The live check on app.envato.com
+  // (commit 48b24e3) was kept as advisory in 3304e8d, but with the
+  // web app now polling every 5s in all phases, hitting Envato that
+  // often is wasteful and could trigger anti-bot. Removed entirely.
+  // Real stale Elements sessions surface as download failures in
+  // state_d/f where the user can re-auth and retry.
+  const envatoStatus = (await hasEnvatoSession()) ? 'ok' : 'missing'
+  const envatoDetail = envatoStatus === 'ok' ? 'cookies_present' : 'cookies_missing'
   try {
     const { envato_session_status: stored } = await chrome.storage.local.get('envato_session_status')
     if (stored !== envatoStatus) {
