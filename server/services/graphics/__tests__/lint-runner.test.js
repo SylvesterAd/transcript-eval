@@ -102,7 +102,7 @@ describe('runLint with non-zero exit (errors found)', () => {
   })
 })
 
-describe('runLint with malformed stdout', () => {
+describe('runLint with malformed stdout (no JSON anywhere)', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.doMock('node:child_process', () => ({
@@ -114,10 +114,47 @@ describe('runLint with malformed stdout', () => {
     }))
   })
 
-  it('throws a contextual error when stdout is not valid JSON', async () => {
+  it('throws a contextual error when no JSON object is present', async () => {
     const { runLint } = await import('../lint-runner.js')
     await expect(runLint({ projectDir: '/tmp/test-proj' })).rejects.toThrow(
-      /failed to parse hyperframes lint output as JSON/
+      /no JSON object found in hyperframes lint output/
     )
+  })
+})
+
+describe('runLint tolerates non-JSON prefix (telemetry banner)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.doMock('node:child_process', () => ({
+      execFile: (cmd, args, opts, cb) => {
+        process.nextTick(() => {
+          // Real hyperframes CLI first-run output: telemetry banner before the
+          // JSON payload. This was the root cause of the session-73 lint
+          // failure — JSON.parse(stdout) choked on the "Hyperframes …" prefix.
+          const stdout =
+            '\n  Hyperframes collects anonymous usage data to improve the tool.\n' +
+            '  No personal info, file paths, or content is collected.\n\n' +
+            '  Disable anytime: hyperframes telemetry disable\n\n' +
+            JSON.stringify({
+              ok: false,
+              errorCount: 1,
+              warningCount: 0,
+              infoCount: 0,
+              findings: [
+                { severity: 'error', rule: 'missing_timeline_registry', message: 'no window.__timelines' },
+              ],
+            }) + '\n'
+          cb(null, { stdout, stderr: '' })
+        })
+      },
+    }))
+  })
+
+  it('parses the JSON even when hyperframes prints a telemetry banner first', async () => {
+    const { runLint } = await import('../lint-runner.js')
+    const result = await runLint({ projectDir: '/tmp/test-proj' })
+    expect(result.errorCount).toBe(1)
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].rule).toBe('missing_timeline_registry')
   })
 })

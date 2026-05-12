@@ -194,12 +194,21 @@ export async function drainOnce() {
         await db.transaction(async (tx) => {
           await tx.prepare(`UPDATE graphics_renders SET status = 'failed', error_message = ? WHERE id = ?`)
             .run(e.message.slice(0, 500), row.id)
-          // If this was an iteration off a parent, the parent is still complete and
-          // the user can retry. Unstick the session so they're not blocked.
-          if (row.parent_render_id) {
-            await tx.prepare(`UPDATE graphics_sessions SET status = 'iterating' WHERE id = ?`)
-              .run(row.session_id)
-          }
+          // Unstick the session regardless of whether this was an initial
+          // render or an iteration. If left in 'rendering', the chat UI is
+          // dead and the user can't recover. Iterations flip back to
+          // 'iterating' (a completed parent still exists); initial-render
+          // failures flip back to 'briefing' so the user can chat again.
+          const nextSessionStatus = row.parent_render_id ? 'iterating' : 'briefing'
+          await tx.prepare(`UPDATE graphics_sessions SET status = ? WHERE id = ?`)
+            .run(nextSessionStatus, row.session_id)
+        })
+        emit({
+          sessionId: row.session_id,
+          step: 'render_failed',
+          label: 'Render failed',
+          renderId: row.id,
+          error: e.message.slice(0, 200),
         })
       } catch (markErr) {
         console.error('[graphics-worker] failed to mark render failed', row.id, markErr)

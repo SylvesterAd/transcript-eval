@@ -32,13 +32,24 @@ export async function runLint({ projectDir }) {
     }
   }
 
-  // hyperframes lint --json prints a single JSON object on stdout
+  // hyperframes lint --json prints a single JSON object on stdout, but the
+  // CLI can also print a telemetry banner on first run (and possibly other
+  // status text). Slice from the first `{` to the last `}` so any preamble or
+  // trailing noise is ignored.
   let parsed
+  const firstBrace = stdout.indexOf('{')
+  const lastBrace = stdout.lastIndexOf('}')
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+    throw new Error(
+      `runLint: no JSON object found in hyperframes lint output.\nstdout (first 500 chars): ${String(stdout).slice(0, 500)}`
+    )
+  }
+  const jsonStr = stdout.slice(firstBrace, lastBrace + 1)
   try {
-    parsed = JSON.parse(stdout)
+    parsed = JSON.parse(jsonStr)
   } catch (e) {
     throw new Error(
-      `runLint: failed to parse hyperframes lint output as JSON: ${e.message}\nstdout (first 500 chars): ${String(stdout).slice(0, 500)}`
+      `runLint: failed to parse hyperframes lint output as JSON: ${e.message}\nsliced JSON (first 500 chars): ${jsonStr.slice(0, 500)}`
     )
   }
 

@@ -182,6 +182,12 @@ export async function runChatTurn({ sessionId, userMessage }) {
   const cost = costCents(MODEL_FOR.brief, briefResp.tokens);
   const newSpec = mergeSpec(session.spec_json || {}, specUpdate);
 
+  // The brief prompt teaches Gemini to emit the literal phrase "Rendering now."
+  // when (and only when) the spec is final. Use that as the explicit render
+  // trigger so clarifying-question turns that also include a complete [SPEC]
+  // block don't accidentally fire a render. See brief-prompt.js → RENDER TRIGGER.
+  const wantsRender = /rendering now/i.test(safeText);
+
   // Bug 3 fix: wrap all writes in a single atomic transaction
   const renderId = await db.transaction(async (tx) => {
     // INSERT user message (moved inside tx — was previously before loadHistory)
@@ -201,8 +207,9 @@ export async function runChatTurn({ sessionId, userMessage }) {
       'UPDATE graphics_sessions SET spec_json = ?, updated_at = NOW() WHERE id = ?'
     ).run(JSON.stringify(newSpec), sessionId);
 
-    // Enqueue render if spec is complete and session is still in briefing state
-    if (isSpecComplete(newSpec) && session.status === 'briefing') {
+    // Enqueue render if spec is complete, session is still in briefing state,
+    // AND Gemini explicitly signalled it is ready ("Rendering now.").
+    if (isSpecComplete(newSpec) && session.status === 'briefing' && wantsRender) {
       const iteration = 1;
       // Multi-scene specs legitimately omit top-level template (it's ignored by
       // the renderer when scenes[] is present), but graphics_renders.template
