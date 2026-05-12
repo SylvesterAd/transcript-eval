@@ -12,7 +12,7 @@
 //   - When `phase === 'state_a'`: ping every 2s.
 //   - Otherwise: one-shot ping on phase change.
 
-import { useEffect, useReducer, useRef } from 'react'
+import { useEffect, useReducer, useRef, useCallback } from 'react'
 import { useExtension } from './useExtension.js'
 import { apiGet } from './useApi.js'
 
@@ -86,6 +86,24 @@ export function useExportPreflight({ pipelineId, phase, additionalPlanPipelineId
     }
   }, [phase, ext])
 
+  // Imperative ping refresh. Used by ExportPage.onStart to re-verify
+  // Envato session at click-time AND keep the cached preflight in
+  // sync — otherwise the auto-router (which watches preflight.ping)
+  // sees stale 'ok' from minutes ago and bounces state_b → state_c
+  // immediately. Returns the fresh ping value so callers don't have
+  // to wait for the next render.
+  const refreshPing = useCallback(async () => {
+    dispatch({ type: 'ping_loading' })
+    try {
+      const value = await ext.ping()
+      dispatch({ type: 'ping_ok', value })
+      return value
+    } catch (e) {
+      dispatch({ type: 'ping_error', error: e.message })
+      throw e
+    }
+  }, [ext])
+
   // Manifest fetch — one-shot per pipelineId. Re-runs when pipelineId
   // changes (e.g. user navigates from one plan_pipeline_id to another).
   useEffect(() => {
@@ -143,5 +161,5 @@ export function useExportPreflight({ pipelineId, phase, additionalPlanPipelineId
     return () => { cancelled = true }
   }, [])
 
-  return state
+  return { ...state, refreshPing }
 }

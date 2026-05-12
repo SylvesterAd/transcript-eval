@@ -116,6 +116,7 @@ export function useExtension() {
             latest_version: EXT_LATEST_VERSION || null,
             is_outdated: isOutdated(ext_version, EXT_LATEST_VERSION),
             envato_session: r?.envato_session ?? 'missing',
+            envato_session_detail: r?.envato_session_detail ?? null,
             has_jwt: !!r?.has_jwt,
             jwt_expires_at: r?.jwt_expires_at ?? null,
             raw: r,

@@ -48,17 +48,28 @@ async function handlePing() {
   // start happily then fail at resolve/license time with confusing errors.
   // If cookies are absent we can short-circuit without a network call.
   let envatoStatus
+  let envatoDetail = null
   if (!await hasEnvatoSession()) {
     envatoStatus = 'missing'
+    envatoDetail = 'cookies_missing'
   } else {
     try {
       const live = await checkEnvatoSessionLive()
-      envatoStatus = live.status === 'ok' ? 'ok' : 'missing'
-    } catch {
+      if (live.status === 'ok') {
+        envatoStatus = 'ok'
+        envatoDetail = `http_${live.httpStatus}`
+      } else {
+        envatoStatus = 'missing'
+        envatoDetail = live.httpStatus
+          ? `live_http_${live.httpStatus}`
+          : `live_error: ${live.detail || 'unknown'}`
+      }
+    } catch (err) {
       // Network error during preflight — be conservative and treat as
       // missing so the user is prompted to re-authenticate rather than
       // the export starting on a possibly-stale session.
       envatoStatus = 'missing'
+      envatoDetail = `live_threw: ${String(err?.message || err)}`
     }
   }
   try {
@@ -72,6 +83,7 @@ async function handlePing() {
     version: MESSAGE_VERSION,
     ext_version: EXT_VERSION,
     envato_session: envatoStatus,
+    envato_session_detail: envatoDetail,
     has_jwt: !!jwt && jwt.expires_at > Date.now(),
     jwt_expires_at: jwt?.expires_at ?? null,
   }

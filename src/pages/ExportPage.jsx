@@ -316,12 +316,18 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
     // they might have logged out in another tab, or cookies might have
     // expired. Catch this BEFORE we mint a JWT and trigger downloads that
     // would all fail with envato_403.
+    //
+    // Use the preflight hook's refreshPing() (not ext.ping() directly) so
+    // the result lands in the cached preflight state. Otherwise the
+    // auto-router useEffect above sees stale 'ok' on the next render
+    // and bounces state_b → state_c, eating the failure UI.
     const envatoCount = (unifiedManifest.totals?.by_source?.envato) || 0
     if (envatoCount > 0) {
-      const fresh = await ext.ping()
+      const fresh = await preflight.refreshPing()
       if (fresh.envato_session !== 'ok') {
         dispatch({ type: 'goto', phase: 'state_b' })
-        throw new Error('Envato session expired or not detected. Please log in to Envato Elements and try again.')
+        const detail = fresh.envato_session_detail ? ` [${fresh.envato_session_detail}]` : ''
+        throw new Error(`Envato session expired or not detected${detail}. Please log in to Envato Elements and try again.`)
       }
     }
 
@@ -366,7 +372,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
       unified_manifest: unifiedManifest,
       variant_labels: variantLabels,
     })
-  }, [planPipelineId, variantLabel, ext])
+  }, [planPipelineId, variantLabel, ext, preflight])
 
   // Retry failed items — State F button callback. Rebuilds a filtered
   // unified manifest containing only items whose source_item_id is in
