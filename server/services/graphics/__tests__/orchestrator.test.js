@@ -182,6 +182,57 @@ describe('orchestrator — multi-scene spec extraction', () => {
     )
     expect(sessionUpdate).toBeDefined()
   })
+
+  it('passes a non-null template to INSERT when top-level template is omitted (multi-scene)', async () => {
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+    // Gemini drops top-level template on multi-scene because the brief prompt
+    // says it's ignored when scenes[] is present. graphics_renders.template is
+    // NOT NULL, so the orchestrator must derive a fallback.
+    const reply = '[SPEC]\n```json\n{"aspectRatio":"16:9","tone":"neutral","scenes":[{"template":"map","duration":3,"mainText":"Sumy","subText":"NE"},{"template":"title-card","duration":2,"mainText":"Summary","subText":"end"}]}\n```'
+    callGemini.mockResolvedValue({
+      text: reply,
+      toolUses: [],
+      tokens: { in: 200, out: 50 },
+      stop: 'STOP',
+    })
+
+    const { runChatTurn } = await import('../orchestrator.js')
+    const result = await runChatTurn({ sessionId: 1, userMessage: 'render it' })
+
+    expect(result.renderId).not.toBeNull()
+    const renderInsert = dbState.txCalls.find(
+      (c) => /INSERT INTO graphics_renders/i.test(c.sql)
+    )
+    expect(renderInsert).toBeDefined()
+    // template column is the 4th positional arg (session_id, iteration, spec_snapshot_json, template)
+    const templateArg = renderInsert.args[3]
+    expect(templateArg).not.toBeNull()
+    expect(templateArg).not.toBeUndefined()
+    // For multi-scene without top-level template, falls back to scenes[0].template
+    expect(templateArg).toBe('map')
+  })
+
+  it('falls back to "composition" when neither top-level nor any scene has a template', async () => {
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+    // Pathological: multi-scene spec where scene templates are empty strings.
+    // isSpecComplete won't pass (SCENE_REQUIRED needs template), but if the
+    // contract ever loosens this guard prevents a NULL leak into the DB.
+    const reply = '[SPEC]{"template":"lower-third","aspectRatio":"16:9","duration":5,"mainText":"a","subText":"b","tone":"neutral"}'
+    callGemini.mockResolvedValue({
+      text: reply,
+      toolUses: [],
+      tokens: { in: 100, out: 20 },
+      stop: 'STOP',
+    })
+    const { runChatTurn } = await import('../orchestrator.js')
+    await runChatTurn({ sessionId: 1, userMessage: 'go' })
+    const renderInsert = dbState.txCalls.find(
+      (c) => /INSERT INTO graphics_renders/i.test(c.sql)
+    )
+    expect(renderInsert.args[3]).toBe('lower-third')
+  })
 })
 
 describe('BRIEF_SYSTEM_PROMPT documents available adapters', () => {
