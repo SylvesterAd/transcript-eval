@@ -156,6 +156,17 @@ export default function StateC_Summary({
   const [includeExtras, setIncludeExtras] = useState({})  // {planPipelineId: true}
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState(null)
+  // Date-time slug appended to the default folder so each export gets
+  // a unique destination — avoids file collisions across re-exports
+  // and makes State C's "you've already used this folder" warning a
+  // non-issue. Computed once at mount in local time, format
+  // YYYY-MM-DD-HHMM (e.g. "2026-05-12-1547"). Stable across re-renders
+  // so the displayed folder name doesn't tick mid-session.
+  const [dateTimeSlug] = useState(() => {
+    const d = new Date()
+    const pad = n => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`
+  })
 
   // Build the unified manifest from the current selection.
   const unified = useMemo(() => {
@@ -181,8 +192,8 @@ export default function StateC_Summary({
   // Default folder per spec § "Multi-variant exports" (multi: -all suffix).
   // User-edited override (via "Change folder") wins when present.
   const defaultFolder = unified.variants.length > 1
-    ? `~/Downloads/export-${folderRoot}-all/`
-    : `~/Downloads/export-${folderRoot}-${variantLetter}/`
+    ? `~/Downloads/export-${folderRoot}-all-${dateTimeSlug}/`
+    : `~/Downloads/export-${folderRoot}-${variantLetter}-${dateTimeSlug}/`
   const folderName = targetFolderOverride || defaultFolder
 
   const diskAvailable = diskValue?.available ?? null
