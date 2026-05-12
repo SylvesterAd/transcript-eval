@@ -35,6 +35,8 @@ function totalSpecDuration(spec) {
   return spec.duration ?? 0
 }
 
+const LINT_MAX_RETRIES = 2
+
 async function generateHtmlWithLintGate({ spec, renderId }) {
   const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders'
   const htmlDir = path.join(baseDir, String(renderId))
@@ -52,18 +54,23 @@ async function generateHtmlWithLintGate({ spec, renderId }) {
   let lint = await runLint({ projectDir: lintProjectDir })
   if (lint.errorCount === 0) return { html, cost, tokens, lintFindings: lint.findings }
 
-  const feedback = formatFindingsForPrompt(lint.findings)
-  const retry = await specToHtml({ spec, additionalSystemContext: feedback })
-  html = retry.html
-  cost += retry.cost
-  tokens = { in: tokens.in + retry.tokens.in, out: tokens.out + retry.tokens.out }
-  await writeFile(htmlPath, html, 'utf8')
+  // Up to LINT_MAX_RETRIES additional attempts, each carrying forward the
+  // accumulated lint findings as CORRECTIONS REQUESTED context.
+  for (let attempt = 1; attempt <= LINT_MAX_RETRIES; attempt++) {
+    const feedback = formatFindingsForPrompt(lint.findings)
+    const retry = await specToHtml({ spec, additionalSystemContext: feedback })
+    html = retry.html
+    cost += retry.cost
+    tokens = { in: tokens.in + retry.tokens.in, out: tokens.out + retry.tokens.out }
+    await writeFile(htmlPath, html, 'utf8')
 
-  lint = await runLint({ projectDir: lintProjectDir })
-  if (lint.errorCount > 0) {
-    throw new Error(`lint failed after 1 retry: ${formatFindingsForPrompt(lint.findings)}`)
+    lint = await runLint({ projectDir: lintProjectDir })
+    if (lint.errorCount === 0) return { html, cost, tokens, lintFindings: lint.findings }
   }
-  return { html, cost, tokens, lintFindings: lint.findings }
+
+  throw new Error(
+    `lint failed after ${LINT_MAX_RETRIES} retries: ${formatFindingsForPrompt(lint.findings)}`,
+  )
 }
 
 async function claimNextRender() {

@@ -342,11 +342,15 @@ export async function specToHtml({ spec, additionalSystemContext = null }) {
   const systemPrompt = additionalSystemContext
     ? `${CREATE_HTML_SYSTEM_PROMPT}\n\n## CORRECTIONS REQUESTED\n${additionalSystemContext}`
     : CREATE_HTML_SYSTEM_PROMPT
+  // 8192 matches refineHtml. An 8-scene multi-scene composition with map img
+  // + inline-SVG overlays + per-scene GSAP tweens hits ~5-6k output tokens;
+  // the prior 4096 cap was truncating mid-output, dropping the trailing
+  // `window.__timelines["main"] = tl;` script line and tripping lint.
   const r = await callAnthropic({
     model: MODEL_FOR.create,
     system: systemPrompt,
     messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(spec, null, 2)}` }],
-    max_tokens: 4096,
+    max_tokens: 8192,
   })
   let html = r.text.trim()
     .replace(/^```html\s*/i, '')
