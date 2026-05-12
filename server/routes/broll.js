@@ -260,10 +260,25 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
           new Promise(resolve => setTimeout(() => resolve(null), PROBE_TIMEOUT_MS)),
         ])
         if (!probe) return
+        // fps + ntsc: trust probe universally. The preview URL's
+        // framerate is the same as the licensed source for every
+        // envato/pexels case observed (encoders preserve container
+        // rate when transcoding to preview bitrate).
         if (probe.frameRateInt) it.frame_rate = probe.frameRateInt
         if (typeof probe.ntsc === 'boolean') it.ntsc = probe.ntsc
-        if (probe.width && probe.height) it.resolution = { width: probe.width, height: probe.height }
-        if (probe.durationSeconds) it.duration_seconds = probe.durationSeconds
+        // dimensions + duration: trust probe ONLY when probed URL is
+        // the actual source we'll download. For envato, the probed
+        // URL is a watermarked preview at REDUCED resolution (e.g.
+        // 960x540) while the licensed download is full-res
+        // (1920x1080) — overriding with preview dims caused DaVinci
+        // to reject the import as "File not found in search
+        // directories" since file reality (1920x1080) didn't match
+        // XML's claim (960x540).
+        const probeIsSource = it.source === 'pexels' || it.source === 'aroll'
+        if (probeIsSource) {
+          if (probe.width && probe.height) it.resolution = { width: probe.width, height: probe.height }
+          if (probe.durationSeconds) it.duration_seconds = probe.durationSeconds
+        }
       } catch {
         // probe failed — keep source-API metadata
       }
