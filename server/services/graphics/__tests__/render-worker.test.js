@@ -335,6 +335,95 @@ describe('renderWorker.drainOnce — lint gate', () => {
     expect(renderHtml).toHaveBeenCalled();
   });
 
+  it('on lint failure, the persisted error_message includes a head+tail preview of the actual HTML', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 19, session_id: 10, iteration: 1, template: 'lower-third',
+        parent_render_id: null,
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null);
+
+    const { runLint } = await import('../lint-runner.js');
+    const { specToHtml } = await import('../html-generator.js');
+    runLint.mockReset();
+    runLint.mockResolvedValue({
+      errorCount: 1, warningCount: 0, infoCount: 0,
+      findings: [{ severity: 'error', rule: 'missing_timeline_registry', message: 'no __timelines' }],
+    });
+    const broken =
+      '<!doctype html><html><head><title>BROKEN_HEAD_MARKER</title></head>' +
+      '<body><div data-composition-id="main">scene-content</div>' +
+      '<!-- BROKEN_TAIL_MARKER -->\n<script>const tl = gsap.timeline({ paused: true });</script>' +
+      '</body></html>';
+    specToHtml.mockClear();
+    specToHtml.mockResolvedValue({ html: broken, cost: 5, tokens: { in: 600, out: 400 } });
+
+    const origTransaction = db.transaction;
+    const txCalls = [];
+    db.transaction = async (fn) =>
+      fn({
+        prepare: (sql) => ({
+          run: (...args) => {
+            txCalls.push({ sql, args });
+            return { changes: 1 };
+          },
+          get: (...args) => {
+            txCalls.push({ sql, args });
+            return null;
+          },
+        }),
+      });
+
+    try {
+      const { drainOnce } = await import('../render-worker.js');
+      await drainOnce();
+      const renderFailedUpdate = txCalls.find(
+        (c) => /UPDATE graphics_renders/.test(c.sql) && /status\s*=\s*'failed'/.test(c.sql)
+      );
+      expect(renderFailedUpdate).toBeDefined();
+      const errorBody = renderFailedUpdate.args[0];
+      expect(errorBody).toMatch(/lint failed after \d+ retries/);
+      expect(errorBody).toContain('FAILED HTML');
+      // Both ends of the failed HTML are inlined (head + tail) so we can
+      // diagnose without Railway's /tmp.
+      expect(errorBody).toContain('BROKEN_HEAD_MARKER');
+      expect(errorBody).toContain('BROKEN_TAIL_MARKER');
+    } finally {
+      db.transaction = origTransaction;
+    }
+  });
+
+  it('formatFailedHtmlPreview returns empty string for empty/non-string input', async () => {
+    const { formatFailedHtmlPreview } = await import('../render-worker.js');
+    expect(formatFailedHtmlPreview(null)).toBe('');
+    expect(formatFailedHtmlPreview(undefined)).toBe('');
+    expect(formatFailedHtmlPreview('')).toBe('');
+    expect(formatFailedHtmlPreview(42)).toBe('');
+  });
+
+  it('formatFailedHtmlPreview inlines full HTML when small, head+tail when large', async () => {
+    const { formatFailedHtmlPreview } = await import('../render-worker.js');
+    const small = 'a'.repeat(500);
+    const smallOut = formatFailedHtmlPreview(small);
+    expect(smallOut).toContain('500 chars total');
+    expect(smallOut).toContain(small);
+
+    const large = 'H'.repeat(2000) + 'M'.repeat(5000) + 'T'.repeat(2000);
+    const largeOut = formatFailedHtmlPreview(large);
+    expect(largeOut).toContain(`${large.length} chars`);
+    expect(largeOut).toContain('truncated middle');
+    expect(largeOut).toContain('H'.repeat(1500));
+    expect(largeOut).toContain('T'.repeat(1500));
+    expect(largeOut).not.toContain('M'.repeat(2000));
+  });
+
   it('lint dirty TWICE then clean: takes a second retry before proceeding (LINT_MAX_RETRIES=2)', async () => {
     const db = (await import('../../../db.js')).default;
     const sharedGet = db.prepare().get;

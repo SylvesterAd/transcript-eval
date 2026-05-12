@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../../../lib/llm/anthropic.js', () => ({
   callAnthropic: vi.fn().mockResolvedValue({
-    text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-start="0" data-duration="5" data-width="1920" data-height="1080"><div class="lt-bar">Hi</div></div><script>window.__timelines={main: {paused:true}}</script></body></html>',
+    text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-start="0" data-duration="5" data-width="1920" data-height="1080"><div class="lt-bar">Hi</div></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
     toolUses: [],
     tokens: { in: 600, out: 400 },
     stop: 'end_turn',
@@ -28,7 +28,7 @@ describe('specToHtml', () => {
   it('strips markdown fences from response', async () => {
     const { callAnthropic } = await import('../../../lib/llm/anthropic.js')
     callAnthropic.mockResolvedValueOnce({
-      text: '```html\n<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div></body></html>\n```',
+      text: '```html\n<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>\n```',
       toolUses: [],
       tokens: { in: 100, out: 50 },
       stop: 'end_turn',
@@ -43,7 +43,7 @@ describe('specToHtml', () => {
     const { callAnthropic } = await import('../../../lib/llm/anthropic.js')
     callAnthropic.mockClear()
     callAnthropic.mockResolvedValueOnce({
-      text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080"></div></body></html>',
+      text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
       toolUses: [],
       tokens: { in: 0, out: 0 },
       stop: 'end_turn',
@@ -85,7 +85,7 @@ describe('specToHtml', () => {
     const { callAnthropic } = await import('../../../lib/llm/anthropic.js')
     callAnthropic.mockClear()
     callAnthropic.mockResolvedValueOnce({
-      text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080"></div></body></html>',
+      text: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
       toolUses: [],
       tokens: { in: 0, out: 0 },
       stop: 'end_turn',
@@ -196,7 +196,7 @@ describe('refineHtml', () => {
   it('returns refined html + cost + tokens preserving stage marker', async () => {
     vi.doMock('../../../lib/llm/anthropic.js', () => ({
       callAnthropic: vi.fn().mockResolvedValue({
-        text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+        text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
         toolUses: [],
         tokens: { in: 800, out: 600 },
         stop: 'end_turn',
@@ -205,7 +205,7 @@ describe('refineHtml', () => {
 
     const { refineHtml } = await import('../html-generator.js')
     const result = await refineHtml({
-      html: '<html><body><div data-composition-id="main"></div></body></html>',
+      html: '<html><body><div data-composition-id="main"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
       feedback: 'Lower-third bar slides off-screen too fast; extend hold to 4s.',
       spec: { template: 'lower-third', duration: 5 },
     })
@@ -242,7 +242,7 @@ describe('specToHtml additionalSystemContext', () => {
 
   it('passes plain CREATE_HTML_SYSTEM_PROMPT to callAnthropic when context is null', async () => {
     const callMock = vi.fn().mockResolvedValue({
-      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
       toolUses: [],
       tokens: { in: 100, out: 100 },
       stop: 'end_turn',
@@ -259,7 +259,7 @@ describe('specToHtml additionalSystemContext', () => {
 
   it('appends CORRECTIONS REQUESTED block when additionalSystemContext is provided', async () => {
     const callMock = vi.fn().mockResolvedValue({
-      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
       toolUses: [],
       tokens: { in: 100, out: 100 },
       stop: 'end_turn',
@@ -277,9 +277,66 @@ describe('specToHtml additionalSystemContext', () => {
     expect(call.system).toMatch(/Math\.random\(\) detected/)
   })
 
+  it('passes the deterministic skeleton in the user message (with CLAUDE_FILL markers)', async () => {
+    const { callAnthropic } = await import('../../../lib/llm/anthropic.js')
+    callAnthropic.mockClear()
+    callAnthropic.mockResolvedValueOnce({
+      text: '<!doctype html><html><body><div data-composition-id="main">x</div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
+      toolUses: [],
+      tokens: { in: 0, out: 0 },
+      stop: 'end_turn',
+    })
+    const { specToHtml } = await import('../html-generator.js')
+    await specToHtml({
+      spec: {
+        aspectRatio: '16:9',
+        tone: 'neutral',
+        scenes: [
+          { template: 'map', duration: 1, mainText: 'A', subText: 'a' },
+          { template: 'title-card', duration: 2, mainText: 'B', subText: 'b' },
+        ],
+      },
+    })
+    const userMsg = callAnthropic.mock.calls.at(-1)[0].messages[0].content
+    expect(userMsg).toMatch(/SKELETON/i)
+    expect(userMsg).toContain('CLAUDE_FILL_SCENE_1')
+    expect(userMsg).toContain('CLAUDE_FILL_SCENE_2')
+    expect(userMsg).toContain('CLAUDE_FILL_STYLES')
+    expect(userMsg).toContain('CLAUDE_FILL_TWEENS')
+    expect(userMsg).toContain('window.__timelines["main"] = tl')
+    expect(userMsg).toContain('"aspectRatio": "16:9"')
+  })
+
+  it('throws a tagged error with failedHtml attached when the LLM corrupts a skeleton invariant', async () => {
+    const { callAnthropic } = await import('../../../lib/llm/anthropic.js')
+    callAnthropic.mockClear()
+    callAnthropic.mockResolvedValueOnce({
+      // Has composition root but stripped the timeline registration — exactly
+      // the failure mode that killed renders 66/67/73/74.
+      text: '<!doctype html><html><body><div data-composition-id="main">x</div><script>const tl = gsap.timeline({ paused: true });</script></body></html>',
+      toolUses: [],
+      tokens: { in: 0, out: 0 },
+      stop: 'end_turn',
+    })
+    const { specToHtml } = await import('../html-generator.js')
+    let caught = null
+    try {
+      await specToHtml({
+        spec: { template: 'lower-third', aspectRatio: '16:9', duration: 5, mainText: 'x', subText: 'y', tone: 'neutral' },
+      })
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).not.toBeNull()
+    expect(caught.message).toMatch(/skeleton invariants/i)
+    expect(caught.html).toMatch(/data-composition-id="main"/)
+    expect(Array.isArray(caught.invariantFailures)).toBe(true)
+    expect(caught.invariantFailures.length).toBeGreaterThan(0)
+  })
+
   it('requests max_tokens=8192 so 8-scene compositions are not truncated mid-output', async () => {
     const callMock = vi.fn().mockResolvedValue({
-      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines["main"] = tl;</script></body></html>',
       toolUses: [],
       tokens: { in: 100, out: 100 },
       stop: 'end_turn',

@@ -37,6 +37,24 @@ function totalSpecDuration(spec) {
 
 const LINT_MAX_RETRIES = 2
 
+// First and last N chars of the failed HTML are inlined into the lint-failure
+// error message so failed renders are diagnosable from the DB alone (Railway's
+// /tmp is ephemeral; the file is gone after a container swap). Capped to keep
+// error_message rows under the column's TEXT limit and within sensible
+// transport size.
+const FAILED_HTML_HEAD_CHARS = 1500
+const FAILED_HTML_TAIL_CHARS = 1500
+
+export function formatFailedHtmlPreview(html) {
+  if (!html || typeof html !== 'string') return ''
+  if (html.length <= FAILED_HTML_HEAD_CHARS + FAILED_HTML_TAIL_CHARS) {
+    return `\n\n--- FAILED HTML (${html.length} chars total) ---\n${html}\n--- END HTML ---`
+  }
+  const head = html.slice(0, FAILED_HTML_HEAD_CHARS)
+  const tail = html.slice(-FAILED_HTML_TAIL_CHARS)
+  return `\n\n--- FAILED HTML (${html.length} chars, head + tail) ---\n${head}\n…[truncated middle]…\n${tail}\n--- END HTML ---`
+}
+
 async function generateHtmlWithLintGate({ spec, renderId }) {
   const baseDir = process.env.GRAPHICS_RENDER_DIR || '/tmp/graphics-renders'
   const htmlDir = path.join(baseDir, String(renderId))
@@ -68,9 +86,13 @@ async function generateHtmlWithLintGate({ spec, renderId }) {
     if (lint.errorCount === 0) return { html, cost, tokens, lintFindings: lint.findings }
   }
 
-  throw new Error(
+  // Surface the final HTML on the error so the catch block can persist a
+  // preview of it into the DB for diagnosis.
+  const err = new Error(
     `lint failed after ${LINT_MAX_RETRIES} retries: ${formatFindingsForPrompt(lint.findings)}`,
   )
+  err.failedHtml = html
+  throw err
 }
 
 async function claimNextRender() {
@@ -198,9 +220,14 @@ export async function drainOnce() {
     } catch (e) {
       errors.push({ renderId: row.id, error: e.message })
       try {
+        // If the failure carries a captured HTML payload (lint-gate failure or
+        // skeleton-invariant failure), inline a head+tail preview so the
+        // render is diagnosable from the DB alone (Railway /tmp is ephemeral).
+        const htmlPreview = formatFailedHtmlPreview(e.failedHtml || e.html)
+        const errorBody = `${e.message}${htmlPreview}`.slice(0, 5000)
         await db.transaction(async (tx) => {
           await tx.prepare(`UPDATE graphics_renders SET status = 'failed', error_message = ? WHERE id = ?`)
-            .run(e.message.slice(0, 500), row.id)
+            .run(errorBody, row.id)
           // Unstick the session regardless of whether this was an initial
           // render or an iteration. If left in 'rendering', the chat UI is
           // dead and the user can't recover. Iterations flip back to
