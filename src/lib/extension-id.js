@@ -37,6 +37,19 @@ export function getExtIdsToProbe(primary = EXT_ID, fallbacks = EXT_ID_FALLBACKS)
 
 export const EXT_IDS_TO_PROBE = getExtIdsToProbe()
 
+// Active extension ID — the one that responded to the most recent
+// successful ping. Defaults to EXT_ID (the Web Store ID) so consumers
+// that fire a chrome.runtime.sendMessage before any ping has run still
+// hit something sensible. useExtension.ping() updates this when a
+// fallback ID matches; downstream callers (useExportXmlKickoff for
+// save_xml, useExportPort for openPort, etc.) MUST read this rather
+// than EXT_ID directly so dev-loaded extensions keep working.
+let _activeExtId = EXT_ID
+export function getActiveExtId() { return _activeExtId }
+export function setActiveExtId(id) {
+  if (id && typeof id === 'string') _activeExtId = id
+}
+
 export function requireExtensionId() {
   if (!EXT_ID) {
     throw new Error(

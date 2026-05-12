@@ -17,19 +17,13 @@
 // exist" error — the canonical "extension not installed" signals).
 
 import { useMemo } from 'react'
-import { EXT_ID, EXT_IDS_TO_PROBE } from '../lib/extension-id.js'
+import { EXT_ID, EXT_IDS_TO_PROBE, getActiveExtId, setActiveExtId } from '../lib/extension-id.js'
 import { resolveBackendUrl } from '../lib/backendUrl.js'
 import { isOutdated } from '../lib/semver.js'
 
 /* global __EXT_LATEST_VERSION__ */
 export const EXT_LATEST_VERSION =
   typeof __EXT_LATEST_VERSION__ === 'string' ? __EXT_LATEST_VERSION__ : ''
-
-// Cached ID of whichever extension responded to the most recent
-// successful ping(). sendSession/sendExport/openPort use this so a
-// dev-loaded extension (whose ID differs from the Web Store build's
-// pinned EXT_ID) keeps working past the initial probe.
-let _activeExtId = EXT_ID
 
 // Compose the most-informative human-readable error from an extension
 // reject response. Different code paths in the SW carry the reason on
@@ -57,7 +51,7 @@ function isNotInstalledError(message) {
   )
 }
 
-function send(msg, { timeoutMs = 5000, extId = _activeExtId } = {}) {
+function send(msg, { timeoutMs = 5000, extId = getActiveExtId() } = {}) {
   return new Promise((resolve, reject) => {
     if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage) {
       reject(new Error('chrome.runtime.sendMessage is not available — non-Chrome browser?'))
@@ -107,7 +101,7 @@ export function useExtension() {
         try {
           const r = await send({ type: 'ping', version: 1 }, { timeoutMs: 3000, extId: id })
           const ext_version = r?.ext_version ?? null
-          _activeExtId = id
+          setActiveExtId(id)
           return {
             installed: true,
             ext_id: id,
@@ -204,7 +198,7 @@ export function useExtension() {
       if (typeof chrome === 'undefined' || !chrome?.runtime?.connect) {
         throw new Error('chrome.runtime.connect is not available — non-Chrome browser?')
       }
-      const targetId = _activeExtId || EXT_ID
+      const targetId = getActiveExtId() || EXT_ID
       if (!targetId) {
         throw new Error('EXT_ID is empty (see src/lib/extension-id.js)')
       }

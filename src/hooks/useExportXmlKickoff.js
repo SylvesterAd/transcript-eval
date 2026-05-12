@@ -24,7 +24,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiPost } from './useApi.js'
-import { EXT_ID } from '../lib/extension-id.js'
+import { EXT_ID, getActiveExtId } from '../lib/extension-id.js'
 
 // ----------------------------------------------------------------------
 // Pure transform: unified manifest → endpoint-ready variants shape.
@@ -107,7 +107,14 @@ export function triggerXmlDownload(filename, xmlString, folderPath) {
   // default Downloads folder — they'll have to move the file by hand
   // but at least it isn't lost.
   const tryExtension = () => new Promise((resolve, reject) => {
-    if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage || !EXT_ID) {
+    // Use the ID that responded to the most recent successful ping
+    // (set by useExtension.ping). This handles dev-loaded extensions
+    // whose ID differs from the Web Store EXT_ID baked at build time —
+    // sending to the wrong ID was previously falling back to the
+    // browser default Downloads folder despite the user clicking
+    // "save next to b-rolls".
+    const targetId = getActiveExtId() || EXT_ID
+    if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage || !targetId) {
       reject(new Error('extension unavailable'))
       return
     }
@@ -121,7 +128,7 @@ export function triggerXmlDownload(filename, xmlString, folderPath) {
     }, 5000)
     try {
       chrome.runtime.sendMessage(
-        EXT_ID,
+        targetId,
         { type: 'save_xml', version: 1, folder: folderPath, filename, content: xmlString },
         (response) => {
           if (settled) return
