@@ -47,28 +47,29 @@ async function handlePing() {
   // declare 'ok' for a stale session — that previously caused exports to
   // start happily then fail at resolve/license time with confusing errors.
   // If cookies are absent we can short-circuit without a network call.
+  // Cookie probe is authoritative. The live check (commit 48b24e3) was
+  // intended to catch server-invalidated Elements sessions, but it
+  // hits app.envato.com — a different domain with separate session
+  // cookies that valid Elements-only users don't necessarily have.
+  // Result was false negatives blocking real users from exporting.
+  //
+  // We still RUN the live check for diagnostics so envato_session_detail
+  // can show the HTTP status, but we don't gate on it. Real stale
+  // Elements sessions will surface as download failures in state_d/f
+  // where the user can re-auth and retry.
   let envatoStatus
   let envatoDetail = null
   if (!await hasEnvatoSession()) {
     envatoStatus = 'missing'
     envatoDetail = 'cookies_missing'
   } else {
+    envatoStatus = 'ok'
     try {
       const live = await checkEnvatoSessionLive()
-      if (live.status === 'ok') {
-        envatoStatus = 'ok'
-        envatoDetail = `http_${live.httpStatus}`
-      } else {
-        envatoStatus = 'missing'
-        envatoDetail = live.httpStatus
-          ? `live_http_${live.httpStatus}`
-          : `live_error: ${live.detail || 'unknown'}`
-      }
+      envatoDetail = live.httpStatus
+        ? `live_http_${live.httpStatus}`
+        : `live_error: ${live.detail || 'unknown'}`
     } catch (err) {
-      // Network error during preflight — be conservative and treat as
-      // missing so the user is prompted to re-authenticate rather than
-      // the export starting on a possibly-stale session.
-      envatoStatus = 'missing'
       envatoDetail = `live_threw: ${String(err?.message || err)}`
     }
   }

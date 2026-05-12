@@ -322,7 +322,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
     // auto-router useEffect above sees stale 'ok' on the next render
     // and bounces state_b → state_c, eating the failure UI.
     const envatoCount = (unifiedManifest.totals?.by_source?.envato) || 0
-    if (envatoCount > 0) {
+    if (envatoCount > 0 && !state.sessionOverridden) {
       const fresh = await preflight.refreshPing()
       if (fresh.envato_session !== 'ok') {
         dispatch({ type: 'goto', phase: 'state_b' })
@@ -372,7 +372,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
       unified_manifest: unifiedManifest,
       variant_labels: variantLabels,
     })
-  }, [planPipelineId, variantLabel, ext, preflight])
+  }, [planPipelineId, variantLabel, ext, preflight, state.sessionOverridden])
 
   // Retry failed items — State F button callback. Rebuilds a filtered
   // unified manifest containing only items whose source_item_id is in
