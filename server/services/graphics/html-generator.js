@@ -306,6 +306,16 @@ Available shaders: cinematic-zoom, whip-pan, dissolve, slide-left, slide-right, 
   neutral    → #9ca3af
   playful    → #10b981
 
+# Scene template hint (spec.template OR scenes[i].template)
+The \`template\` field signals scene intent — let it drive layout choice:
+- \`lower-third\`: a name/role bar in the bottom-left; rest of the frame transparent (see Few-shot A/B).
+- \`title-card\`: fullscreen centered headline + optional subline. Big type, generous negative space; suitable for openers, section breaks, summary frames.
+- \`map\`: the frame is a map. If spec.assets has a "map" / "background" SVG, render it full-bleed; overlay regions, arrows, hotspots, frontline strokes, and city labels using inline SVG or absolutely-positioned divs animated via the GSAP timeline. mainText/subText become the broadcast title overlay (top-strip or corner card), not the primary subject.
+- \`chart\`: data viz is the primary subject. Use chart.js (CDN allowed) for axis-bound viz, or hand-rolled SVG/divs for bars/lines/counters. mainText/subText become the chart title + caption.
+- \`freeform\`: use your judgment based on mainText/subText, assets, and any extra spec hints.
+
+A multi-scene war-map sequence with template="map" scenes must actually render a map per scene (SVG outlines, animated arrows, pulsing hotspots), not eight lower-third name bars.
+
 # Asset usage (when spec.assets is present)
 The spec may include an \`assets\` array. Each entry has { role, url, alt, source }.
 - "logo" / "icon" → embed as <img src="<url>" alt="<alt>" /> sized appropriately for the layout.
