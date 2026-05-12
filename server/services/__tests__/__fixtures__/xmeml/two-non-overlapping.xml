@@ -16,6 +16,7 @@
         <track>
           <clipitem id="clip-variant-a-001">
             <name>001_pexels_123.mp4</name>
+            <enabled>TRUE</enabled>
             <duration>60</duration>
             <start>0</start>
             <end>100</end>
@@ -26,23 +27,29 @@
             <file id="file-pexels-123">
               <name>001_pexels_123.mp4</name>
               <pathurl>001_pexels_123.mp4</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
           <clipitem id="clip-variant-a-002">
             <name>002_pexels_456.mp4</name>
+            <enabled>TRUE</enabled>
             <duration>60</duration>
             <start>150</start>
             <end>250</end>
@@ -53,20 +60,25 @@
             <file id="file-pexels-456">
               <name>002_pexels_456.mp4</name>
               <pathurl>002_pexels_456.mp4</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
         </track>
       </video>

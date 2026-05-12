@@ -16,6 +16,7 @@
         <track>
           <clipitem id="clip-variant-b-001">
             <name>001_freepik_xyz.mp4</name>
+            <enabled>TRUE</enabled>
             <duration>90</duration>
             <start>0</start>
             <end>150</end>
@@ -26,20 +27,25 @@
             <file id="file-freepik-xyz">
               <name>001_freepik_xyz.mp4</name>
               <pathurl>001_freepik_xyz.mp4</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
         </track>
       </video>

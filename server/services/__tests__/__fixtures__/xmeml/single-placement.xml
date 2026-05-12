@@ -16,6 +16,7 @@
         <track>
           <clipitem id="clip-variant-c-001">
             <name>001_envato_NX9WYGQ.mov</name>
+            <enabled>TRUE</enabled>
             <duration>120</duration>
             <start>1270</start>
             <end>1470</end>
@@ -26,20 +27,25 @@
             <file id="file-envato-NX9WYGQ">
               <name>001_envato_NX9WYGQ.mov</name>
               <pathurl>001_envato_NX9WYGQ.mov</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
         </track>
       </video>

@@ -16,6 +16,7 @@
         <track>
           <clipitem id="clip-variant-c-001">
             <name>001_envato_A.mov</name>
+            <enabled>TRUE</enabled>
             <duration>120</duration>
             <start>0</start>
             <end>200</end>
@@ -26,25 +27,31 @@
             <file id="file-envato-A">
               <name>001_envato_A.mov</name>
               <pathurl>001_envato_A.mov</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
         </track>
         <track>
           <clipitem id="clip-variant-c-002">
             <name>002_envato_B.mov</name>
+            <enabled>TRUE</enabled>
             <duration>120</duration>
             <start>50</start>
             <end>250</end>
@@ -55,25 +62,31 @@
             <file id="file-envato-B">
               <name>002_envato_B.mov</name>
               <pathurl>002_envato_B.mov</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
         </track>
         <track>
           <clipitem id="clip-variant-c-003">
             <name>003_envato_C.mov</name>
+            <enabled>TRUE</enabled>
             <duration>120</duration>
             <start>100</start>
             <end>300</end>
@@ -84,20 +97,25 @@
             <file id="file-envato-C">
               <name>003_envato_C.mov</name>
               <pathurl>003_envato_C.mov</pathurl>
-              <duration></duration>
-              <rate><timebase>30</timebase></rate>
               <timecode>
-                <rate><timebase>30</timebase></rate>
                 <string>00:00:00:00</string>
-                <frame>0</frame>
                 <displayformat>NDF</displayformat>
+                <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
               </timecode>
+              <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+              <duration></duration>
               <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
+                <video>
+                  <samplecharacteristics>
+                    <rate><timebase>30</timebase><ntsc>FALSE</ntsc></rate>
+                    <width>1920</width>
+                    <height>1080</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                  </samplecharacteristics>
+                </video>
               </media>
             </file>
+            <compositemode>normal</compositemode>
           </clipitem>
         </track>
       </video>

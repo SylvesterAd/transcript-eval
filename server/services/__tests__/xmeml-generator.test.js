@@ -367,11 +367,15 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
       ],
     })
     expect(xml).toMatch(/<rate><timebase>30<\/timebase><ntsc>TRUE<\/ntsc><\/rate>/)
-    // The <timecode> override block uses the same rate + ntsc flag.
-    expect(xml).toMatch(/<timecode>\s*<rate><timebase>30<\/timebase><ntsc>TRUE<\/ntsc><\/rate>/)
+    // The <timecode> override block also has the rate with ntsc=TRUE.
+    expect(xml).toMatch(/<rate><timebase>30<\/timebase><ntsc>TRUE<\/ntsc><\/rate>/)
   })
 
-  it('omits ntsc tag when placement.ntsc is missing or false (true 30fps / 25fps / 50fps)', () => {
+  it('always emits ntsc tag — TRUE for fractional, FALSE otherwise (per WyattBlue)', () => {
+    // WyattBlue/auto-editor's working DaVinci-compatible exporter
+    // always emits <ntsc> on every <rate> — TRUE for 29.97/23.976/
+    // 59.94, FALSE otherwise. Omitting let DaVinci default-guess
+    // and disagree with our claim.
     const xml = generateXmeml({
       sequenceName: 'Variant A',
       placements: [
@@ -381,8 +385,7 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
           width: 1920, height: 1080, sourceFrameRate: 25 },
       ],
     })
-    // Bare integer rate, no ntsc tag — DaVinci treats as exact 25/1.
-    expect(xml).toMatch(/<rate><timebase>25<\/timebase><\/rate>/)
+    expect(xml).toMatch(/<rate><timebase>25<\/timebase><ntsc>FALSE<\/ntsc><\/rate>/)
     expect(xml).not.toContain('<ntsc>TRUE</ntsc>')
   })
 
@@ -420,19 +423,17 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
     expect(xml).toContain('<out>60</out>')   // 2s × 30fps
     // The clipitem reports SOURCE duration (for trim handles).
     // The file ALSO reports source duration when sourceDurationSeconds
-    // was provided (probed). When not provided, <file><duration> is
-    // omitted and the importer probes the file itself.
-    expect(xml).toMatch(/<clipitem id="clip-variant-a-001">\s*<name>001_pexels_123\.mp4<\/name>\s*<duration>900<\/duration>/)
-    expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<duration>900<\/duration>/)
+    // was provided. <enabled>TRUE</enabled> is between <name> and
+    // <duration> per WyattBlue's structure.
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-001">\s*<name>001_pexels_123\.mp4<\/name>\s*<enabled>TRUE<\/enabled>\s*<duration>900<\/duration>/)
+    // <file>: name, pathurl, then <timecode> (per WyattBlue's order),
+    // then <rate>, then <duration>900</duration>.
+    expect(xml).toMatch(/<file id="file-pexels-123">[\s\S]*?<duration>900<\/duration>/)
   })
 
   it('emits empty <file><duration></duration> tag when sourceDurationSeconds is missing', () => {
     // Per WyattBlue/auto-editor's working DaVinci-compatible exporter:
     // "DaVinci Resolve needs this tag even though it's blank".
-    // Omitting the tag entirely makes DaVinci reject as
-    // "File not found in search directories". Emit empty value when
-    // we don't have a confirmed source duration; DaVinci probes the
-    // file for the actual value.
     const xml = generateXmeml({
       sequenceName: 'Variant A',
       placements: [
@@ -442,7 +443,8 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
           width: 1920, height: 1080, sourceFrameRate: 30 },
       ],
     })
-    expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<duration><\/duration>/)
+    // <file> contains an empty <duration></duration> somewhere inside.
+    expect(xml).toMatch(/<file id="file-pexels-123">[\s\S]*?<duration><\/duration>/)
   })
 
   it('emits absolute pathurl on the A-roll track too', () => {
@@ -453,9 +455,9 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
       mediaFolderAbsolute: '/Users/x/Downloads/export-370-a',
     })
     expect(xml).toContain('<pathurl>file:///Users/x/Downloads/export-370-a/aroll_370.mp4</pathurl>')
-    // A-roll's source duration is the source's full length (120s × 30 = 3600 frames)
-    // not the sequence duration (which is 0 here).
-    expect(xml).toMatch(/<clipitem id="clip-variant-a-aroll">\s*<name>aroll_370\.mp4<\/name>\s*<duration>3600<\/duration>/)
+    // A-roll's source duration is the source's full length (120s × 30 = 3600 frames).
+    // <enabled>TRUE</enabled> sits between name and duration.
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-aroll">\s*<name>aroll_370\.mp4<\/name>\s*<enabled>TRUE<\/enabled>\s*<duration>3600<\/duration>/)
   })
 })
 

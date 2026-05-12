@@ -417,8 +417,12 @@ export function generateXmeml({
       const arollClipId = useSegments ? `clip-${seqSlug}-aroll-${i + 1}` : `clip-${seqSlug}-aroll`
       const arollFileId = i === 0 ? `file-aroll` : `file-aroll-${i + 1}`
 
+      // Element order + always-emit-ntsc per WyattBlue/auto-editor —
+      // see b-roll branch for rationale.
+      const arollNtscTag = `<ntsc>${arollNtsc ? 'TRUE' : 'FALSE'}</ntsc>`
       lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
       lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
+      lines.push(`            <enabled>TRUE</enabled>`)
       lines.push(`            <duration>${arollSourceFrames}</duration>`)
       lines.push(`            <start>${startFrame}</start>`)
       lines.push(`            <end>${endFrame}</end>`)
@@ -430,40 +434,36 @@ export function generateXmeml({
       lines.push(`            <pproTicksOut>${secondsToPproTicks(srcEnd)}</pproTicksOut>`)
       if (i === 0) {
         // First clipitem owns the <file> block; later clipitems reference it by id.
+        const arollHasDur = Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0
         lines.push(`            <file id="${escapeXml(arollFileId)}">`)
         lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
         lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
-        // Empty <duration> tag REQUIRED by DaVinci even if blank —
-        // see b-roll branch above for the rationale (WyattBlue/auto-
-        // editor's "DaVinci Resolve needs this tag even though it's
-        // blank").
-        const arollHasDur = Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0
-        lines.push(`              <duration>${arollHasDur ? arollSourceFrames : ''}</duration>`)
-        lines.push(`              <rate><timebase>${arollFrameRate}</timebase>${arollNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
-        // Override any SMPTE timecode embedded in the source file's
-        // metadata. Without this, DaVinci Resolve honors the file's
-        // baked-in TC (e.g. 18:16:14:04 on Envato/Sony footage) and
-        // rejects our zero-based <in>/<out> with "No overlap between
-        // specified target timecodes and located file timecodes".
-        // Premiere ignores this block — it always treats source as
-        // zero-based — so it's pure-win for cross-NLE compatibility.
+        // <timecode> first per WyattBlue's order. Override embedded
+        // SMPTE so DaVinci accepts our zero-based <in>/<out>.
         lines.push(`              <timecode>`)
-        lines.push(`                <rate><timebase>${arollFrameRate}</timebase>${arollNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
         lines.push(`                <string>00:00:00:00</string>`)
-        lines.push(`                <frame>0</frame>`)
         lines.push(`                <displayformat>NDF</displayformat>`)
+        lines.push(`                <rate><timebase>${arollFrameRate}</timebase>${arollNtscTag}</rate>`)
         lines.push(`              </timecode>`)
-        // <media> with sequence dims — see b-roll branch for why we
-        // use seqW/seqH instead of per-file dims.
+        lines.push(`              <rate><timebase>${arollFrameRate}</timebase>${arollNtscTag}</rate>`)
+        // Empty <duration> tag REQUIRED by DaVinci even if blank.
+        lines.push(`              <duration>${arollHasDur ? arollSourceFrames : ''}</duration>`)
+        // <media> with sequence dims, rate, pixelaspectratio per WyattBlue.
         lines.push(`              <media>`)
-        lines.push(`                <video><samplecharacteristics>`)
-        lines.push(`                  <width>${seqW}</width><height>${seqH}</height>`)
-        lines.push(`                </samplecharacteristics></video>`)
+        lines.push(`                <video>`)
+        lines.push(`                  <samplecharacteristics>`)
+        lines.push(`                    <rate><timebase>${arollFrameRate}</timebase>${arollNtscTag}</rate>`)
+        lines.push(`                    <width>${seqW}</width>`)
+        lines.push(`                    <height>${seqH}</height>`)
+        lines.push(`                    <pixelaspectratio>square</pixelaspectratio>`)
+        lines.push(`                  </samplecharacteristics>`)
+        lines.push(`                </video>`)
         lines.push(`              </media>`)
         lines.push(`            </file>`)
       } else {
         lines.push(`            <file id="${escapeXml(`file-aroll`)}"/>`)
       }
+      lines.push(`            <compositemode>normal</compositemode>`)
       lines.push(`          </clipitem>`)
     }
     lines.push(`        </track>`)
@@ -499,59 +499,59 @@ export function generateXmeml({
       const fileId = `file-${slugifyForId(p.source)}-${slugifyForId(p.sourceItemId) || padSeq(p.seq)}`
       const inFrame = 0
       const outFrame = inFrame + p._durationSrcFrames
+      // Element order + always-emit-ntsc derived from
+      // WyattBlue/auto-editor's working DaVinci-compatible exporter
+      // (src/exports/fcp7.nim). DaVinci validates element order in
+      // <file>: timecode → rate → duration → media. Out-of-order
+      // tags caused "File not found in search directories" rejections
+      // even when paths and metadata were correct. <ntsc> must always
+      // be present (TRUE for fractional rates, FALSE otherwise) —
+      // omitting lets DaVinci default-guess and disagree with our
+      // claim.
+      const ntscTag = `<ntsc>${p._sourceNtsc ? 'TRUE' : 'FALSE'}</ntsc>`
+      const pproIn = secondsToPproTicks(0)
+      const pproOut = secondsToPproTicks(p._timelineDurationSec)
       lines.push(`          <clipitem id="${escapeXml(clipId)}">`)
       lines.push(`            <name>${escapeXml(p.filename)}</name>`)
+      lines.push(`            <enabled>TRUE</enabled>`)
       lines.push(`            <duration>${p._sourceDurationFrames}</duration>`)
       lines.push(`            <start>${p._startFrame}</start>`)
       lines.push(`            <end>${p._endFrame}</end>`)
       lines.push(`            <in>${inFrame}</in>`)
       lines.push(`            <out>${outFrame}</out>`)
-      // Sub-frame precision (Adobe extension). pproTicksIn/Out hold the
-      // source IN/OUT at picosecond resolution (254,016,000,000 ticks/sec)
-      // so Premiere uses the exact float seconds rather than the integer
-      // <in>/<out> frames, which round to the nearest sequence-rate frame.
-      const pproIn = secondsToPproTicks(0)
-      const pproOut = secondsToPproTicks(p._timelineDurationSec)
       lines.push(`            <pproTicksIn>${pproIn}</pproTicksIn>`)
       lines.push(`            <pproTicksOut>${pproOut}</pproTicksOut>`)
       lines.push(`            <file id="${escapeXml(fileId)}">`)
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
       lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
-      // Empty <duration> tag is REQUIRED by DaVinci Resolve. Per
-      // WyattBlue/auto-editor's working exporter ("DaVinci Resolve
-      // needs this tag even though it's blank"). When confirmed,
-      // populate with the source frame count; otherwise emit empty
-      // and let DaVinci probe the file. Omitting the tag entirely
-      // makes DaVinci reject as "File not found in search directories"
-      // — even when the file is right there at the pathurl.
-      lines.push(`              <duration>${p._sourceDurationConfirmed ? p._sourceDurationFrames : ''}</duration>`)
-      lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${p._sourceNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
-      // Zero-based source timecode override — see aroll branch above
-      // for the why. Without this, DaVinci rejects every Envato/Sony
-      // clip whose embedded SMPTE doesn't start at 00:00:00:00 with a
-      // "No overlap between specified target timecodes and located
-      // file timecodes" error.
+      // <timecode> FIRST — sets the file's TC base (zero-based override).
+      // Order INSIDE timecode: string, displayformat, rate (matches WyattBlue).
       lines.push(`              <timecode>`)
-      lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase>${p._sourceNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
       lines.push(`                <string>00:00:00:00</string>`)
-      lines.push(`                <frame>0</frame>`)
       lines.push(`                <displayformat>NDF</displayformat>`)
+      lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
       lines.push(`              </timecode>`)
-      // <media> block is also required by DaVinci to register the
-      // file as a video clip. Use SEQUENCE dimensions (seqW × seqH)
-      // for every file rather than per-file dimensions — per-file
-      // dimensions from source APIs and from preview-URL probes
-      // frequently disagree with the actual licensed download (envato
-      // preview 960x540 → file 1920x1080; envato source-API default
-      // 1920x1080 → file 4096x2160). DaVinci probes the actual file
-      // for rendering anyway; the <media> block here is structural
-      // (tells DaVinci "this is video, here's the timebase").
+      lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
+      // Empty <duration> tag is REQUIRED by DaVinci even when blank
+      // (per WyattBlue's "DaVinci Resolve needs this tag even though
+      // it's blank"). Populated when probed; empty otherwise.
+      lines.push(`              <duration>${p._sourceDurationConfirmed ? p._sourceDurationFrames : ''}</duration>`)
+      // <media><video><samplecharacteristics> with sequence dimensions,
+      // <rate>, and <pixelaspectratio>square</pixelaspectratio>. WyattBlue
+      // uses sequence dims for every file (not per-file dims) — per-file
+      // dims drift from probed-preview vs licensed source.
       lines.push(`              <media>`)
-      lines.push(`                <video><samplecharacteristics>`)
-      lines.push(`                  <width>${seqW}</width><height>${seqH}</height>`)
-      lines.push(`                </samplecharacteristics></video>`)
+      lines.push(`                <video>`)
+      lines.push(`                  <samplecharacteristics>`)
+      lines.push(`                    <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
+      lines.push(`                    <width>${seqW}</width>`)
+      lines.push(`                    <height>${seqH}</height>`)
+      lines.push(`                    <pixelaspectratio>square</pixelaspectratio>`)
+      lines.push(`                  </samplecharacteristics>`)
+      lines.push(`                </video>`)
       lines.push(`              </media>`)
       lines.push(`            </file>`)
+      lines.push(`            <compositemode>normal</compositemode>`)
       lines.push(`          </clipitem>`)
     }
     lines.push(`        </track>`)
