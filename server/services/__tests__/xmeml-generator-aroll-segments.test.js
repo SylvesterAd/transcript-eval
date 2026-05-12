@@ -17,8 +17,10 @@ describe('generateXmeml — arollSegments', () => {
         { filename: 'aroll.mov', start: 15, end: 30 },
       ],
     })
-    // Two A-Roll clipitems on track 1.
-    const matches = xml.match(/<clipitem[^>]*aroll[^"]*"/g) || []
+    // Two A-Roll VIDEO clipitems on V1. The audio twins on A1/A2 use the
+    // same base ID with `-a1` / `-a2` suffix; this regex stops at the first
+    // digit-then-quote so it only counts video clips, not audio twins.
+    const matches = xml.match(/<clipitem id="clip-[^"]*-aroll-\d+"/g) || []
     expect(matches.length).toBe(2)
     // First clip start=0, end = 10 * 50fps = 500 frames.
     expect(xml).toMatch(/<start>0<\/start>[\s\S]*?<end>500<\/end>/)

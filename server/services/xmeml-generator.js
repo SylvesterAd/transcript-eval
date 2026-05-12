@@ -424,6 +424,13 @@ export function generateXmeml({
         }]
       : [])
 
+  // Capture per-segment data we need to emit audio twins of each video
+  // clipitem after the <video> block closes. A-roll source files carry
+  // audio (talking-head footage); without these audio clipitems Premiere
+  // imports the video and applies its safety-default mute (level 0), which
+  // is the user-reported "volume 0" symptom. B-roll stays silent — it's
+  // a visual overlay over the A-roll's audio.
+  const audioSegments = []
   if (segs.length > 0) {
     lines.push(`        <track>`)
     for (let i = 0; i < segs.length; i++) {
@@ -492,6 +499,9 @@ export function generateXmeml({
         // Empty <duration> tag REQUIRED by DaVinci even if blank.
         lines.push(`              <duration>${arollHasDur ? arollSourceFrames : ''}</duration>`)
         // <media> with sequence dims, rate, pixelaspectratio per WyattBlue.
+        // <audio> sibling declares stereo PCM characteristics — mandatory
+        // for Premiere to apply the audiolevels filter we emit on the audio
+        // clipitems below. Mono sources mirror channel 1 to both A1/A2.
         lines.push(`              <media>`)
         lines.push(`                <video>`)
         lines.push(`                  <samplecharacteristics>`)
@@ -501,6 +511,13 @@ export function generateXmeml({
         lines.push(`                    <pixelaspectratio>square</pixelaspectratio>`)
         lines.push(`                  </samplecharacteristics>`)
         lines.push(`                </video>`)
+        lines.push(`                <audio>`)
+        lines.push(`                  <samplecharacteristics>`)
+        lines.push(`                    <depth>16</depth>`)
+        lines.push(`                    <samplerate>48000</samplerate>`)
+        lines.push(`                  </samplecharacteristics>`)
+        lines.push(`                  <channelcount>2</channelcount>`)
+        lines.push(`                </audio>`)
         lines.push(`              </media>`)
         lines.push(`            </file>`)
       } else {
@@ -508,6 +525,17 @@ export function generateXmeml({
       }
       lines.push(`            <compositemode>normal</compositemode>`)
       lines.push(`          </clipitem>`)
+      // Stash everything an audio twin clipitem needs. Emitted after the
+      // last <video> track closes so XML order stays <video>...</video>
+      // <audio>...</audio> per FCP7 spec.
+      audioSegments.push({
+        videoClipId: arollClipId,
+        filename: arollFilename,
+        startFrame, endFrame,
+        inSrcFrames, outSrcFrames,
+        srcStart, srcEnd,
+        sourceFrames: arollSourceFrames,
+      })
     }
     lines.push(`        </track>`)
   }
@@ -641,6 +669,83 @@ export function generateXmeml({
   }
 
   lines.push(`      </video>`)
+
+  // <audio> sibling — A-roll audio twins on A1 (channel 1) and A2 (channel 2).
+  // Each twin mirrors a V1 video clipitem's start/end/in/out exactly so
+  // Premiere keeps audio in sync with the video, and carries an explicit
+  // unity-gain audiolevels <filter> — without that, Premiere defaults the
+  // imported audio level to muted (the user-reported "volume 0" bug).
+  // <link> blocks tie V1/A1/A2 of the same segment together so trims stay
+  // synced.
+  if (audioSegments.length > 0) {
+    lines.push(`      <audio>`)
+    for (const channel of [1, 2]) {
+      lines.push(`        <track>`)
+      for (let i = 0; i < audioSegments.length; i++) {
+        const a = audioSegments[i]
+        const audioClipId = `${a.videoClipId}-a${channel}`
+        const segIndex = i + 1  // 1-based clipindex per FCP7 spec
+        lines.push(`          <clipitem id="${escapeXml(audioClipId)}">`)
+        lines.push(`            <name>${escapeXml(a.filename)}</name>`)
+        lines.push(`            <enabled>TRUE</enabled>`)
+        lines.push(`            <duration>${a.sourceFrames}</duration>`)
+        lines.push(`            <start>${a.startFrame}</start>`)
+        lines.push(`            <end>${a.endFrame}</end>`)
+        lines.push(`            <in>${a.inSrcFrames}</in>`)
+        lines.push(`            <out>${a.outSrcFrames}</out>`)
+        lines.push(`            <pproTicksIn>${secondsToPproTicks(a.srcStart)}</pproTicksIn>`)
+        lines.push(`            <pproTicksOut>${secondsToPproTicks(a.srcEnd)}</pproTicksOut>`)
+        lines.push(`            <file id="file-aroll"/>`)
+        lines.push(`            <sourcetrack>`)
+        lines.push(`              <mediatype>audio</mediatype>`)
+        lines.push(`              <trackindex>${channel}</trackindex>`)
+        lines.push(`            </sourcetrack>`)
+        // Audiolevels filter at unity gain (1.0 = 0dB). The whole reason
+        // this <audio> block exists — without this filter, Premiere
+        // applies its mute default and the imported timeline plays silent.
+        lines.push(`            <filter>`)
+        lines.push(`              <effect>`)
+        lines.push(`                <name>Audio Levels</name>`)
+        lines.push(`                <effectid>audiolevels</effectid>`)
+        lines.push(`                <effecttype>audiolevels</effecttype>`)
+        lines.push(`                <mediatype>audio</mediatype>`)
+        lines.push(`                <pproBypass>false</pproBypass>`)
+        lines.push(`                <parameter>`)
+        lines.push(`                  <parameterid>level</parameterid>`)
+        lines.push(`                  <name>Level</name>`)
+        lines.push(`                  <valuemin>0</valuemin>`)
+        lines.push(`                  <valuemax>3.98109</valuemax>`)
+        lines.push(`                  <value>1</value>`)
+        lines.push(`                </parameter>`)
+        lines.push(`              </effect>`)
+        lines.push(`            </filter>`)
+        // Link to V1 video twin + the A2 audio twin (or A1 if we're on A2).
+        // Premiere uses these to keep the A/V group selected/trimmed together.
+        lines.push(`            <link>`)
+        lines.push(`              <linkclipref>${escapeXml(a.videoClipId)}</linkclipref>`)
+        lines.push(`              <mediatype>video</mediatype>`)
+        lines.push(`              <trackindex>1</trackindex>`)
+        lines.push(`              <clipindex>${segIndex}</clipindex>`)
+        lines.push(`            </link>`)
+        lines.push(`            <link>`)
+        lines.push(`              <linkclipref>${escapeXml(a.videoClipId)}-a1</linkclipref>`)
+        lines.push(`              <mediatype>audio</mediatype>`)
+        lines.push(`              <trackindex>1</trackindex>`)
+        lines.push(`              <clipindex>${segIndex}</clipindex>`)
+        lines.push(`            </link>`)
+        lines.push(`            <link>`)
+        lines.push(`              <linkclipref>${escapeXml(a.videoClipId)}-a2</linkclipref>`)
+        lines.push(`              <mediatype>audio</mediatype>`)
+        lines.push(`              <trackindex>2</trackindex>`)
+        lines.push(`              <clipindex>${segIndex}</clipindex>`)
+        lines.push(`            </link>`)
+        lines.push(`          </clipitem>`)
+      }
+      lines.push(`        </track>`)
+    }
+    lines.push(`      </audio>`)
+  }
+
   lines.push(`    </media>`)
   lines.push(`  </sequence>`)
   lines.push(`</xmeml>`)
