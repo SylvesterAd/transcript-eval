@@ -671,56 +671,50 @@ export function generateXmeml({
   lines.push(`      </video>`)
 
   // <audio> sibling — A-roll audio twins on A1 (channel 1) and A2 (channel 2).
-  // Each twin mirrors a V1 video clipitem's start/end/in/out exactly so
-  // Premiere keeps audio in sync with the video, and carries an explicit
-  // unity-gain audiolevels <filter> — without that, Premiere defaults the
-  // imported audio level to muted (the user-reported "volume 0" bug).
+  // Structure mirrors WyattBlue/auto-editor's `premiereWriteAudio`:
+  //   <numOutputChannels> + <format><samplecharacteristics> declare the
+  //   sequence audio rate (without these, Premiere reinterprets clipitem
+  //   <in>/<out> as 48kHz samples instead of video-frame indices and the
+  //   audio desyncs from the video). Each <track> carries Premiere stereo
+  //   attributes + a leading <outputchannelindex>. Clipitems omit
+  //   <duration>, <pproTicks*>, and an audiolevels <filter> — auto-editor
+  //   doesn't emit those on audio; once <format> is declared Premiere
+  //   defaults to unity gain on its own.
   // <link> blocks tie V1/A1/A2 of the same segment together so trims stay
-  // synced.
+  // synced — auto-editor leaves linking to the user, but our pipeline
+  // wants the user to trim A/V as one clip in the NLE.
   if (audioSegments.length > 0) {
     lines.push(`      <audio>`)
+    lines.push(`        <numOutputChannels>2</numOutputChannels>`)
+    lines.push(`        <format>`)
+    lines.push(`          <samplecharacteristics>`)
+    lines.push(`            <depth>16</depth>`)
+    lines.push(`            <samplerate>48000</samplerate>`)
+    lines.push(`          </samplecharacteristics>`)
+    lines.push(`        </format>`)
     for (const channel of [1, 2]) {
-      lines.push(`        <track>`)
+      const explodedIndex = channel - 1  // 0-based
+      lines.push(`        <track currentExplodedTrackIndex="${explodedIndex}" totalExplodedTrackCount="2" premiereTrackType="Stereo">`)
+      lines.push(`          <outputchannelindex>${channel}</outputchannelindex>`)
       for (let i = 0; i < audioSegments.length; i++) {
         const a = audioSegments[i]
         const audioClipId = `${a.videoClipId}-a${channel}`
         const segIndex = i + 1  // 1-based clipindex per FCP7 spec
-        lines.push(`          <clipitem id="${escapeXml(audioClipId)}">`)
+        lines.push(`          <clipitem id="${escapeXml(audioClipId)}" premiereChannelType="stereo">`)
         lines.push(`            <name>${escapeXml(a.filename)}</name>`)
         lines.push(`            <enabled>TRUE</enabled>`)
-        lines.push(`            <duration>${a.sourceFrames}</duration>`)
         lines.push(`            <start>${a.startFrame}</start>`)
         lines.push(`            <end>${a.endFrame}</end>`)
         lines.push(`            <in>${a.inSrcFrames}</in>`)
         lines.push(`            <out>${a.outSrcFrames}</out>`)
-        lines.push(`            <pproTicksIn>${secondsToPproTicks(a.srcStart)}</pproTicksIn>`)
-        lines.push(`            <pproTicksOut>${secondsToPproTicks(a.srcEnd)}</pproTicksOut>`)
         lines.push(`            <file id="file-aroll"/>`)
         lines.push(`            <sourcetrack>`)
         lines.push(`              <mediatype>audio</mediatype>`)
         lines.push(`              <trackindex>${channel}</trackindex>`)
         lines.push(`            </sourcetrack>`)
-        // Audiolevels filter at unity gain (1.0 = 0dB). The whole reason
-        // this <audio> block exists — without this filter, Premiere
-        // applies its mute default and the imported timeline plays silent.
-        lines.push(`            <filter>`)
-        lines.push(`              <effect>`)
-        lines.push(`                <name>Audio Levels</name>`)
-        lines.push(`                <effectid>audiolevels</effectid>`)
-        lines.push(`                <effecttype>audiolevels</effecttype>`)
-        lines.push(`                <mediatype>audio</mediatype>`)
-        lines.push(`                <pproBypass>false</pproBypass>`)
-        lines.push(`                <parameter>`)
-        lines.push(`                  <parameterid>level</parameterid>`)
-        lines.push(`                  <name>Level</name>`)
-        lines.push(`                  <valuemin>0</valuemin>`)
-        lines.push(`                  <valuemax>3.98109</valuemax>`)
-        lines.push(`                  <value>1</value>`)
-        lines.push(`                </parameter>`)
-        lines.push(`              </effect>`)
-        lines.push(`            </filter>`)
-        // Link to V1 video twin + the A2 audio twin (or A1 if we're on A2).
-        // Premiere uses these to keep the A/V group selected/trimmed together.
+        lines.push(`            <labels>`)
+        lines.push(`              <label2>Iris</label2>`)
+        lines.push(`            </labels>`)
         lines.push(`            <link>`)
         lines.push(`              <linkclipref>${escapeXml(a.videoClipId)}</linkclipref>`)
         lines.push(`              <mediatype>video</mediatype>`)
