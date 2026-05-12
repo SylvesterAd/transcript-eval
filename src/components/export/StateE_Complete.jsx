@@ -153,7 +153,12 @@ export default function StateE_Complete({
   function onDownloadAgain(label) {
     const xml = xmlByVariant[label]
     if (!xml) return
-    triggerXmlDownload(`variant-${String(label).toLowerCase()}.xml`, xml)
+    // Label is e.g. "Variant A"; strip the redundant prefix so the
+    // filename reads "variant-a.xml" not "variant-variant a.xml".
+    // Pass folder_path so the extension drops the XML next to the
+    // b-roll mp4s instead of the browser's default Downloads dir.
+    const letter = String(label).replace(/^Variant\s+/i, '').toLowerCase() || 'a'
+    triggerXmlDownload(`variant-${letter}.xml`, xml, complete?.folder_path)
   }
 
   return (
@@ -193,14 +198,17 @@ export default function StateE_Complete({
           )}
           {variantsReady && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {variantLabels.map(label => xmlByVariant[label] ? (
-                <DownloadBtn key={label} type="button" onClick={() => onDownloadAgain(label)}>
-                  <Download size={14} /> Download variant-{String(label).toLowerCase()}.xml again
-                </DownloadBtn>
-              ) : null)}
+              {variantLabels.map(label => {
+                const letter = String(label).replace(/^Variant\s+/i, '').toLowerCase() || 'a'
+                return xmlByVariant[label] ? (
+                  <DownloadBtn key={label} type="button" onClick={() => onDownloadAgain(label)}>
+                    <Download size={14} /> Download variant-{letter}.xml again
+                  </DownloadBtn>
+                ) : null
+              })}
               <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
-                XML files auto-downloaded to your default downloads folder.
-                Click a button above to re-download if you cleared the browser queue.
+                XML files saved to your export folder alongside the b-rolls.
+                Click a button above to re-download if needed.
               </div>
             </div>
           )}

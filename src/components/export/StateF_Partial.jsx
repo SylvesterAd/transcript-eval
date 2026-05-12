@@ -233,7 +233,12 @@ function XmlKickoffPanel({ exportId, variantLabels, unifiedManifest, complete })
   function onDownloadAgain(label) {
     const xml = xmlByVariant[label]
     if (!xml) return
-    triggerXmlDownload(`variant-${String(label).toLowerCase()}.xml`, xml)
+    // Strip "Variant " prefix so filename is variant-a.xml not
+    // variant-variant a.xml. Pass folder_path so the extension drops
+    // the XML next to the b-roll mp4s instead of browser's default
+    // Downloads dir.
+    const letter = String(label).replace(/^Variant\s+/i, '').toLowerCase() || 'a'
+    triggerXmlDownload(`variant-${letter}.xml`, xml, complete?.folder_path)
   }
 
   return (
@@ -261,13 +266,16 @@ function XmlKickoffPanel({ exportId, variantLabels, unifiedManifest, complete })
       )}
       {variantsReady && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-          {variantLabels.map(label => xmlByVariant[label] ? (
-            <XmlDownloadBtn key={label} type="button" onClick={() => onDownloadAgain(label)}>
-              <Download size={14} /> Download variant-{String(label).toLowerCase()}.xml again
-            </XmlDownloadBtn>
-          ) : null)}
+          {variantLabels.map(label => {
+            const letter = String(label).replace(/^Variant\s+/i, '').toLowerCase() || 'a'
+            return xmlByVariant[label] ? (
+              <XmlDownloadBtn key={label} type="button" onClick={() => onDownloadAgain(label)}>
+                <Download size={14} /> Download variant-{letter}.xml again
+              </XmlDownloadBtn>
+            ) : null
+          })}
           <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
-            XML auto-downloaded to your default downloads folder.
+            XML saved to your export folder alongside the b-rolls.
           </div>
         </div>
       )}
