@@ -132,12 +132,12 @@ describe('materializePlacementRemap', () => {
       expect(p.anchor_state).toBe('word_snapped')
     })
 
-    it('falls back to LLM timecode when anchor_word_idx points far from the LLM start (>30s)', () => {
+    it('falls back to LLM timecode when the word is >10s away in post-cut space', () => {
       // Real-world case from project 367: LLM emits start=[00:02:52] (172s),
       // but findAnchorWordIdx fell back to first-token match and returned
-      // idx=21 → word "and" at 12.4s. Without the sanity gate the placement
-      // would snap to 12.4s (off by 160s). With the gate it falls back to
-      // the LLM's 172s.
+      // idx=21 → word "and" at 12.4s. Without the gate the placement would
+      // snap to 12.4s (off by 160s in raw, ~140s in post-cut). With the
+      // 10s post-cut gate it falls back to the LLM's 172s.
       const words = []
       for (let i = 0; i < 200; i++) words.push({ word: `w${i}`, start: i * 0.9, end: i * 0.9 + 0.2 })
       words[21] = { word: 'and', start: 12.4, end: 12.62 }
@@ -154,12 +154,45 @@ describe('materializePlacementRemap', () => {
       expect(p.anchor_state).toBe('shifted')
     })
 
-    it('keeps word-snap when the word is within the ±30s gate of the LLM start', () => {
-      // 28s offset — within the gate, snap wins.
+    it('gate operates in post-cut space, not raw — large raw gap can pass after cuts collapse it', () => {
+      // Word at raw 3s, LLM at raw 30s — 27s raw gap. A cut [5, 25] collapses
+      // 20s between them, leaving a 7s post-cut gap (3 → 30-20=10) → within
+      // the 10s gate → snap wins. Would be rejected if the gate were on raw.
+      const words = [{ word: 'target', start: 3, end: 3.3 }]
+      const placements = [{
+        uuid: 'p_postcut',
+        start: '[00:00:30]', end: '[00:00:32]',
+        audio_anchor: 'target',
+        anchor_word_idx: 0,
+      }]
+      const out = materializePlacementRemap(placements, [{ start: 5, end: 25 }], words)
+      const p = out.get('p_postcut')
+      expect(p.anchor_state).toBe('word_snapped')
+      expect(p.start_seconds).toBeCloseTo(3, 2)
+      expect(p.end_seconds).toBeCloseTo(5, 2)  // raw end 5, post-cut 5 (cut.start), MIN_DURATION enforced if needed
+    })
+
+    it('gate rejects when raw gap is small but post-cut gap exceeds 10s (no cuts between)', () => {
+      // No cuts → raw gap == post-cut gap. 12s gap → rejected.
+      const words = [{ word: 'target', start: 0, end: 0.3 }]
+      const placements = [{
+        uuid: 'p_over',
+        start: '[00:00:12]', end: '[00:00:14]',  // 12s gap
+        audio_anchor: 'target',
+        anchor_word_idx: 0,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_over')
+      expect(p.start_seconds).toBeCloseTo(12, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+
+    it('keeps word-snap when the word is within the ±10s post-cut gate', () => {
+      // 8s offset, no cuts → 8s post-cut → within gate → snap wins.
       const words = [{ word: 'target', start: 100, end: 100.5 }]
       const placements = [{
         uuid: 'p_within',
-        start: '[00:01:12]', end: '[00:01:14]',  // 72s, 28s off
+        start: '[00:01:48]', end: '[00:01:50]',  // 108s, 8s off
         audio_anchor: 'target',
         anchor_word_idx: 0,
       }]
