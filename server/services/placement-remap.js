@@ -70,16 +70,19 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
     const llmEnd = parseTimecode(p.end)
     const llmDuration = llmEnd - llmStart
 
-    // Prefer the actual transcript word position when the LLM-assigned
-    // anchor_word_idx points to a real word that's close to where the
-    // LLM placed it. The ±30s sanity gate rejects indices that
-    // `findAnchorWordIdx` (in server/services/anchor-word.js) returned
-    // from its first-token fallback path — when the full anchor phrase
-    // didn't match verbatim and the function fell back to the first
-    // occurrence of the first word. Without the gate, a placement
-    // intended for [00:02:52] could snap to "and" at 12.4s 160s away.
-    // The legacy placement-match.js used the same ±30s window for its
-    // anchor search, so the threshold matches that domain expectation.
+    // Word-anchor as a refinement on top of the cut-remap, not a
+    // free-floating snap. Order of operations:
+    //   1. cut-remap places the LLM timecode in post-cut space.
+    //   2. word-anchor refines to the actual transcript word's start,
+    //      but only when the word's own post-cut position is within 10s
+    //      of step 1.
+    // The gate runs in post-cut domain (what the user sees) and rejects
+    // anchor_word_idx values that findAnchorWordIdx returned from its
+    // first-token fallback path — when the full anchor phrase didn't
+    // match verbatim, findAnchorWordIdx falls back to "first occurrence
+    // of first word", which can land 100+ seconds away from the LLM's
+    // intent. Project 367 placement 21 hit this: LLM at [00:02:52],
+    // findAnchorWordIdx returned idx 21 = "and" at 12.4s.
     const idx = p.anchor_word_idx
     const idxValid =
       Number.isInteger(idx) &&
@@ -87,7 +90,9 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
       idx < wordsList.length &&
       Number.isFinite(wordsList[idx]?.start)
     const wordStart = idxValid ? wordsList[idx].start : null
-    const usedWordSnap = idxValid && Math.abs(wordStart - llmStart) <= 30
+    const llmStartPostCut = postCutTime(llmStart, effectiveCuts)
+    const wordStartPostCut = idxValid ? postCutTime(wordStart, effectiveCuts) : null
+    const usedWordSnap = idxValid && Math.abs(wordStartPostCut - llmStartPostCut) <= 10
     const startOrig = usedWordSnap ? wordStart : llmStart
     const endOrig = usedWordSnap ? wordStart + llmDuration : llmEnd
 
