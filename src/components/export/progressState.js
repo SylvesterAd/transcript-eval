@@ -179,6 +179,12 @@ export function progressReducer(state, action) {
           ok_count: action.payload.ok_count,
           fail_count: action.payload.fail_count,
           folder_path: action.payload.folder_path || null,
+          // OS-resolved absolute path from extension's pickAbsoluteFolder
+          // (chrome.downloads.search filename → dirname). Required for
+          // <pathurl>file:///<absolute>/<file></pathurl> emission. When
+          // missing, the XML generator falls back to bare filenames —
+          // Premiere can still relink, but DaVinci can't auto-resolve.
+          folder_path_absolute: action.payload.folder_path_absolute || null,
           xml_paths: Array.isArray(action.payload.xml_paths) ? action.payload.xml_paths : [],
         },
       }
