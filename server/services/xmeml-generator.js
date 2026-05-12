@@ -378,14 +378,27 @@ export function generateXmeml({
       const arollFrameRate = Number.isFinite(seg.sourceFrameRate) && seg.sourceFrameRate > 0 ? seg.sourceFrameRate : frameRate
       const arollWidth = Number.isFinite(seg.width) && seg.width > 0 ? seg.width : seqW
       const arollHeight = Number.isFinite(seg.height) && seg.height > 0 ? seg.height : seqH
+      // Two coordinate systems per segment:
+      //   timelineStart/timelineEnd → where on the NLE timeline (post-cut,
+      //     ripple-deleted). Used for <start>/<end>.
+      //   sourceStart/sourceEnd    → which slice of the source file. Used
+      //     for <in>/<out>.
+      // Legacy single-clip path (no cuts) only sets seg.start/seg.end and
+      // both coordinate systems collapse to the same value — no ripple
+      // needed because there are no cuts. Fall back to start/end when the
+      // explicit fields aren't provided.
+      const tlStart = Number.isFinite(seg.timelineStart) ? seg.timelineStart : seg.start
+      const tlEnd = Number.isFinite(seg.timelineEnd) ? seg.timelineEnd : seg.end
+      const srcStart = Number.isFinite(seg.sourceStart) ? seg.sourceStart : seg.start
+      const srcEnd = Number.isFinite(seg.sourceEnd) ? seg.sourceEnd : seg.end
       const sourceDurationSec = Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0
         ? seg.sourceDurationSeconds
-        : (seg.end - seg.start)
+        : (srcEnd - srcStart)
       const arollSourceFrames = Math.round(sourceDurationSec * arollFrameRate)
-      const startFrame = secondsToFrames(seg.start, frameRate)
-      const endFrame = secondsToFrames(seg.end, frameRate)
-      const inSrcFrames = Math.round(seg.start * arollFrameRate)
-      const outSrcFrames = Math.round(seg.end * arollFrameRate)
+      const startFrame = secondsToFrames(tlStart, frameRate)
+      const endFrame = secondsToFrames(tlEnd, frameRate)
+      const inSrcFrames = Math.round(srcStart * arollFrameRate)
+      const outSrcFrames = Math.round(srcEnd * arollFrameRate)
       // Legacy aroll uses the original bare id (no index suffix) for backwards
       // compat with existing tests and any saved Premiere XML references.
       const arollClipId = useSegments ? `clip-${seqSlug}-aroll-${i + 1}` : `clip-${seqSlug}-aroll`
@@ -398,8 +411,10 @@ export function generateXmeml({
       lines.push(`            <end>${endFrame}</end>`)
       lines.push(`            <in>${inSrcFrames}</in>`)
       lines.push(`            <out>${outSrcFrames}</out>`)
-      lines.push(`            <pproTicksIn>${secondsToPproTicks(seg.start)}</pproTicksIn>`)
-      lines.push(`            <pproTicksOut>${secondsToPproTicks(seg.end)}</pproTicksOut>`)
+      // pproTicks are picosecond-precision IN/OUT for source — Premiere
+      // uses these instead of integer in/out frames. Use source coords.
+      lines.push(`            <pproTicksIn>${secondsToPproTicks(srcStart)}</pproTicksIn>`)
+      lines.push(`            <pproTicksOut>${secondsToPproTicks(srcEnd)}</pproTicksOut>`)
       if (i === 0) {
         // First clipitem owns the <file> block; later clipitems reference it by id.
         lines.push(`            <file id="${escapeXml(arollFileId)}">`)

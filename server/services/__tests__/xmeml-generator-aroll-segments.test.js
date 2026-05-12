@@ -82,4 +82,45 @@ describe('generateXmeml — arollSegments', () => {
     expect(xml).toMatch(/<in>300<\/in>/) // 10 * 30
     expect(xml).toMatch(/<out>600<\/out>/) // 20 * 30
   })
+
+  it('uses timelineStart/timelineEnd for <start>/<end> (ripple-deleted), sourceStart/sourceEnd for <in>/<out>', () => {
+    // Models the user's actual case: source has a 18.78s intro cut and
+    // a 22.66s mid cut (5:51-6:14). Two kept segments.
+    const xml = generateXmeml({
+      ...baseInput,
+      arollSegments: [
+        // First kept segment: source 18.78s-351.62s, timeline 0-332.84s (intro removed).
+        { filename: 'aroll.mov',
+          sourceStart: 18.78, sourceEnd: 351.62,
+          timelineStart: 0,    timelineEnd: 332.84,
+          sourceFrameRate: 30, sourceDurationSeconds: 713 },
+        // Second kept segment: source 374.28s-713s, timeline lays
+        // contiguous starting where the first ended (332.84s) — the
+        // 22.66s gap from 351.62→374.28 source is collapsed.
+        { filename: 'aroll.mov',
+          sourceStart: 374.28, sourceEnd: 713.00,
+          timelineStart: 332.84, timelineEnd: 671.56,
+          sourceFrameRate: 30, sourceDurationSeconds: 713 },
+      ],
+    })
+    // First clipitem: timeline 0 → 332.84*50 = 16642 frames; source in/out at 30fps.
+    expect(xml).toMatch(/<clipitem id="clip-testseq-aroll-1">[\s\S]*?<start>0<\/start>\s*<end>16642<\/end>\s*<in>563<\/in>\s*<out>10549<\/out>/)
+    // Second clipitem: starts EXACTLY where the first ended (no gap), source picks up after the cut.
+    expect(xml).toMatch(/<clipitem id="clip-testseq-aroll-2">[\s\S]*?<start>16642<\/start>\s*<end>33578<\/end>\s*<in>11228<\/in>\s*<out>21390<\/out>/)
+  })
+
+  it('falls back to start/end when timelineStart not provided (legacy callers)', () => {
+    // Pre-fix callers passed only start/end — both coordinates collapse
+    // to the same source-time value. New fields are opt-in.
+    const xml = generateXmeml({
+      ...baseInput,
+      arollSegments: [{
+        filename: 'aroll.mov',
+        start: 5, end: 15,
+        sourceFrameRate: 30, sourceDurationSeconds: 30,
+      }],
+    })
+    // <start>=5*50=250, <end>=15*50=750, <in>=5*30=150, <out>=15*30=450.
+    expect(xml).toMatch(/<start>250<\/start>\s*<end>750<\/end>\s*<in>150<\/in>\s*<out>450<\/out>/)
+  })
 })

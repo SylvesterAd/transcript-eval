@@ -217,30 +217,56 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       // separately on V1 by generateXmeml's `aroll` arg, not as a regular
       // b-roll clipitem.
       const brollPlacementsPostCut = allPlacements.filter((p) => !p || (p.source !== 'aroll' && p.seq !== 0))
-      // Placements are stored in post-cut canonical (Task 4). NLEs
-      // (Premiere/Resolve/FCP) consume original-time of the source
-      // media. Translate timelineStart/timelineDuration here so the
-      // emitted clipitem <start>/<end> match the source video's
-      // timeline. With no effective cuts this is reference-identity.
-      const brollPlacements = translatePlacementsForExport(brollPlacementsPostCut, effectiveCuts)
+      // Use post-cut canonical times directly — the editor (/brolls/edit)
+      // shows ripple-deleted timeline (cuts collapsed); the NLE export
+      // must match. Previous behavior translated to original-source time
+      // via translatePlacementsForExport, which left every cut as a
+      // visible gap in DaVinci/Premiere even though the editor view had
+      // no gap. translatePlacementsForExport is kept exported for
+      // historical consumers / tests that still want source-time layout.
+      const brollPlacements = brollPlacementsPostCut
 
       // Build arollSegments from editor cuts when cuts are present.
       // If no cuts (empty array), pass null so generateXmeml uses the legacy
       // aroll single-clip path — preserves behaviour for projects without cuts.
+      //
+      // Each segment carries TWO coordinate systems:
+      //   sourceStart/sourceEnd  — where in the original aroll file
+      //                            (used for <in>/<out> = source slice)
+      //   timelineStart/timelineEnd — ripple-deleted timeline position
+      //                            (used for <start>/<end> on the timeline)
+      // timelineStart = sourceStart minus the cumulative cut duration
+      // that lies before sourceStart, so consecutive kept segments lay
+      // contiguous on the NLE timeline with no gaps where cuts used to be.
       let arollSegments = null
       if (editorCuts.length > 0 && aroll) {
         const arollDurationSeconds = aroll.sourceDurationSeconds
         if (Number.isFinite(arollDurationSeconds) && arollDurationSeconds > 0) {
           const keptSegments = complementSegments(effectiveCuts, arollDurationSeconds)
-          arollSegments = keptSegments.map(s => ({
-            filename: aroll.filename,
-            start: s.start,
-            end: s.end,
-            sourceFrameRate: aroll.frameRate,
-            sourceDurationSeconds: arollDurationSeconds,
-            width: aroll.width,
-            height: aroll.height,
-          }))
+          // Cumulative cut duration strictly BEFORE a given source-time.
+          // Cuts are non-overlapping + sorted (computeEffectiveCuts contract).
+          const cutsBefore = (sourceTime) => {
+            let sum = 0
+            for (const c of effectiveCuts) {
+              if (c.end <= sourceTime) sum += (c.end - c.start)
+              else break
+            }
+            return sum
+          }
+          arollSegments = keptSegments.map(s => {
+            const offset = cutsBefore(s.start)
+            return {
+              filename: aroll.filename,
+              sourceStart: s.start,
+              sourceEnd: s.end,
+              timelineStart: s.start - offset,
+              timelineEnd: s.end - offset,
+              sourceFrameRate: aroll.frameRate,
+              sourceDurationSeconds: arollDurationSeconds,
+              width: aroll.width,
+              height: aroll.height,
+            }
+          })
         }
       }
 
