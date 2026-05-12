@@ -52,6 +52,34 @@ export function splitAtPlayhead({ playheadTime, cuts, cutExclusions = [] }) {
 }
 
 /**
+ * If a cut covers the first transcribed word, return 0 so the cut extends
+ * back to the timeline origin. Otherwise return start unchanged.
+ *
+ * Mirrors the head-trim already applied to annotation cuts in
+ * TranscriptEditor.jsx (~lines 421-425): when the cut includes the first
+ * word, any pre-transcript content (silence, lead-in, throat-clear before
+ * the first detected word) should be inside the cut rather than left as a
+ * sliver at the very top of the timeline.
+ *
+ * "Covers" = start at-or-before firstWord.start (±50ms) AND end at-or-after
+ * firstWord.start (±50ms). Both conditions required so a tiny cut entirely
+ * before the first word is not extended.
+ *
+ * @param {number} start - Proposed cut start time
+ * @param {number} end - Cut end time (used to verify overlap with the word)
+ * @param {{start: number} | null | undefined} firstWord - First transcribed word, or null when there is no transcript
+ * @returns {number} 0 if the cut covers the first word, else start unchanged
+ */
+export function snapCutStartToTimelineStart(start, end, firstWord) {
+  if (!firstWord) return start
+  const tolerance = 0.05
+  if (start <= firstWord.start + tolerance && end >= firstWord.start - tolerance) {
+    return 0
+  }
+  return start
+}
+
+/**
  * Compute the action to dispatch when the user drags a cut edge handle.
  *
  * Always returns UPDATE_CUT — mirroring the existing handleEdgeDrag behavior
