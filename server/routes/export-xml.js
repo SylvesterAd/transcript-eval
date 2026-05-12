@@ -281,32 +281,43 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       // aroll single-clip path — preserves behaviour for projects without cuts.
       //
       // Each segment carries TWO coordinate systems:
-      //   sourceStart/sourceEnd       — slice of the source file
-      //                                 (used for <in>/<out>)
-      //   timelineStart/timelineEnd   — where on the NLE sequence timeline
-      //                                 (used for <start>/<end>)
-      // Hold-position placement: timelineStart = sourceStart so each kept
-      // segment sits at its original-time position on the V1 track and
-      // every cut shows as a visible gap in the NLE. Scrubbing the NLE
-      // timeline to second N reveals source second N of the A-roll —
-      // matches the rough-cut ruler exactly.
+      //   sourceStart/sourceEnd  — where in the original aroll file
+      //                            (used for <in>/<out> = source slice)
+      //   timelineStart/timelineEnd — ripple-deleted timeline position
+      //                            (used for <start>/<end> on the timeline)
+      // timelineStart = sourceStart minus the cumulative cut duration
+      // that lies before sourceStart, so consecutive kept segments lay
+      // contiguous on the NLE timeline with no gaps where cuts used to be.
       let arollSegments = null
       if (editorCuts.length > 0 && aroll) {
         const arollDurationSeconds = aroll.sourceDurationSeconds
         if (Number.isFinite(arollDurationSeconds) && arollDurationSeconds > 0) {
           const keptSegments = complementSegments(effectiveCuts, arollDurationSeconds)
-          arollSegments = keptSegments.map(s => ({
-            filename: aroll.filename,
-            sourceStart: s.start,
-            sourceEnd: s.end,
-            timelineStart: s.start,
-            timelineEnd: s.end,
-            sourceFrameRate: aroll.frameRate,
-            ntsc: aroll.ntsc === true,
-            sourceDurationSeconds: arollDurationSeconds,
-            width: aroll.width,
-            height: aroll.height,
-          }))
+          // Cumulative cut duration strictly BEFORE a given source-time.
+          // Cuts are non-overlapping + sorted (computeEffectiveCuts contract).
+          const cutsBefore = (sourceTime) => {
+            let sum = 0
+            for (const c of effectiveCuts) {
+              if (c.end <= sourceTime) sum += (c.end - c.start)
+              else break
+            }
+            return sum
+          }
+          arollSegments = keptSegments.map(s => {
+            const offset = cutsBefore(s.start)
+            return {
+              filename: aroll.filename,
+              sourceStart: s.start,
+              sourceEnd: s.end,
+              timelineStart: s.start - offset,
+              timelineEnd: s.end - offset,
+              sourceFrameRate: aroll.frameRate,
+              ntsc: aroll.ntsc === true,
+              sourceDurationSeconds: arollDurationSeconds,
+              width: aroll.width,
+              height: aroll.height,
+            }
+          })
         }
       }
 
