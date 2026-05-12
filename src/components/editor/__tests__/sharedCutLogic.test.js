@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   splitAtPlayhead,
   resolveEdgeDrag,
+  snapCutStartToTimelineStart,
   ADD_CUT,
   UPDATE_CUT,
   REMOVE_CUT,
@@ -143,5 +144,57 @@ describe('resolveEdgeDrag', () => {
     const cut = { id: 'c1', start: 10, end: 20, source: 'split' }
     expect(resolveEdgeDrag({ cut, edge: 'end', newTime: NaN, cuts: [] })).toBeNull()
     expect(resolveEdgeDrag({ cut, edge: 'start', newTime: undefined, cuts: [] })).toBeNull()
+  })
+})
+
+describe('snapCutStartToTimelineStart', () => {
+  // Mirrors the head-trim logic the annotation cut generator already applies
+  // (TranscriptEditor.jsx ~lines 421-425): when a cut covers the first
+  // transcribed word, extend the cut's start back to 0 so any pre-transcript
+  // content (silence, lead-in, throat clears before the first detected word)
+  // is included. Without this, a Backspace cut starting at the first word
+  // leaves a tiny ~firstWord.start sliver uncut at the timeline origin.
+
+  it('snaps to 0 when cut starts at the first word and covers it', () => {
+    // Real case from project 367: user selects from displayItems[0]
+    // ([clear throat] at 0.20s) through several later words. Cut start is
+    // 0.20, end is ~4.50. Should snap to 0 so the pre-transcript 0–0.20s
+    // sliver is included.
+    const firstWord = { start: 0.20, end: 0.55 }
+    expect(snapCutStartToTimelineStart(0.20, 4.50, firstWord)).toBe(0)
+  })
+
+  it('snaps to 0 when cut starts slightly before the first word (within tolerance)', () => {
+    const firstWord = { start: 0.20, end: 0.55 }
+    expect(snapCutStartToTimelineStart(0.18, 4.50, firstWord)).toBe(0)
+  })
+
+  it('snaps to 0 when cut starts slightly after the first word but still overlaps it', () => {
+    // Edge drag could land the start just past firstWord.start; still
+    // covers the word so the snap should fire.
+    const firstWord = { start: 0.20, end: 0.55 }
+    expect(snapCutStartToTimelineStart(0.24, 4.50, firstWord)).toBe(0)
+  })
+
+  it('does not snap when cut is entirely after the first word', () => {
+    const firstWord = { start: 0.20, end: 0.55 }
+    expect(snapCutStartToTimelineStart(2.0, 4.50, firstWord)).toBe(2.0)
+  })
+
+  it('does not snap when cut is entirely before the first word (no overlap)', () => {
+    // Theoretical: tiny cut at 0.05-0.10, but first transcribed word is at 5s.
+    // Cut does NOT cover the first word, so don't extend it to 0.
+    const firstWord = { start: 5.0, end: 5.4 }
+    expect(snapCutStartToTimelineStart(0.05, 0.10, firstWord)).toBe(0.05)
+  })
+
+  it('does not snap when there is no first word (empty transcript)', () => {
+    expect(snapCutStartToTimelineStart(0.20, 4.50, null)).toBe(0.20)
+    expect(snapCutStartToTimelineStart(0.20, 4.50, undefined)).toBe(0.20)
+  })
+
+  it('does not snap when start is already 0 (no-op)', () => {
+    const firstWord = { start: 0.20, end: 0.55 }
+    expect(snapCutStartToTimelineStart(0, 4.50, firstWord)).toBe(0)
   })
 })

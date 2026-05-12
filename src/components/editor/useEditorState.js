@@ -1,6 +1,23 @@
 import { useReducer, useEffect, useRef, useCallback, useMemo } from 'react'
 import { apiGet, apiPut } from '../../hooks/useApi.js'
-import { ADD_CUT, UPDATE_CUT, REMOVE_CUT } from './sharedCutLogic.js'
+import { ADD_CUT, UPDATE_CUT, REMOVE_CUT, snapCutStartToTimelineStart } from './sharedCutLogic.js'
+
+// Pick the first transcribed word from the primary audio track (longest by
+// duration — matches Timeline.mergedDisplayCuts / EditorView.skipRegions),
+// shifted by track offset. Used by ADD_CUT to extend a cut back to 0 when
+// it covers the first word — same intent as the annotation head-trim in
+// TranscriptEditor.jsx.
+function getFirstTranscribedWord(state) {
+  if (!state?.tracks?.length) return null
+  const primaryAudio = state.tracks
+    .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+    .sort((a, b) => (b.duration || 0) - (a.duration || 0))[0]
+  if (!primaryAudio) return null
+  const w = primaryAudio.transcriptWords[0]
+  if (!w) return null
+  const offset = primaryAudio.offset || 0
+  return { start: w.start + offset, end: (w.end ?? w.start) + offset }
+}
 
 const GROUP_COLORS = ['#cefc00', '#c180ff', '#65fde6', '#ff7351', '#48e5d0', '#dbb4ff']
 
@@ -160,7 +177,7 @@ function cascadeOverlaps(tracks) {
   return result
 }
 
-function reducer(state, action) {
+export function reducer(state, action) {
   switch (action.type) {
     case 'INIT_TRACKS': {
       const { tracks, groups, groupDetail, groupId, restoredState } = action.payload
@@ -453,8 +470,17 @@ function reducer(state, action) {
     }
     case 'CLEAR_ROUGH_CUT':
       return { ...state, cuts: [], segmentVideoOverrides: {}, segmentAudioOverrides: {}, roughcutTranscriptState: null, isDirty: true }
-    case ADD_CUT:
-      return { ...state, cuts: [...state.cuts, action.payload], isDirty: true }
+    case ADD_CUT: {
+      const cut = action.payload
+      // Skip zero-width splits/razors — only real cuts get the head-trim.
+      let normalized = cut
+      if (cut.end > cut.start + 0.01) {
+        const firstWord = getFirstTranscribedWord(state)
+        const newStart = snapCutStartToTimelineStart(cut.start, cut.end, firstWord)
+        if (newStart !== cut.start) normalized = { ...cut, start: newStart }
+      }
+      return { ...state, cuts: [...state.cuts, normalized], isDirty: true }
+    }
     case REMOVE_CUT:
       return { ...state, cuts: state.cuts.filter(c => c.id !== action.payload), isDirty: true }
     case 'EXCLUDE_FROM_CUT': {
