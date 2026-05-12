@@ -148,6 +148,9 @@ export function useBRollEditorState(planPipelineId) {
   const editorStateLoadedRef = useRef(state.editorStateLoaded)
   editorStateLoadedRef.current = state.editorStateLoaded
 
+  const audioOnlyRef = useRef(editorCtx?.state?.audioOnly || false)
+  audioOnlyRef.current = editorCtx?.state?.audioOnly || false
+
   // Seed cached placements synchronously. Called by BRollEditor BEFORE setActiveVariantIdx,
   // so the pipelineId passed here is the INCOMING one.
   const seedFromCache = useCallback((pipelineId, rawPlacements, searchProgress) => {
@@ -169,6 +172,7 @@ export function useBRollEditorState(planPipelineId) {
       edits: useServerMode ? {} : editsRef.current,
       transcriptWords: transcriptWordsRef.current,
       editorStateLoaded: !useServerMode && editorStateLoadedRef.current,
+      audioOnly: audioOnlyRef.current,
     })
     dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements, placements: resolved, searchProgress: searchProgress || null, pipelineChanged: isPipelineSwitch } })
   }, [])
@@ -192,6 +196,7 @@ export function useBRollEditorState(planPipelineId) {
             edits: editsRef.current,
             transcriptWords: transcriptWordsRef.current,
             editorStateLoaded: editorStateLoadedRef.current,
+            audioOnly: audioOnlyRef.current,
           })
           dispatch({ type: 'SET_DATA_RESOLVED', payload: {
             rawPlacements: data.placements,
@@ -230,6 +235,7 @@ export function useBRollEditorState(planPipelineId) {
           edits: editsRef.current,
           transcriptWords: transcriptWordsRef.current,
           editorStateLoaded: editorStateLoadedRef.current,
+          audioOnly: audioOnlyRef.current,
         })
         dispatch({ type: 'SET_DATA_RESOLVED', payload: { rawPlacements: data.placements, placements: resolved, searchProgress: data.searchProgress, pipelineChanged: isPipelineSwitch } })
       })
@@ -293,9 +299,10 @@ export function useBRollEditorState(planPipelineId) {
       edits: state.edits,
       transcriptWords,
       editorStateLoaded: state.editorStateLoaded,
+      audioOnly: editorCtx?.state?.audioOnly || false,
     })
     dispatch({ type: 'SET_RESOLVED', payload: resolved })
-  }, [transcriptWords, state.edits, state.userPlacements, state.rawPlacements, state.editorStateLoaded])
+  }, [transcriptWords, state.edits, state.userPlacements, state.rawPlacements, state.editorStateLoaded, editorCtx?.state?.audioOnly])
 
   // Poll for progressive search updates
   useEffect(() => {

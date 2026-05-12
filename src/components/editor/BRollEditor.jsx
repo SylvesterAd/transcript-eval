@@ -245,6 +245,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   // Per-pid cache keeps individual array references stable when only one variant's
   // raw data changed, allowing React.memo in BRollTrack to skip unchanged tracks.
   const resolvedCacheRef = useRef(new Map())
+  const audioOnly = editorCtx?.state?.audioOnly || false
   const inactiveVariantPlacements = useMemo(() => {
     const cache = resolvedCacheRef.current
     const out = {}
@@ -252,14 +253,14 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     for (const [pid, placements] of Object.entries(rawInactivePlacements)) {
       seen.add(pid)
       const cached = cache.get(pid)
-      if (cached && cached.raw === placements && cached.words === transcriptWords) {
+      if (cached && cached.raw === placements && cached.words === transcriptWords && cached.audioOnly === audioOnly) {
         out[pid] = cached.resolved
         continue
       }
       // TODO: inactive variant edits — currently inactive variants don't have their edits applied
       //       because fetching per-pipeline editor-state for all variants is not yet wired up.
-      const resolved = matchPlacementsToTranscript(placements, transcriptWords)
-      cache.set(pid, { raw: placements, words: transcriptWords, resolved })
+      const resolved = matchPlacementsToTranscript(placements, transcriptWords, null, audioOnly)
+      cache.set(pid, { raw: placements, words: transcriptWords, audioOnly, resolved })
       out[pid] = resolved
     }
     // Evict stale entries for pids that no longer exist
@@ -267,7 +268,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
       if (!seen.has(pid)) cache.delete(pid)
     }
     return out
-  }, [rawInactivePlacements, transcriptWords])
+  }, [rawInactivePlacements, transcriptWords, audioOnly])
 
   // Apply pending selection after variant switch data loads. The pending value can be:
   //   - { uuid } — same-pipeline stable identity (preferred when staying in one variant)
@@ -532,7 +533,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                       const localOptimistic = (rawInactivePlacements[args.targetPipelineId] || [])
                         .filter(p => p.isUserPlacement && p.userPlacementId && !serverIds.has(p.userPlacementId))
                       const merged = [...serverPlacements, ...localOptimistic]
-                      targetPlacements = matchPlacementsToTranscript(merged, transcriptWords)
+                      targetPlacements = matchPlacementsToTranscript(merged, transcriptWords, null, audioOnly)
                       setRawInactivePlacements(prev => ({ ...prev, [args.targetPipelineId]: merged }))
                     } catch (err) {
                       console.error('[broll-cross-drop] fit-check refresh failed:', err.message)

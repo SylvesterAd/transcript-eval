@@ -26,9 +26,13 @@ function normalize(text) {
  *
  * @param {Array} placements - from the assembled plan
  * @param {Array} words - transcript words [{word, start, end}, ...]
+ * @param {Object} editsByKey - per-placement user edits (uuid or legacy key)
+ * @param {boolean} audioOnly - when true, extend each placement's end to the next
+ *                              placement's start so b-rolls play back-to-back
+ *                              with no gaps (no A-Roll behind to fill them).
  * @returns {Array} placements with timelineStart, timelineEnd, timelineDuration added
  */
-export function matchPlacementsToTranscript(placements, words, editsByKey = null) {
+export function matchPlacementsToTranscript(placements, words, editsByKey = null, audioOnly = false) {
   if (!placements?.length) return placements || []
   // Even when transcript words aren't available yet (race during initial mount or
   // a track-list reload), each placement still resolves via its plan timecodes
@@ -144,6 +148,21 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
     if (curr.timelineEnd > next.timelineStart) {
       curr.timelineEnd = next.timelineStart
       curr.timelineDuration = Math.max(0, curr.timelineEnd - curr.timelineStart)
+    }
+  }
+
+  // Step 3: Audio-only gap-fill. With no A-Roll behind the b-roll track, any
+  // gap between consecutive placements would play silence/black. Extend each
+  // placement's end to the next placement's start so playback is continuous.
+  // Anchor-snapped starts and the last placement's end are preserved.
+  if (audioOnly) {
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const curr = sorted[i]
+      const next = sorted[i + 1]
+      if (curr.timelineEnd < next.timelineStart) {
+        curr.timelineEnd = next.timelineStart
+        curr.timelineDuration = curr.timelineEnd - curr.timelineStart
+      }
     }
   }
 

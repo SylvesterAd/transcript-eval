@@ -145,16 +145,17 @@ export function userPlacementToRawEntry(up) {
 // and local-authoritative (after LOAD_EDITOR_STATE has populated state.userPlacements/edits).
 // Both modes filter hidden placements; local mode strips server's userPlacements and re-adds
 // from local state so unsaved local edits to userPlacements are reflected.
-export function resolvePlacements({ rawPlacements, userPlacements, edits, transcriptWords, editorStateLoaded }) {
+export function resolvePlacements({ rawPlacements, userPlacements, edits, transcriptWords, editorStateLoaded, audioOnly = false }) {
   if (!editorStateLoaded) {
     const visible = rawPlacements.filter(p => !p.hidden)
-    return matchPlacementsToTranscript(visible, transcriptWords)
+    return matchPlacementsToTranscript(visible, transcriptWords, null, audioOnly)
   }
   const visible = rawPlacements.filter(p => !p.hidden && !p.isUserPlacement)
   return matchPlacementsToTranscript(
     [...visible, ...userPlacements.map(userPlacementToRawEntry)],
     transcriptWords,
     edits,
+    audioOnly,
   )
 }
 
