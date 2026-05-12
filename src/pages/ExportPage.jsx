@@ -439,6 +439,7 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
       <StateB_Session
         variant={variantLabel}
         envatoItemCount={envatoCount}
+        ping={preflight.ping}
         onContinue={onContinueOverride}
       />
     )

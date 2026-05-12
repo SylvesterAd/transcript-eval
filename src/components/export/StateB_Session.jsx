@@ -66,16 +66,20 @@ const SignInButton = styled.a`
   &:hover { background: #1d4ed8; }
 `
 
-const ContinueLink = styled.button`
-  margin-top: 12px;
-  background: none;
-  border: none;
-  color: #6b7280;
-  font-size: 12px;
+const ContinueButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 10px 16px;
+  background: #fff;
+  color: #1f2937;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
-  text-decoration: underline;
-  padding: 0;
-  &:hover { color: #374151; }
+  &:hover { background: #f9fafb; border-color: #9ca3af; }
 `
 
 const ManualWarning = styled.p`
@@ -91,7 +95,27 @@ const Footnote = styled.p`
   margin: 16px 0 0;
 `
 
-export default function StateB_Session({ variant, envatoItemCount, onContinue }) {
+const Diagnostics = styled.details`
+  margin-top: 16px;
+  font-size: 12px;
+  color: #6b7280;
+  > summary { cursor: pointer; user-select: none; }
+  > div {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #374151;
+  }
+`
+
+export default function StateB_Session({ variant, envatoItemCount, ping, onContinue }) {
+  const detail = ping?.value?.envato_session_detail || null
+  const sessionRaw = ping?.value?.envato_session || (ping?.status === 'loading' ? '(checking…)' : '(no ping yet)')
   return (
     <Wrap>
       <Card>
@@ -116,18 +140,36 @@ export default function StateB_Session({ variant, envatoItemCount, onContinue })
           Sign in to Envato
         </SignInButton>
 
-        <Footnote>This page updates automatically after sign-in.</Footnote>
+        <Footnote>This page re-checks every 2 seconds and continues automatically once we see your session.</Footnote>
 
-        {/* TODO Ext.4: remove this manual override once the extension's
-            cookie watcher reliably reports envato_session === 'ok'.
-            Today (Ext.1) the extension hard-codes 'missing', so without
-            this escape hatch every user is stuck on State B forever. */}
-        <ContinueLink type="button" onClick={onContinue}>
-          I'm already signed in — continue
-        </ContinueLink>
+        <ContinueButton type="button" onClick={onContinue}>
+          I'm already signed in — continue anyway
+        </ContinueButton>
         <ManualWarning>
-          We'll re-check your Envato session before the first download.
+          Use this if the page doesn't auto-detect your sign-in. We'll skip
+          the cookie check and try the download — if your session really
+          is missing, individual items will fail in the next step where
+          you can retry them.
         </ManualWarning>
+
+        <Diagnostics>
+          <summary>Why doesn't it detect my sign-in?</summary>
+          <div>
+            ping status: {ping?.status || '(unknown)'}<br />
+            envato_session: {sessionRaw}<br />
+            detail: {detail || '—'}<br />
+            {detail === 'cookies_missing' && (
+              <>
+                The extension can't see <code>envato_client_id</code> + <code>elements.session.&lt;N&gt;</code> cookies on
+                <code> .envato.com</code>. Make sure you signed in to <code>elements.envato.com</code> (not just app.envato.com),
+                and that the extension has the <code>cookies</code> permission for <code>https://elements.envato.com/*</code>.<br />
+              </>
+            )}
+            {detail === 'cookies_present' && (
+              <>Cookies look present to the extension — if you're still on this page, the page may have stale state. Try refreshing.</>
+            )}
+          </div>
+        </Diagnostics>
       </Card>
     </Wrap>
   )
