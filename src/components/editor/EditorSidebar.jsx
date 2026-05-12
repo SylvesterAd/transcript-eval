@@ -8,7 +8,12 @@ const items = [
   { icon: 'video_library', label: 'B-Roll Editor', id: 'brolls-edit', navTo: 'brolls/edit', tab: 'brolls', needsSync: true, needsBrollSearch: true },
 ]
 
-const SYNC_READY_STATUSES = ['done', 'confirmed']
+// Sub-groups land in 'done' after their own assembly runs — that's where
+// transcripts/timeline actually live. Parent groups end up in 'confirmed'
+// after classification confirmation; they're containers and their sub-groups
+// hold the real work, so Sync/Rough Cut/B-Roll tabs must stay locked at
+// the parent level (Assets is the only meaningful surface).
+const SYNC_READY_STATUSES = ['done']
 
 export default function EditorSidebar({
   activeTab = 'sync',
