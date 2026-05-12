@@ -335,6 +335,65 @@ describe('renderWorker.drainOnce — lint gate', () => {
     expect(renderHtml).toHaveBeenCalled();
   });
 
+  it('lint dirty TWICE then clean: takes a second retry before proceeding (LINT_MAX_RETRIES=2)', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 18, session_id: 9, iteration: 1, template: 'lower-third',
+        spec_snapshot_json: {
+          template: 'lower-third', mainText: 'Hi', subText: 'Sub',
+          aspectRatio: '16:9', duration: 5, tone: 'neutral',
+        },
+      })
+      .mockResolvedValue(null);
+
+    const { runLint } = await import('../lint-runner.js');
+    const { specToHtml } = await import('../html-generator.js');
+    const { renderHtml } = await import('../render-runner.js');
+    const { runCritic } = await import('../critic/critic-runner.js');
+
+    runLint.mockReset();
+    runLint
+      .mockResolvedValueOnce({
+        errorCount: 1, warningCount: 0, infoCount: 0,
+        findings: [{ severity: 'error', rule: 'missing_timeline', message: 'no __timelines' }],
+      })
+      .mockResolvedValueOnce({
+        errorCount: 1, warningCount: 0, infoCount: 0,
+        findings: [{ severity: 'error', rule: 'missing_timeline', message: 'still no __timelines' }],
+      })
+      .mockResolvedValueOnce({ errorCount: 0, warningCount: 0, infoCount: 0, findings: [] });
+
+    specToHtml.mockClear();
+    specToHtml.mockResolvedValue({
+      html: '<!doctype html><html><body><div id="stage" data-composition-id="main" data-duration="5" data-width="1920" data-height="1080">x</div></body></html>',
+      cost: 5,
+      tokens: { in: 600, out: 400 },
+    });
+
+    renderHtml.mockClear();
+    runCritic.mockReset();
+    runCritic.mockResolvedValue({
+      score: 0.9, criteria: { fidelity: 0.9, legibility: 0.9, style: 0.9, timing: 0.9 },
+      feedback: 'good', retry_recommended: false, frameUrls: ['x'], tokens: { in: 0, out: 0 },
+    });
+
+    const { drainOnce } = await import('../render-worker.js');
+    const result = await drainOnce();
+
+    expect(result.processed).toBe(1);
+    expect(result.errors).toHaveLength(0);
+    // initial + retry 1 + retry 2 (clean on retry 2)
+    expect(runLint).toHaveBeenCalledTimes(3);
+    expect(specToHtml).toHaveBeenCalledTimes(3);
+    // Both retries get the lint feedback as additionalSystemContext
+    expect(specToHtml.mock.calls[1][0].additionalSystemContext).toMatch(/missing_timeline/);
+    expect(specToHtml.mock.calls[2][0].additionalSystemContext).toMatch(/still no __timelines/);
+    expect(renderHtml).toHaveBeenCalled();
+  });
+
   it('lint still dirty after retry: marks render failed, does not call renderHtml', async () => {
     const db = (await import('../../../db.js')).default;
     const sharedGet = db.prepare().get;
@@ -382,7 +441,8 @@ describe('renderWorker.drainOnce — lint gate', () => {
       expect(result.processed).toBe(0);
       expect(result.errors).toHaveLength(1);
       expect(result.errors[0].error).toMatch(/lint failed/i);
-      expect(runLint).toHaveBeenCalledTimes(2);
+      // Initial attempt + LINT_MAX_RETRIES (=2) retries = 3 lint runs total
+      expect(runLint).toHaveBeenCalledTimes(3);
       expect(renderHtml).not.toHaveBeenCalled();
       // The failure-marking SQL should have been prepared
       const sqls = prepareSpy.mock.calls.map((c) => c[0]);

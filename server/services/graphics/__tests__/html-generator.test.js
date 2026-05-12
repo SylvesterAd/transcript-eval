@@ -276,6 +276,22 @@ describe('specToHtml additionalSystemContext', () => {
     expect(call.system).toMatch(/## CORRECTIONS REQUESTED/)
     expect(call.system).toMatch(/Math\.random\(\) detected/)
   })
+
+  it('requests max_tokens=8192 so 8-scene compositions are not truncated mid-output', async () => {
+    const callMock = vi.fn().mockResolvedValue({
+      text: '<!doctype html><html><body><div data-composition-id="main" data-start="0" data-duration="5"></div></body></html>',
+      toolUses: [],
+      tokens: { in: 100, out: 100 },
+      stop: 'end_turn',
+    })
+    vi.doMock('../../../lib/llm/anthropic.js', () => ({ callAnthropic: callMock }))
+
+    const { specToHtml } = await import('../html-generator.js')
+    await specToHtml({ spec: { template: 'lower-third', duration: 5 } })
+
+    const call = callMock.mock.calls[0][0]
+    expect(call.max_tokens).toBe(8192)
+  })
 })
 
 describe('few-shots use canonical scene-clip pattern', () => {
