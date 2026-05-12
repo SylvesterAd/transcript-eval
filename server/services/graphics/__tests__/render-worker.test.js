@@ -388,8 +388,108 @@ describe('renderWorker.drainOnce — lint gate', () => {
       const sqls = prepareSpy.mock.calls.map((c) => c[0]);
       const failedMark = sqls.find((s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'failed'/.test(s));
       expect(failedMark).toBeDefined();
+      // And the session must be unstuck — for an initial render (no
+      // parent_render_id) it flips back to 'briefing' so the user isn't
+      // permanently locked out of the chat UI.
+      const sessionStatusUpdate = sqls.find(
+        (s) => /UPDATE graphics_sessions/.test(s) && /SET status/.test(s)
+      );
+      expect(sessionStatusUpdate).toBeDefined();
     } finally {
       prepareSpy.mockRestore();
+      db.transaction = origTransaction;
+    }
+  });
+
+  it('on iteration render failure (parent_render_id set), session flips to iterating not briefing', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 14, session_id: 7, iteration: 2, template: 'lower-third',
+        parent_render_id: 99,  // <-- iteration off a parent
+        spec_snapshot_json: { template: 'lower-third', mainText: 'Hi', subText: 'Sub', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      })
+      .mockResolvedValue(null);
+
+    // Force failure inside the critic loop by making specToHtml throw — both
+    // initial-render and iteration paths share the same outer catch block.
+    const { specToHtml } = await import('../html-generator.js');
+    specToHtml.mockClear();
+    specToHtml.mockRejectedValue(new Error('synthetic failure for test'));
+
+    const origTransaction = db.transaction;
+    const txCalls = [];
+    db.transaction = async (fn) =>
+      fn({
+        prepare: (sql) => ({
+          run: (...args) => {
+            txCalls.push({ sql, args });
+            return { changes: 1 };
+          },
+          get: (...args) => {
+            txCalls.push({ sql, args });
+            return null;
+          },
+        }),
+      });
+
+    try {
+      const { drainOnce } = await import('../render-worker.js');
+      await drainOnce();
+      const statusUpdate = txCalls.find(
+        (c) => /UPDATE graphics_sessions/.test(c.sql) && /SET status/.test(c.sql)
+      );
+      expect(statusUpdate).toBeDefined();
+      // The first positional arg is the next status value (parameterised)
+      expect(statusUpdate.args[0]).toBe('iterating');
+    } finally {
+      db.transaction = origTransaction;
+    }
+  });
+
+  it('on initial render failure (no parent_render_id), session flips to briefing', async () => {
+    const db = (await import('../../../db.js')).default;
+    const sharedGet = db.prepare().get;
+    sharedGet.mockReset();
+    sharedGet
+      .mockResolvedValueOnce({
+        id: 15, session_id: 8, iteration: 1, template: 'lower-third',
+        parent_render_id: null,  // <-- initial render
+        spec_snapshot_json: { template: 'lower-third', mainText: 'Hi', subText: 'Sub', aspectRatio: '16:9', duration: 5, tone: 'neutral' },
+      })
+      .mockResolvedValue(null);
+
+    const { specToHtml } = await import('../html-generator.js');
+    specToHtml.mockClear();
+    specToHtml.mockRejectedValue(new Error('synthetic failure for test'));
+
+    const origTransaction = db.transaction;
+    const txCalls = [];
+    db.transaction = async (fn) =>
+      fn({
+        prepare: (sql) => ({
+          run: (...args) => {
+            txCalls.push({ sql, args });
+            return { changes: 1 };
+          },
+          get: (...args) => {
+            txCalls.push({ sql, args });
+            return null;
+          },
+        }),
+      });
+
+    try {
+      const { drainOnce } = await import('../render-worker.js');
+      await drainOnce();
+      const statusUpdate = txCalls.find(
+        (c) => /UPDATE graphics_sessions/.test(c.sql) && /SET status/.test(c.sql)
+      );
+      expect(statusUpdate).toBeDefined();
+      expect(statusUpdate.args[0]).toBe('briefing');
+    } finally {
       db.transaction = origTransaction;
     }
   });
@@ -701,8 +801,11 @@ describe('renderWorker.drainOnce — refine-from-parent path', () => {
       const failedMark = sqls.find(
         (s) => /UPDATE graphics_renders/.test(s) && /status\s*=\s*'failed'/.test(s)
       )
+      // The SQL now passes the next status as a parameter, so look for the
+      // shape instead of a quoted literal. Value-level assertion (iterating
+      // vs briefing) lives in the dedicated tests in the lint-failure block.
       const unstickSession = sqls.find(
-        (s) => /UPDATE graphics_sessions/.test(s) && /status\s*=\s*'iterating'/.test(s)
+        (s) => /UPDATE graphics_sessions/.test(s) && /SET status/.test(s)
       )
       expect(failedMark).toBeDefined()
       expect(unstickSession).toBeDefined()

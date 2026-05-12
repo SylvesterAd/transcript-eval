@@ -189,7 +189,7 @@ describe('orchestrator — multi-scene spec extraction', () => {
     // Gemini drops top-level template on multi-scene because the brief prompt
     // says it's ignored when scenes[] is present. graphics_renders.template is
     // NOT NULL, so the orchestrator must derive a fallback.
-    const reply = '[SPEC]\n```json\n{"aspectRatio":"16:9","tone":"neutral","scenes":[{"template":"map","duration":3,"mainText":"Sumy","subText":"NE"},{"template":"title-card","duration":2,"mainText":"Summary","subText":"end"}]}\n```'
+    const reply = 'Rendering now.\n[SPEC]\n```json\n{"aspectRatio":"16:9","tone":"neutral","scenes":[{"template":"map","duration":3,"mainText":"Sumy","subText":"NE"},{"template":"title-card","duration":2,"mainText":"Summary","subText":"end"}]}\n```'
     callGemini.mockResolvedValue({
       text: reply,
       toolUses: [],
@@ -219,7 +219,7 @@ describe('orchestrator — multi-scene spec extraction', () => {
     // Pathological: multi-scene spec where scene templates are empty strings.
     // isSpecComplete won't pass (SCENE_REQUIRED needs template), but if the
     // contract ever loosens this guard prevents a NULL leak into the DB.
-    const reply = '[SPEC]{"template":"lower-third","aspectRatio":"16:9","duration":5,"mainText":"a","subText":"b","tone":"neutral"}'
+    const reply = 'Rendering now. [SPEC]{"template":"lower-third","aspectRatio":"16:9","duration":5,"mainText":"a","subText":"b","tone":"neutral"}'
     callGemini.mockResolvedValue({
       text: reply,
       toolUses: [],
@@ -232,6 +232,44 @@ describe('orchestrator — multi-scene spec extraction', () => {
       (c) => /INSERT INTO graphics_renders/i.test(c.sql)
     )
     expect(renderInsert.args[3]).toBe('lower-third')
+  })
+
+  it('does NOT queue a render when Gemini asks a clarifying question, even with a complete spec', async () => {
+    const { callGemini } = await import('../../../lib/llm/gemini.js')
+    callGemini.mockClear()
+    // session-73/74 scenario: complete multi-scene spec + a follow-up question
+    // instead of the explicit "Rendering now." trigger.
+    const reply =
+      'Here is the spec for your war map.\n\n' +
+      'Is there anything you would like to adjust regarding the pacing or the text before I render?\n\n' +
+      '[SPEC]\n```json\n{"aspectRatio":"16:9","tone":"neutral","scenes":[{"template":"map","duration":3,"mainText":"A","subText":"B"},{"template":"title-card","duration":2,"mainText":"C","subText":"D"}]}\n```'
+    callGemini.mockResolvedValue({
+      text: reply,
+      toolUses: [],
+      tokens: { in: 200, out: 50 },
+      stop: 'STOP',
+    })
+    const { runChatTurn } = await import('../orchestrator.js')
+    const result = await runChatTurn({ sessionId: 1, userMessage: 'go' })
+
+    expect(result.renderId).toBeNull()
+    const renderInsert = dbState.txCalls.find(
+      (c) => /INSERT INTO graphics_renders/i.test(c.sql)
+    )
+    expect(renderInsert).toBeUndefined()
+    const sessionToRendering = dbState.txCalls.find(
+      (c) => /UPDATE graphics_sessions/i.test(c.sql) && /status\s*=\s*'rendering'/i.test(c.sql)
+    )
+    expect(sessionToRendering).toBeUndefined()
+    // Spec is still merged + assistant message is still stored — only the
+    // render insert is gated.
+    expect(result.specUpdate.scenes).toHaveLength(2)
+  })
+
+  it('BRIEF_SYSTEM_PROMPT teaches the explicit "Rendering now." render trigger', async () => {
+    const { BRIEF_SYSTEM_PROMPT } = await import('../brief-prompt.js')
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/rendering now/i)
+    expect(BRIEF_SYSTEM_PROMPT).toMatch(/render trigger|never emit it|do not include/i)
   })
 })
 

@@ -131,13 +131,11 @@ describe('CREATE_HTML_SYSTEM_PROMPT canonical Hyperframes rules', () => {
 
   it('requires at least 3 different easings per scene', async () => {
     const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
-    // The rule should mention a ≥3 ease requirement (durable across phrasing)
+    // The rule should mention a ≥3 ease requirement (durable across phrasing).
+    // Upstream Hyperframes guide uses "Use at least 3 different eases per scene".
     expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/(?:at least|≥|minimum (?:of )?|no fewer than)\s*(?:3|three)\b[^.]*?eas/i)
-    // And the approved-easing list must enumerate ≥3 entries
-    const approvedMatch = CREATE_HTML_SYSTEM_PROMPT.match(/Approved:\s*([^\n]+)/)
-    expect(approvedMatch).not.toBeNull()
-    const eases = approvedMatch[1].split(',').map((s) => s.trim()).filter(Boolean)
-    expect(eases.length).toBeGreaterThanOrEqual(3)
+    // And the approved-easing vocabulary must enumerate ≥3 distinct ease names
+    // (verified separately by the "lists approved easings" test below).
   })
 
   it('lists approved easings', async () => {
@@ -331,8 +329,10 @@ describe('CREATE_HTML_SYSTEM_PROMPT — canonical multi-scene schema', () => {
 
   it('lists transition strategy: hard cuts default, shaders sparingly', async () => {
     const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
-    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/95%|hard cuts.*default/i)
-    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/2.{0,5}3 shader|2-3 shader/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/95%|hard cuts/i)
+    // Upstream guide says "2 shader transitions at key moments" and "Rule of
+    // thumb: a 6-8 scene video wants 2 shader transitions". Accept either.
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/[2-3]\s*shader\s*transitions?/i)
   })
 })
 
@@ -428,5 +428,41 @@ describe('REFINE_HTML_SYSTEM_PROMPT — scene-scoped editing', () => {
   it('teaches composition root duration recalculation on scene duration change', async () => {
     const { REFINE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
     expect(REFINE_HTML_SYSTEM_PROMPT).toMatch(/recalculate.*composition.*data-duration|composition root.*data-duration|sum of all scene durations/i)
+  })
+})
+
+describe('CREATE_HTML_SYSTEM_PROMPT — vendored Hyperframes guide integration', () => {
+  it('embeds the upstream guide verbatim and exposes the pinned SHA', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    const { HYPERFRAMES_CLAUDE_DESIGN_GUIDE, HYPERFRAMES_GUIDE_SHA } = await import(
+      '../prompts/hyperframes-claude-design.js'
+    )
+    // SHA is exposed (40-char git hash) so we can audit drift
+    expect(HYPERFRAMES_GUIDE_SHA).toMatch(/^[0-9a-f]{40}$/)
+    // The guide is non-trivial in size
+    expect(HYPERFRAMES_CLAUDE_DESIGN_GUIDE.length).toBeGreaterThan(10_000)
+    // And it's spliced into the system prompt body
+    expect(CREATE_HTML_SYSTEM_PROMPT).toContain(HYPERFRAMES_CLAUDE_DESIGN_GUIDE)
+  })
+
+  it('inherits the upstream self-review checklist (which catches the missing-timeline lint error)', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/window\.__timelines\[["']main["']\]\s*=\s*tl/)
+  })
+
+  it('inherits the upstream media rules (no base64, no placeholder URLs, no SVG data: grain)', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/base64 media/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/placeholder URLs|placehold\.co/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/data:image\/svg\+xml/i)
+  })
+
+  it('teaches the map-scene pattern (img background + overlay arrows/hotspots)', async () => {
+    const { CREATE_HTML_SYSTEM_PROMPT } = await import('../html-generator.js')
+    // Map template handling is pipeline-specific (the upstream guide doesn't
+    // cover maps), so we anchor the test on our own preamble copy.
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/map[\s\S]{0,200}img/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/arrows.*hotspots|hotspots.*arrows|frontline/i)
+    expect(CREATE_HTML_SYSTEM_PROMPT).toMatch(/never paste a giant base-map SVG|never base64/i)
   })
 })

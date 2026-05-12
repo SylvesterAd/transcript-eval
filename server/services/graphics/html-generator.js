@@ -6,6 +6,10 @@
 
 import { callAnthropic } from '../../lib/llm/anthropic.js'
 import { MODEL_FOR, costCents } from './models.js'
+import {
+  HYPERFRAMES_CLAUDE_DESIGN_GUIDE,
+  HYPERFRAMES_GUIDE_SHA,
+} from './prompts/hyperframes-claude-design.js'
 
 export const FEW_SHOT_LOWER_THIRD = `<!doctype html>
 <html lang="en">
@@ -252,201 +256,85 @@ export const FEW_SHOT_LOTTIE_LOGO = `<!doctype html>
   </body>
 </html>`
 
-export const CREATE_HTML_SYSTEM_PROMPT = `You are an HTML motion-graphics author for the Hyperframes pipeline. Given a spec with one or more scenes, you write a SINGLE complete HTML file containing all scenes nested inside one composition. Hyperframes renders this to MP4 by scrubbing one paused GSAP timeline frame-by-frame.
+// The HTML-authoring system prompt is composed of three layers, in this order:
+//   1. PIPELINE PREAMBLE — how the spec is delivered, what to output, our scene
+//      template vocabulary, asset-URL conventions, aspect-ratio + tone mapping.
+//   2. OFFICIAL HYPERFRAMES CLAUDE DESIGN GUIDE — vendored verbatim from
+//      heygen-com/hyperframes @ ${HYPERFRAMES_GUIDE_SHA} (Apache-2.0). Owns the
+//      hard contract, banned APIs, visibility rules, animation baselines,
+//      typography, transition strategy, mid-scene activity, and the self-review
+//      checklist. Don't re-state these in the preamble — just defer.
+//   3. FEW-SHOT EXAMPLES — our pipeline-specific complete HTML files (lower-
+//      third, logo'd lower-third, multi-scene with shader transition).
+const PIPELINE_PREAMBLE = `You are an HTML motion-graphics author for the Hyperframes pipeline. The user message will contain a spec JSON object with one or more scenes; you produce a SINGLE complete HTML file rendering it. The framework renders to MP4 by scrubbing one paused GSAP timeline frame-by-frame.
 
-# Hard contract (must always hold)
-1. ONE composition root: <div id="main" data-composition-id="main" data-width="<W>" data-height="<H>" data-start="0" data-duration="<TOTAL_DURATION>">…</div> where TOTAL_DURATION = sum of all scenes' durations.
-2. Each scene is nested inside the composition as: <div class="scene clip" id="sN" data-start="<ABSOLUTE_START>" data-duration="<DURATION>" data-track-index="0"> with N starting at 1 and incrementing. data-start values are ABSOLUTE seconds from t=0 (scene 2 starts where scene 1 ends).
-3. Each scene has a wrapper: <div class="scene-content"> ... </div>
-4. Animations: ONE GSAP timeline, paused, registered as window.__timelines["main"] = tl. The single timeline orchestrates entrances, mid-scene activity, and exits across all scenes.
-5. Allowed external resources: Google Fonts CSS; GSAP 3.14.x from cdn.jsdelivr.net; chart.js from cdn.jsdelivr.net; lottie-web from cdn.jsdelivr.net (only if a scene uses lottie adapter); image/SVG URLs from spec.assets[].url. NO other <script src> URLs.
-6. Output ONLY the HTML — no commentary, no markdown fences, no explanation.
+## Output rules
+- Output ONLY the complete HTML. No commentary, no markdown fences, no explanation.
+- The document MUST satisfy every rule in the "Claude Design + HyperFrames" guide below (hard contract, banned APIs, self-review checklist, etc.). Treat that guide as authoritative.
 
-# Scene visibility — anchor vs non-anchor
+## Spec → composition mappings (pipeline-specific; the guide does not cover these)
 
-ANCHOR scenes participate in shader transitions (HyperShader.init owns their opacity):
-  <div class="scene clip" id="s4" data-start="..." data-duration="..." data-track-index="0" style="opacity:0;">
-The FIRST anchor in each shader group needs an explicit reset in the timeline:
-  tl.set("#s4", { opacity: 1 }, <s4_start_time>)
+### Aspect ratio → composition root width × height
+- 16:9 → 1920 × 1080
+- 9:16 → 1080 × 1920
+- 1:1  → 1080 × 1080
 
-NON-ANCHOR scenes use autoAlpha (sets BOTH opacity AND visibility to dodge HyperShader's blanket opacity:0 reset):
-  <div class="scene clip" id="s2" data-start="..." data-duration="..." data-track-index="0" style="visibility:hidden;">
-And in the timeline:
-  tl.set("#s2", { autoAlpha: 1 }, <s2_start_time>)
-  tl.set("#s2", { autoAlpha: 0 }, <s2_start_time + s2_duration>)
+### Tone → accent color (CSS hex)
+- analytical → #f59e0b
+- dramatic   → #dc2626
+- neutral    → #9ca3af
+- playful    → #10b981
 
-Scene 1 typically gets only the autoAlpha hide at its end — it starts visible.
-
-# Shader transitions (use sparingly — ~95% of cuts should be hard cuts)
-
-If the spec has 6+ scenes, use 2-3 shader transitions at energy-shift moments (hero reveal, CTA landing). Otherwise hard cuts only. Minimum transition duration: 0.3s; sweet spot: 0.5s.
-
-Wire HyperShader for transitions:
-  window.HyperShader.init({
-    bgColor: "<bg-hex>",
-    scenes: ["s4", "s5"],
-    timeline: tl,
-    transitions: [
-      { time: <s4_end - duration/2>, shader: "cinematic-zoom", duration: 0.5 }
-    ]
-  });
-INVARIANT: scenes.length === transitions.length + 1 (every transition is between two adjacent anchor scenes).
-Math: transition.time = scene_boundary - (transition.duration / 2)
-
-Available shaders: cinematic-zoom, whip-pan, dissolve, slide-left, slide-right, fade-through-black, kaleidoscope.
-
-# Aspect ratio → width × height
-  16:9 → 1920 × 1080
-  9:16 → 1080 × 1920
-  1:1  → 1080 × 1080
-
-# Tone → accent color (CSS hex)
-  analytical → #f59e0b
-  dramatic   → #dc2626
-  neutral    → #9ca3af
-  playful    → #10b981
-
-# Scene template hint (spec.template OR scenes[i].template)
-The \`template\` field signals scene intent — let it drive layout choice:
-- \`lower-third\`: a name/role bar in the bottom-left; rest of the frame transparent (see Few-shot A/B).
+### Scene \`template\` field — intent hint that drives layout
+The \`template\` field on each scene signals what kind of scene it is. Pick layout/composition from this — do NOT default everything to lower-third bars.
+- \`lower-third\`: name/role bar bottom-left; rest of frame transparent (see Few-shot A/B).
 - \`title-card\`: fullscreen centered headline + optional subline. Big type, generous negative space; suitable for openers, section breaks, summary frames.
-- \`map\`: the frame is a map. If spec.assets has a "map" / "background" SVG, render it full-bleed; overlay regions, arrows, hotspots, frontline strokes, and city labels using inline SVG or absolutely-positioned divs animated via the GSAP timeline. mainText/subText become the broadcast title overlay (top-strip or corner card), not the primary subject.
-- \`chart\`: data viz is the primary subject. Use chart.js (CDN allowed) for axis-bound viz, or hand-rolled SVG/divs for bars/lines/counters. mainText/subText become the chart title + caption.
-- \`freeform\`: use your judgment based on mainText/subText, assets, and any extra spec hints.
+- \`map\`: the frame IS a map. If spec.assets has a "map" / "background" image, render it full-bleed via \`<img>\` (HTTPS URL — never base64, never an inline mega-SVG). Overlay regions, arrows, hotspots, frontline strokes, and city labels using INLINE \`<svg>\` elements positioned absolutely on top of the base img, animated through the GSAP timeline (stroke-dashoffset for arrows, opacity pulses for hotspots, etc.). mainText/subText become a broadcast title overlay (top strip or corner card), NOT the primary subject. A war-map sequence MUST render real maps per scene — do not produce eight lower-third bars instead.
+- \`chart\`: data viz as the primary subject. Use chart.js (CDN allowed per the guide's resource policy) for axis-bound viz, or hand-rolled SVG/divs for bars/lines/counters. mainText/subText become the chart title + caption.
+- \`freeform\`: use your judgment based on mainText/subText, assets, and the brief.
 
-A multi-scene war-map sequence with template="map" scenes must actually render a map per scene (SVG outlines, animated arrows, pulsing hotspots), not eight lower-third name bars.
-
-# Asset usage (when spec.assets is present)
-The spec may include an \`assets\` array. Each entry has { role, url, alt, source }.
-- "logo" / "icon" → embed as <img src="<url>" alt="<alt>" /> sized appropriately for the layout.
-  Hint: a logo on a dark bar usually wants \`filter: brightness(0) invert(1);\` for white-on-dark.
-- "background" → set as a CSS background on body or a wrapper div: \`background: url('<url>') center/cover no-repeat\`.
-- "map" / "chart" / generic image → <img> or inline <svg> as appropriate.
-- If a "chart-data" role contains JSON-shaped data, render with chart.js inline.
-- ALWAYS include the \`alt\` attribute on <img> tags for accessibility.
+### Asset usage (when spec.assets is present)
+Each entry: \`{ role, url, alt, source }\`. Follow the guide's media rules — HTTPS URL or local file reference only; never base64; never placeholder URLs; never SVG-filter \`data:image/svg+xml\` grain.
+- \`logo\` / \`icon\` → \`<img src="<url>" alt="<alt>" />\`. White-on-dark hint: \`filter: brightness(0) invert(1);\`.
+- \`background\` → CSS background on a wrapper div: \`background: url('<url>') center/cover no-repeat;\`.
+- \`map\` → full-bleed \`<img>\` background per the \`map\` template rule above. NEVER paste a giant base-map SVG inline; overlay arrows/hotspots as small inline \`<svg>\` per scene.
+- \`chart\` / generic image → \`<img>\` or hand-rolled inline \`<svg>\` as appropriate.
+- ALWAYS include the \`alt\` attribute on \`<img>\` tags.
 - Compose layouts that show the asset prominently — don't hide it behind text or off-screen.
 
-## DETERMINISM RULES (BANNED APIS — never use these)
+## Resources the renderer allows
+Google Fonts CSS; GSAP 3.14.x from cdn.jsdelivr.net; chart.js from cdn.jsdelivr.net; lottie-web from cdn.jsdelivr.net (only if a scene uses the lottie adapter); image / SVG URLs declared in spec.assets[].url. NO other \`<script src>\` URLs.
 
-The render is frame-by-frame on headless Chromium; non-deterministic state poisons capture.
+---
 
-| Banned                              | Use instead                                              |
-| ----------------------------------- | -------------------------------------------------------- |
-| Math.random()                       | A seeded PRNG (mulberry32 inline; deterministic)         |
-| Date.now()                          | Hard-coded numeric timing or tl.time() inside onUpdate   |
-| performance.now()                   | Same — tl.time() inside onUpdate                         |
-| setInterval / setTimeout            | Timeline tweens with onUpdate                            |
-| repeat: -1                          | repeat: Math.ceil(duration / cycle) - 1                  |
-| stagger: { from: "random" }         | from: "start" | "center" | "end"                         |
-| Async timeline construction         | Build timelines synchronously at page load               |
+# Authoritative authoring guide
 
-## ANIMATION BASELINES
+Everything below this line is the official Hyperframes Claude Design guide vendored verbatim. It is the source of truth for the hard contract, banned APIs, visibility (autoAlpha) rules, shader transitions, typography, easing → feeling, mid-scene activity patterns, and the self-review checklist. Follow it literally.
 
-- **Mid-scene activity:** every visible element must keep moving AFTER its entrance. A still element on a still background is a JPEG with a progress bar.
-- **Easing variety:** use at least 3 different eases per scene. Don't default to power2.out everywhere. Approved: power2.out, power4.out, back.out(1.6), expo.out, sine.inOut, steps(5).
-- **Display sizes:** headlines ≥60px, body ≥20px, labels ≥16px.
-- **Reading-time budget per text element:** no text 1.5–2s; 1–3 words 2–3s; 4–10 words 3–4s; 11–20 words 4–6s; 21–35 words 6–8s; 35+ words split. Hard 5s ceiling for any single text element's on-screen time, unless justified.
-- **Weight contrast:** 300 vs 900, not 400 vs 700.
-- **Number columns:** apply \`font-variant-numeric: tabular-nums\` to any element displaying numbers (counters, stats, prices) to prevent layout shift as digits change.
+`
 
-## EASING → FEELING (use this map; pick at least 3 per scene)
+export const CREATE_HTML_SYSTEM_PROMPT = `${PIPELINE_PREAMBLE}${HYPERFRAMES_CLAUDE_DESIGN_GUIDE}
 
-| Feeling     | Ease            | Typical duration |
-| ----------- | --------------- | ---------------- |
-| Smooth      | power2.out      | 0.4–0.6s         |
-| Snappy      | power4.out      | 0.2–0.3s         |
-| Bouncy      | back.out(1.6)   | 0.3–0.5s         |
-| Dramatic    | expo.out        | 0.3–0.5s         |
-| Dreamy      | sine.inOut      | 0.5–0.8s         |
-| Mechanical  | steps(5)        | 0.3–0.5s         |
+---
 
-## TYPOGRAPHY (BANNED — never use these fonts)
+# Pipeline-specific few-shot examples
 
-These fonts read as "AI-generated" — never use them, even if they fit semantically:
+These are complete HTML files matching this pipeline's data-attribute conventions. They are visual baselines for the lower-third and multi-scene shapes; vary layouts as the spec calls for it (title cards, charts, maps, mixed content) while honoring every rule above.
 
-Inter, Inter Tight, Roboto, Open Sans, Noto Sans, Lato, Poppins, Outfit, Sora, Fraunces, Playfair Display, Cormorant Garamond, EB Garamond, Syne, Cinzel, Prata, Bodoni Moda, Nunito, Source Sans, PT Sans, Arimo.
-
-Banned PAIRINGS even if individual fonts are not banned:
-- Fraunces + JetBrains Mono
-- Inter + anything
-- Playfair Display + Lato
-
-PREFER: Roboto Condensed, Roboto Slab, JetBrains Mono (alone with a serif), Bebas Neue, Archivo Narrow, IBM Plex Sans/Mono/Serif, DM Sans, Space Grotesk, Inconsolata, Cabin, Montserrat (only with strong weight contrast).
-
-Weight contrast must be DRAMATIC: 300 vs 900, not 400 vs 700.
-
-## VISIBILITY (autoAlpha)
-
-When shader transitions fire, HyperShader blanks ALL .scene elements to opacity:0. Non-anchor scenes that only toggle visibility get poisoned.
-
-For NON-ANCHOR scenes, use autoAlpha (sets BOTH opacity AND visibility):
-
-    tl.set("#sceneN", { autoAlpha: 1 }, <data-start>)
-    tl.set("#sceneN", { autoAlpha: 0 }, <data-start + data-duration>)
-
-For ANCHOR scenes (HyperShader-managed), do NOT use autoAlpha. The first anchor in each shader group needs an explicit opacity:1 reset:
-
-    tl.set("#sceneN", { opacity: 1 }, <data-start>)
-
-## MID-SCENE ACTIVITY CATALOG (use ≥2 per scene)
-
-Every scene > 4s must include at least 2 of these patterns AFTER the entrance:
-
-1. **Counter animation** — animate a number from start→end via gsap.to({ value: 0 }, { value: target, onUpdate }) and write innerText each tick.
-2. **SVG stroke draw** — animate stroke-dashoffset from total length to 0 over 1-2s.
-3. **Character stagger** — split text into spans, gsap.from with stagger 0.04-0.12s.
-4. **Breathing float** — gsap.to with y: '+=8', yoyo: true, repeat: Math.ceil((sceneDuration - entranceDuration) / cycleDuration) - 1 (bounded per determinism rules — never use repeat: -1).
-5. **Bar chart fill** — animate height or width from 0 to target with stagger.
-6. **Ken Burns zoom** — gsap.to image scale from 1.0 to 1.05-1.10 over the full scene duration with sine.inOut.
-7. **Highlight sweep** — animate a translucent band across text with sine.inOut.
-8. **Glow pulse** — gsap.to filter: drop-shadow with alternating intensity.
-9. **Orbit/rotation** — gsap.to rotate over scene duration, useful for icons.
-
-## TRANSITION STRATEGY
-
-Most cuts are hard cuts. ~95% of professional video scene changes are hard cuts. Effect transitions (shaders, dissolves) are reserved for 2-3 key moments — a hero reveal, an energy shift, the CTA landing.
-
-A 6-8 scene video wants 2-3 shader transitions and the rest hard cuts.
-
-Minimum transition duration: 0.3s. Sweet spot: 0.5s.
-
-NEVER use exit tweens before a shader transition — the shader IS the exit; content stays visible until the shader fires.
-
-## SELF-REVIEW CHECKLIST (run mentally before output)
-
-Before emitting your HTML, verify:
-- [ ] Composition root has data-composition-id="main" + data-width + data-height + data-start="0" + data-duration=total
-- [ ] Every scene has class="scene clip" + sequential id (s1, s2, …) + data-start + data-duration + data-track-index="0"
-- [ ] Every scene has a <div class="scene-content"> wrapper
-- [ ] Anchor scenes have style="opacity:0;"; non-anchor scenes from Scene 2 onward have style="visibility:hidden;" (Scene 1 starts visible — no initial hidden style)
-- [ ] Every non-anchor scene has tl.set autoAlpha:1 at start and autoAlpha:0 at end (scene 1 only at end)
-- [ ] First anchor scene in each shader group has tl.set opacity:1 at its start
-- [ ] Scene windows tile end-to-end (no gaps, no overlap unless intentional shader transition)
-- [ ] If using shader transitions: scenes.length === transitions.length + 1 invariant holds; transition.time = boundary - duration/2
-- [ ] No exit tweens except on non-anchor scene boundaries (non-anchor scenes need tl.set autoAlpha:0 at their end) and the final scene
-- [ ] No banned APIs (Math.random, Date.now, performance.now, setTimeout, setInterval, repeat:-1, stagger from:'random')
-- [ ] No banned fonts; weight contrast 300/900 not 400/700; size floors 60/20/16
-- [ ] tabular-nums on number columns
-- [ ] Every scene has ≥3 different eases; every scene >4s has ≥2 mid-scene activity patterns
-- [ ] window.__timelines["main"] = tl is set; data-composition-id matches "main"
-
-# Few-shot example A — single-scene composition (lower-third)
+## Few-shot A — single-scene composition (lower-third)
 \`\`\`html
 ${FEW_SHOT_LOWER_THIRD}
 \`\`\`
 
-# Few-shot example B — single-scene with embedded logo
+## Few-shot B — single-scene with embedded logo
 \`\`\`html
 ${FEW_SHOT_LOWER_THIRD_WITH_LOGO}
 \`\`\`
 
-# Few-shot example C — multi-scene composition with shader transition
-For specs with multiple scenes, produce something like:
+## Few-shot C — multi-scene composition with shader transition
 \`\`\`html
 ${FEW_SHOT_MULTI_SCENE_WITH_SHADER}
-\`\`\`
-
-These examples define the visual baseline. Vary layouts as the spec calls for it (fullscreen title cards, charts, maps, mixed content) while honoring the hard contract.`
+\`\`\``
 
 const STAGE_MARKER = /data-composition-id\s*=\s*"main"/i
 
