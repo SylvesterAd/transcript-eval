@@ -19,6 +19,11 @@
 import { useMemo } from 'react'
 import { EXT_ID } from '../lib/extension-id.js'
 import { resolveBackendUrl } from '../lib/backendUrl.js'
+import { isOutdated } from '../lib/semver.js'
+
+/* global __EXT_LATEST_VERSION__ */
+export const EXT_LATEST_VERSION =
+  typeof __EXT_LATEST_VERSION__ === 'string' ? __EXT_LATEST_VERSION__ : ''
 
 // Chrome reports a few distinct phrasings when the extension isn't
 // reachable. Match on substrings rather than exact equality so we
@@ -80,19 +85,23 @@ export function useExtension() {
     ping: async () => {
       try {
         const r = await send({ type: 'ping', version: 1 }, { timeoutMs: 3000 })
+        const ext_version = r?.ext_version ?? null
         return {
           installed: true,
-          ext_version: r?.ext_version ?? null,
+          ext_version,
+          latest_version: EXT_LATEST_VERSION || null,
+          is_outdated: isOutdated(ext_version, EXT_LATEST_VERSION),
           envato_session: r?.envato_session ?? 'missing',
           has_jwt: !!r?.has_jwt,
           jwt_expires_at: r?.jwt_expires_at ?? null,
+          ext_id: EXT_ID,
           raw: r,
         }
       } catch (err) {
         if (isNotInstalledError(err.message)) {
-          return { installed: false, reason: 'not_installed' }
+          return { installed: false, reason: 'not_installed', ext_id: EXT_ID, latest_version: EXT_LATEST_VERSION || null }
         }
-        return { installed: false, reason: 'error', error: err.message }
+        return { installed: false, reason: 'error', error: err.message, ext_id: EXT_ID, latest_version: EXT_LATEST_VERSION || null }
       }
     },
 

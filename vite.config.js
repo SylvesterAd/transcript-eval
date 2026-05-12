@@ -21,10 +21,25 @@ function getExtensionId() {
   return ''
 }
 
+// Latest extension version, read from extension/manifest.json at build
+// time. The web app uses this to detect installed-but-outdated
+// extensions and prompt the user to update (StateA_Install). Empty
+// string means "unknown" — the web app will skip the outdated check.
+function getExtLatestVersion() {
+  const fromEnv = process.env.VITE_EXT_LATEST_VERSION
+  if (fromEnv) return fromEnv
+  const fromFile = path.resolve(__dirname, 'extension/manifest.json')
+  if (existsSync(fromFile)) {
+    try { return JSON.parse(readFileSync(fromFile, 'utf-8')).version || '' } catch { return '' }
+  }
+  return ''
+}
+
 export default defineConfig({
   define: {
     '__APP_VERSION__': JSON.stringify(gitSha),
     '__EXTENSION_ID__': JSON.stringify(getExtensionId()),
+    '__EXT_LATEST_VERSION__': JSON.stringify(getExtLatestVersion()),
   },
   plugins: [react(), tailwindcss()],
   // extension-test.html is a dev-only harness — vite's default MPA

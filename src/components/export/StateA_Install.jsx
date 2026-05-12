@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import styled from 'styled-components'
-import { Download, AlertCircle } from 'lucide-react'
+import { Download, AlertCircle, RefreshCw } from 'lucide-react'
 
 // Spec § State A. Polls extension via the parent's useExportPreflight
 // hook (parent passes `installed` derived from ping.value).
 //
-// Renders one of two surfaces:
+// Renders one of three surfaces:
 //   - non-Chrome browser → "This feature requires Chrome" banner.
-//   - Chrome, extension missing → install card (per spec mockup).
+//   - Chrome, extension missing → install card.
+//   - Chrome, extension installed but older than bundled latest → update card.
 //
 // We detect Chrome via window.chrome?.runtime presence (the actual
 // capability we need) + UA fallback for friendlier copy.
@@ -75,6 +76,29 @@ const Footnote = styled.p`
   margin: 12px 0 0;
 `
 
+const Diagnostics = styled.details`
+  margin-top: 16px;
+  font-size: 12px;
+  color: #6b7280;
+  > summary {
+    cursor: pointer;
+    user-select: none;
+    color: #6b7280;
+  }
+  > div {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    word-break: break-all;
+    color: #374151;
+  }
+`
+
 function detectBrowser() {
   if (typeof navigator === 'undefined') return { isChromium: false, label: 'unknown' }
   const ua = navigator.userAgent.toLowerCase()
@@ -90,7 +114,7 @@ function detectBrowser() {
   return { isChromium: true, label: 'Chrome', hasRuntime: hasChromeRuntime }
 }
 
-export default function StateA_Install({ variant, ping }) {
+export default function StateA_Install({ variant, ping, mode = 'install' }) {
   const [browser] = useState(detectBrowser)
 
   // Chrome Web Store listing for the Transcript Eval Export Helper extension.
@@ -121,26 +145,65 @@ export default function StateA_Install({ variant, ping }) {
     )
   }
 
+  const isUpdate = mode === 'update'
+  const detectedVersion = ping.value?.ext_version || null
+  const latestVersion = ping.value?.latest_version || null
+  const extId = ping.value?.ext_id || null
+  const probeReason = ping.value?.reason || null
+  const probeError = ping.value?.error || (ping.status === 'error' ? ping.error : null)
+
   return (
     <Wrap>
       <Card>
-        <Title>Ready to export Variant {variant}</Title>
-        <SubText>
-          Install the Export Helper Chrome extension to continue.
-        </SubText>
-        <SubText>
-          This extension downloads your licensed b-roll files into a folder
-          using your own Envato subscription. Files never leave your computer.
-        </SubText>
-        <InstallButton href={STORE_URL} target="_blank" rel="noreferrer">
-          <Download size={16} />
-          Install from Chrome Web Store
-        </InstallButton>
+        <Title>
+          {isUpdate
+            ? `Update the Export Helper to continue`
+            : `Ready to export Variant ${variant}`}
+        </Title>
+        {isUpdate ? (
+          <>
+            <SubText>
+              Your Export Helper is on v{detectedVersion || '?'} but this page
+              needs v{latestVersion || '?'} or newer.
+            </SubText>
+            <SubText>
+              Open <code>chrome://extensions</code>, toggle <strong>Developer mode</strong> on,
+              click <strong>Update</strong>, then return here. The page will continue automatically.
+            </SubText>
+            <InstallButton href={STORE_URL} target="_blank" rel="noreferrer">
+              <RefreshCw size={16} />
+              Open Chrome Web Store listing
+            </InstallButton>
+          </>
+        ) : (
+          <>
+            <SubText>
+              Install the Export Helper Chrome extension to continue.
+            </SubText>
+            <SubText>
+              This extension downloads your licensed b-roll files into a folder
+              using your own Envato subscription. Files never leave your computer.
+            </SubText>
+            <InstallButton href={STORE_URL} target="_blank" rel="noreferrer">
+              <Download size={16} />
+              Install from Chrome Web Store
+            </InstallButton>
+          </>
+        )}
         <Footnote>
-          After install, this page updates automatically.
+          {isUpdate ? 'After update, this page continues automatically.' : 'After install, this page updates automatically.'}
           {ping.status === 'loading' ? ' Checking…' : ''}
-          {ping.status === 'error' ? ` (probe error: ${ping.error})` : ''}
         </Footnote>
+        <Diagnostics>
+          <summary>Detection details</summary>
+          <div>
+            ping: {ping.status}{probeReason ? ` (${probeReason})` : ''}<br />
+            extension id (expected): {extId || '(empty — VITE_EXTENSION_ID not set at build)'}<br />
+            installed version: {detectedVersion || '—'}<br />
+            latest known version: {latestVersion || '—'}<br />
+            {probeError ? <>probe error: {probeError}<br /></> : null}
+          </div>
+        </Diagnostics>
       </Card>
     </Wrap>
   )

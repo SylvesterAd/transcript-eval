@@ -214,11 +214,12 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
     if (preflight.manifest.status !== 'ok') return
 
     const installed = !!preflight.ping.value?.installed
+    const isOutdated = !!preflight.ping.value?.is_outdated
     const envatoCount = (preflight.manifest.value?.totals?.by_source?.envato) || 0
     const sessionOk = preflight.ping.value?.envato_session === 'ok'
 
     let next
-    if (!installed) next = 'state_a'
+    if (!installed || isOutdated) next = 'state_a'
     else if (envatoCount > 0 && !sessionOk && !state.sessionOverridden) next = 'state_b'
     else next = 'state_c'
 
@@ -411,12 +412,16 @@ function ExportFlow({ videoGroupId, planPipelineId, plans }) {
     return <Loader>Running pre-flight checks…</Loader>
   }
 
-  // State A — install.
+  // State A — install or update (outdated extension takes the same surface).
   if (state.phase === 'state_a') {
+    const mode = preflight.ping.value?.installed && preflight.ping.value?.is_outdated
+      ? 'update'
+      : 'install'
     return (
       <StateA_Install
         variant={variantLabel}
         ping={preflight.ping}
+        mode={mode}
       />
     )
   }
