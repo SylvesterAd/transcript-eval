@@ -234,9 +234,9 @@ describe('generateXmeml — golden fixtures', () => {
       ],
     })
     expect(xml).toBe(loadFixture('missing-metadata.xml'))
-    // The sequence-level <samplecharacteristics> still pins the
-    // sequence resolution. <file><media> is intentionally omitted —
-    // see xmeml-generator.js for the rationale (NLE probes the file).
+    // <file><media> uses sequence dimensions for ALL files (matches
+    // WyattBlue/auto-editor's pattern — DaVinci ignores the dim
+    // claims and probes the actual file for rendering specs anyway).
     expect(xml).toContain('<samplecharacteristics>')
     expect(xml).toContain('<width>1920</width>')
     expect(xml).toContain('<timebase>30</timebase>')
@@ -426,10 +426,13 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
     expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<duration>900<\/duration>/)
   })
 
-  it('omits <file><duration> when sourceDurationSeconds is missing (importer probes file)', () => {
-    // Old manifests without duration_seconds: don't fabricate a fake
-    // file duration from the slice — DaVinci validates and rejects.
-    // Just omit and let the NLE probe the actual file.
+  it('emits empty <file><duration></duration> tag when sourceDurationSeconds is missing', () => {
+    // Per WyattBlue/auto-editor's working DaVinci-compatible exporter:
+    // "DaVinci Resolve needs this tag even though it's blank".
+    // Omitting the tag entirely makes DaVinci reject as
+    // "File not found in search directories". Emit empty value when
+    // we don't have a confirmed source duration; DaVinci probes the
+    // file for the actual value.
     const xml = generateXmeml({
       sequenceName: 'Variant A',
       placements: [
@@ -439,12 +442,7 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
           width: 1920, height: 1080, sourceFrameRate: 30 },
       ],
     })
-    // <file> block has <name>, <pathurl>, <rate>, <timecode> — but
-    // NO <duration>. Match the start of <file>: it should jump
-    // directly from <pathurl> to <rate>.
-    expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<rate>/)
-    // Negative: no <duration> inside <file>.
-    expect(xml).not.toMatch(/<file id="file-pexels-123">[\s\S]*?<duration>[\s\S]*?<\/file>/)
+    expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<duration><\/duration>/)
   })
 
   it('emits absolute pathurl on the A-roll track too', () => {

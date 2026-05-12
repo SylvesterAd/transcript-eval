@@ -433,13 +433,12 @@ export function generateXmeml({
         lines.push(`            <file id="${escapeXml(arollFileId)}">`)
         lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
         lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
-        // Aroll source duration is reported by the user's source video
-        // record in our DB (uploaded via /videos with ffprobe), so we
-        // can trust it here unconditionally. Same logic as the b-roll
-        // branch — only emit when confirmed; otherwise let importer probe.
-        if (Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0) {
-          lines.push(`              <duration>${arollSourceFrames}</duration>`)
-        }
+        // Empty <duration> tag REQUIRED by DaVinci even if blank —
+        // see b-roll branch above for the rationale (WyattBlue/auto-
+        // editor's "DaVinci Resolve needs this tag even though it's
+        // blank").
+        const arollHasDur = Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0
+        lines.push(`              <duration>${arollHasDur ? arollSourceFrames : ''}</duration>`)
         lines.push(`              <rate><timebase>${arollFrameRate}</timebase>${arollNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
         // Override any SMPTE timecode embedded in the source file's
         // metadata. Without this, DaVinci Resolve honors the file's
@@ -454,9 +453,13 @@ export function generateXmeml({
         lines.push(`                <frame>0</frame>`)
         lines.push(`                <displayformat>NDF</displayformat>`)
         lines.push(`              </timecode>`)
-        // <media> dimensions intentionally omitted — see b-roll branch
-        // for the why (importer-probe is robust against source-API
-        // dimension drift).
+        // <media> with sequence dims — see b-roll branch for why we
+        // use seqW/seqH instead of per-file dims.
+        lines.push(`              <media>`)
+        lines.push(`                <video><samplecharacteristics>`)
+        lines.push(`                  <width>${seqW}</width><height>${seqH}</height>`)
+        lines.push(`                </samplecharacteristics></video>`)
+        lines.push(`              </media>`)
         lines.push(`            </file>`)
       } else {
         lines.push(`            <file id="${escapeXml(`file-aroll`)}"/>`)
@@ -514,15 +517,14 @@ export function generateXmeml({
       lines.push(`            <file id="${escapeXml(fileId)}">`)
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
       lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
-      // Only emit <duration> when we have a CONFIRMED source duration
-      // (probed from the actual file's container). Falling back to
-      // the slice duration here was wrong — DaVinci probes the file,
-      // sees the actual duration, finds it doesn't match our claim,
-      // and rejects with "File not found in search directories".
-      // When omitted, importers (Premiere + DaVinci) probe the file.
-      if (p._sourceDurationConfirmed) {
-        lines.push(`              <duration>${p._sourceDurationFrames}</duration>`)
-      }
+      // Empty <duration> tag is REQUIRED by DaVinci Resolve. Per
+      // WyattBlue/auto-editor's working exporter ("DaVinci Resolve
+      // needs this tag even though it's blank"). When confirmed,
+      // populate with the source frame count; otherwise emit empty
+      // and let DaVinci probe the file. Omitting the tag entirely
+      // makes DaVinci reject as "File not found in search directories"
+      // — even when the file is right there at the pathurl.
+      lines.push(`              <duration>${p._sourceDurationConfirmed ? p._sourceDurationFrames : ''}</duration>`)
       lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${p._sourceNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
       // Zero-based source timecode override — see aroll branch above
       // for the why. Without this, DaVinci rejects every Envato/Sony
@@ -535,15 +537,20 @@ export function generateXmeml({
       lines.push(`                <frame>0</frame>`)
       lines.push(`                <displayformat>NDF</displayformat>`)
       lines.push(`              </timecode>`)
-      // <media><video><samplecharacteristics> intentionally omitted.
-      // Source-API resolutions (and probed preview dimensions for
-      // pexels low-res entries) frequently disagree with the actual
-      // licensed file (e.g. envato preview 960x540 → file 1920x1080;
-      // pexels preview_url_hq 640x360 → file 1920x1080;
-      // envato source-API 1920x1080 default → file 4096x2160 4K).
-      // Each mismatch made DaVinci reject. Omitting lets the importer
-      // probe the file directly and use its actual dimensions —
-      // robust to every transcoding variation.
+      // <media> block is also required by DaVinci to register the
+      // file as a video clip. Use SEQUENCE dimensions (seqW × seqH)
+      // for every file rather than per-file dimensions — per-file
+      // dimensions from source APIs and from preview-URL probes
+      // frequently disagree with the actual licensed download (envato
+      // preview 960x540 → file 1920x1080; envato source-API default
+      // 1920x1080 → file 4096x2160). DaVinci probes the actual file
+      // for rendering anyway; the <media> block here is structural
+      // (tells DaVinci "this is video, here's the timebase").
+      lines.push(`              <media>`)
+      lines.push(`                <video><samplecharacteristics>`)
+      lines.push(`                  <width>${seqW}</width><height>${seqH}</height>`)
+      lines.push(`                </samplecharacteristics></video>`)
+      lines.push(`              </media>`)
       lines.push(`            </file>`)
       lines.push(`          </clipitem>`)
     }

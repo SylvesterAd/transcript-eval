@@ -26,6 +26,7 @@
             <file id="file-pexels-123">
               <name>001_pexels_123.mp4</name>
               <pathurl>001_pexels_123.mp4</pathurl>
+              <duration></duration>
               <rate><timebase>30</timebase></rate>
               <timecode>
                 <rate><timebase>30</timebase></rate>
@@ -33,6 +34,11 @@
                 <frame>0</frame>
                 <displayformat>NDF</displayformat>
               </timecode>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
             </file>
           </clipitem>
           <clipitem id="clip-variant-a-002">
@@ -47,6 +53,7 @@
             <file id="file-pexels-456">
               <name>002_pexels_456.mp4</name>
               <pathurl>002_pexels_456.mp4</pathurl>
+              <duration></duration>
               <rate><timebase>30</timebase></rate>
               <timecode>
                 <rate><timebase>30</timebase></rate>
@@ -54,6 +61,11 @@
                 <frame>0</frame>
                 <displayformat>NDF</displayformat>
               </timecode>
+              <media>
+                <video><samplecharacteristics>
+                  <width>1920</width><height>1080</height>
+                </samplecharacteristics></video>
+              </media>
             </file>
           </clipitem>
         </track>
