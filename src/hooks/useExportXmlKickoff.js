@@ -69,6 +69,13 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
           ...(item.resolution?.width ? { width: item.resolution.width } : {}),
           ...(item.resolution?.height ? { height: item.resolution.height } : {}),
           ...(item.frame_rate ? { sourceFrameRate: item.frame_rate } : {}),
+          // ntsc fractional flag (29.97/23.976/59.94) — set by server-
+          // side ffprobe of the source URL at manifest build time.
+          // Forwarded so xmeml-generator emits <ntsc>TRUE</ntsc> on the
+          // source <rate>, otherwise DaVinci validates our claimed
+          // integer rate against the file's actual fractional rate
+          // and rejects the import.
+          ...(item.ntsc === true ? { ntsc: true } : {}),
           // Source media's full length, used by the generator for
           // <file><duration> so Premiere can show trim handles past
           // the cut. Optional — falls back to timeline duration if

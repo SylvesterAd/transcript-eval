@@ -342,6 +342,71 @@ export async function getVideoMediaInfo(videoPath) {
 }
 
 /**
+ * Probe a remote (or local) media URL with ffprobe and return the
+ * fields the XMEML generator needs:
+ *   { rFrameRate: "30000/1001", frameRateInt: 30, ntsc: true,
+ *     width, height, durationSeconds, codec }
+ *
+ * Cached in-memory by URL — same URL probed multiple times within a
+ * server lifetime returns the cached result. Cache is naive (no TTL,
+ * no size cap) — adequate for build-time manifest probing where the
+ * working set is bounded by recent search results.
+ *
+ * Returns null on probe failure (timeout, 4xx/5xx, ffprobe parse
+ * error, ffprobe binary missing). Callers should treat null as "no
+ * authoritative metadata" and fall back to whatever the source API
+ * provided.
+ */
+const _probeCache = new Map()
+
+export async function probeMediaUrl(url) {
+  if (typeof url !== 'string' || !url) return null
+  if (_probeCache.has(url)) return _probeCache.get(url)
+  let result = null
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_entries', 'stream=width,height,r_frame_rate,avg_frame_rate,codec_name,codec_type,duration',
+      '-show_entries', 'format=duration',
+      url,
+    ], { timeout: 15000 })
+    const data = JSON.parse(stdout)
+    const v = data.streams?.find(s => s.codec_type === 'video' && s.width && s.height)
+    if (v) {
+      // Prefer r_frame_rate (real frame rate from container) over
+      // avg_frame_rate which can drift on VBR sources.
+      const rate = v.r_frame_rate || v.avg_frame_rate || null
+      let frameRateInt = null
+      let ntsc = false
+      if (typeof rate === 'string' && rate.includes('/')) {
+        const [num, den] = rate.split('/').map(Number)
+        if (den > 0) {
+          // 30000/1001 = 29.97 → timebase 30 + ntsc=TRUE per FCP7 spec.
+          // 25/1 = 25 → timebase 25, ntsc=FALSE.
+          frameRateInt = Math.round(num / den)
+          ntsc = den === 1001
+        }
+      }
+      const dur = Number.parseFloat(v.duration || data.format?.duration)
+      result = {
+        rFrameRate: rate,
+        frameRateInt,
+        ntsc,
+        width: v.width || null,
+        height: v.height || null,
+        durationSeconds: Number.isFinite(dur) && dur > 0 ? dur : null,
+        codec: v.codec_name || null,
+      }
+    }
+  } catch {
+    // probe failed — return null, caller falls back
+  }
+  _probeCache.set(url, result)
+  return result
+}
+
+/**
  * Check if ffmpeg is available on the system.
  */
 export async function checkFfmpeg() {

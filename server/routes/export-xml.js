@@ -193,6 +193,7 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
       return {
         filename: a.filename || `aroll.mp4`,
         frameRate: Number.isFinite(a.sourceFrameRate) ? a.sourceFrameRate : null,
+        ntsc: a.ntsc === true,
         width: Number.isFinite(a.width) ? a.width : null,
         height: Number.isFinite(a.height) ? a.height : null,
         // A-roll's source duration (when known) — feeds <file><duration>.
@@ -262,6 +263,7 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
               timelineStart: s.start - offset,
               timelineEnd: s.end - offset,
               sourceFrameRate: aroll.frameRate,
+              ntsc: aroll.ntsc === true,
               sourceDurationSeconds: arollDurationSeconds,
               width: aroll.width,
               height: aroll.height,

@@ -6429,6 +6429,13 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
       target_filename: targetFilename,
       resolution: pick.resolution || { width: pick.width || 1920, height: pick.height || 1080 },
       frame_rate: pick.frame_rate || 30,
+      // ntsc flag — set by post-build probeMediaUrl pass in the route
+      // when the file's actual rate is NTSC fractional (29.97 = 30000/1001,
+      // 23.976 = 24000/1001, 59.94 = 60000/1001). XMEML generator emits
+      // <ntsc>TRUE</ntsc> when set; without it DaVinci validates our
+      // claimed integer rate against the file's fractional rate and
+      // rejects with "File not found in search directories".
+      ntsc: false,
       // Source media's full length. Distinct from timeline_duration_s
       // (the trimmed cut). XMEML emits this on <file><duration> so
       // Premiere knows the clip has trim handles past the cut points.
@@ -6439,6 +6446,11 @@ export function buildManifestFromPlacements(placements, { variant, allowedSource
         ? pick.est_size_bytes
         : (pick.duration_seconds ? Math.round(pick.duration_seconds * 25 * 1024 * 1024) : 100 * 1024 * 1024),
       variant_label: p.variant_label || null,
+      // Internal: URL the route can probe with ffprobe to derive
+      // accurate frame_rate/dimensions/duration/ntsc. For envato this
+      // is a watermarked preview but its container metadata matches
+      // the licensed source. Stripped before responding to the client.
+      _probe_url: pick.preview_url_hq || pick.preview_url || pick.video_url || null,
     }
     items.push(item)
     estTotal += item.est_size_bytes

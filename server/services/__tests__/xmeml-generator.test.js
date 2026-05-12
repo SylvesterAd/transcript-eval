@@ -348,6 +348,41 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
     expect(xml).toContain('<pathurl>file:///Users/laurynas/Downloads/transcript-eval/export-370-a/001_pexels_123.mp4</pathurl>')
   })
 
+  it('emits <ntsc>TRUE</ntsc> on the file rate when placement.ntsc is true (29.97/23.976 sources)', () => {
+    // Real case: Envato 29.97fps clip (30000/1001). DaVinci validates
+    // XML's claimed rate against the file's actual rate; without the
+    // ntsc flag, claim "30/1" doesn't match file's "30000/1001" and
+    // DaVinci marks the clip offline ("File not found in search
+    // directories").
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'envato', sourceItemId: 'X',
+          filename: '001_envato_X.mov',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 30, ntsc: true },
+      ],
+    })
+    expect(xml).toMatch(/<rate><timebase>30<\/timebase><ntsc>TRUE<\/ntsc><\/rate>/)
+    // The <timecode> override block uses the same rate + ntsc flag.
+    expect(xml).toMatch(/<timecode>\s*<rate><timebase>30<\/timebase><ntsc>TRUE<\/ntsc><\/rate>/)
+  })
+
+  it('omits ntsc tag when placement.ntsc is missing or false (true 30fps / 25fps / 50fps)', () => {
+    const xml = generateXmeml({
+      sequenceName: 'Variant A',
+      placements: [
+        { seq: 1, source: 'pexels', sourceItemId: '123',
+          filename: '001_pexels_123.mp4',
+          timelineStart: 0, timelineDuration: 2,
+          width: 1920, height: 1080, sourceFrameRate: 25 },
+      ],
+    })
+    // Bare integer rate, no ntsc tag — DaVinci treats as exact 25/1.
+    expect(xml).toMatch(/<rate><timebase>25<\/timebase><\/rate>/)
+    expect(xml).not.toContain('<ntsc>TRUE</ntsc>')
+  })
+
   it('falls back to bare filename when mediaFolderAbsolute is null', () => {
     const xml = generateXmeml({
       sequenceName: 'Variant A',

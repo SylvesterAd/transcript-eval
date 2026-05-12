@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url'
 import { mkdirSync } from 'fs'
 import { requireAuth, isAdmin } from '../auth.js'
 import { uploadFile } from '../services/storage.js'
-import { extractThumbnail } from '../services/video-processor.js'
+import { extractThumbnail, probeMediaUrl } from '../services/video-processor.js'
 import db from '../db.js'
 import {
   BROLL_MODELS,
@@ -239,6 +239,56 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
       } catch (e) {
         console.warn('[broll-export-manifest] aroll lookup failed:', e.message)
       }
+    }
+
+    // Probe each item's source URL with ffprobe to capture real
+    // metadata (frame_rate, dimensions, duration, ntsc fractional flag).
+    // Without this, the b-roll pipeline's frame_rate (often integer-
+    // rounded by source APIs) doesn't match the actual file, and DaVinci
+    // rejects the XML import as "File not found in search directories".
+    // Probe in parallel with a 15s budget per probe; fall back silently
+    // when probe fails (item retains source-API metadata). _probe_url is
+    // an internal field — stripped before sending to client.
+    const PROBE_TIMEOUT_MS = 20000
+    await Promise.all(items.map(async (it) => {
+      const url = it._probe_url
+      delete it._probe_url
+      if (!url) return
+      try {
+        const probe = await Promise.race([
+          probeMediaUrl(url),
+          new Promise(resolve => setTimeout(() => resolve(null), PROBE_TIMEOUT_MS)),
+        ])
+        if (!probe) return
+        if (probe.frameRateInt) it.frame_rate = probe.frameRateInt
+        if (typeof probe.ntsc === 'boolean') it.ntsc = probe.ntsc
+        if (probe.width && probe.height) it.resolution = { width: probe.width, height: probe.height }
+        if (probe.durationSeconds) it.duration_seconds = probe.durationSeconds
+      } catch {
+        // probe failed — keep source-API metadata
+      }
+    }))
+
+    // Probe the aroll signed URL too — Supabase Storage URLs are
+    // ffprobe-friendly. Same accuracy benefit as b-rolls.
+    if (aroll && aroll.signed_url) {
+      try {
+        const probe = await probeMediaUrl(aroll.signed_url)
+        if (probe) {
+          if (probe.frameRateInt) aroll.frame_rate = probe.frameRateInt
+          if (typeof probe.ntsc === 'boolean') aroll.ntsc = probe.ntsc
+          if (probe.width && probe.height) { aroll.width = probe.width; aroll.height = probe.height }
+          if (probe.durationSeconds) aroll.duration_seconds = probe.durationSeconds
+          // Mirror onto the prepended item too (seq=0).
+          const arollItem = items.find(i => i.seq === 0)
+          if (arollItem) {
+            if (probe.frameRateInt) arollItem.frame_rate = probe.frameRateInt
+            if (typeof probe.ntsc === 'boolean') arollItem.ntsc = probe.ntsc
+            if (probe.width && probe.height) arollItem.resolution = { width: probe.width, height: probe.height }
+            if (probe.durationSeconds) arollItem.duration_seconds = probe.durationSeconds
+          }
+        }
+      } catch {}
     }
 
     res.json({ pipeline_id: pipelineId, variant, items, totals, aroll })

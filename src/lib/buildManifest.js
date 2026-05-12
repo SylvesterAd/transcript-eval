@@ -98,6 +98,9 @@ export function buildManifest({ manifests, options = {} }) {
         target_filename: makeFilename(seq, source, id),
         resolution: raw.resolution || { width: 1920, height: 1080 },
         frame_rate: raw.frame_rate || 30,
+        // NTSC fractional rate flag (29.97/23.976/59.94) — propagated
+        // from server-side ffprobe so XMEML can emit <ntsc>TRUE</ntsc>.
+        ntsc: raw.ntsc === true,
         est_size_bytes: typeof raw.est_size_bytes === 'number' ? raw.est_size_bytes : 0,
         // Source media's full length. Forwarded to xmeml-generator so
         // <file><duration> reports the source's real length, giving

@@ -275,6 +275,14 @@ export function generateXmeml({
     // Storyblocks/Envato rate) when manifest didn't carry it.
     const sourceFrameRate = Number.isFinite(p.sourceFrameRate) && p.sourceFrameRate > 0
       ? p.sourceFrameRate : 30
+    // NTSC fractional rate flag — TRUE for 29.97 (30000/1001), 23.976
+    // (24000/1001), 59.94 (60000/1001). Source: probeMediaUrl in
+    // video-processor.js. Without this, DaVinci validates XML's
+    // claimed integer rate (30) against file's actual fractional
+    // rate (29.97) and rejects with "File not found in search
+    // directories" (misleading error). Premiere ignores the ntsc
+    // flag entirely.
+    const sourceNtsc = p.ntsc === true
     // Two duration coordinates. <start>/<end> use sequence-rate
     // frames (timeline grid); <in>/<out> use source-rate frames (cut
     // points in the source media). Equal only when sequence rate ==
@@ -311,6 +319,7 @@ export function generateXmeml({
       _width: width,
       _height: height,
       _sourceFrameRate: sourceFrameRate,
+      _sourceNtsc: sourceNtsc,
     }
   })
 
@@ -363,6 +372,7 @@ export function generateXmeml({
           start: 0,
           end: sequenceDuration / frameRate,
           sourceFrameRate: aroll.frameRate,
+          ntsc: aroll.ntsc === true,
           sourceDurationSeconds: aroll.sourceDurationSeconds,
           width: aroll.width,
           height: aroll.height,
@@ -378,6 +388,7 @@ export function generateXmeml({
       const arollFrameRate = Number.isFinite(seg.sourceFrameRate) && seg.sourceFrameRate > 0 ? seg.sourceFrameRate : frameRate
       const arollWidth = Number.isFinite(seg.width) && seg.width > 0 ? seg.width : seqW
       const arollHeight = Number.isFinite(seg.height) && seg.height > 0 ? seg.height : seqH
+      const arollNtsc = seg.ntsc === true
       // Two coordinate systems per segment:
       //   timelineStart/timelineEnd → where on the NLE timeline (post-cut,
       //     ripple-deleted). Used for <start>/<end>.
@@ -421,7 +432,7 @@ export function generateXmeml({
         lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
         lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
         lines.push(`              <duration>${arollSourceFrames}</duration>`)
-        lines.push(`              <rate><timebase>${arollFrameRate}</timebase></rate>`)
+        lines.push(`              <rate><timebase>${arollFrameRate}</timebase>${arollNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
         // Override any SMPTE timecode embedded in the source file's
         // metadata. Without this, DaVinci Resolve honors the file's
         // baked-in TC (e.g. 18:16:14:04 on Envato/Sony footage) and
@@ -430,7 +441,7 @@ export function generateXmeml({
         // Premiere ignores this block — it always treats source as
         // zero-based — so it's pure-win for cross-NLE compatibility.
         lines.push(`              <timecode>`)
-        lines.push(`                <rate><timebase>${arollFrameRate}</timebase></rate>`)
+        lines.push(`                <rate><timebase>${arollFrameRate}</timebase>${arollNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
         lines.push(`                <string>00:00:00:00</string>`)
         lines.push(`                <frame>0</frame>`)
         lines.push(`                <displayformat>NDF</displayformat>`)
@@ -498,14 +509,14 @@ export function generateXmeml({
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
       lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
       lines.push(`              <duration>${p._sourceDurationFrames}</duration>`)
-      lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
+      lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${p._sourceNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
       // Zero-based source timecode override — see aroll branch above
       // for the why. Without this, DaVinci rejects every Envato/Sony
       // clip whose embedded SMPTE doesn't start at 00:00:00:00 with a
       // "No overlap between specified target timecodes and located
       // file timecodes" error.
       lines.push(`              <timecode>`)
-      lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
+      lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase>${p._sourceNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
       lines.push(`                <string>00:00:00:00</string>`)
       lines.push(`                <frame>0</frame>`)
       lines.push(`                <displayformat>NDF</displayformat>`)
