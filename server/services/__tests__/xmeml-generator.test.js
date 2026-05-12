@@ -455,9 +455,11 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
       mediaFolderAbsolute: '/Users/x/Downloads/export-370-a',
     })
     expect(xml).toContain('<pathurl>file:///Users/x/Downloads/export-370-a/aroll_370.mp4</pathurl>')
-    // A-roll's source duration is the source's full length (120s × 30 = 3600 frames).
-    // <enabled>TRUE</enabled> sits between name and duration.
-    expect(xml).toMatch(/<clipitem id="clip-variant-a-aroll">\s*<name>aroll_370\.mp4<\/name>\s*<enabled>TRUE<\/enabled>\s*<duration>3600<\/duration>/)
+    // Clipitem <duration> is at the clipitem's effective rate (= sequence
+    // rate 50 by default): 120s × 50 = 6000. The file's own <duration>
+    // inside <file> stays at the file rate (30) — 120 × 30 = 3600.
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-aroll">\s*<name>aroll_370\.mp4<\/name>\s*<enabled>TRUE<\/enabled>\s*<duration>6000<\/duration>/)
+    expect(xml).toMatch(/<file id="file-aroll">[\s\S]*?<duration>3600<\/duration>/)
   })
 })
 

@@ -457,11 +457,23 @@ export function generateXmeml({
       const sourceDurationSec = Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0
         ? seg.sourceDurationSeconds
         : (srcEnd - srcStart)
-      const arollSourceFrames = Math.round(sourceDurationSec * arollFrameRate)
+      // Two rates per clipitem:
+      //   - frameRate (sequence) governs every frame count INSIDE the
+      //     <clipitem>: <start>, <end>, <in>, <out>, and clipitem-<duration>.
+      //     Premiere reads them at the clipitem's effective rate, which
+      //     defaults to the sequence's rate when the clipitem has no inner
+      //     <rate>. Computing <in>/<out> at arollFrameRate made Premiere's
+      //     source monitor display the IN at frame/seq_rate seconds:
+      //     <in>129</in> on a 29.97 source emitted-at-30 read as 2.58s
+      //     instead of the intended 4.30s.
+      //   - arollFrameRate (file) only governs values inside the inner
+      //     <file> block: file's <rate> + file's <duration>.
+      const arollClipitemDurationFrames = Math.round(sourceDurationSec * frameRate)
+      const arollFileDurationFrames = Math.round(sourceDurationSec * arollFrameRate)
       const startFrame = secondsToFrames(tlStart, frameRate)
       const endFrame = secondsToFrames(tlEnd, frameRate)
-      const inSrcFrames = Math.round(srcStart * arollFrameRate)
-      const outSrcFrames = Math.round(srcEnd * arollFrameRate)
+      const inSrcFrames = Math.round(srcStart * frameRate)
+      const outSrcFrames = Math.round(srcEnd * frameRate)
       // Legacy aroll uses the original bare id (no index suffix) for backwards
       // compat with existing tests and any saved Premiere XML references.
       const arollClipId = useSegments ? `clip-${seqSlug}-aroll-${i + 1}` : `clip-${seqSlug}-aroll`
@@ -473,7 +485,7 @@ export function generateXmeml({
       lines.push(`          <clipitem id="${escapeXml(arollClipId)}">`)
       lines.push(`            <name>${escapeXml(arollFilename)}</name>`)
       lines.push(`            <enabled>TRUE</enabled>`)
-      lines.push(`            <duration>${arollSourceFrames}</duration>`)
+      lines.push(`            <duration>${arollClipitemDurationFrames}</duration>`)
       lines.push(`            <start>${startFrame}</start>`)
       lines.push(`            <end>${endFrame}</end>`)
       lines.push(`            <in>${inSrcFrames}</in>`)
@@ -497,7 +509,7 @@ export function generateXmeml({
         lines.push(`              </timecode>`)
         lines.push(`              <rate><timebase>${arollFrameRate}</timebase>${arollNtscTag}</rate>`)
         // Empty <duration> tag REQUIRED by DaVinci even if blank.
-        lines.push(`              <duration>${arollHasDur ? arollSourceFrames : ''}</duration>`)
+        lines.push(`              <duration>${arollHasDur ? arollFileDurationFrames : ''}</duration>`)
         // <media> with sequence dims, rate, pixelaspectratio per WyattBlue.
         // <audio> sibling declares stereo PCM characteristics — mandatory
         // for Premiere to apply the audiolevels filter we emit on the audio
@@ -534,7 +546,7 @@ export function generateXmeml({
         startFrame, endFrame,
         inSrcFrames, outSrcFrames,
         srcStart, srcEnd,
-        sourceFrames: arollSourceFrames,
+        sourceFrames: arollClipitemDurationFrames,
       })
     }
     lines.push(`        </track>`)

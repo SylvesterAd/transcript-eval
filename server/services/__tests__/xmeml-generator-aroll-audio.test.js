@@ -176,8 +176,10 @@ describe('generateXmeml — A-roll audio (auto-editor-compatible structure)', ()
     const firstClip = (audioBlock.match(/<clipitem\b[\s\S]*?<\/clipitem>/) || [])[0] || ''
     expect(firstClip).toMatch(/<start>500<\/start>/)
     expect(firstClip).toMatch(/<end>1000<\/end>/)
-    expect(firstClip).toMatch(/<in>300<\/in>/)
-    expect(firstClip).toMatch(/<out>600<\/out>/)
+    // <in>/<out> are interpreted at the clipitem's effective rate (= sequence
+    // rate 50 when no inner <rate>), so they use the same scale as <start>/<end>.
+    expect(firstClip).toMatch(/<in>500<\/in>/)
+    expect(firstClip).toMatch(/<out>1000<\/out>/)
   })
 
   it('emits one audio clipitem per A-roll segment per channel', () => {

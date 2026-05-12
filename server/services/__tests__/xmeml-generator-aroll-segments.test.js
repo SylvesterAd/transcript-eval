@@ -67,8 +67,11 @@ describe('generateXmeml — arollSegments', () => {
 
   it('preserves source IN/OUT correctly per segment (timeline pos vs source pos)', () => {
     // A 30s aroll source. Segment is [10,20] in original time = a 10s slice.
-    // <start>=10*50=500 (timeline). <end>=20*50=1000.
-    // <in>=10*src_rate, <out>=20*src_rate (source coords).
+    // <start>/<end> AND <in>/<out> all live INSIDE the clipitem and Premiere
+    // reads them at the clipitem's effective rate (= sequence rate when no
+    // inner <rate>). So all four values use frameRate=50:
+    //   <start> = 10*50 = 500    <in>  = 10*50 = 500
+    //   <end>   = 20*50 = 1000   <out> = 20*50 = 1000
     const xml = generateXmeml({
       ...baseInput,
       arollSegments: [{
@@ -81,8 +84,8 @@ describe('generateXmeml — arollSegments', () => {
     })
     expect(xml).toMatch(/<start>500<\/start>/)
     expect(xml).toMatch(/<end>1000<\/end>/)
-    expect(xml).toMatch(/<in>300<\/in>/) // 10 * 30
-    expect(xml).toMatch(/<out>600<\/out>/) // 20 * 30
+    expect(xml).toMatch(/<in>500<\/in>/)
+    expect(xml).toMatch(/<out>1000<\/out>/)
   })
 
   it('uses timelineStart/timelineEnd for <start>/<end> (ripple-deleted), sourceStart/sourceEnd for <in>/<out>', () => {
@@ -105,10 +108,11 @@ describe('generateXmeml — arollSegments', () => {
           sourceFrameRate: 30, sourceDurationSeconds: 713 },
       ],
     })
-    // First clipitem: timeline 0 → 332.84*50 = 16642 frames; source in/out at 30fps.
-    expect(xml).toMatch(/<clipitem id="clip-testseq-aroll-1">[\s\S]*?<start>0<\/start>\s*<end>16642<\/end>\s*<in>563<\/in>\s*<out>10549<\/out>/)
-    // Second clipitem: starts EXACTLY where the first ended (no gap), source picks up after the cut.
-    expect(xml).toMatch(/<clipitem id="clip-testseq-aroll-2">[\s\S]*?<start>16642<\/start>\s*<end>33578<\/end>\s*<in>11228<\/in>\s*<out>21390<\/out>/)
+    // All four frame counts inside the clipitem use sequence rate (50).
+    //   seg 1 timeline 0 → 332.84*50 = 16642 ; source 18.78*50=939 → 351.62*50=17581
+    expect(xml).toMatch(/<clipitem id="clip-testseq-aroll-1">[\s\S]*?<start>0<\/start>\s*<end>16642<\/end>\s*<in>939<\/in>\s*<out>17581<\/out>/)
+    //   seg 2 timeline 332.84*50=16642 → 671.56*50=33578 ; source 374.28*50=18714 → 713*50=35650
+    expect(xml).toMatch(/<clipitem id="clip-testseq-aroll-2">[\s\S]*?<start>16642<\/start>\s*<end>33578<\/end>\s*<in>18714<\/in>\s*<out>35650<\/out>/)
   })
 
   it('falls back to start/end when timelineStart not provided (legacy callers)', () => {
@@ -122,7 +126,8 @@ describe('generateXmeml — arollSegments', () => {
         sourceFrameRate: 30, sourceDurationSeconds: 30,
       }],
     })
-    // <start>=5*50=250, <end>=15*50=750, <in>=5*30=150, <out>=15*30=450.
-    expect(xml).toMatch(/<start>250<\/start>\s*<end>750<\/end>\s*<in>150<\/in>\s*<out>450<\/out>/)
+    // All four frame counts at sequence rate 50:
+    //   <start>=5*50=250  <end>=15*50=750  <in>=5*50=250  <out>=15*50=750
+    expect(xml).toMatch(/<start>250<\/start>\s*<end>750<\/end>\s*<in>250<\/in>\s*<out>750<\/out>/)
   })
 })
