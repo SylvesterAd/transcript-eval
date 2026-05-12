@@ -1,8 +1,20 @@
 // server/services/graphics/html-generator.js
 //
-// Opus generates a complete HTML file matching the Hyperframes contract.
-// Replaces the older specToVars + template-substitution path. Adapt the
-// prompt's few-shot example to evolve the supported visual styles.
+// Skeleton-fill flow:
+//   1. buildSkeleton(spec) produces a valid Hyperframes shell — composition
+//      root, scene clips, paused timeline declaration, and
+//      window.__timelines["main"] = tl already wired. Three CLAUDE_FILL
+//      markers wait for content: styles, per-scene innerHTML, and tweens.
+//   2. Opus receives the skeleton + spec and is asked to replace ONLY the
+//      markers. The rest of the file must come back byte-identical.
+//   3. listSkeletonInvariantFailures() verifies the structural contract held
+//      (composition root present, timeline registered, no markers left).
+//
+// This replaces the earlier "write the whole HTML from scratch" approach
+// that kept silently dropping the `window.__timelines["main"] = tl` line —
+// PRs #84, #86, #87, #89 each fixed adjacent issues; this one fixes the
+// underlying problem (structural invariants implicit in a 50KB prompt
+// instead of guaranteed by code).
 
 import { callAnthropic } from '../../lib/llm/anthropic.js'
 import { MODEL_FOR, costCents } from './models.js'
@@ -10,6 +22,7 @@ import {
   HYPERFRAMES_CLAUDE_DESIGN_GUIDE,
   HYPERFRAMES_GUIDE_SHA,
 } from './prompts/hyperframes-claude-design.js'
+import { buildSkeleton, listSkeletonInvariantFailures } from './skeleton-builder.js'
 
 export const FEW_SHOT_LOWER_THIRD = `<!doctype html>
 <html lang="en">
@@ -256,70 +269,70 @@ export const FEW_SHOT_LOTTIE_LOGO = `<!doctype html>
   </body>
 </html>`
 
-// The HTML-authoring system prompt is composed of three layers, in this order:
-//   1. PIPELINE PREAMBLE — how the spec is delivered, what to output, our scene
-//      template vocabulary, asset-URL conventions, aspect-ratio + tone mapping.
-//   2. OFFICIAL HYPERFRAMES CLAUDE DESIGN GUIDE — vendored verbatim from
-//      heygen-com/hyperframes @ ${HYPERFRAMES_GUIDE_SHA} (Apache-2.0). Owns the
-//      hard contract, banned APIs, visibility rules, animation baselines,
-//      typography, transition strategy, mid-scene activity, and the self-review
-//      checklist. Don't re-state these in the preamble — just defer.
-//   3. FEW-SHOT EXAMPLES — our pipeline-specific complete HTML files (lower-
-//      third, logo'd lower-third, multi-scene with shader transition).
-const PIPELINE_PREAMBLE = `You are an HTML motion-graphics author for the Hyperframes pipeline. The user message will contain a spec JSON object with one or more scenes; you produce a SINGLE complete HTML file rendering it. The framework renders to MP4 by scrubbing one paused GSAP timeline frame-by-frame.
+// Skeleton-fill system prompt structure (in this order):
+//   1. FILL_INSTRUCTIONS — what the markers are, what is and isn't editable,
+//      output format. The structural contract is locked in by code, not prompt.
+//   2. PIPELINE_PREAMBLE — pipeline-specific style/asset/template conventions.
+//   3. HYPERFRAMES_CLAUDE_DESIGN_GUIDE — vendored upstream guide (Apache-2.0,
+//      heygen-com/hyperframes @ ${HYPERFRAMES_GUIDE_SHA}). Still the source of
+//      truth for animation patterns, banned APIs, typography, easing → feeling,
+//      visibility rules, mid-scene activity catalog. The "hard contract"
+//      section is still useful as context — Opus needs to understand the shape
+//      it's editing — but we no longer rely on Opus to reproduce it.
+//   4. FEW_SHOTS — complete-file examples kept as visual anchors for style.
+const FILL_INSTRUCTIONS = `You are filling in a Hyperframes composition skeleton. The skeleton has already been built for you — composition root, scene clips with correct data-* attributes, the paused GSAP timeline declaration, and the \`window.__timelines["main"] = tl\` registration are ALL pre-written. Your only job is to replace three kinds of CLAUDE_FILL markers with content.
 
-## Output rules
-- Output ONLY the complete HTML. No commentary, no markdown fences, no explanation.
-- The document MUST satisfy every rule in the "Claude Design + HyperFrames" guide below (hard contract, banned APIs, self-review checklist, etc.). Treat that guide as authoritative.
+## Markers to fill
+1. \`/* CLAUDE_FILL_STYLES */\` (inside <style>) → CSS rules for the scene content (custom classes, scene-scoped styles, decorative elements, fonts, sizes).
+2. \`<!-- CLAUDE_FILL_SCENE_N -->\` (inside each \`<div class="scene-content">\`) → the actual HTML for scene N (text elements, imgs, inline SVG overlays). Give every element a sensible \`id\` so GSAP can target it.
+3. \`/* CLAUDE_FILL_TWEENS */\` (inside <script>, after the \`const tl = …\` line, before \`window.__timelines["main"] = tl\`) → the FULL set of GSAP timeline tweens for entrances, mid-scene activity, and exits across ALL scenes. Use \`tl.from\`, \`tl.to\`, \`tl.set\`. For non-first scenes, you MUST set \`autoAlpha: 1\` at the scene's data-start and \`autoAlpha: 0\` at data-start + data-duration (see the upstream guide's visibility section).
 
-## Spec → composition mappings (pipeline-specific; the guide does not cover these)
+## Output rules — non-negotiable
+- Output the COMPLETE HTML file with markers replaced. The rest of the file must come back BYTE-IDENTICAL to the input skeleton.
+- DO NOT modify: <!doctype>, <html>, <head>, font links, GSAP <script src> tag, the composition root <div id="main" data-composition-id="main" ...>, any scene clip div's tag (you may only edit the contents of its \`<div class="scene-content">\` child), the \`const tl = gsap.timeline({ paused: true });\` line, the \`window.__timelines["main"] = tl\` registration, the closing </body>/</html>.
+- DO NOT add or remove scenes. The skeleton has exactly N scenes; your output must too.
+- DO NOT emit markdown fences, commentary, or explanation. Output only the HTML.
+- If you cannot fill a marker honestly given the spec, leave a minimal valid placeholder (e.g. an empty <div>) — but NEVER leave a CLAUDE_FILL marker in the output.
 
-### Aspect ratio → composition root width × height
-- 16:9 → 1920 × 1080
-- 9:16 → 1080 × 1920
-- 1:1  → 1080 × 1080
-
-### Tone → accent color (CSS hex)
-- analytical → #f59e0b
-- dramatic   → #dc2626
-- neutral    → #9ca3af
-- playful    → #10b981
-
-### Scene \`template\` field — intent hint that drives layout
-The \`template\` field on each scene signals what kind of scene it is. Pick layout/composition from this — do NOT default everything to lower-third bars.
-- \`lower-third\`: name/role bar bottom-left; rest of frame transparent (see Few-shot A/B).
-- \`title-card\`: fullscreen centered headline + optional subline. Big type, generous negative space; suitable for openers, section breaks, summary frames.
-- \`map\`: the frame IS a map. If spec.assets has a "map" / "background" image, render it full-bleed via \`<img>\` (HTTPS URL — never base64, never an inline mega-SVG). Overlay regions, arrows, hotspots, frontline strokes, and city labels using INLINE \`<svg>\` elements positioned absolutely on top of the base img, animated through the GSAP timeline (stroke-dashoffset for arrows, opacity pulses for hotspots, etc.). mainText/subText become a broadcast title overlay (top strip or corner card), NOT the primary subject. A war-map sequence MUST render real maps per scene — do not produce eight lower-third bars instead.
-- \`chart\`: data viz as the primary subject. Use chart.js (CDN allowed per the guide's resource policy) for axis-bound viz, or hand-rolled SVG/divs for bars/lines/counters. mainText/subText become the chart title + caption.
-- \`freeform\`: use your judgment based on mainText/subText, assets, and the brief.
-
-### Asset usage (when spec.assets is present)
-Each entry: \`{ role, url, alt, source }\`. Follow the guide's media rules — HTTPS URL or local file reference only; never base64; never placeholder URLs; never SVG-filter \`data:image/svg+xml\` grain.
-- \`logo\` / \`icon\` → \`<img src="<url>" alt="<alt>" />\`. White-on-dark hint: \`filter: brightness(0) invert(1);\`.
-- \`background\` → CSS background on a wrapper div: \`background: url('<url>') center/cover no-repeat;\`.
-- \`map\` → full-bleed \`<img>\` background per the \`map\` template rule above. NEVER paste a giant base-map SVG inline; overlay arrows/hotspots as small inline \`<svg>\` per scene.
-- \`chart\` / generic image → \`<img>\` or hand-rolled inline \`<svg>\` as appropriate.
-- ALWAYS include the \`alt\` attribute on \`<img>\` tags.
-- Compose layouts that show the asset prominently — don't hide it behind text or off-screen.
-
-## Resources the renderer allows
-Google Fonts CSS; GSAP 3.14.x from cdn.jsdelivr.net; chart.js from cdn.jsdelivr.net; lottie-web from cdn.jsdelivr.net (only if a scene uses the lottie adapter); image / SVG URLs declared in spec.assets[].url. NO other \`<script src>\` URLs.
-
----
-
-# Authoritative authoring guide
-
-Everything below this line is the official Hyperframes Claude Design guide vendored verbatim. It is the source of truth for the hard contract, banned APIs, visibility (autoAlpha) rules, shader transitions, typography, easing → feeling, mid-scene activity patterns, and the self-review checklist. Follow it literally.
+The skeleton is delivered to you in the user message. The spec follows. Apply the spec to the skeleton.
 
 `
 
-export const CREATE_HTML_SYSTEM_PROMPT = `${PIPELINE_PREAMBLE}${HYPERFRAMES_CLAUDE_DESIGN_GUIDE}
+const PIPELINE_PREAMBLE = `# Pipeline-specific style conventions
+
+### Scene \`template\` field — intent hint that drives content for that scene
+- \`lower-third\`: name/role bar bottom-left; rest of frame transparent. mainText = name, subText = role/affiliation.
+- \`title-card\`: fullscreen centered headline + optional subline. Big type (≥80px), generous negative space. mainText = headline.
+- \`map\`: the frame IS a map. If spec.assets has a "map" / "background" image, render it full-bleed via \`<img>\` (HTTPS URL — never base64, never an inline mega-SVG). Overlay regions, arrows, hotspots, frontline strokes, and city labels using INLINE \`<svg>\` elements positioned absolutely on top of the base img. Animate via GSAP (stroke-dashoffset for arrows, opacity pulses for hotspots). mainText/subText become a broadcast-style title overlay (top strip or corner card), NOT the primary subject. A war-map sequence MUST render real maps per scene — do not produce lower-third bars instead.
+- \`chart\`: data viz as the primary subject. chart.js (CDN allowed) or hand-rolled SVG/divs. mainText/subText = chart title + caption.
+- \`freeform\`: use your judgment from mainText/subText, assets, and the brief.
+
+### Asset usage (when spec.assets is present)
+Each entry: \`{ role, url, alt, source }\`. HTTPS URL or local file reference only; never base64; never placeholder URLs; never SVG-filter \`data:image/svg+xml\` grain.
+- \`logo\` / \`icon\` → \`<img src="<url>" alt="<alt>" />\`. White-on-dark hint: \`filter: brightness(0) invert(1);\`.
+- \`background\` → CSS background on a wrapper div: \`background: url('<url>') center/cover no-repeat;\`.
+- \`map\` → full-bleed \`<img>\` per the \`map\` template rule above. NEVER paste a giant base-map SVG inline; overlay arrows/hotspots as small inline \`<svg>\` per scene.
+- \`chart\` / generic image → \`<img>\` or hand-rolled inline \`<svg>\` as appropriate.
+- ALWAYS include the \`alt\` attribute on \`<img>\` tags.
+
+### Resources the renderer allows
+Google Fonts CSS (already in skeleton); GSAP 3.14.x (already in skeleton); chart.js from cdn.jsdelivr.net (you may add); lottie-web from cdn.jsdelivr.net (only if a scene uses the lottie adapter); image / SVG URLs declared in spec.assets[].url. NO other \`<script src>\` URLs may be added.
 
 ---
 
-# Pipeline-specific few-shot examples
+# Animation, typography, and motion patterns
 
-These are complete HTML files matching this pipeline's data-attribute conventions. They are visual baselines for the lower-third and multi-scene shapes; vary layouts as the spec calls for it (title cards, charts, maps, mixed content) while honoring every rule above.
+Everything below is the official Hyperframes Claude Design guide vendored verbatim. Treat it as authoritative for animation feel, easing choices, mid-scene activity patterns, typography (banned fonts), and visibility rules. The "hard contract" section describes the structure your skeleton ALREADY satisfies; read it as context, but you do not need to reproduce that structure — it is fixed.
+
+`
+
+export const CREATE_HTML_SYSTEM_PROMPT = `${FILL_INSTRUCTIONS}${PIPELINE_PREAMBLE}${HYPERFRAMES_CLAUDE_DESIGN_GUIDE}
+
+---
+
+# Few-shot examples — visual baselines for fully-rendered HTML
+
+These are complete files. They show the SHAPE of the output (composition root, scene clips, timeline, registration) and the visual language. The skeleton you receive in the user message has the same shape but with CLAUDE_FILL markers in place of content. Match the level of polish you see here.
 
 ## Few-shot A — single-scene composition (lower-third)
 \`\`\`html
@@ -342,14 +355,18 @@ export async function specToHtml({ spec, additionalSystemContext = null }) {
   const systemPrompt = additionalSystemContext
     ? `${CREATE_HTML_SYSTEM_PROMPT}\n\n## CORRECTIONS REQUESTED\n${additionalSystemContext}`
     : CREATE_HTML_SYSTEM_PROMPT
-  // 8192 matches refineHtml. An 8-scene multi-scene composition with map img
-  // + inline-SVG overlays + per-scene GSAP tweens hits ~5-6k output tokens;
-  // the prior 4096 cap was truncating mid-output, dropping the trailing
-  // `window.__timelines["main"] = tl;` script line and tripping lint.
+
+  const skeleton = buildSkeleton(spec)
+  const userMessage =
+    `SKELETON (replace the CLAUDE_FILL markers, keep everything else byte-identical):\n` +
+    `\n\`\`\`html\n${skeleton}\n\`\`\`\n\n` +
+    `SPEC (apply this content to the skeleton):\n` +
+    `\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\``
+
   const r = await callAnthropic({
     model: MODEL_FOR.create,
     system: systemPrompt,
-    messages: [{ role: 'user', content: `Spec:\n${JSON.stringify(spec, null, 2)}` }],
+    messages: [{ role: 'user', content: userMessage }],
     max_tokens: 8192,
   })
   let html = r.text.trim()
@@ -357,8 +374,20 @@ export async function specToHtml({ spec, additionalSystemContext = null }) {
     .replace(/^```\s*/i, '')
     .replace(/```$/, '')
     .trim()
+
   if (!STAGE_MARKER.test(html)) {
-    throw new Error(`creator returned HTML missing data-composition-id="main": ${html.slice(0, 200)}`)
+    throw new Error(
+      `creator returned HTML missing data-composition-id="main": ${html.slice(0, 200)}`,
+    )
+  }
+  const invariantFailures = listSkeletonInvariantFailures(html)
+  if (invariantFailures.length > 0) {
+    const err = new Error(
+      `creator returned HTML that violates skeleton invariants: ${invariantFailures.join('; ')}`,
+    )
+    err.html = html
+    err.invariantFailures = invariantFailures
+    throw err
   }
   const cost = costCents(MODEL_FOR.create, r.tokens)
   return { html, cost, tokens: r.tokens }
