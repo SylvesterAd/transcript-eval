@@ -368,7 +368,9 @@ export async function probeMediaUrl(url) {
       '-v', 'quiet',
       '-print_format', 'json',
       '-show_entries', 'stream=width,height,r_frame_rate,avg_frame_rate,codec_name,codec_type,duration',
+      '-show_entries', 'stream_tags=timecode',
       '-show_entries', 'format=duration',
+      '-show_entries', 'format_tags=timecode',
       url,
     ], { timeout: 15000 })
     const data = JSON.parse(stdout)
@@ -389,6 +391,15 @@ export async function probeMediaUrl(url) {
         }
       }
       const dur = Number.parseFloat(v.duration || data.format?.duration)
+      // Embedded SMPTE timecode (TAG:timecode in the video stream or
+      // container format). Common values: "00:00:00:00" (zero — clean),
+      // "18:16:14:04" (camera origin TC), "01:00:00;00" (drop-frame
+      // start). DaVinci respects this baked-in TC and rejects XML
+      // imports that ask for in/out outside the file's TC range — even
+      // if the XML provides a <timecode> override block. Forwarded
+      // through manifest → placement → XMEML so the generator can
+      // emit absolute in/out frame numbers offset by this TC.
+      const tc = v.tags?.timecode || data.format?.tags?.timecode || null
       result = {
         rFrameRate: rate,
         frameRateInt,
@@ -397,6 +408,7 @@ export async function probeMediaUrl(url) {
         height: v.height || null,
         durationSeconds: Number.isFinite(dur) && dur > 0 ? dur : null,
         codec: v.codec_name || null,
+        embeddedTimecode: typeof tc === 'string' && tc.length ? tc : null,
       }
     }
   } catch {

@@ -214,6 +214,37 @@ function padSeq(seq) {
 // when the XML sits next to the media. That's lossy (forces a Locate
 // dialog every import) but it works; the historical `file://./` form
 // did not — Premiere parsed the `.` as a host and silently failed.
+// Parse a SMPTE timecode string into total frame count (absolute from
+// 00:00:00:00). Handles drop-frame (semicolon separator before frames)
+// for 29.97 (timebase 30) and 59.94 (timebase 60). Returns 0 on null /
+// malformed input — caller falls back to zero-based in/out, matching
+// pre-fix behavior.
+//
+// Examples:
+//   "00:00:00:00" → 0
+//   "18:16:14:04" at timebase=24 → 18*3600*24 + 16*60*24 + 14*24 + 4 = 1577140
+//   "01:00:00;00" at timebase=30 (DF) → 30*60*60 - dropped = 107892
+export function parseTimecodeToFrame(tcString, timebase) {
+  if (typeof tcString !== 'string' || !tcString) return 0
+  if (!Number.isFinite(timebase) || timebase <= 0) return 0
+  const isDF = tcString.includes(';')
+  const parts = tcString.split(/[:;]/)
+  if (parts.length !== 4) return 0
+  const [h, m, s, f] = parts.map(n => Number.parseInt(n, 10))
+  if (![h, m, s, f].every(Number.isFinite)) return 0
+  let frames = (h * 3600 + m * 60 + s) * timebase + f
+  if (isDF && (timebase === 30 || timebase === 60)) {
+    // Drop-frame TC (29.97/59.94): drop 2 (or 4) frames at the start
+    // of every minute except every 10th, to keep TC seconds aligned
+    // with wall-clock seconds.
+    const dropPerMin = timebase === 30 ? 2 : 4
+    const totalMinutes = h * 60 + m
+    const droppedMinutes = totalMinutes - Math.floor(totalMinutes / 10)
+    frames -= droppedMinutes * dropPerMin
+  }
+  return frames
+}
+
 export function buildPathUrl(mediaFolderAbsolute, filename) {
   const safeName = String(filename || '')
   if (!mediaFolderAbsolute) {
@@ -283,6 +314,16 @@ export function generateXmeml({
     // directories" (misleading error). Premiere ignores the ntsc
     // flag entirely.
     const sourceNtsc = p.ntsc === true
+    // Embedded SMPTE timecode from the source file's metadata
+    // (probed at manifest time). When present, the file's own TC is
+    // declared in <file><timecode> AND <in>/<out> are offset by the
+    // corresponding frame number — DaVinci validates strictly against
+    // the file's actual baked-in TC, and zero-based in/out outside the
+    // file's TC range get rejected as "File not found in search
+    // directories". When absent (file has TC 00:00:00:00 or no TC tag),
+    // fall back to zero — the historical behavior.
+    const embeddedTimecode = (typeof p.embeddedTimecode === 'string' && p.embeddedTimecode) ? p.embeddedTimecode : null
+    const embeddedTimecodeFrame = embeddedTimecode ? parseTimecodeToFrame(embeddedTimecode, sourceFrameRate) : 0
     // Two duration coordinates. <start>/<end> use sequence-rate
     // frames (timeline grid); <in>/<out> use source-rate frames (cut
     // points in the source media). Equal only when sequence rate ==
@@ -322,6 +363,8 @@ export function generateXmeml({
       _height: height,
       _sourceFrameRate: sourceFrameRate,
       _sourceNtsc: sourceNtsc,
+      _embeddedTimecode: embeddedTimecode,
+      _embeddedTimecodeFrame: embeddedTimecodeFrame,
     }
   })
 
@@ -512,7 +555,14 @@ export function generateXmeml({
       const fileId = `file-${slugifyForId(p.source)}-${slugifyForId(p.sourceItemId) || padSeq(p.seq)}`
       const fileBodyAlreadyEmitted = emittedFileIds.has(fileId)
       emittedFileIds.add(fileId)
-      const inFrame = 0
+      // Offset <in>/<out> by the file's embedded TC frame so DaVinci
+      // accepts the slice. With a non-zero embedded TC (e.g.
+      // 18:16:14:04 → frame 1577140 at timebase 24), <in>0</in> means
+      // "absolute TC 00:00:00:00" which doesn't exist in the file's
+      // TC range. Offset gives <in>1577140 = file's actual frame 0
+      // = TC 18:16:14:04 = within range.
+      const tcOffset = p._embeddedTimecodeFrame || 0
+      const inFrame = tcOffset
       const outFrame = inFrame + p._durationSrcFrames
       // Element order + always-emit-ntsc derived from
       // WyattBlue/auto-editor's working DaVinci-compatible exporter
@@ -548,11 +598,19 @@ export function generateXmeml({
         lines.push(`            <file id="${escapeXml(fileId)}">`)
         lines.push(`              <name>${escapeXml(p.filename)}</name>`)
         lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
-        // <timecode> FIRST — sets the file's TC base (zero-based override).
-        // Order INSIDE timecode: string, displayformat, rate (matches WyattBlue).
+        // <timecode>: declare the file's actual embedded SMPTE so
+        // DaVinci's strict TC validation matches our absolute in/out
+        // frame numbers. When the file has no embedded TC (or zero),
+        // we declare 00:00:00:00 — same as before. Per FCP7 spec
+        // <string> is the TC at file frame 0; <frame> is that frame
+        // number (here always 0 since we declare from file's start).
+        // <displayformat>: DF if the embedded TC uses semicolon
+        // separator (29.97 drop-frame), NDF otherwise.
+        const tcString = p._embeddedTimecode || '00:00:00:00'
+        const tcDisplayFmt = (p._embeddedTimecode || '').includes(';') ? 'DF' : 'NDF'
         lines.push(`              <timecode>`)
-        lines.push(`                <string>00:00:00:00</string>`)
-        lines.push(`                <displayformat>NDF</displayformat>`)
+        lines.push(`                <string>${tcString}</string>`)
+        lines.push(`                <displayformat>${tcDisplayFmt}</displayformat>`)
         lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
         lines.push(`              </timecode>`)
         lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)

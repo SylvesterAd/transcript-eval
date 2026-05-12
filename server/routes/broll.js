@@ -266,6 +266,10 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
         // rate when transcoding to preview bitrate).
         if (probe.frameRateInt) it.frame_rate = probe.frameRateInt
         if (typeof probe.ntsc === 'boolean') it.ntsc = probe.ntsc
+        // Embedded SMPTE timecode is universal across container formats
+        // and bitrates — preview and licensed source share it. Trust
+        // probe regardless of source type.
+        if (probe.embeddedTimecode) it.embedded_timecode = probe.embeddedTimecode
         // dimensions + duration: trust probe ONLY when probed URL is
         // the actual source we'll download. For envato, the probed
         // URL is a watermarked preview at REDUCED resolution (e.g.
@@ -292,6 +296,7 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
         if (probe) {
           if (probe.frameRateInt) aroll.frame_rate = probe.frameRateInt
           if (typeof probe.ntsc === 'boolean') aroll.ntsc = probe.ntsc
+          if (probe.embeddedTimecode) aroll.embedded_timecode = probe.embeddedTimecode
           if (probe.width && probe.height) { aroll.width = probe.width; aroll.height = probe.height }
           if (probe.durationSeconds) aroll.duration_seconds = probe.durationSeconds
           // Mirror onto the prepended item too (seq=0).
@@ -299,6 +304,7 @@ brollSearchesRouter.get('/:pipelineId/manifest', requireAuth, async (req, res) =
           if (arollItem) {
             if (probe.frameRateInt) arollItem.frame_rate = probe.frameRateInt
             if (typeof probe.ntsc === 'boolean') arollItem.ntsc = probe.ntsc
+            if (probe.embeddedTimecode) arollItem.embedded_timecode = probe.embeddedTimecode
             if (probe.width && probe.height) arollItem.resolution = { width: probe.width, height: probe.height }
             if (probe.durationSeconds) arollItem.duration_seconds = probe.durationSeconds
           }

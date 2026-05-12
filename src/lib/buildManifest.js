@@ -101,6 +101,13 @@ export function buildManifest({ manifests, options = {} }) {
         // NTSC fractional rate flag (29.97/23.976/59.94) — propagated
         // from server-side ffprobe so XMEML can emit <ntsc>TRUE</ntsc>.
         ntsc: raw.ntsc === true,
+        // Embedded SMPTE timecode from the source file's metadata
+        // (probed via ffprobe). When present, XMEML emits this in the
+        // <file><timecode><string> + computes <in>/<out> as absolute
+        // frame offsets so DaVinci's strict TC validation accepts the
+        // import. Without it, files with non-zero embedded TC fail
+        // import as "File not found in search directories".
+        embedded_timecode: raw.embedded_timecode || null,
         est_size_bytes: typeof raw.est_size_bytes === 'number' ? raw.est_size_bytes : 0,
         // Source media's full length. Forwarded to xmeml-generator so
         // <file><duration> reports the source's real length, giving

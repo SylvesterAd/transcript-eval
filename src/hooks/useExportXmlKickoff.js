@@ -76,6 +76,10 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
           // integer rate against the file's actual fractional rate
           // and rejects the import.
           ...(item.ntsc === true ? { ntsc: true } : {}),
+          // Embedded SMPTE timecode from the source file's metadata.
+          // Forwarded so xmeml-generator can emit it in <file><timecode>
+          // and offset <in>/<out> by the corresponding frame number.
+          ...(item.embedded_timecode ? { embeddedTimecode: item.embedded_timecode } : {}),
           // Source media's full length, used by the generator for
           // <file><duration> so Premiere can show trim handles past
           // the cut. Optional — falls back to timeline duration if
