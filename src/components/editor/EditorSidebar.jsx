@@ -20,6 +20,7 @@ export default function EditorSidebar({
   activeSub,
   assemblyStatus,
   hasVideos = true,
+  singleVideo = false,
   hasBrollSearch = false,
   brollChainStatus = null,
   parentGroupId = null,
@@ -33,7 +34,10 @@ export default function EditorSidebar({
   return (
     <aside className="flex flex-col items-center py-4 gap-8 border-r border-white/5 bg-[#0e0e10] w-20 shrink-0">
       <nav className="flex flex-col gap-6 w-full px-2">
-        {items.filter(item => !item.adminOnly || isAdmin).map(item => {
+        {items
+          .filter(item => !item.adminOnly || isAdmin)
+          .filter(item => !(singleVideo && item.id === 'sync'))
+          .map(item => {
           const baseLocked = item.needsSync && (!SYNC_READY_STATUSES.includes(assemblyStatus) || !hasVideos)
           const brollLocked = item.needsBrollSearch && !hasBrollSearch
           // While paused at rough cut, brolls-strategy must be clickable so the
