@@ -26,7 +26,6 @@
             <file id="file-freepik-xyz">
               <name>001_freepik_xyz.mp4</name>
               <pathurl>001_freepik_xyz.mp4</pathurl>
-              <duration>90</duration>
               <rate><timebase>30</timebase></rate>
               <timecode>
                 <rate><timebase>30</timebase></rate>
@@ -34,11 +33,6 @@
                 <frame>0</frame>
                 <displayformat>NDF</displayformat>
               </timecode>
-              <media>
-                <video><samplecharacteristics>
-                  <width>1920</width><height>1080</height>
-                </samplecharacteristics></video>
-              </media>
             </file>
           </clipitem>
         </track>

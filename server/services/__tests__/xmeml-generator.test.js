@@ -234,8 +234,11 @@ describe('generateXmeml — golden fixtures', () => {
       ],
     })
     expect(xml).toBe(loadFixture('missing-metadata.xml'))
-    // Structural: emitted width/height are the sequence defaults
-    expect(xml).toContain('<width>1920</width><height>1080</height>')
+    // The sequence-level <samplecharacteristics> still pins the
+    // sequence resolution. <file><media> is intentionally omitted —
+    // see xmeml-generator.js for the rationale (NLE probes the file).
+    expect(xml).toContain('<samplecharacteristics>')
+    expect(xml).toContain('<width>1920</width>')
     expect(xml).toContain('<timebase>30</timebase>')
   })
 })
@@ -415,14 +418,18 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
     // Source IN/OUT frames the cut WITHIN the source.
     expect(xml).toContain('<in>0</in>')
     expect(xml).toContain('<out>60</out>')   // 2s × 30fps
-    // The clipitem AND the file both report the SOURCE duration.
+    // The clipitem reports SOURCE duration (for trim handles).
+    // The file ALSO reports source duration when sourceDurationSeconds
+    // was provided (probed). When not provided, <file><duration> is
+    // omitted and the importer probes the file itself.
     expect(xml).toMatch(/<clipitem id="clip-variant-a-001">\s*<name>001_pexels_123\.mp4<\/name>\s*<duration>900<\/duration>/)
     expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<duration>900<\/duration>/)
   })
 
-  it('falls back to timeline duration when sourceDurationSeconds is missing', () => {
-    // Backwards compatibility: old manifests without duration_seconds
-    // still produce playable XML — file <duration> = timeline duration.
+  it('omits <file><duration> when sourceDurationSeconds is missing (importer probes file)', () => {
+    // Old manifests without duration_seconds: don't fabricate a fake
+    // file duration from the slice — DaVinci validates and rejects.
+    // Just omit and let the NLE probe the actual file.
     const xml = generateXmeml({
       sequenceName: 'Variant A',
       placements: [
@@ -432,8 +439,12 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
           width: 1920, height: 1080, sourceFrameRate: 30 },
       ],
     })
-    // No source-duration override → <duration> mirrors timeline span.
-    expect(xml).toMatch(/<file id="file-pexels-123">[\s\S]*<duration>60<\/duration>/)
+    // <file> block has <name>, <pathurl>, <rate>, <timecode> — but
+    // NO <duration>. Match the start of <file>: it should jump
+    // directly from <pathurl> to <rate>.
+    expect(xml).toMatch(/<file id="file-pexels-123">\s*<name>001_pexels_123\.mp4<\/name>\s*<pathurl>001_pexels_123\.mp4<\/pathurl>\s*<rate>/)
+    // Negative: no <duration> inside <file>.
+    expect(xml).not.toMatch(/<file id="file-pexels-123">[\s\S]*?<duration>[\s\S]*?<\/file>/)
   })
 
   it('emits absolute pathurl on the A-roll track too', () => {

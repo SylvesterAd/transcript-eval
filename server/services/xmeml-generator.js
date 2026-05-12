@@ -298,7 +298,8 @@ export function generateXmeml({
     // When unknown, fall back to the source-rate duration so the clip plays —
     // the cost is no trim handles past the cut, but at least the import
     // succeeds and the clip is the right length.
-    const sourceDurationFrames = Number.isFinite(p.sourceDurationSeconds) && p.sourceDurationSeconds > 0
+    const sourceDurationConfirmed = Number.isFinite(p.sourceDurationSeconds) && p.sourceDurationSeconds > 0
+    const sourceDurationFrames = sourceDurationConfirmed
       ? Math.round(p.sourceDurationSeconds * sourceFrameRate)
       : durationSrcFrames
     const cleanName = sanitizeFilename(p.filename)
@@ -312,6 +313,7 @@ export function generateXmeml({
       _duration: durationSeqFrames,
       _durationSrcFrames: durationSrcFrames,
       _sourceDurationFrames: sourceDurationFrames,
+      _sourceDurationConfirmed: sourceDurationConfirmed,
       // Sub-frame-precise versions of the timing fields. Carried alongside
       // the integer-frame values; emitted as <pproTicks*> in the XML.
       _timelineStartSec: p.timelineStart,
@@ -431,7 +433,13 @@ export function generateXmeml({
         lines.push(`            <file id="${escapeXml(arollFileId)}">`)
         lines.push(`              <name>${escapeXml(arollFilename)}</name>`)
         lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
-        lines.push(`              <duration>${arollSourceFrames}</duration>`)
+        // Aroll source duration is reported by the user's source video
+        // record in our DB (uploaded via /videos with ffprobe), so we
+        // can trust it here unconditionally. Same logic as the b-roll
+        // branch — only emit when confirmed; otherwise let importer probe.
+        if (Number.isFinite(seg.sourceDurationSeconds) && seg.sourceDurationSeconds > 0) {
+          lines.push(`              <duration>${arollSourceFrames}</duration>`)
+        }
         lines.push(`              <rate><timebase>${arollFrameRate}</timebase>${arollNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
         // Override any SMPTE timecode embedded in the source file's
         // metadata. Without this, DaVinci Resolve honors the file's
@@ -446,11 +454,9 @@ export function generateXmeml({
         lines.push(`                <frame>0</frame>`)
         lines.push(`                <displayformat>NDF</displayformat>`)
         lines.push(`              </timecode>`)
-        lines.push(`              <media>`)
-        lines.push(`                <video><samplecharacteristics>`)
-        lines.push(`                  <width>${arollWidth}</width><height>${arollHeight}</height>`)
-        lines.push(`                </samplecharacteristics></video>`)
-        lines.push(`              </media>`)
+        // <media> dimensions intentionally omitted — see b-roll branch
+        // for the why (importer-probe is robust against source-API
+        // dimension drift).
         lines.push(`            </file>`)
       } else {
         lines.push(`            <file id="${escapeXml(`file-aroll`)}"/>`)
@@ -508,7 +514,15 @@ export function generateXmeml({
       lines.push(`            <file id="${escapeXml(fileId)}">`)
       lines.push(`              <name>${escapeXml(p.filename)}</name>`)
       lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
-      lines.push(`              <duration>${p._sourceDurationFrames}</duration>`)
+      // Only emit <duration> when we have a CONFIRMED source duration
+      // (probed from the actual file's container). Falling back to
+      // the slice duration here was wrong — DaVinci probes the file,
+      // sees the actual duration, finds it doesn't match our claim,
+      // and rejects with "File not found in search directories".
+      // When omitted, importers (Premiere + DaVinci) probe the file.
+      if (p._sourceDurationConfirmed) {
+        lines.push(`              <duration>${p._sourceDurationFrames}</duration>`)
+      }
       lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${p._sourceNtsc ? '<ntsc>TRUE</ntsc>' : ''}</rate>`)
       // Zero-based source timecode override — see aroll branch above
       // for the why. Without this, DaVinci rejects every Envato/Sony
@@ -521,11 +535,15 @@ export function generateXmeml({
       lines.push(`                <frame>0</frame>`)
       lines.push(`                <displayformat>NDF</displayformat>`)
       lines.push(`              </timecode>`)
-      lines.push(`              <media>`)
-      lines.push(`                <video><samplecharacteristics>`)
-      lines.push(`                  <width>${p._width}</width><height>${p._height}</height>`)
-      lines.push(`                </samplecharacteristics></video>`)
-      lines.push(`              </media>`)
+      // <media><video><samplecharacteristics> intentionally omitted.
+      // Source-API resolutions (and probed preview dimensions for
+      // pexels low-res entries) frequently disagree with the actual
+      // licensed file (e.g. envato preview 960x540 → file 1920x1080;
+      // pexels preview_url_hq 640x360 → file 1920x1080;
+      // envato source-API 1920x1080 default → file 4096x2160 4K).
+      // Each mismatch made DaVinci reject. Omitting lets the importer
+      // probe the file directly and use its actual dimensions —
+      // robust to every transcoding variation.
       lines.push(`            </file>`)
       lines.push(`          </clipitem>`)
     }
