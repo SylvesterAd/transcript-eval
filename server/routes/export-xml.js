@@ -166,6 +166,7 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
     // gracefully — editorCuts stays [] and the legacy aroll single-clip path is used.
     let editorCuts = []
     let editorCutExclusions = []
+    let editorWords = null
     try {
       const exportRow = await db.prepare(
         'SELECT plan_pipeline_id FROM exports WHERE id = ?'
@@ -194,9 +195,25 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
             editorCutExclusions = editorState.cutExclusions || []
           }
         }
+        // Raw transcript words drive the word-aware cut merge in
+        // computeEffectiveCuts: two cuts separated by a word-less gap merge
+        // into one. /brolls/edit and the rough cut UI already pass words
+        // (see server/services/broll.js getBRollEditorData ~line 6171 and
+        // src/components/editor/useBRollEditorState.js effectiveCutsForTrigger);
+        // without it here, the export produces tiny "kept" slivers between
+        // cuts that the editor views never show.
+        const tRow = await db.prepare(
+          "SELECT word_timestamps_json FROM transcripts WHERE video_id = ? AND type = 'raw'"
+        ).get(videoId)
+        if (tRow?.word_timestamps_json) {
+          try {
+            const parsed = JSON.parse(tRow.word_timestamps_json)
+            if (Array.isArray(parsed) && parsed.length > 0) editorWords = parsed
+          } catch { /* malformed JSON: fall through to non-word-aware merge */ }
+        }
       }
     } catch (cutLoadErr) {
-      // Non-fatal: cut loading failed, fall back to legacy single-clip A-roll.
+      // Non-fatal: cut/word loading failed, fall back to legacy single-clip A-roll.
       console.warn('[export-xml] editor cut load failed; using legacy aroll:', cutLoadErr.message)
     }
 
@@ -234,8 +251,10 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
 
     // Hoist effective cuts once — both the arollSegments build below and
     // the b-roll placement translation use the same cut topology, and the
-    // computation is per-group, not per-variant.
-    const effectiveCuts = computeEffectiveCuts(editorCuts, editorCutExclusions)
+    // computation is per-group, not per-variant. Pass editorWords so the
+    // word-aware merge collapses cuts that span word-less gaps; matches
+    // /brolls/edit and the rough cut UI.
+    const effectiveCuts = computeEffectiveCuts(editorCuts, editorCutExclusions, editorWords)
 
     // Generate per variant. Loop is sequential since each call is
     // CPU-bound microseconds of string concat — no benefit to Promise.all.
