@@ -204,12 +204,19 @@ export async function runChatTurn({ sessionId, userMessage }) {
     // Enqueue render if spec is complete and session is still in briefing state
     if (isSpecComplete(newSpec) && session.status === 'briefing') {
       const iteration = 1;
+      // Multi-scene specs legitimately omit top-level template (it's ignored by
+      // the renderer when scenes[] is present), but graphics_renders.template
+      // is NOT NULL. Fall back to the first scene's template, then a constant.
+      const templateColumn =
+        newSpec.template
+        || (Array.isArray(newSpec.scenes) && newSpec.scenes[0]?.template)
+        || 'composition';
       const inserted = await tx
         .prepare(
           `INSERT INTO graphics_renders (session_id, iteration, spec_snapshot_json, template, status)
            VALUES (?, ?, ?, ?, 'queued') RETURNING id`
         )
-        .get(sessionId, iteration, JSON.stringify(newSpec), newSpec.template);
+        .get(sessionId, iteration, JSON.stringify(newSpec), templateColumn);
       await tx.prepare("UPDATE graphics_sessions SET status = 'rendering' WHERE id = ?").run(sessionId);
       return inserted.id;
     }
