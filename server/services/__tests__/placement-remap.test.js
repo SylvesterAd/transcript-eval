@@ -132,6 +132,43 @@ describe('materializePlacementRemap', () => {
       expect(p.anchor_state).toBe('word_snapped')
     })
 
+    it('falls back to LLM timecode when anchor_word_idx points far from the LLM start (>30s)', () => {
+      // Real-world case from project 367: LLM emits start=[00:02:52] (172s),
+      // but findAnchorWordIdx fell back to first-token match and returned
+      // idx=21 → word "and" at 12.4s. Without the sanity gate the placement
+      // would snap to 12.4s (off by 160s). With the gate it falls back to
+      // the LLM's 172s.
+      const words = []
+      for (let i = 0; i < 200; i++) words.push({ word: `w${i}`, start: i * 0.9, end: i * 0.9 + 0.2 })
+      words[21] = { word: 'and', start: 12.4, end: 12.62 }
+      const placements = [{
+        uuid: 'p_offgate',
+        start: '[00:02:52]', end: '[00:03:07]',
+        audio_anchor: 'And speaking of not done buying, Switzerland holds more gold',
+        anchor_word_idx: 21,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_offgate')
+      expect(p.start_seconds).toBeCloseTo(172, 2)
+      expect(p.end_seconds).toBeCloseTo(187, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+
+    it('keeps word-snap when the word is within the ±30s gate of the LLM start', () => {
+      // 28s offset — within the gate, snap wins.
+      const words = [{ word: 'target', start: 100, end: 100.5 }]
+      const placements = [{
+        uuid: 'p_within',
+        start: '[00:01:12]', end: '[00:01:14]',  // 72s, 28s off
+        audio_anchor: 'target',
+        anchor_word_idx: 0,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_within')
+      expect(p.start_seconds).toBeCloseTo(100, 2)
+      expect(p.anchor_state).toBe('word_snapped')
+    })
+
     it('falls back to LLM timecode when anchor_word_idx is -1 (anchor not found at plan time)', () => {
       const words = [{ word: 'Soviet', start: 25, end: 25.5 }]
       const placements = [{
