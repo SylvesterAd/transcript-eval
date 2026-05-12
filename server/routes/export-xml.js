@@ -55,6 +55,32 @@ function complementSegments(cutsArr, totalDuration) {
 }
 
 /**
+ * Pick the cuts that should drive a-roll segmentation in the XMEML export.
+ *
+ * Mirrors the source filter applied by:
+ *   - src/components/editor/Timeline.jsx (userCuts useMemo)
+ *   - src/components/editor/useBRollEditorState.js (effectiveCutsForTrigger)
+ *   - server/services/broll.js (getBRollEditorData, line ~6161)
+ *
+ * Annotation-source cuts are LLM suggestions that don't ripple-delete
+ * anything in the rough-cut timeline or in /brolls/edit — they're
+ * visual highlights only, written to state.cuts by the orchestrator's
+ * ensureEditorCutsFromAnnotations so b-roll search has context, not as
+ * user-applied cuts. The NLE export must use the SAME cut topology
+ * those views show, otherwise the exported a-roll's first kept clip
+ * lands seconds later than what the user sees in /editor/:id/roughcut.
+ *
+ * Exported for direct unit testing — the route also calls it inline.
+ *
+ * @param {Array} cuts - raw editor_state_json.cuts
+ * @returns {Array} cuts with `source === 'annotation'` removed
+ */
+export function selectExportCuts(cuts) {
+  if (!Array.isArray(cuts)) return []
+  return cuts.filter(c => c && c.source !== 'annotation')
+}
+
+/**
  * Translate b-roll placement timeline times from post-cut canonical
  * (Task 4) back to original-time before handing them to generateXmeml.
  *
@@ -160,7 +186,11 @@ router.post('/:id/generate-xml', requireAuth, async (req, res, next) => {
             const editorState = typeof gRow.editor_state_json === 'string'
               ? JSON.parse(gRow.editor_state_json)
               : gRow.editor_state_json
-            editorCuts = editorState.cuts || []
+            // Strip annotation-source cuts before computing kept segments —
+            // those are LLM suggestions, not user-applied cuts. See
+            // selectExportCuts above for the full rationale and the three
+            // other call sites that apply the same filter.
+            editorCuts = selectExportCuts(editorState.cuts)
             editorCutExclusions = editorState.cutExclusions || []
           }
         }
