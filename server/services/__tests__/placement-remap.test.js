@@ -34,14 +34,13 @@ describe('cutsHash', () => {
 })
 
 describe('materializePlacementRemap', () => {
-  it('shifts placement to post-cut time using LLM-emitted timecode (no anchor re-matching)', () => {
+  it('shifts placement to post-cut time using LLM-emitted timecode when no anchor_word_idx', () => {
     // Cut [10,15] removes 5s. Placement at original 19.94s shifts to 14.94s.
     const placements = [{
       uuid: 'p_a',
       start: '[00:00:19.94]',
       end: '[00:00:21.94]',
       audio_anchor: 'There is a bad piece',
-      // anchor_word_idx ignored — we trust the LLM timecode directly.
     }]
     const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], [])
     const p = out.get('p_a')
@@ -50,7 +49,7 @@ describe('materializePlacementRemap', () => {
     expect(p.anchor_state).toBe('shifted')
   })
 
-  it('passes through original-time when there are no effective cuts', () => {
+  it('passes through original-time when there are no effective cuts and no anchor_word_idx', () => {
     const placements = [{
       uuid: 'p_b',
       start: '[00:02:14]',
@@ -63,10 +62,13 @@ describe('materializePlacementRemap', () => {
     expect(p.end_seconds).toBeCloseTo(137, 2)
   })
 
-  it('trusts the LLM timecode regardless of where the anchor phrase repeats in the transcript', () => {
-    // The phrase "bad piece" appears at words[1-2] AND words[8-9]. Without
-    // anchor matching, the placement stays at the LLM's emitted [00:02:14] =
-    // 134s — NOT the earlier "bad piece" occurrence at 128.86s.
+  it('trusts the LLM timecode (no anchor_word_idx) regardless of where the anchor phrase repeats in the transcript', () => {
+    // The phrase "bad piece" appears at words[1-2] AND words[8-9]. The
+    // placement has no anchor_word_idx — without runtime re-matching it
+    // stays at the LLM's emitted [00:02:14] = 134s, NOT the earlier "bad
+    // piece" occurrence at 128.86s. This is exactly why anchor_word_idx
+    // is used when present: the LLM picked it at plan time, locking the
+    // intended occurrence.
     const words = [
       { word: 'a', start: 100, end: 100.1 },
       { word: 'bad', start: 128.86, end: 129.0 },
@@ -87,6 +89,122 @@ describe('materializePlacementRemap', () => {
     const out = materializePlacementRemap(placements, [], words)
     const p = out.get('p_c')
     expect(p.start_seconds).toBeCloseTo(134, 2)
+  })
+
+  describe('anchor_word_idx word-snap', () => {
+    it('snaps start to the actual word time, recovering sub-second precision the LLM timecode lost', () => {
+      // Real-world case: LLM emits [00:08:00] (480s, rounded down to a whole
+      // second). Actual word "Soviet" at idx 1068 starts at 481.71s.
+      // anchor_word_idx wins, end shifts by the same offset so LLM-intended
+      // duration (6s) is preserved.
+      const words = []
+      for (let i = 0; i < 1070; i++) words.push({ word: `w${i}`, start: i * 0.45, end: i * 0.45 + 0.1 })
+      words[1068] = { word: 'Soviet', start: 481.71, end: 482.29 }
+      const placements = [{
+        uuid: 'p_soviet',
+        start: '[00:08:00]', end: '[00:08:06]',
+        audio_anchor: 'Soviet tanks potentially heading west',
+        anchor_word_idx: 1068,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_soviet')
+      expect(p.start_seconds).toBeCloseTo(481.71, 2)
+      expect(p.end_seconds).toBeCloseTo(487.71, 2)
+      expect(p.anchor_state).toBe('word_snapped')
+    })
+
+    it('shifts the word-snapped start through cuts and preserves LLM-intended duration', () => {
+      const words = [
+        { word: 'placeholder', start: 0, end: 0.1 },
+        { word: 'Soviet', start: 25, end: 25.5 },
+      ]
+      // Cut [5,15] removes 10s. Word at 25 → post-cut 15. Duration 6s preserved.
+      const placements = [{
+        uuid: 'p_x',
+        start: '[00:00:24]', end: '[00:00:30]',
+        audio_anchor: 'Soviet',
+        anchor_word_idx: 1,
+      }]
+      const out = materializePlacementRemap(placements, [{ start: 5, end: 15 }], words)
+      const p = out.get('p_x')
+      expect(p.start_seconds).toBeCloseTo(15, 2)
+      expect(p.end_seconds).toBeCloseTo(21, 2)
+      expect(p.anchor_state).toBe('word_snapped')
+    })
+
+    it('falls back to LLM timecode when anchor_word_idx is -1 (anchor not found at plan time)', () => {
+      const words = [{ word: 'Soviet', start: 25, end: 25.5 }]
+      const placements = [{
+        uuid: 'p_y',
+        start: '[00:00:24]', end: '[00:00:26]',
+        audio_anchor: 'Soviet',
+        anchor_word_idx: -1,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_y')
+      expect(p.start_seconds).toBeCloseTo(24, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+
+    it('falls back to LLM timecode when anchor_word_idx is out of range (transcript edited away)', () => {
+      const words = [{ word: 'Soviet', start: 25, end: 25.5 }]
+      const placements = [{
+        uuid: 'p_z',
+        start: '[00:00:24]', end: '[00:00:26]',
+        audio_anchor: 'Soviet',
+        anchor_word_idx: 999,  // out of range
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_z')
+      expect(p.start_seconds).toBeCloseTo(24, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+
+    it('falls back to LLM timecode when the indexed word has no finite start', () => {
+      const words = [{ word: 'broken', start: null, end: 25.5 }]
+      const placements = [{
+        uuid: 'p_w',
+        start: '[00:00:24]', end: '[00:00:26]',
+        audio_anchor: 'broken',
+        anchor_word_idx: 0,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_w')
+      expect(p.start_seconds).toBeCloseTo(24, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+
+    it('hides a placement whose anchor word lands inside a cut (no visible start)', () => {
+      const words = [{ word: 'Soviet', start: 12, end: 12.5 }]
+      const placements = [{
+        uuid: 'p_incut',
+        start: '[00:00:11.50]', end: '[00:00:13.00]',
+        audio_anchor: 'Soviet',
+        anchor_word_idx: 0,
+      }]
+      // Cut [10,15] covers the word at 12 AND the LLM-derived end at 13 (= word+1.5s).
+      // adjStart = 15 (cut end), adjEnd = 10 (cut start) → adjStart >= adjEnd → hidden.
+      const out = materializePlacementRemap(placements, [{ start: 10, end: 15 }], words)
+      const p = out.get('p_incut')
+      expect(p.hidden).toBe(true)
+    })
+
+    it('overlap trim still wins when two word-snapped placements collide', () => {
+      const words = [
+        { word: 'one', start: 10, end: 10.5 },
+        { word: 'two', start: 10.8, end: 11 },
+      ]
+      const placements = [
+        { uuid: 'p_first',  start: '[00:00:10]', end: '[00:00:12]', audio_anchor: 'one', anchor_word_idx: 0 },
+        { uuid: 'p_second', start: '[00:00:11]', end: '[00:00:13]', audio_anchor: 'two', anchor_word_idx: 1 },
+      ]
+      const out = materializePlacementRemap(placements, [], words)
+      const a = out.get('p_first')
+      const b = out.get('p_second')
+      // First placement: word at 10, intended duration 2 → end 12. But next starts at 10.8 → trim end to 10.8.
+      expect(a.end_seconds).toBeCloseTo(10.8, 2)
+      expect(b.start_seconds).toBeCloseTo(10.8, 2)
+    })
   })
 
   it('enforces 0.5s minimum duration', () => {

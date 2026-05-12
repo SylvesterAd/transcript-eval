@@ -469,13 +469,23 @@ export function useBRollEditorState(planPipelineId) {
   // positions returned by the server. Without this filter, visualTime
   // collapses through annotation cuts and activePlacementAtTime returns null
   // at the time the placement actually shows on screen.
-  const effectiveCutsForTrigger = useMemo(
-    () => computeSkipRegions(
+  const effectiveCutsForTrigger = useMemo(() => {
+    // Same word-aware merge as the other b-roll editor consumers so that
+    // active-placement detection lines up with the displayed timeline.
+    const tracks = editorCtx?.state?.tracks || []
+    const primaryAudio = tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    const words = primaryAudio?.transcriptWords?.map(w => ({
+      start: w.start + (primaryAudio.offset || 0),
+      end: w.end + (primaryAudio.offset || 0),
+    })) || null
+    return computeSkipRegions(
       (editorCtx?.state?.cuts || []).filter(c => c.source !== 'annotation'),
       editorCtx?.state?.cutExclusions || [],
-    ),
-    [editorCtx?.state?.cuts, editorCtx?.state?.cutExclusions]
-  )
+      words,
+    )
+  }, [editorCtx?.state?.cuts, editorCtx?.state?.cutExclusions, editorCtx?.state?.tracks])
   const activePlacementAtTime = useCallback((time) => {
     const visualTime = postCutTime(time, effectiveCutsForTrigger)
     for (const p of state.placements) {
