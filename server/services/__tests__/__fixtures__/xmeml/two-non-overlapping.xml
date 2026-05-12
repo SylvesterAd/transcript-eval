@@ -28,6 +28,12 @@
               <pathurl>001_pexels_123.mp4</pathurl>
               <duration>60</duration>
               <rate><timebase>30</timebase></rate>
+              <timecode>
+                <rate><timebase>30</timebase></rate>
+                <string>00:00:00:00</string>
+                <frame>0</frame>
+                <displayformat>NDF</displayformat>
+              </timecode>
               <media>
                 <video><samplecharacteristics>
                   <width>1920</width><height>1080</height>
@@ -49,6 +55,12 @@
               <pathurl>002_pexels_456.mp4</pathurl>
               <duration>60</duration>
               <rate><timebase>30</timebase></rate>
+              <timecode>
+                <rate><timebase>30</timebase></rate>
+                <string>00:00:00:00</string>
+                <frame>0</frame>
+                <displayformat>NDF</displayformat>
+              </timecode>
               <media>
                 <video><samplecharacteristics>
                   <width>1920</width><height>1080</height>

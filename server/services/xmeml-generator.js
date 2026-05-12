@@ -407,6 +407,19 @@ export function generateXmeml({
         lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, arollFilename))}</pathurl>`)
         lines.push(`              <duration>${arollSourceFrames}</duration>`)
         lines.push(`              <rate><timebase>${arollFrameRate}</timebase></rate>`)
+        // Override any SMPTE timecode embedded in the source file's
+        // metadata. Without this, DaVinci Resolve honors the file's
+        // baked-in TC (e.g. 18:16:14:04 on Envato/Sony footage) and
+        // rejects our zero-based <in>/<out> with "No overlap between
+        // specified target timecodes and located file timecodes".
+        // Premiere ignores this block — it always treats source as
+        // zero-based — so it's pure-win for cross-NLE compatibility.
+        lines.push(`              <timecode>`)
+        lines.push(`                <rate><timebase>${arollFrameRate}</timebase></rate>`)
+        lines.push(`                <string>00:00:00:00</string>`)
+        lines.push(`                <frame>0</frame>`)
+        lines.push(`                <displayformat>NDF</displayformat>`)
+        lines.push(`              </timecode>`)
         lines.push(`              <media>`)
         lines.push(`                <video><samplecharacteristics>`)
         lines.push(`                  <width>${arollWidth}</width><height>${arollHeight}</height>`)
@@ -471,6 +484,17 @@ export function generateXmeml({
       lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
       lines.push(`              <duration>${p._sourceDurationFrames}</duration>`)
       lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
+      // Zero-based source timecode override — see aroll branch above
+      // for the why. Without this, DaVinci rejects every Envato/Sony
+      // clip whose embedded SMPTE doesn't start at 00:00:00:00 with a
+      // "No overlap between specified target timecodes and located
+      // file timecodes" error.
+      lines.push(`              <timecode>`)
+      lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase></rate>`)
+      lines.push(`                <string>00:00:00:00</string>`)
+      lines.push(`                <frame>0</frame>`)
+      lines.push(`                <displayformat>NDF</displayformat>`)
+      lines.push(`              </timecode>`)
       lines.push(`              <media>`)
       lines.push(`                <video><samplecharacteristics>`)
       lines.push(`                  <width>${p._width}</width><height>${p._height}</height>`)

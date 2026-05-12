@@ -28,6 +28,12 @@
               <pathurl>001_envato_NX9WYGQ.mov</pathurl>
               <duration>120</duration>
               <rate><timebase>30</timebase></rate>
+              <timecode>
+                <rate><timebase>30</timebase></rate>
+                <string>00:00:00:00</string>
+                <frame>0</frame>
+                <displayformat>NDF</displayformat>
+              </timecode>
               <media>
                 <video><samplecharacteristics>
                   <width>1920</width><height>1080</height>
