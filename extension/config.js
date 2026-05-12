@@ -4,7 +4,13 @@
 // Change ENV by editing this file before packaging; there's no
 // build-step substitution yet (added in Ext.10).
 
-export const EXT_VERSION = '0.9.2'
+// Read from manifest at runtime so this constant can never drift away
+// from manifest.json (it did before — see service-worker reporting
+// 0.9.2 against a 0.9.4 manifest). The fallback is only consulted by
+// tests where chrome.runtime isn't mocked; production always reads
+// the manifest. Future version bumps don't require touching this file.
+export const EXT_VERSION =
+  (globalThis.chrome?.runtime?.getManifest?.()?.version) || '0.9.4'
 export const ENV = 'prod'  // "dev" | "prod"
 
 export const BACKEND_URL = ENV === 'prod'
