@@ -149,6 +149,7 @@ export default function StateA_Install({ variant, ping, mode = 'install' }) {
   const detectedVersion = ping.value?.ext_version || null
   const latestVersion = ping.value?.latest_version || null
   const extId = ping.value?.ext_id || null
+  const probedIds = ping.value?.probed_ids || []
   const probeReason = ping.value?.reason || null
   const probeError = ping.value?.error || (ping.status === 'error' ? ping.error : null)
 
@@ -198,7 +199,8 @@ export default function StateA_Install({ variant, ping, mode = 'install' }) {
           <summary>Detection details</summary>
           <div>
             ping: {ping.status}{probeReason ? ` (${probeReason})` : ''}<br />
-            extension id (expected): {extId || '(empty — VITE_EXTENSION_ID not set at build)'}<br />
+            extension id ({ping.value?.installed ? 'matched' : 'expected'}): {extId || '(empty — VITE_EXTENSION_ID not set at build)'}<br />
+            {probedIds.length > 1 ? <>probed ids: {probedIds.join(', ')}<br /></> : null}
             installed version: {detectedVersion || '—'}<br />
             latest known version: {latestVersion || '—'}<br />
             {probeError ? <>probe error: {probeError}<br /></> : null}

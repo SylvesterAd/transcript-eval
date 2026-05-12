@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { execSync } from 'child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 const gitSha = (() => { try { return execSync('git rev-parse --short HEAD').toString().trim() } catch { return 'unknown' } })()
@@ -35,10 +36,46 @@ function getExtLatestVersion() {
   return ''
 }
 
+// Chrome derives an unpacked extension's ID from the public key in the
+// manifest's `key` field via the same SHA-256 → 0-9a-f → a-p mapping
+// used here. The Web Store assigns a *different* key on first publish,
+// so the source-tree dev ID and the published ID are intentionally
+// different (see commit f90edc6). We bake both so the production web
+// app can probe the dev-loaded extension too — first hit wins in
+// useExtension.ping().
+function computeExtIdFromManifestKey(keyB64) {
+  try {
+    const sha = createHash('sha256').update(Buffer.from(keyB64, 'base64')).digest()
+    let id = ''
+    for (let i = 0; i < 16; i++) {
+      id += String.fromCharCode(97 + (sha[i] >> 4))
+      id += String.fromCharCode(97 + (sha[i] & 0xf))
+    }
+    return id
+  } catch { return '' }
+}
+
+function getExtensionIdFallbacks() {
+  const fromEnv = process.env.VITE_EXTENSION_ID_FALLBACKS
+  if (fromEnv) return fromEnv.split(',').map(s => s.trim()).filter(Boolean)
+  const manifestPath = path.resolve(__dirname, 'extension/manifest.json')
+  if (existsSync(manifestPath)) {
+    try {
+      const m = JSON.parse(readFileSync(manifestPath, 'utf-8'))
+      if (m.key) {
+        const id = computeExtIdFromManifestKey(m.key)
+        return id ? [id] : []
+      }
+    } catch {}
+  }
+  return []
+}
+
 export default defineConfig({
   define: {
     '__APP_VERSION__': JSON.stringify(gitSha),
     '__EXTENSION_ID__': JSON.stringify(getExtensionId()),
+    '__EXTENSION_ID_FALLBACKS__': JSON.stringify(getExtensionIdFallbacks()),
     '__EXT_LATEST_VERSION__': JSON.stringify(getExtLatestVersion()),
   },
   plugins: [react(), tailwindcss()],

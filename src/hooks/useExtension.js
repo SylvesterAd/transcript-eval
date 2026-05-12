@@ -17,13 +17,19 @@
 // exist" error — the canonical "extension not installed" signals).
 
 import { useMemo } from 'react'
-import { EXT_ID } from '../lib/extension-id.js'
+import { EXT_ID, EXT_IDS_TO_PROBE } from '../lib/extension-id.js'
 import { resolveBackendUrl } from '../lib/backendUrl.js'
 import { isOutdated } from '../lib/semver.js'
 
 /* global __EXT_LATEST_VERSION__ */
 export const EXT_LATEST_VERSION =
   typeof __EXT_LATEST_VERSION__ === 'string' ? __EXT_LATEST_VERSION__ : ''
+
+// Cached ID of whichever extension responded to the most recent
+// successful ping(). sendSession/sendExport/openPort use this so a
+// dev-loaded extension (whose ID differs from the Web Store build's
+// pinned EXT_ID) keeps working past the initial probe.
+let _activeExtId = EXT_ID
 
 // Chrome reports a few distinct phrasings when the extension isn't
 // reachable. Match on substrings rather than exact equality so we
@@ -39,13 +45,13 @@ function isNotInstalledError(message) {
   )
 }
 
-function send(msg, { timeoutMs = 5000 } = {}) {
+function send(msg, { timeoutMs = 5000, extId = _activeExtId } = {}) {
   return new Promise((resolve, reject) => {
     if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage) {
       reject(new Error('chrome.runtime.sendMessage is not available — non-Chrome browser?'))
       return
     }
-    if (!EXT_ID) {
+    if (!extId) {
       reject(new Error('EXT_ID is empty (see src/lib/extension-id.js)'))
       return
     }
@@ -56,7 +62,7 @@ function send(msg, { timeoutMs = 5000 } = {}) {
       reject(new Error(`extension message timed out after ${timeoutMs} ms`))
     }, timeoutMs)
     try {
-      chrome.runtime.sendMessage(EXT_ID, msg, (response) => {
+      chrome.runtime.sendMessage(extId, msg, (response) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
@@ -83,25 +89,51 @@ function send(msg, { timeoutMs = 5000 } = {}) {
 export function useExtension() {
   return useMemo(() => ({
     ping: async () => {
-      try {
-        const r = await send({ type: 'ping', version: 1 }, { timeoutMs: 3000 })
-        const ext_version = r?.ext_version ?? null
+      const probedIds = EXT_IDS_TO_PROBE.length ? EXT_IDS_TO_PROBE : [EXT_ID].filter(Boolean)
+      let lastNonInstallError = null
+      for (const id of probedIds) {
+        try {
+          const r = await send({ type: 'ping', version: 1 }, { timeoutMs: 3000, extId: id })
+          const ext_version = r?.ext_version ?? null
+          _activeExtId = id
+          return {
+            installed: true,
+            ext_id: id,
+            probed_ids: probedIds,
+            ext_version,
+            latest_version: EXT_LATEST_VERSION || null,
+            is_outdated: isOutdated(ext_version, EXT_LATEST_VERSION),
+            envato_session: r?.envato_session ?? 'missing',
+            has_jwt: !!r?.has_jwt,
+            jwt_expires_at: r?.jwt_expires_at ?? null,
+            raw: r,
+          }
+        } catch (err) {
+          if (!isNotInstalledError(err.message)) {
+            // Real error against this ID (handler crash, timeout). Don't
+            // fall through — the user has *something* installed under
+            // this ID and we should surface what's wrong.
+            lastNonInstallError = { id, error: err.message }
+          }
+          // not_installed: try next ID
+        }
+      }
+      if (lastNonInstallError) {
         return {
-          installed: true,
-          ext_version,
+          installed: false,
+          reason: 'error',
+          error: lastNonInstallError.error,
+          ext_id: lastNonInstallError.id,
+          probed_ids: probedIds,
           latest_version: EXT_LATEST_VERSION || null,
-          is_outdated: isOutdated(ext_version, EXT_LATEST_VERSION),
-          envato_session: r?.envato_session ?? 'missing',
-          has_jwt: !!r?.has_jwt,
-          jwt_expires_at: r?.jwt_expires_at ?? null,
-          ext_id: EXT_ID,
-          raw: r,
         }
-      } catch (err) {
-        if (isNotInstalledError(err.message)) {
-          return { installed: false, reason: 'not_installed', ext_id: EXT_ID, latest_version: EXT_LATEST_VERSION || null }
-        }
-        return { installed: false, reason: 'error', error: err.message, ext_id: EXT_ID, latest_version: EXT_LATEST_VERSION || null }
+      }
+      return {
+        installed: false,
+        reason: 'not_installed',
+        ext_id: EXT_ID,
+        probed_ids: probedIds,
+        latest_version: EXT_LATEST_VERSION || null,
       }
     },
 
@@ -157,7 +189,8 @@ export function useExtension() {
       if (typeof chrome === 'undefined' || !chrome?.runtime?.connect) {
         throw new Error('chrome.runtime.connect is not available — non-Chrome browser?')
       }
-      if (!EXT_ID) {
+      const targetId = _activeExtId || EXT_ID
+      if (!targetId) {
         throw new Error('EXT_ID is empty (see src/lib/extension-id.js)')
       }
       let port = null
@@ -177,7 +210,7 @@ export function useExtension() {
             retried = true
             setTimeout(() => {
               try {
-                const p2 = chrome.runtime.connect(EXT_ID, { name })
+                const p2 = chrome.runtime.connect(targetId, { name })
                 port = p2
                 attach(p2)
               } catch (e) {
@@ -191,10 +224,10 @@ export function useExtension() {
       }
 
       try {
-        port = chrome.runtime.connect(EXT_ID, { name })
+        port = chrome.runtime.connect(targetId, { name })
         attach(port)
       } catch (e) {
-        throw new Error(`failed to open port to ${EXT_ID}: ${e.message}`)
+        throw new Error(`failed to open port to ${targetId}: ${e.message}`)
       }
 
       return {
