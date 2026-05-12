@@ -5,7 +5,15 @@ import RoughCutPreview from './RoughCutPreview.jsx'
 import { computeSkipRegions } from './usePlaybackSkipRegions.js'
 import { postCutTime } from '../../lib/timeTranslation.js'
 import { Loader2 } from 'lucide-react'
-import { attachVideoSource, detachVideoSource } from '../../hooks/useHlsSource.js'
+import { useHlsSource, detachVideoSource } from '../../hooks/useHlsSource.js'
+
+// Match `.m3u8` even when followed by query params (e.g. `?token=…`). Plain
+// `<video>.src` can't decode HLS in Chrome — Artlist serves HLS only, so this
+// detection routes them through hls.js via useHlsSource.
+const HLS_RE = /\.m3u8(\?|$)/i
+function isHlsUrl(url) {
+  return !!url && HLS_RE.test(url)
+}
 
 export default function BRollPreview() {
   const { state, videoRefs } = useContext(EditorContext)
@@ -13,10 +21,21 @@ export default function BRollPreview() {
   const brollVideoRef = useRef(null)
   const [showBRoll, setShowBRoll] = useState(false)
   const [videoLoadState, setVideoLoadState] = useState('idle')
+  const [activeUrl, setActiveUrl] = useState(null)
   const fallbackIdxRef = useRef(0)
+  const activeKeyRef = useRef(null)
+  const activeUrlRef = useRef(null); activeUrlRef.current = activeUrl
 
   const stateRef = useRef(state); stateRef.current = state
   const brollRef = useRef(broll); brollRef.current = broll
+
+  // Drive <video> source via useHlsSource: HLS goes through hls.js (Chrome) or
+  // native (Safari); MP4s land directly on `.src`. Setting activeUrl=null
+  // detaches cleanly between placements.
+  useHlsSource(brollVideoRef, {
+    hlsUrl: isHlsUrl(activeUrl) ? activeUrl : null,
+    mp4Url: !isHlsUrl(activeUrl) && activeUrl ? activeUrl : null,
+  })
 
   // Compute skip regions from the editor's cut state (same cuts as the rough-cut
   // editor — synced via editor_state_json). Annotation-source cuts are visual
@@ -71,18 +90,21 @@ export default function BRollPreview() {
 
       if (activeResult) {
         if (!showBRoll) setShowBRoll(true)
+        // Reset fallback chain when the placement OR selected result changes,
+        // not when src changes (we no longer compare against v.src).
+        const key = `${activePlacement.index}:${resultIdx}`
+        if (activeKeyRef.current !== key) {
+          activeKeyRef.current = key
+          fallbackIdxRef.current = 0
+        }
+        const urlChain = [activeResult.preview_url, activeResult.preview_url_hq, activeResult.url].filter(Boolean)
+        const url = urlChain[fallbackIdxRef.current] || urlChain[0] || null
+        if (activeUrlRef.current !== url) {
+          setVideoLoadState('loading')
+          setActiveUrl(url)
+        }
         if (brollVideoRef.current) {
           const v = brollVideoRef.current
-          const urlChain = [activeResult.preview_url, activeResult.preview_url_hq, activeResult.url].filter(Boolean)
-          const desired = urlChain[0] || ''
-          // Compare via the helper's tracked URL — for HLS, hls.js sets v.src
-          // to an internal blob: URL so a `v.src !== url` check always
-          // mismatches and would re-attach every frame.
-          if (v._currentSourceUrl !== desired) {
-            fallbackIdxRef.current = 0
-            setVideoLoadState('loading')
-            attachVideoSource(v, desired)
-          }
           // Visual time = where the playhead sits on the post-cut ruler. Each
           // placement's timelineStart/End are in those same post-cut seconds
           // (b-rolls render at `timelineStart * zoom` with no translation), so
@@ -96,6 +118,8 @@ export default function BRollPreview() {
         }
       } else {
         if (showBRoll) setShowBRoll(false)
+        if (activeKeyRef.current !== null) activeKeyRef.current = null
+        if (activeUrlRef.current !== null) setActiveUrl(null)
         if (brollVideoRef.current && !brollVideoRef.current.paused) brollVideoRef.current.pause()
       }
 
@@ -125,10 +149,8 @@ export default function BRollPreview() {
     if (fallbackIdxRef.current + 1 < chain.length) {
       fallbackIdxRef.current += 1
       console.log('[broll-preview] URL failed, trying fallback', fallbackIdxRef.current, chain[fallbackIdxRef.current])
-      if (brollVideoRef.current) {
-        setVideoLoadState('loading')
-        attachVideoSource(brollVideoRef.current, chain[fallbackIdxRef.current])
-      }
+      setVideoLoadState('loading')
+      setActiveUrl(chain[fallbackIdxRef.current] || null)
     } else {
       console.log('[broll-preview] all URL fallbacks exhausted')
       setVideoLoadState('error')
