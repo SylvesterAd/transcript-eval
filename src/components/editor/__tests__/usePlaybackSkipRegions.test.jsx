@@ -43,6 +43,68 @@ describe('computeSkipRegions (pure)', () => {
     const out = computeSkipRegions([{ start: 10, end: 10.005 }])
     expect(out).toEqual([])
   })
+
+  describe('word-aware merge', () => {
+    it('merges adjacent cuts when the gap contains no transcript word', () => {
+      // Real case from project 367: an ai-silence cut and the user's
+      // Backspace cut leave a 200ms gap whose only nearby word ("[clears
+      // throat]") starts AT the gap's far edge (not inside it). Result:
+      // one merged region instead of two with a sliver between.
+      const cuts = [
+        { start: 175.69, end: 176.23, source: 'ai-silence' },
+        { start: 176.43, end: 178.15, source: 'transcript' },
+      ]
+      const words = [
+        { start: 175.08, end: 175.519, word: 'seven.' },
+        { start: 176.48, end: 177.74, word: '[clears throat]' },
+        { start: 178.22, end: 178.46, word: 'Number' },
+      ]
+      const out = computeSkipRegions(cuts, [], words)
+      expect(out).toEqual([{ start: 175.69, end: 178.15 }])
+    })
+
+    it('keeps cuts separate when a transcript word fits in the gap', () => {
+      const cuts = [
+        { start: 10, end: 12, source: 'transcript' },
+        { start: 14, end: 16, source: 'transcript' },
+      ]
+      const words = [{ start: 12.5, end: 13.5, word: 'keepme' }]
+      const out = computeSkipRegions(cuts, [], words)
+      expect(out).toEqual([
+        { start: 10, end: 12 },
+        { start: 14, end: 16 },
+      ])
+    })
+
+    it('falls back to the 50ms basic merge when words is null', () => {
+      const cuts = [
+        { start: 10, end: 12, source: 'transcript' },
+        { start: 12.04, end: 14, source: 'transcript' },  // 40ms gap → still merges
+        { start: 15, end: 17, source: 'transcript' },     // 1s gap, no words → stays separate without words
+      ]
+      const out = computeSkipRegions(cuts, [])
+      expect(out).toEqual([
+        { start: 10, end: 14 },
+        { start: 15, end: 17 },
+      ])
+    })
+
+    it('does not merge across a word-less gap when the cuts overlap an exclusion', () => {
+      // Smart-merge runs before exclusion split — the user's manual
+      // exclusion still carves out a kept sub-region after the merge.
+      const cuts = [
+        { start: 10, end: 12, source: 'transcript' },
+        { start: 13, end: 15, source: 'transcript' },
+      ]
+      const words = []  // no words anywhere → smart-merge would join 10-15
+      const exclusions = [{ start: 11, end: 14 }]
+      const out = computeSkipRegions(cuts, exclusions, words)
+      expect(out).toEqual([
+        { start: 10, end: 11 },
+        { start: 14, end: 15 },
+      ])
+    })
+  })
 })
 
 describe('usePlaybackSkipRegions', () => {

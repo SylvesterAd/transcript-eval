@@ -41,13 +41,27 @@ export default function BRollPreview() {
   // editor — synced via editor_state_json). Annotation-source cuts are visual
   // suggestions only — they don't drive playback skipping. Mirror the filter
   // used by TranscriptEditor.isItemCut + Timeline.userCuts.
+  // Pass primary audio words so word-aware merge collapses adjacent cuts
+  // separated by silent (non-transcribed) gaps — same predicate the rough-
+  // cut playback uses, so the b-roll editor doesn't show a sliver between
+  // two cuts the rough-cut tab already treats as one.
   // The actual timeupdate listeners are attached below to every a-roll video
   // element in videoRefs (there can be multiple tracks), so we call
   // computeSkipRegions directly instead of the hook.
-  const skipRegions = useMemo(
-    () => computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions),
-    [state.cuts, state.cutExclusions],
-  )
+  const skipRegions = useMemo(() => {
+    const primaryAudio = state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    const words = primaryAudio?.transcriptWords?.map(w => ({
+      start: w.start + (primaryAudio.offset || 0),
+      end: w.end + (primaryAudio.offset || 0),
+    })) || null
+    return computeSkipRegions(
+      state.cuts.filter(c => c.source !== 'annotation'),
+      state.cutExclusions,
+      words,
+    )
+  }, [state.cuts, state.cutExclusions, state.tracks])
   const skipRegionsRef = useRef(skipRegions)
   skipRegionsRef.current = skipRegions
 

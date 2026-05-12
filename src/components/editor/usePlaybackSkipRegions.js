@@ -11,20 +11,38 @@ import { useMemo, useEffect } from 'react'
  *
  * Both inputs in seconds. Output is a sorted, non-overlapping array of
  * {start, end} regions.
+ *
+ * Words-aware merge: when `words` is provided and the gap between two
+ * adjacent cuts contains no transcript word (with a ±0.05s pad on each
+ * side), the cuts are merged across the gap. This mirrors the predicate
+ * already used by `EditorView.skipRegions` for rough-cut playback — it
+ * prevents a ~0.2s silent sliver from being kept in the b-roll layout
+ * just because two cuts (an ai-silence cut and a Backspace-applied user
+ * cut) didn't quite touch end-to-end. Without `words`, the merge falls
+ * back to the basic 50ms threshold.
  */
-export function computeSkipRegions(cuts, cutExclusions = []) {
+export function computeSkipRegions(cuts, cutExclusions = [], words = null) {
   if (!cuts || cuts.length === 0) return []
   const sorted = [...cuts]
     .filter(c => c.end > c.start + 0.01)
     .sort((a, b) => a.start - b.start)
+  const wordsList = Array.isArray(words) ? words : null
   const merged = []
   for (const c of sorted) {
     const last = merged[merged.length - 1]
-    if (last && c.start <= last.end + 0.05) {
-      last.end = Math.max(last.end, c.end)
-    } else {
+    if (!last) {
       merged.push({ start: c.start, end: c.end })
+      continue
     }
+    if (c.start <= last.end + 0.05) {
+      last.end = Math.max(last.end, c.end)
+      continue
+    }
+    if (wordsList && !wordsList.some(w => w.start >= last.end - 0.05 && w.end <= c.start + 0.05)) {
+      last.end = Math.max(last.end, c.end)
+      continue
+    }
+    merged.push({ start: c.start, end: c.end })
   }
   if (!cutExclusions?.length) return merged
   const result = []

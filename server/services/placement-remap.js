@@ -28,8 +28,17 @@ function cutContainingEnd(t, effectiveCuts) {
 /**
  * Materialize a per-placement remap from LLM-emitted timecodes + effective cuts.
  *
- * - Trusts the LLM's emitted timecodes as the canonical original-time anchors.
- * - For each placement:
+ * Start-time precedence (first match wins):
+ *   1. words[p.anchor_word_idx].start — anchor_word_idx is computed at plan
+ *      generation time against the same raw transcript, so it disambiguates
+ *      repeated phrases (the LLM picked which occurrence it meant). Using
+ *      the word's actual start gets sub-second precision the LLM's whole-
+ *      second timecode lacks. End is offset by the LLM-intended duration
+ *      (parseTimecode(p.end) - parseTimecode(p.start)).
+ *   2. parseTimecode(p.start) — fallback when anchor_word_idx is missing,
+ *      -1, out of range, or its word lacks a finite start.
+ *
+ * Then for each placement:
  *   - If start lands inside a cut → push start forward to the cut's end (the
  *     next visible moment).
  *   - If end lands inside a cut → pull end back to the cut's start (the last
@@ -37,29 +46,43 @@ function cutContainingEnd(t, effectiveCuts) {
  *   - If those adjustments leave start >= end (placement is fully consumed by
  *     a cut) → mark hidden:true so the caller skips it. The placement returns
  *     to view automatically when the user shrinks/removes the offending cut.
- * - Then shifts the (clipped) original-time range through the effective cuts
- *   via postCutTime to get post-cut start/end. Cuts that lie *between* the
- *   adjusted start and end naturally collapse via postCutTime (placement
- *   visually shortens to its kept-content duration).
+ *   - Shift the (clipped) original-time range through the effective cuts via
+ *     postCutTime to get post-cut start/end. Cuts that lie *between* the
+ *     adjusted start and end naturally collapse via postCutTime (placement
+ *     visually shortens to its kept-content duration).
  *
  * Pure function — no DB, no I/O. Caller is responsible for computing
  * `effectiveCuts` (via computeEffectiveCuts in broll.js).
  *
- * `words` is unused but kept in the signature for backwards compatibility.
- *
  * Returns Map<uuid, { start_seconds, end_seconds, anchor_state, hidden? }>.
  *
- * `anchor_state`: 'shifted' | 'overlap_squeezed' | 'cut_clipped'.
+ * `anchor_state`: 'word_snapped' | 'shifted' | 'overlap_squeezed' | 'cut_clipped'.
  */
 export function materializePlacementRemap(placements, effectiveCuts, words) {
   const MIN_DURATION = 0.5
+  const wordsList = Array.isArray(words) ? words : []
 
   const resolved = []
   for (const p of placements) {
     if (!p.uuid) continue
 
-    const startOrig = parseTimecode(p.start)
-    const endOrig = parseTimecode(p.end)
+    const llmStart = parseTimecode(p.start)
+    const llmEnd = parseTimecode(p.end)
+    const llmDuration = llmEnd - llmStart
+
+    // Prefer the actual transcript word position when the LLM-assigned
+    // anchor_word_idx points to a real word. Falls back to the LLM timecode
+    // for legacy placements (no idx), unmatched anchors (idx === -1), or
+    // post-edit drift (idx now out of range).
+    const idx = p.anchor_word_idx
+    const idxValid =
+      Number.isInteger(idx) &&
+      idx >= 0 &&
+      idx < wordsList.length &&
+      Number.isFinite(wordsList[idx]?.start)
+    const usedWordSnap = idxValid
+    const startOrig = usedWordSnap ? wordsList[idx].start : llmStart
+    const endOrig = usedWordSnap ? startOrig + llmDuration : llmEnd
 
     // Clip the placement to the visible (non-cut) portion of the timeline.
     const startCut = cutContaining(startOrig, effectiveCuts)
@@ -80,11 +103,16 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
     const dur = Math.max(MIN_DURATION, endSec - startSec)
     const wasClipped = (adjStart !== startOrig) || (adjEnd !== endOrig)
 
+    let state
+    if (wasClipped) state = 'cut_clipped'
+    else if (usedWordSnap) state = 'word_snapped'
+    else state = 'shifted'
+
     resolved.push({
       uuid: p.uuid,
       startSec,
       endSec: startSec + dur,
-      state: wasClipped ? 'cut_clipped' : 'shifted',
+      state,
     })
   }
 

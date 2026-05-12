@@ -1224,24 +1224,39 @@ export async function generatePostCutTranscript(videoId, cuts, cutExclusions = [
 
 /**
  * Merge cuts and subtract exclusions to get effective cut regions.
+ *
+ * Words-aware merge: when `words` is provided and the gap between two
+ * adjacent cuts contains no transcript word (±0.05s pad), the cuts merge
+ * across the gap. Mirrors `computeSkipRegions` and `EditorView.skipRegions`
+ * — without it, server-side placement remap would still see a sliver
+ * between e.g. an ai-silence cut and the user's Backspace cut even after
+ * the client-side display merges them. Without `words`, the merge falls
+ * back to the basic 50ms threshold (legacy callers unchanged).
  */
-export function computeEffectiveCuts(cuts, cutExclusions = []) {
+export function computeEffectiveCuts(cuts, cutExclusions = [], words = null) {
   if (!cuts || !cuts.length) return []
 
   // Filter real cuts (not zero-width razor markers)
   const real = cuts.filter(c => c.end > c.start + 0.01)
   if (!real.length) return []
 
-  // Sort and merge overlapping cuts
+  const wordsList = Array.isArray(words) ? words : null
+
+  // Sort and merge overlapping cuts; also merge across word-less gaps
+  // when transcript words are available.
   const sorted = [...real].sort((a, b) => a.start - b.start)
   const merged = [{ start: sorted[0].start, end: sorted[0].end }]
   for (let i = 1; i < sorted.length; i++) {
     const last = merged[merged.length - 1]
     if (sorted[i].start <= last.end + 0.05) {
       last.end = Math.max(last.end, sorted[i].end)
-    } else {
-      merged.push({ start: sorted[i].start, end: sorted[i].end })
+      continue
     }
+    if (wordsList && !wordsList.some(w => w.start >= last.end - 0.05 && w.end <= sorted[i].start + 0.05)) {
+      last.end = Math.max(last.end, sorted[i].end)
+      continue
+    }
+    merged.push({ start: sorted[i].start, end: sorted[i].end })
   }
 
   // Subtract exclusions
@@ -5911,6 +5926,10 @@ export async function getBRollEditorData(planPipelineId) {
         start: p.start,
         end: p.end,
         audio_anchor: p.audio_anchor || '',
+        // Plan-time anchor index into raw transcript words. materializePlacementRemap
+        // uses this to snap start time to the actual word position, recovering the
+        // sub-second precision the LLM's whole-second [HH:MM:SS] timecode loses.
+        anchor_word_idx: typeof p.anchor_word_idx === 'number' ? p.anchor_word_idx : null,
         description: p.description || '',
         function: p.function || '',
         type_group: p.type_group || '',
@@ -6159,7 +6178,7 @@ export async function getBRollEditorData(planPipelineId) {
           }
         }
         if (words.length) {
-          const effective = computeEffectiveCuts(cuts, exclusions)
+          const effective = computeEffectiveCuts(cuts, exclusions, words)
           const remap = materializePlacementRemap(placements, effective, words)
           const remappedPositions = Object.fromEntries(remap)
           const nextState = {

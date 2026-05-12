@@ -121,10 +121,19 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
   //   placements). Includes the expanded cut — the popover sits on top.
   // - expandedCut:   the cut currently rendered as a popover (or null),
   //   resolved by anchor-contains lookup.
-  const effectiveCuts = useMemo(
-    () => isBroll ? computeSkipRegions(userCuts, state.cutExclusions) : [],
-    [isBroll, userCuts, state.cutExclusions]
-  )
+  const effectiveCuts = useMemo(() => {
+    if (!isBroll) return []
+    // Word-aware merge keeps two cuts that span a non-transcribed gap from
+    // leaving a sliver visible in the b-roll layout — mirrors EditorView.
+    const primaryAudio = state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    const words = primaryAudio?.transcriptWords?.map(w => ({
+      start: w.start + (primaryAudio.offset || 0),
+      end: w.end + (primaryAudio.offset || 0),
+    })) || null
+    return computeSkipRegions(userCuts, state.cutExclusions, words)
+  }, [isBroll, userCuts, state.cutExclusions, state.tracks])
   // expandedCutAnchor is an original-time timestamp (typically the cut's
   // center at click). Resolve to the effective cut whose interval contains
   // it. Anchor identity survives edge-resize drags that change cut bounds

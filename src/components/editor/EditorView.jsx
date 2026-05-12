@@ -695,10 +695,25 @@ export default function EditorView() {
   // translation. Computed once per relevant change so the 60fps rAF tick
   // reads it without recomputing. Annotation-source cuts are visual
   // suggestions only — same filter as Timeline.userCuts + BRollPreview.
-  const brollEffectiveCuts = useMemo(
-    () => state.activeTab === 'brolls' ? computeSkipRegions(state.cuts.filter(c => c.source !== 'annotation'), state.cutExclusions) : null,
-    [state.activeTab, state.cuts, state.cutExclusions]
-  )
+  // `words` enables word-aware merge: two cuts separated by a silent gap
+  // (e.g., ai-silence + a Backspace cut that don't quite touch) collapse
+  // into one — matching the rough-cut playback behavior and avoiding a
+  // ~0.2s visible sliver in the b-roll layout.
+  const brollEffectiveCuts = useMemo(() => {
+    if (state.activeTab !== 'brolls') return null
+    const primaryAudio = state.tracks
+      .filter(t => t.type === 'audio' && t.transcriptWords?.length)
+      .sort((a, b) => b.duration - a.duration)[0]
+    const words = primaryAudio?.transcriptWords?.map(w => ({
+      start: w.start + (primaryAudio.offset || 0),
+      end: w.end + (primaryAudio.offset || 0),
+    })) || null
+    return computeSkipRegions(
+      state.cuts.filter(c => c.source !== 'annotation'),
+      state.cutExclusions,
+      words,
+    )
+  }, [state.activeTab, state.cuts, state.cutExclusions, state.tracks])
   stateRefs.current.brollEffectiveCuts = brollEffectiveCuts
 
   // Declared before tick so tick's deps can include stopAllVideos without TDZ.
@@ -765,9 +780,18 @@ export default function EditorView() {
       return
     }
 
-    // Skip cut regions in rough cut mode (using waveform-refined regions)
-    const regions = skipRegionsRef.current
-    if (s.activeTab === 'roughcut' && regions.length > 0) {
+    // Skip cut regions during playback. Rough-cut uses waveform-refined
+    // regions (skipRegionsRef) so boundaries don't clip word sounds. B-roll
+    // uses the displayed post-cut layout (brollEffectiveCuts) so playback
+    // skip matches what the user sees on the b-roll timeline. Without this
+    // pass, b-roll playback only skipped via BRollPreview's `timeupdate`
+    // listener — which fires every ~250ms, so master.currentTime advanced
+    // inside the cut for a quarter second before each jump, and the playhead
+    // (translated via postCutTime) visually froze at the cut start.
+    const regions = s.activeTab === 'brolls'
+      ? (s.brollEffectiveCuts || [])
+      : (s.activeTab === 'roughcut' ? skipRegionsRef.current : [])
+    if (regions.length > 0) {
       const preSkipTime = newTime
       let skipping = true
       while (skipping) {
