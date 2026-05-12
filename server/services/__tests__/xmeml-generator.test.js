@@ -425,7 +425,7 @@ describe('generateXmeml — pathurl + source duration semantics', () => {
     // The file ALSO reports source duration when sourceDurationSeconds
     // was provided. <enabled>TRUE</enabled> is between <name> and
     // <duration> per WyattBlue's structure.
-    expect(xml).toMatch(/<clipitem id="clip-variant-a-001">\s*<name>001_pexels_123\.mp4<\/name>\s*<enabled>TRUE<\/enabled>\s*<duration>900<\/duration>/)
+    expect(xml).toMatch(/<clipitem id="clip-variant-a-001-\d+">\s*<name>001_pexels_123\.mp4<\/name>\s*<enabled>TRUE<\/enabled>\s*<duration>900<\/duration>/)
     // <file>: name, pathurl, then <timecode> (per WyattBlue's order),
     // then <rate>, then <duration>900</duration>.
     expect(xml).toMatch(/<file id="file-pexels-123">[\s\S]*?<duration>900<\/duration>/)

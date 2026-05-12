@@ -492,11 +492,26 @@ export function generateXmeml({
   // exposes a per-placement source-IN, plumb it through and adjust the
   // `in`/`out` calc here.
   const trackIndices = Array.from(tracksByIndex.keys()).sort((a, b) => a - b)
+  // Track which file IDs we've already emitted with a full <file> body.
+  // Same source clip used at N timeline positions emits N <clipitem>s,
+  // but only the FIRST gets the full <file> block — subsequent ones use
+  // the self-closing <file id="X"/> reference. Without this we emit
+  // duplicate <file id="X"> blocks and DaVinci rejects with "Item
+  // already exists" — the source of the user's persistent rejections.
+  const emittedFileIds = new Set()
+  // Counter for unique clipitem IDs. The placement.seq is shared across
+  // multiple placements of the same source (buildManifest dedupes by
+  // source|id), so seq-based clipitem IDs collide when a clip is reused.
+  // Use a strictly-increasing counter scoped to this sequence.
+  let clipItemCounter = 0
   for (const trackIdx of trackIndices) {
     lines.push(`        <track>`)
     for (const p of tracksByIndex.get(trackIdx)) {
-      const clipId = `clip-${seqSlug}-${padSeq(p.seq)}`
+      clipItemCounter += 1
+      const clipId = `clip-${seqSlug}-${padSeq(p.seq)}-${clipItemCounter}`
       const fileId = `file-${slugifyForId(p.source)}-${slugifyForId(p.sourceItemId) || padSeq(p.seq)}`
+      const fileBodyAlreadyEmitted = emittedFileIds.has(fileId)
+      emittedFileIds.add(fileId)
       const inFrame = 0
       const outFrame = inFrame + p._durationSrcFrames
       // Element order + always-emit-ntsc derived from
@@ -521,36 +536,46 @@ export function generateXmeml({
       lines.push(`            <out>${outFrame}</out>`)
       lines.push(`            <pproTicksIn>${pproIn}</pproTicksIn>`)
       lines.push(`            <pproTicksOut>${pproOut}</pproTicksOut>`)
-      lines.push(`            <file id="${escapeXml(fileId)}">`)
-      lines.push(`              <name>${escapeXml(p.filename)}</name>`)
-      lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
-      // <timecode> FIRST — sets the file's TC base (zero-based override).
-      // Order INSIDE timecode: string, displayformat, rate (matches WyattBlue).
-      lines.push(`              <timecode>`)
-      lines.push(`                <string>00:00:00:00</string>`)
-      lines.push(`                <displayformat>NDF</displayformat>`)
-      lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
-      lines.push(`              </timecode>`)
-      lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
-      // Empty <duration> tag is REQUIRED by DaVinci even when blank
-      // (per WyattBlue's "DaVinci Resolve needs this tag even though
-      // it's blank"). Populated when probed; empty otherwise.
-      lines.push(`              <duration>${p._sourceDurationConfirmed ? p._sourceDurationFrames : ''}</duration>`)
-      // <media><video><samplecharacteristics> with sequence dimensions,
-      // <rate>, and <pixelaspectratio>square</pixelaspectratio>. WyattBlue
-      // uses sequence dims for every file (not per-file dims) — per-file
-      // dims drift from probed-preview vs licensed source.
-      lines.push(`              <media>`)
-      lines.push(`                <video>`)
-      lines.push(`                  <samplecharacteristics>`)
-      lines.push(`                    <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
-      lines.push(`                    <width>${seqW}</width>`)
-      lines.push(`                    <height>${seqH}</height>`)
-      lines.push(`                    <pixelaspectratio>square</pixelaspectratio>`)
-      lines.push(`                  </samplecharacteristics>`)
-      lines.push(`                </video>`)
-      lines.push(`              </media>`)
-      lines.push(`            </file>`)
+      if (fileBodyAlreadyEmitted) {
+        // Reference-only — same source clip already had its full <file>
+        // body emitted in an earlier clipitem on this sequence. Per FCP7
+        // XMEML, subsequent uses link by id with self-closing tag.
+        // Without this we'd emit N full <file id="X"> blocks for a clip
+        // used N times, which is invalid XML (duplicate id) and makes
+        // DaVinci report "Item already exists" repeatedly.
+        lines.push(`            <file id="${escapeXml(fileId)}"/>`)
+      } else {
+        lines.push(`            <file id="${escapeXml(fileId)}">`)
+        lines.push(`              <name>${escapeXml(p.filename)}</name>`)
+        lines.push(`              <pathurl>${escapeXml(buildPathUrl(mediaFolderAbsolute, p.filename))}</pathurl>`)
+        // <timecode> FIRST — sets the file's TC base (zero-based override).
+        // Order INSIDE timecode: string, displayformat, rate (matches WyattBlue).
+        lines.push(`              <timecode>`)
+        lines.push(`                <string>00:00:00:00</string>`)
+        lines.push(`                <displayformat>NDF</displayformat>`)
+        lines.push(`                <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
+        lines.push(`              </timecode>`)
+        lines.push(`              <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
+        // Empty <duration> tag is REQUIRED by DaVinci even when blank
+        // (per WyattBlue's "DaVinci Resolve needs this tag even though
+        // it's blank"). Populated when probed; empty otherwise.
+        lines.push(`              <duration>${p._sourceDurationConfirmed ? p._sourceDurationFrames : ''}</duration>`)
+        // <media><video><samplecharacteristics> with sequence dimensions,
+        // <rate>, and <pixelaspectratio>square</pixelaspectratio>. WyattBlue
+        // uses sequence dims for every file (not per-file dims) — per-file
+        // dims drift from probed-preview vs licensed source.
+        lines.push(`              <media>`)
+        lines.push(`                <video>`)
+        lines.push(`                  <samplecharacteristics>`)
+        lines.push(`                    <rate><timebase>${p._sourceFrameRate}</timebase>${ntscTag}</rate>`)
+        lines.push(`                    <width>${seqW}</width>`)
+        lines.push(`                    <height>${seqH}</height>`)
+        lines.push(`                    <pixelaspectratio>square</pixelaspectratio>`)
+        lines.push(`                  </samplecharacteristics>`)
+        lines.push(`                </video>`)
+        lines.push(`              </media>`)
+        lines.push(`            </file>`)
+      }
       lines.push(`            <compositemode>normal</compositemode>`)
       lines.push(`          </clipitem>`)
     }

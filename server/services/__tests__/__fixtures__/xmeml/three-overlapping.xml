@@ -14,7 +14,7 @@
           </samplecharacteristics>
         </format>
         <track>
-          <clipitem id="clip-variant-c-001">
+          <clipitem id="clip-variant-c-001-1">
             <name>001_envato_A.mov</name>
             <enabled>TRUE</enabled>
             <duration>120</duration>
@@ -49,7 +49,7 @@
           </clipitem>
         </track>
         <track>
-          <clipitem id="clip-variant-c-002">
+          <clipitem id="clip-variant-c-002-2">
             <name>002_envato_B.mov</name>
             <enabled>TRUE</enabled>
             <duration>120</duration>
@@ -84,7 +84,7 @@
           </clipitem>
         </track>
         <track>
-          <clipitem id="clip-variant-c-003">
+          <clipitem id="clip-variant-c-003-3">
             <name>003_envato_C.mov</name>
             <enabled>TRUE</enabled>
             <duration>120</duration>

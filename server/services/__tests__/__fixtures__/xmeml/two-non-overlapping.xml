@@ -14,7 +14,7 @@
           </samplecharacteristics>
         </format>
         <track>
-          <clipitem id="clip-variant-a-001">
+          <clipitem id="clip-variant-a-001-1">
             <name>001_pexels_123.mp4</name>
             <enabled>TRUE</enabled>
             <duration>60</duration>
@@ -47,7 +47,7 @@
             </file>
             <compositemode>normal</compositemode>
           </clipitem>
-          <clipitem id="clip-variant-a-002">
+          <clipitem id="clip-variant-a-002-2">
             <name>002_pexels_456.mp4</name>
             <enabled>TRUE</enabled>
             <duration>60</duration>
