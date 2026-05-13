@@ -54,23 +54,30 @@ function LibraryTile({ lib, checked, onToggle }) {
 
 export default function StepLibraries({ state, setState }) {
   const selected = state.libraries
-  const none = selected.length === 0
+  const pexelsOn = selected.includes('pexels')
+  const isPaid = id => id !== 'pexels'
   const toggle = id => {
-    const wasEmpty = selected.length === 0
+    const paidBefore = selected.some(isPaid)
     const next = selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]
     setState.libraries(next)
     // First paid lib selected: drop the default Freepik fallback. The user
-    // can re-enable it explicitly via the toggle below.
-    if (wasEmpty && next.length > 0 && state.freepikOptIn) setState.freepikOptIn(false)
+    // can re-enable it explicitly via the toggle below. Pexels doesn't
+    // trigger this — it's an opt-in backup, not a primary subscription.
+    const paidAfter = next.some(isPaid)
+    if (!paidBefore && paidAfter && state.freepikOptIn) setState.freepikOptIn(false)
   }
-  const clearAll = () => setState.libraries([])
+  const togglePexels = () => toggle('pexels')
 
-  const paidNames = selected.map(id => LIBRARIES.find(l => l.id === id)?.name).filter(Boolean)
+  const paidNames = selected
+    .filter(isPaid)
+    .map(id => LIBRARIES.find(l => l.id === id)?.name)
+    .filter(Boolean)
   const sourcesLine = [
     ...paidNames,
-    'Pexels',
+    pexelsOn ? 'Pexels' : null,
     state.freepikOptIn ? 'Freepik (paid, confirm each)' : null,
   ].filter(Boolean).join(' · ')
+  const noSources = sourcesLine.length === 0
 
   return (
     <div>
@@ -97,20 +104,20 @@ export default function StepLibraries({ state, setState }) {
       </div>
 
       <div
-        onClick={() => none ? null : clearAll()}
+        onClick={togglePexels}
         className={[
-          'rounded-xl transition-all',
-          none
-            ? 'bg-purple-accent/6 p-[22px] ring-[1.5px] ring-inset ring-purple-accent/35 shadow-[0_0_32px_rgba(193,128,255,0.06)] cursor-default'
-            : 'bg-surface-container-low p-[18px] ring-1 ring-inset ring-border-subtle/10 cursor-pointer',
+          'rounded-xl transition-all cursor-pointer',
+          pexelsOn
+            ? 'bg-purple-accent/6 p-[22px] ring-[1.5px] ring-inset ring-purple-accent/35 shadow-[0_0_32px_rgba(193,128,255,0.06)]'
+            : 'bg-surface-container-low p-[18px] ring-1 ring-inset ring-border-subtle/10',
         ].join(' ')}
       >
         <div className="flex items-start gap-4">
           <div className={[
             'w-[42px] h-[42px] rounded-[10px] shrink-0 flex items-center justify-center',
-            none ? 'bg-purple-accent/15 text-purple-accent' : 'bg-surface-container-high text-on-surface-variant',
+            pexelsOn ? 'bg-purple-accent/15 text-purple-accent' : 'bg-surface-container-high text-on-surface-variant',
           ].join(' ')}>
-            <span className="material-symbols-outlined text-[22px]" style={{ fontVariationSettings: `"FILL" ${none ? 1 : 0}` }}>
+            <span className="material-symbols-outlined text-[22px]" style={{ fontVariationSettings: `"FILL" ${pexelsOn ? 1 : 0}` }}>
               public
             </span>
           </div>
@@ -119,19 +126,16 @@ export default function StepLibraries({ state, setState }) {
               <span className="text-[15px] font-bold text-on-surface font-['Inter']">
                 I don't own any subscriptions
               </span>
-              {none && (
+              {pexelsOn && (
                 <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-purple-accent/12 text-purple-accent text-[9px] font-bold tracking-[0.15em] uppercase font-['Inter'] ring-1 ring-inset ring-purple-accent/25">
                   <span className="material-symbols-outlined text-[11px]">bolt</span>
-                  Active fallback
+                  Pexels backup
                 </span>
               )}
             </div>
             <p className="text-xs text-on-surface-variant leading-[1.6] m-0 mt-2 max-w-[680px]">
-              We'll use <span className="text-on-surface font-semibold">Pexels</span> (free) wherever possible.
-              For moments Pexels can't cover, we can also pull from{' '}
-              <span className="text-on-surface font-semibold">Freepik</span> at{' '}
-              <span className="font-mono text-lime">$0.05 / clip</span>.{' '}
-              <span className="text-on-surface font-semibold">Nothing is charged until you confirm each download.</span>
+              Enable to search <span className="text-on-surface font-semibold">Pexels</span> (free) for b-roll.
+              Best if you don't own a paid subscription, or as a no-cost backup for shots your paid libraries miss.
             </p>
           </div>
         </div>
@@ -148,7 +152,7 @@ export default function StepLibraries({ state, setState }) {
           <div>
             <div className="text-xs font-bold text-on-surface font-['Inter']">Allow paid Freepik fallback</div>
             <div className="text-[11px] text-on-surface-variant mt-[3px] font-['Inter']">
-              Surfaces clips for shots Pexels misses — you approve every charge before download.
+              Surfaces clips for shots your other libraries miss — you approve every charge before download.
             </div>
           </div>
         </div>
@@ -159,7 +163,9 @@ export default function StepLibraries({ state, setState }) {
         <span className="material-symbols-outlined text-[18px] text-lime">search</span>
         <div className="text-xs text-on-surface-variant leading-[1.5] font-['Inter']">
           <span className="text-on-surface font-semibold">B-roll will be searched across:</span>{' '}
-          {sourcesLine}
+          {noSources
+            ? <span className="text-on-surface-variant italic">nothing yet — pick at least one library above, or enable the Pexels backup.</span>
+            : sourcesLine}
         </div>
       </div>
     </div>

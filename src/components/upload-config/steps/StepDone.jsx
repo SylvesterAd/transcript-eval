@@ -17,9 +17,10 @@ function SummaryRow({ label, value, tone }) {
 }
 
 function summarizeLibs(libs, freepik) {
-  if (!libs || !libs.length) return `Pexels${freepik ? ' + Freepik ($0.05/clip, confirmed)' : ' only'}`
-  const map = { envato: 'Envato', artlist: 'Artlist', storyblocks: 'Storyblocks' }
-  return libs.map(l => map[l] || l).join(' · ')
+  const map = { envato: 'Envato', artlist: 'Artlist', storyblocks: 'Storyblocks', pexels: 'Pexels' }
+  const parts = (libs || []).map(l => map[l] || l)
+  if (freepik) parts.push('Freepik ($0.05/clip, confirmed)')
+  return parts.length ? parts.join(' · ') : 'Nothing selected'
 }
 
 function summarizeAudience(a) {
