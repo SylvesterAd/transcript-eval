@@ -1997,8 +1997,10 @@ async function _pollGpuJob(jobId, gpuKey, timeoutSeconds = 900) {
 
 // Pure source-list builder, exported for unit tests.
 // Inputs: a row's libraries_json (string | array | null) and freepik_opt_in (bool | null).
-// Output: deduped array of source names; pexels always appended,
-// freepik appended unless explicitly opted out.
+// Output: deduped array of source names. Pexels is opt-in — it appears
+// only when the user explicitly selected it (via "I don't own any
+// subscriptions" in StepLibraries). Freepik is appended unless explicitly
+// opted out.
 //
 // Exported for unit tests in __tests__/resolve-broll-sources.test.js.
 export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
@@ -2010,21 +2012,21 @@ export function resolveSourcesFromGroup({ libraries_json, freepik_opt_in }) {
     } catch {}
   }
   const freepikOptIn = freepik_opt_in !== false  // null → default-on
-  const sources = [...libraries, 'pexels']
+  const sources = [...libraries]
   if (freepikOptIn) sources.push('freepik')
   return Array.from(new Set(sources))
 }
 
 // Resolve which stock libraries to send to the broll proxy for a given plan pipeline.
 // Reads the parent video group's `libraries_json` + `freepik_opt_in` (falling
-// back to the sub-group's own values if there's no parent), and always appends
-// `pexels`. `overrides.sources` (if non-empty) wins.
+// back to the sub-group's own values if there's no parent). Pexels is included
+// only when the user explicitly selected it as the no-subscriptions backup.
+// `overrides.sources` (if non-empty) wins.
 //
 // SQL MUST walk the parent: post-classification, `videos.group_id` points at
 // the sub-group, but library config is configured on the parent project.
-// Without the JOIN, the user's "Envato" opt-in is silently ignored — only
-// Pexels (and default-on Freepik) get searched. Mirrors the COALESCE pattern
-// in server/routes/videos.js:550.
+// Without the JOIN, the user's "Envato" opt-in is silently ignored. Mirrors
+// the COALESCE pattern in server/routes/videos.js:550.
 //
 // Exported for unit tests; production callers go through executeBrollSearch.
 export async function resolveBrollSources(planPipelineId, overrides = {}) {
@@ -2060,7 +2062,7 @@ export async function resolveBrollSources(planPipelineId, overrides = {}) {
       if (got) row = got
     }
   } catch (e) {
-    console.error('[broll] resolveBrollSources failed, falling back to pexels only:', e)
+    console.error('[broll] resolveBrollSources failed, falling back to defaults (freepik default-on):', e)
   }
 
   return resolveSourcesFromGroup(row)

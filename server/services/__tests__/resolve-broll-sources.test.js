@@ -30,56 +30,68 @@ vi.mock('../../db.js', () => ({
 }))
 
 describe('resolveSourcesFromGroup (pure helper)', () => {
-  it('returns ["envato","pexels"] for envato + freepik off', async () => {
+  it('returns ["envato"] for envato + freepik off — pexels is opt-in, not selected', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     const result = resolveSourcesFromGroup({ libraries_json: '["envato"]', freepik_opt_in: false })
-    expect(result).toEqual(['envato', 'pexels'])
+    expect(result).toEqual(['envato'])
   })
 
-  it('returns ["pexels","freepik"] when libraries_json is null and freepik default-on', async () => {
+  it('returns ["freepik"] when libraries_json is null and freepik default-on', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     const result = resolveSourcesFromGroup({ libraries_json: null, freepik_opt_in: true })
-    expect(result).toEqual(['pexels', 'freepik'])
+    expect(result).toEqual(['freepik'])
   })
 
-  it('returns ["pexels"] when libraries_json is null and freepik off', async () => {
+  it('returns [] when libraries_json is null and freepik off (no auto-pexels baseline)', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
-    expect(resolveSourcesFromGroup({ libraries_json: null, freepik_opt_in: false })).toEqual(['pexels'])
+    expect(resolveSourcesFromGroup({ libraries_json: null, freepik_opt_in: false })).toEqual([])
   })
 
   it('treats freepik_opt_in === null as default-on (matches DB default)', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
-    expect(resolveSourcesFromGroup({ libraries_json: null, freepik_opt_in: null })).toEqual(['pexels', 'freepik'])
+    expect(resolveSourcesFromGroup({ libraries_json: null, freepik_opt_in: null })).toEqual(['freepik'])
   })
 
   it('passes "artlist" through (provider live since 2026-05)', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     expect(resolveSourcesFromGroup({ libraries_json: '["artlist","envato","storyblocks"]', freepik_opt_in: false }))
-      .toEqual(['artlist', 'envato', 'storyblocks', 'pexels'])
+      .toEqual(['artlist', 'envato', 'storyblocks'])
   })
 
   it('passes "artlist" through when it is the only library', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     expect(resolveSourcesFromGroup({ libraries_json: '["artlist"]', freepik_opt_in: false }))
-      .toEqual(['artlist', 'pexels'])
+      .toEqual(['artlist'])
   })
 
-  it('dedupes — never lists pexels twice if user adds it explicitly', async () => {
+  it('includes pexels when the user explicitly selected the no-subscriptions backup', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
-    expect(resolveSourcesFromGroup({ libraries_json: '["pexels","envato"]', freepik_opt_in: false }))
+    expect(resolveSourcesFromGroup({ libraries_json: '["pexels"]', freepik_opt_in: false }))
+      .toEqual(['pexels'])
+  })
+
+  it('allows pexels alongside paid libs (user picked it as a backup)', async () => {
+    const { resolveSourcesFromGroup } = await import('../broll.js')
+    expect(resolveSourcesFromGroup({ libraries_json: '["envato","pexels"]', freepik_opt_in: false }))
+      .toEqual(['envato', 'pexels'])
+  })
+
+  it('dedupes — never lists pexels twice if it appears in libraries multiple times', async () => {
+    const { resolveSourcesFromGroup } = await import('../broll.js')
+    expect(resolveSourcesFromGroup({ libraries_json: '["pexels","envato","pexels"]', freepik_opt_in: false }))
       .toEqual(['pexels', 'envato'])
   })
 
   it('accepts already-parsed object/array (defensive)', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     expect(resolveSourcesFromGroup({ libraries_json: ['envato'], freepik_opt_in: false }))
-      .toEqual(['envato', 'pexels'])
+      .toEqual(['envato'])
   })
 
-  it('handles malformed JSON gracefully (returns pexels-only baseline)', async () => {
+  it('handles malformed JSON gracefully (returns empty when freepik also off)', async () => {
     const { resolveSourcesFromGroup } = await import('../broll.js')
     expect(resolveSourcesFromGroup({ libraries_json: 'not-json', freepik_opt_in: false }))
-      .toEqual(['pexels'])
+      .toEqual([])
   })
 })
 
@@ -115,8 +127,8 @@ describe('resolveBrollSources — group lookup walks parent', () => {
     expect(groupQuery.sql).toMatch(/LEFT JOIN video_groups parent ON parent\.id = vg\.parent_group_id/i)
     expect(groupQuery.args).toEqual([269])
 
-    // And the result reflects the (parent-derived) row.
-    expect(result).toEqual(['envato', 'pexels'])
+    // Result reflects exactly what the user picked — no auto-pexels.
+    expect(result).toEqual(['envato'])
   })
 
   it('falls back to videos.group_id when metadata.groupId is missing', async () => {
@@ -131,15 +143,16 @@ describe('resolveBrollSources — group lookup walks parent', () => {
     expect(videoQuery).toBeDefined()
     expect(videoQuery.args).toEqual([410])
 
-    expect(result).toEqual(['envato', 'pexels'])
+    expect(result).toEqual(['envato'])
   })
 
-  it('falls back to pexels-only baseline when group lookup fails (no exception leaked)', async () => {
+  it('falls back to defaults (freepik default-on) when group lookup fails', async () => {
     const { resolveBrollSources } = await import('../broll.js')
     // Empty planRunsRows means we never resolve a groupId
     dbState.planRunsRows = []
 
     const result = await resolveBrollSources('plan-z')
-    expect(result).toEqual(['pexels', 'freepik']) // no group → freepikOptIn defaults true
+    // No group → libraries empty, freepikOptIn defaults true, pexels NOT auto-added.
+    expect(result).toEqual(['freepik'])
   })
 })

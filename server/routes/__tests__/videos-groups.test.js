@@ -39,6 +39,16 @@ describe('validateGroupUpdate', () => {
     expect(error).toBeNull()
   })
 
+  it('accepts "pexels" as a selectable library (no-subscriptions backup)', () => {
+    const { error } = validateGroupUpdate({ libraries: ['pexels'] })
+    expect(error).toBeNull()
+  })
+
+  it('accepts pexels alongside paid libs as a backup', () => {
+    const { error } = validateGroupUpdate({ libraries: ['envato', 'pexels'] })
+    expect(error).toBeNull()
+  })
+
   it('rejects unknown library', () => {
     const { error } = validateGroupUpdate({ libraries: ['envato', 'unknown'] })
     expect(error).toMatch(/libraries must be/)

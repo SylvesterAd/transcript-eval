@@ -52,7 +52,7 @@ const DEFAULT_ROUGH_CUT_CONFIG = {
 // handler with 400. Unknown fields are silently ignored so callers can
 // piecemeal patch a subset of columns.
 export function validateGroupUpdate(body) {
-  const VALID_LIBS = ['envato', 'artlist', 'storyblocks']
+  const VALID_LIBS = ['envato', 'artlist', 'storyblocks', 'pexels']
   const VALID_PATHS = ['hands-off', 'strategy-only', 'guided']
 
   if (body.libraries !== undefined) {
