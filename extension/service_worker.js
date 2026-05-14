@@ -356,6 +356,17 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
         }
         return
       }
+      case 'telemetry_event': {
+        try {
+          if (typeof msg.name === 'string' && msg.name) {
+            emitTelemetry(msg.name, msg.meta && typeof msg.meta === 'object' ? msg.meta : {})
+          }
+          sendResponse({ ok: true })
+        } catch {
+          sendResponse({ ok: true })
+        }
+        return
+      }
       case 'debug_set_telemetry_opt_out': {
         try {
           const value = msg.value === true
