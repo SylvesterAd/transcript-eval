@@ -182,9 +182,15 @@ export async function getSignedDownloadUrl(newUuid) {
     }
 
     if (!result.signedUrl) throw new Error('envato_unavailable')
-    return result.signedUrl
-  } finally {
-    try { await chrome.tabs.remove(tab.id) } catch {}
+    // Return the tab ID so the queue can hold it open during the
+    // chrome.downloads phase and close it only after download completes
+    // or is interrupted.
+    return { signedUrl: result.signedUrl, filename: result.filename, licenseTabId: tab.id }
+  } catch (err) {
+    // Close the tab on failure — no successful return value, nothing
+    // for the queue to hold the tab open for.
+    if (tab?.id) { try { await chrome.tabs.remove(tab.id) } catch {} }
+    throw err
   }
 }
 
@@ -356,9 +362,9 @@ export async function downloadEnvato({ envatoItemUrl, itemId, runId, sanitizedFi
   const t1 = Date.now()
   console.log('[envato] phase 1 resolve OK', { newUuid, ms: t1 - t0 })
 
-  let signedUrl
+  let signedUrl, licenseTabId
   try {
-    signedUrl = await getSignedDownloadUrl(newUuid)
+    ;({ signedUrl, licenseTabId } = await getSignedDownloadUrl(newUuid))
   } catch (err) {
     return { ok: false, errorCode: err?.message || 'envato_license_error', detail: String(err?.message || err) }
   }
@@ -400,10 +406,17 @@ export async function downloadEnvato({ envatoItemUrl, itemId, runId, sanitizedFi
       })
     })
   } catch (err) {
+    // Close the license tab if chrome.downloads failed to start.
+    if (licenseTabId) { try { await chrome.tabs.remove(licenseTabId) } catch {} }
     return { ok: false, errorCode: 'chrome_downloads_error', detail: String(err?.message || err) }
   }
   const t3 = Date.now()
   console.log('[envato] phase 3 download started', { downloadId, ms: t3 - t2, total_ms: t3 - t0 })
+
+  // Close the license tab now that chrome.downloads has taken ownership
+  // of the signed URL. (Queue path handles this in onChanged; this
+  // non-queue path closes immediately after download starts.)
+  if (licenseTabId) { try { await chrome.tabs.remove(licenseTabId) } catch {} }
 
   return { ok: true, filename: finalFilename, downloadId }
 }
