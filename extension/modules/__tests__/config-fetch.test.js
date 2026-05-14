@@ -173,3 +173,55 @@ describe('enforceConfigBeforeExport', () => {
     expect(result.ok).toBe(true)
   })
 })
+
+describe('fps_probe_enabled config field', () => {
+  it('parses fps_probe_enabled:false from server response and stores it', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      min_ext_version: '0.1.0',
+      export_enabled: true, envato_enabled: true, pexels_enabled: true,
+      freepik_enabled: true, daily_cap_override: null, slack_alerts_enabled: true,
+      fps_probe_enabled: false,
+    }), { headers: { 'content-type': 'application/json' } }))
+    const { fetchConfig } = await import('../config-fetch.js')
+    const record = await fetchConfig()
+    // fetchConfig returns { config, fetched_at }; config is the raw server JSON.
+    expect(record.config.fps_probe_enabled).toBe(false)
+  })
+
+  it('parses fps_probe_enabled:true from server response', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      min_ext_version: '0.1.0',
+      export_enabled: true, envato_enabled: true, pexels_enabled: true,
+      freepik_enabled: true, daily_cap_override: null, slack_alerts_enabled: true,
+      fps_probe_enabled: true,
+    }), { headers: { 'content-type': 'application/json' } }))
+    const { fetchConfig } = await import('../config-fetch.js')
+    const record = await fetchConfig()
+    expect(record.config.fps_probe_enabled).toBe(true)
+  })
+
+  it('getCachedConfig reflects fps_probe_enabled after successful fetch', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      min_ext_version: '0.1.0',
+      export_enabled: true, envato_enabled: true, pexels_enabled: true,
+      freepik_enabled: true, daily_cap_override: null, slack_alerts_enabled: true,
+      fps_probe_enabled: false,
+    }), { headers: { 'content-type': 'application/json' } }))
+    const { fetchConfig, getCachedConfig } = await import('../config-fetch.js')
+    await fetchConfig()
+    const cached = await getCachedConfig()
+    expect(cached).not.toBeNull()
+    expect(cached.config.fps_probe_enabled).toBe(false)
+  })
+
+  it('falls open to fps_probe_enabled=true when network fails and no cache', async () => {
+    // Network failure + no cache → enforceConfigBeforeExport falls open to
+    // CONFIG_FALL_OPEN_DEFAULTS which must include fps_probe_enabled=true.
+    globalThis.fetch = vi.fn(async () => { throw new Error('net') })
+    const { enforceConfigBeforeExport } = await import('../config-fetch.js')
+    const result = await enforceConfigBeforeExport({ items: [] })
+    // Fall-open means ok=true and fps_probe_enabled must be true (not kill-switched).
+    expect(result.ok).toBe(true)
+    expect(result.effective_config.fps_probe_enabled).toBe(true)
+  })
+})

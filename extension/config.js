@@ -216,6 +216,7 @@ export const CONFIG_FALL_OPEN_DEFAULTS = Object.freeze({
   freepik_enabled:      true,
   daily_cap_override:   null,
   slack_alerts_enabled: false,  // client doesn't care — pass-through field
+  fps_probe_enabled:    true,   // fall-open: probe runs when server unreachable (Ext.16)
 })
 
 // Canonical error codes emitted by enforceConfigBeforeExport on reject.

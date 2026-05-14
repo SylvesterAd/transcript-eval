@@ -49,6 +49,7 @@ import {
   parseRetryAfter,
 } from './classifier.js'
 import { probeMp4File } from './mp4-probe.js'
+import { getCachedConfig } from './config-fetch.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
@@ -748,8 +749,32 @@ export function buildItemSnapshot(item) {
 // Probe a completed-download item's on-disk file via file:// fetch.
 // Mutates item.probed_metadata on success. No-op when permission denied.
 // runContext (optional) tracks one-shot "no permission" telemetry per run.
+// Test hook: when non-null, overrides getCachedConfig() return value for tests.
+// Set via _setProbeConfigOverride(cfg); clear with _setProbeConfigOverride(null).
+let _probeConfigOverride = null
+export function _setProbeConfigOverride(cfg) { _probeConfigOverride = cfg }
+
 export async function runProbeForItem(item, { emit = noopProbeEmit, runContext = null } = {}) {
   if (!item || !item.final_path) return
+
+  // Remote kill-switch: if fps_probe_enabled is explicitly false, skip probe.
+  // getCachedConfig() returns { config, fetched_at, fresh } or null.
+  // _probeConfigOverride (test hook) may supply a flat config object directly.
+  const cachedRecord = _probeConfigOverride !== null
+    ? { config: _probeConfigOverride }
+    : await getCachedConfig()
+  if (cachedRecord?.config?.fps_probe_enabled === false) {
+    if (runContext) {
+      if (!runContext.hasEmittedSkipForRun) {
+        emit('fps_probe_skipped_remote_kill', { reason: 'fps_probe_enabled_false' })
+        runContext.hasEmittedSkipForRun = true
+      }
+    } else {
+      emit('fps_probe_skipped_remote_kill', { reason: 'fps_probe_enabled_false' })
+    }
+    return
+  }
+
   const allowed = await chrome.extension.isAllowedFileSchemeAccess()
   if (!allowed) {
     if (runContext) {
