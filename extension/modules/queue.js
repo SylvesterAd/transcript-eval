@@ -23,6 +23,8 @@ import {
   MESSAGE_VERSION,
   FREEPIK_URL_REFETCH_CAP,
   INTEGRITY_TOLERANCE,
+  ENVATO_INTER_ITEM_DELAY_MS_MIN,
+  ENVATO_INTER_ITEM_DELAY_MS_MAX,
 } from '../config.js'
 import { resolveOldIdToNewUuid, getSignedDownloadUrl } from './envato.js'
 import { fetchPexelsUrl, fetchFreepikUrl } from './sources.js'
@@ -252,19 +254,33 @@ function fillPool(phaseName, cap, runner) {
   }
 }
 
-function nextItemForPhase(phaseName) {
-  if (!state) return null
+// Returns true when the inter-item Envato jitter timer is still active.
+// The gate only applies to Envato-specific phases (resolving, licensing).
+// 'downloading' is multi-source and is never gated.
+function isEnvatoGated(s) {
+  return s.envato_next_pickup_at && Date.now() < s.envato_next_pickup_at
+}
+
+// nextItemForPhase can be called with an explicit state argument (for unit
+// testing via _testHooks) or with no argument (scheduler path, uses module
+// state). The gate is applied only to Envato-specific phases.
+function nextItemForPhase(phaseName, s) {
+  const st = s || state
+  if (!st) return null
   // Claim semantics: we flip an in-memory `claimed` flag on the item.
   // Not persisted — a crashed SW redoes the claim on resume because
   // the phase-before-crash is what's persisted.
   if (phaseName === 'resolving') {
-    return state.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'queued')
+    if (isEnvatoGated(st)) return null
+    return st.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'queued')
   }
   if (phaseName === 'licensing') {
-    return state.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'licensing')
+    if (isEnvatoGated(st)) return null
+    return st.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'licensing')
   }
   if (phaseName === 'downloading') {
-    return state.items.find(i => !i.claimed && i.phase === 'downloading')
+    // Multi-source phase — no Envato-specific gate.
+    return st.items.find(i => !i.claimed && i.phase === 'downloading')
   }
   return null
 }
@@ -614,6 +630,18 @@ async function handleDownloadEvent(item, delta) {
         item.__envato_cycle_settle()
         item.__envato_cycle_settle = null
       }
+      // E6: Set the inter-item jitter gate. The next Envato resolving/
+      // licensing pickup is delayed by a uniform random value in
+      // [ENVATO_INTER_ITEM_DELAY_MS_MIN, ENVATO_INTER_ITEM_DELAY_MS_MAX).
+      // A setTimeout wakes the scheduler past the gate so the next item
+      // doesn't wait for an unrelated schedule() call.
+      if (item.source === 'envato') {
+        const minMs = ENVATO_INTER_ITEM_DELAY_MS_MIN
+        const maxMs = ENVATO_INTER_ITEM_DELAY_MS_MAX
+        const delayMs = minMs + Math.random() * (maxMs - minMs)
+        state.envato_next_pickup_at = Date.now() + delayMs
+        setTimeout(() => schedule(), delayMs + 50)
+      }
     } else if (next === 'interrupted') {
       await handleDownloadInterrupt(item, delta)
     }
@@ -764,6 +792,11 @@ export function buildInitialRunState({ runId, manifest, targetFolder, options, u
     // elements.envato.com. Subsequent 401/403s skip + skip_whole_source
     // so we don't ask twice if the user can't / won't re-auth.
     envato_reauth_attempted: false,
+    // E6: epoch-ms timestamp before which nextItemForPhase returns null for
+    // Envato phases (resolving, licensing). 0 means "no gate active" so the
+    // first item starts immediately. Set to Date.now() + jitter after each
+    // successful Envato download; NOT set on interrupted/failed (retry promptly).
+    envato_next_pickup_at: 0,
     // T12: per-run context for runProbeForItem — tracks whether we've
     // already emitted fps_probe_skipped_no_permission for this run so
     // we don't spam telemetry once per downloaded file.
@@ -1458,4 +1491,17 @@ function extractFilenameFromSignedUrl(url) {
   }
   const nameMatch = QUEUE_FILENAME_FROM_DISPOSITION_RE.exec(disposition)
   return nameMatch ? nameMatch[1] : null
+}
+
+// ------------------- Test hooks -------------------
+// Exported for unit tests only. Not part of the public API.
+export const _testHooks = {
+  // Exposes nextItemForPhase so tests can call it with a synthetic state
+  // object without going through the full scheduler machinery.
+  nextItemForPhase,
+  // Returns the module-level state reference. The returned object is the
+  // live reference — mutations the scheduler makes after this call are
+  // visible to the caller. Tests that need a snapshot should read
+  // envato_next_pickup_at immediately after the event that sets it.
+  getRunState: () => state,
 }
