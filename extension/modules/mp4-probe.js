@@ -160,19 +160,49 @@ function readSttsEntries(view, trak) {
   return entries
 }
 
+function normalizeFrameRate(timescale, sampleDelta) {
+  if (!timescale || !sampleDelta || sampleDelta <= 0) {
+    return { frameRate: null, ntsc: false, isBogus: true }
+  }
+  const exact = timescale / sampleDelta
+  if (!Number.isFinite(exact) || exact <= 0 || exact > 120) {
+    return { frameRate: null, ntsc: false, isBogus: true }
+  }
+  const frameRate = Math.round(exact)
+  const ntsc = timescale % 1000 === 0
+    && sampleDelta === 1001
+    && [24000, 30000, 48000, 60000].includes(timescale)
+  return { frameRate, ntsc, isBogus: false }
+}
+
 function readVideoTrakRate(view, trak) {
   const mdhd = readMdhd(view, trak)
-  if (!mdhd || !mdhd.timescale) return { frameRate: null, ntsc: false }
+  if (!mdhd || !mdhd.timescale) return { frameRate: null, ntsc: false, isVfr: false }
   const entries = readSttsEntries(view, trak)
-  if (!entries || entries.length === 0) return { frameRate: null, ntsc: false }
-  const { sampleDelta } = entries[0]
-  if (!sampleDelta) return { frameRate: null, ntsc: false }
-  const exact = mdhd.timescale / sampleDelta
-  const frameRate = Math.round(exact)
-  const ntsc = mdhd.timescale % 1000 === 0
-    && sampleDelta === 1001
-    && [24000, 30000, 60000, 48000].includes(mdhd.timescale)
-  return { frameRate, ntsc }
+  if (!entries || entries.length === 0) return { frameRate: null, ntsc: false, isVfr: false }
+  if (entries.length === 1) {
+    const norm = normalizeFrameRate(mdhd.timescale, entries[0].sampleDelta)
+    return { ...norm, isVfr: false }
+  }
+  // VFR: weighted average of sampleDelta across all entries
+  let totalSamples = 0
+  let totalDuration = 0
+  let minDelta = Infinity
+  let maxDelta = 0
+  for (const e of entries) {
+    totalSamples += e.sampleCount
+    totalDuration += e.sampleCount * e.sampleDelta
+    minDelta = Math.min(minDelta, e.sampleDelta)
+    maxDelta = Math.max(maxDelta, e.sampleDelta)
+  }
+  if (totalSamples === 0 || totalDuration === 0) {
+    return { frameRate: null, ntsc: false, isVfr: false }
+  }
+  const avgDelta = totalDuration / totalSamples
+  const norm = normalizeFrameRate(mdhd.timescale, avgDelta)
+  // VFR if min/max spread > 10% of average
+  const isVfr = (maxDelta - minDelta) / avgDelta > 0.1
+  return { ...norm, isVfr }
 }
 
 function readTkhdDims(view, trak) {
@@ -260,4 +290,4 @@ function readEmbeddedTimecode(view, start, end) {
   return `${pad(hh)}:${pad(mm)}:${pad(ss)}${sep}${pad(ff)}`
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds, readEmbeddedTimecode }
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, normalizeFrameRate, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds, readEmbeddedTimecode }

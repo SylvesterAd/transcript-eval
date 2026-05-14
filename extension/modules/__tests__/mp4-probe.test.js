@@ -167,6 +167,109 @@ describe('mp4-probe tkhd dimensions + duration', () => {
   })
 })
 
+describe('mp4-probe VFR + bogus value handling', () => {
+  // vfr.mp4 fixture is CFR in practice (ffmpeg produced a single stts entry
+  // from a constant-color source). Synthetic in-memory stts used to exercise
+  // the multi-entry VFR path directly instead.
+  it('detects VFR and returns weighted average (synthetic stts)', () => {
+    // Build a minimal trak structure with a 2-entry stts:
+    //   entry 1: sampleCount=15, sampleDelta=512 (≈58.6 fps at timescale=30000? no, pick 90000/3003 ≈ 30)
+    //   entry 2: sampleCount=15, sampleDelta=3004  (very slightly different => >10% spread)
+    // We'll call normalizeFrameRate + isVfr logic via readVideoTrakRate by
+    // constructing a tiny synthetic DataView that wraps the required boxes.
+    // Timescale = 90000 to keep fps in range; deltas 2997 and 3003 => avg~3000 => 30fps,
+    // spread = (3003-2997)/3000 = 0.002 (not >10%). Use bigger spread:
+    // delta1=1500 (60fps), delta2=4500 (20fps) => avg=3000=>30fps,
+    // spread = (4500-1500)/3000 = 1.0 => isVfr=true, frameRate=30
+    //
+    // Rather than building a full MP4, test normalizeFrameRate + isVfr logic directly
+    // by calling readVideoTrakRate with a hand-crafted DataView containing the needed boxes.
+    // This requires mdhd + stts, so we build a minimal mdia > mdhd+minf > stbl > stts.
+
+    // Helper to write a big-endian uint32
+    function w32(view, off, v) { view.setUint32(off, v, false) }
+    function wFCC(view, off, s) {
+      for (let i = 0; i < 4; i++) view.setUint8(off + i, s.charCodeAt(i))
+    }
+
+    // Build stts box: 8(hdr)+4(ver/flags)+4(count)+2*8(entries) = 36 bytes
+    const sttsSize = 36
+    const stts = new Uint8Array(sttsSize)
+    const sv = new DataView(stts.buffer)
+    w32(sv, 0, sttsSize); wFCC(sv, 4, 'stts')
+    w32(sv, 8, 0)          // version + flags
+    w32(sv, 12, 2)         // entry_count=2
+    w32(sv, 16, 15); w32(sv, 20, 1500)   // entry1: 15 samples @ delta 1500
+    w32(sv, 24, 15); w32(sv, 28, 4500)   // entry2: 15 samples @ delta 4500
+
+    // Build stbl box containing stts
+    const stblPayload = stts
+    const stblSize = 8 + stblPayload.byteLength
+    const stbl = new Uint8Array(stblSize)
+    const stblv = new DataView(stbl.buffer)
+    w32(stblv, 0, stblSize); wFCC(stblv, 4, 'stbl')
+    stbl.set(stblPayload, 8)
+
+    // Build minf box containing stbl
+    const minfSize = 8 + stblSize
+    const minf = new Uint8Array(minfSize)
+    const minfv = new DataView(minf.buffer)
+    w32(minfv, 0, minfSize); wFCC(minfv, 4, 'minf')
+    minf.set(stbl, 8)
+
+    // Build mdhd box (version 0): 8(hdr)+4(ver)+4(create)+4(mod)+4(ts)+4(dur) = 32 bytes
+    // timescale = 90000
+    const mdhdSize = 32
+    const mdhd = new Uint8Array(mdhdSize)
+    const mdhdv = new DataView(mdhd.buffer)
+    w32(mdhdv, 0, mdhdSize); wFCC(mdhdv, 4, 'mdhd')
+    w32(mdhdv, 8, 0)         // version 0, flags 0
+    w32(mdhdv, 12, 0)        // creation_time
+    w32(mdhdv, 16, 0)        // modification_time
+    w32(mdhdv, 20, 90000)    // timescale
+    w32(mdhdv, 24, 90000)    // duration
+
+    // Build hdlr box (mdia needs hdlr for readTrakHandler) — but we call readVideoTrakRate
+    // directly so we only need mdhd and stts accessible. readMdhd + readSttsEntries both
+    // go through mdia, so we need mdia containing mdhd + minf.
+    const mdiaSize = 8 + mdhdSize + minfSize
+    const mdia = new Uint8Array(mdiaSize)
+    const mdiav = new DataView(mdia.buffer)
+    w32(mdiav, 0, mdiaSize); wFCC(mdiav, 4, 'mdia')
+    mdia.set(mdhd, 8)
+    mdia.set(minf, 8 + mdhdSize)
+
+    // Build trak box containing mdia
+    const trakSize = 8 + mdiaSize
+    const trakBytes = new Uint8Array(trakSize)
+    const trakv = new DataView(trakBytes.buffer)
+    w32(trakv, 0, trakSize); wFCC(trakv, 4, 'trak')
+    trakBytes.set(mdia, 8)
+
+    const view = new DataView(trakBytes.buffer)
+    // The trak "box" object: payloadStart=8, payloadEnd=trakSize
+    const trak = { type: 'trak', size: trakSize, headerSize: 8, payloadStart: 8, payloadEnd: trakSize }
+    const result = _internal.readVideoTrakRate(view, trak)
+    // avg delta = (15*1500 + 15*4500) / 30 = 90000/30 = 3000 => 90000/3000 = 30 fps
+    // spread = (4500-1500)/3000 = 1.0 > 0.1 => isVfr=true
+    expect(result.frameRate).toBe(30)
+    expect(result.isVfr).toBe(true)
+    expect(result.isBogus).toBe(false)
+  })
+
+  it('rejects derived rate > 120 as bogus', () => {
+    expect(_internal.normalizeFrameRate(10_000_000, 1)).toEqual({
+      frameRate: null, ntsc: false, isBogus: true,
+    })
+  })
+
+  it('rejects sampleDelta=0 (NaN guard)', () => {
+    expect(_internal.normalizeFrameRate(30000, 0)).toEqual({
+      frameRate: null, ntsc: false, isBogus: true,
+    })
+  })
+})
+
 describe('mp4-probe tmcd embedded timecode', () => {
   it('extracts 18:16:14:04 from with_tmcd.mov', () => {
     const view = loadFixture('with_tmcd.mov')
