@@ -755,7 +755,11 @@ let _probeConfigOverride = null
 export function _setProbeConfigOverride(cfg) { _probeConfigOverride = cfg }
 
 export async function runProbeForItem(item, { emit = noopProbeEmit, runContext = null } = {}) {
-  if (!item || !item.final_path) return
+  if (!item) return
+  if (!item.final_path) {
+    emit('fps_probe_failed_no_path', { seq: item.seq, source: item.source })
+    return
+  }
 
   // Remote kill-switch: if fps_probe_enabled is explicitly false, skip probe.
   // getCachedConfig() returns { config, fetched_at, fresh } or null.

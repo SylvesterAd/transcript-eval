@@ -350,10 +350,24 @@ async function refreshFileAccessBanner() {
     return
   }
   if (allowed) {
+    // Detect denied → allowed transition and emit telemetry once.
+    const { fps_permission_last_known = false } =
+      await chrome.storage.local.get('fps_permission_last_known')
+    if (!fps_permission_last_known) {
+      try {
+        chrome.runtime.sendMessage(
+          { type: 'telemetry_event', name: 'fps_permission_granted', meta: {} },
+        ).catch(() => {})
+      } catch {}
+    }
+    await chrome.storage.local.set({ fps_permission_last_known: true })
     banner.hidden = true
     howto.hidden = true
     return
   }
+  // Permission not granted — persist the false state so a future grant
+  // is detected as a transition.
+  await chrome.storage.local.set({ fps_permission_last_known: false })
   const { run_history_count = 0, fps_banner_snoozed_until = 0 } =
     await chrome.storage.local.get(['run_history_count', 'fps_banner_snoozed_until'])
   const now = Date.now()
