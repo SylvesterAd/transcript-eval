@@ -44,7 +44,7 @@ const ROOT_INCLUDES = Object.freeze([
 // NOTE: extension/icons/ does not exist in the current tree, so it is
 // NOT listed here. Add it to this list IF the extension gains toolbar
 // icons later.
-const DIR_INCLUDES = Object.freeze(['modules', 'fixtures'])
+const DIR_INCLUDES = Object.freeze(['modules'])
 
 // Patterns that are excluded even when inside a DIR_INCLUDES dir.
 // Tests, scratch files, OS junk, private keys must never ship.
