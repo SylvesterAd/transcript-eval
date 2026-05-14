@@ -358,6 +358,7 @@ async function runLicenser(item) {
     // E3: store the held tab id so E4/E5 can close it after the download slot releases.
     item.license_tab_id = licenseTabId
     emitTelemetry('envato_license_tab_held', {
+      export_id: state.runId,
       seq: item.seq,
       source_item_id: item.source_item_id,
       tab_id: licenseTabId,
@@ -613,9 +614,22 @@ async function handleDownloadEvent(item, delta) {
       } catch (err) {
         console.warn('[queue] item_finalized broadcast failed', err)
       }
-      // Best-effort FPS probe; never blocks completion
-      runProbeForItem(item, { emit: emitTelemetry, runContext: state._probeRunContext })
-        .catch(err => emitTelemetry('fps_probe_internal_error', { error: String(err?.message || err) }))
+      // Best-effort FPS probe; never blocks completion.
+      // Wrap emit so every probe event carries the run's export_id (required
+      // by telemetry.js buildEntry). After the probe resolves, fire another
+      // persistAndBroadcast so the snapshot the web app receives includes
+      // item.probed_metadata for the XMEML merge — the persistAndBroadcast
+      // immediately below this block runs BEFORE the probe completes.
+      const _probeEmit = (event, payload) => emitTelemetry(event, {
+        ...payload,
+        export_id: state.runId,
+      })
+      runProbeForItem(item, { emit: _probeEmit, runContext: state._probeRunContext })
+        .then(() => { persistAndBroadcast().catch(() => {}) })
+        .catch(err => emitTelemetry('fps_probe_internal_error', {
+          export_id: state.runId,
+          error: String(err?.message || err),
+        }))
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
@@ -852,6 +866,14 @@ let _probeConfigOverride = null
 export function _setProbeConfigOverride(cfg) { _probeConfigOverride = cfg }
 
 export async function runProbeForItem(item, { emit = noopProbeEmit, runContext = null } = {}) {
+  // Diagnostic — proves the function is invoked even if every emit branch
+  // is short-circuited. Cheap; safe to leave in production.
+  console.log('[fps-probe] start', {
+    seq: item?.seq,
+    source: item?.source,
+    source_item_id: item?.source_item_id,
+    final_path: item?.final_path,
+  })
   if (!item) return
   if (!item.final_path) {
     emit('fps_probe_failed_no_path', { seq: item.seq, source: item.source })
@@ -936,6 +958,7 @@ export async function closeLicenseTab(item, reason) {
     // tab already closed by user, or doesn't exist — ignore
   }
   emitTelemetry('envato_license_tab_closed', {
+    export_id: state?.runId,
     seq: item.seq,
     source_item_id: item.source_item_id,
     reason,
