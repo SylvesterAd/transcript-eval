@@ -600,6 +600,11 @@ async function handleDownloadEvent(item, delta) {
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
+      // E5: Close the held Envato licensing tab before releasing the
+      // licensing slot so cleanup completes first.
+      if (item.source === 'envato') {
+        await closeLicenseTab(item, 'download_complete')
+      }
       // E4: Release the Envato licensing slot now that the download is
       // complete. runLicenser awaits this promise, so resolving it
       // allows fillPool's .finally to decrement active.licensing and
@@ -662,6 +667,11 @@ async function handleDownloadInterrupt(item, delta) {
   }
 
   await applyVerdict(item, verdict, { phase: 'download', err: { reason } })
+  // E5: Close the held Envato licensing tab on terminal interrupt, before
+  // releasing the licensing slot so cleanup completes first.
+  if (item.source === 'envato' && (item.phase === 'failed' || item.phase === 'done')) {
+    await closeLicenseTab(item, 'download_failed')
+  }
   // E4: If applyVerdict reached a terminal verdict (skip/hardStop),
   // item.__settle was already called and runDownloader's await completed.
   // Also release the Envato licensing slot so the next item can proceed.
