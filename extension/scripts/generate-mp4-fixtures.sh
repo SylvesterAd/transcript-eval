@@ -8,10 +8,11 @@ OUT_DIR="$(dirname "$0")/../fixtures/mp4"
 mkdir -p "$OUT_DIR"
 
 gen() {
-  local name=$1 rate=$2 ext=$3 extra=${4:-}
+  local name=$1 rate=$2 ext=$3
+  shift 3
   ffmpeg -loglevel error -y \
     -f lavfi -i "color=size=160x90:duration=1:rate=$rate" \
-    $extra "$OUT_DIR/$name.$ext"
+    "$@" "$OUT_DIR/$name.$ext"
 }
 
 # Seven common rates (CFR, faststart)
@@ -29,7 +30,7 @@ gen "60_cfr"     "60/1"       "mp4"
 gen "moov_at_end" "30/1" "mp4"
 
 # Embedded SMPTE timecode
-gen "with_tmcd" "30/1" "mov" "-timecode 18:16:14:04"
+gen "with_tmcd" "30/1" "mov" -timecode "18:16:14:04"
 
 # Variable frame rate: use -fps_mode vfr (ffmpeg 5+ syntax) so the container
 # records a VFR stream (no fixed frame-rate atom in stts).
