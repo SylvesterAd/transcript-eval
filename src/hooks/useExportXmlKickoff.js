@@ -111,11 +111,19 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels, probedIte
         const td = pl.timeline_duration_s
         if (typeof ts !== 'number' || !Number.isFinite(ts)) continue
         if (typeof td !== 'number' || !Number.isFinite(td) || td <= 0) continue
+        // Prefer the actual on-disk filename (final_path basename) when
+        // chrome.downloads renamed during save — e.g. Envato labels a clip
+        // .mov but Chrome content-type-sniffs and writes it as .mp4. Using
+        // target_filename in that case produces "File not found in search
+        // directories" in Premiere because the XML <pathurl> mismatches disk.
+        const finalBasename = typeof item.final_path === 'string' && item.final_path
+          ? item.final_path.split('/').pop() || item.target_filename || ''
+          : (item.target_filename || '')
         const base = {
           seq: item.seq,
           source: item.source || '',
           sourceItemId: item.source_item_id || '',
-          filename: item.target_filename || '',
+          filename: finalBasename,
           timelineStart: ts,
           timelineDuration: td,
         }
