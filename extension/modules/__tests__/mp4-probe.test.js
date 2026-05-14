@@ -144,3 +144,25 @@ describe('mp4-probe mdhd + stts frame rate', () => {
     expect(ntsc).toBe(expected.ntsc)
   })
 })
+
+describe('mp4-probe tkhd dimensions + duration', () => {
+  it('reads 160x90 dims from 30_cfr.mp4', () => {
+    const view = loadFixture('30_cfr.mp4')
+    const moov = _internal.findMoov(view, 0, view.byteLength)
+    const traks = [..._internal.iterateTraks(view, moov)]
+    const videoTrak = traks.find(t => _internal.readTrakHandler(view, t) === 'vide')
+    const { width, height } = _internal.readTkhdDims(view, videoTrak)
+    expect(width).toBe(160)
+    expect(height).toBe(90)
+  })
+
+  it('derives ~1.0s duration from 30_cfr.mp4', () => {
+    const view = loadFixture('30_cfr.mp4')
+    const moov = _internal.findMoov(view, 0, view.byteLength)
+    const traks = [..._internal.iterateTraks(view, moov)]
+    const videoTrak = traks.find(t => _internal.readTrakHandler(view, t) === 'vide')
+    const sec = _internal.readVideoTrakDurationSeconds(view, videoTrak)
+    expect(sec).toBeGreaterThan(0.9)
+    expect(sec).toBeLessThan(1.1)
+  })
+})

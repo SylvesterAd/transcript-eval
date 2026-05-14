@@ -175,4 +175,21 @@ function readVideoTrakRate(view, trak) {
   return { frameRate, ntsc }
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, readVideoTrakRate }
+function readTkhdDims(view, trak) {
+  const tkhd = findChildBox(view, trak, 'tkhd')
+  if (!tkhd) return { width: null, height: null }
+  // tkhd width/height are 16.16 fixed-point at the LAST 8 bytes of the payload
+  const fixedOff = tkhd.payloadEnd - 8
+  if (fixedOff < tkhd.payloadStart) return { width: null, height: null }
+  const wRaw = readU32BE(view, fixedOff)
+  const hRaw = readU32BE(view, fixedOff + 4)
+  return { width: wRaw >>> 16, height: hRaw >>> 16 }
+}
+
+function readVideoTrakDurationSeconds(view, trak) {
+  const mdhd = readMdhd(view, trak)
+  if (!mdhd || !mdhd.timescale || !mdhd.duration) return null
+  return mdhd.duration / mdhd.timescale
+}
+
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds }
