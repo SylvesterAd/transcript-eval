@@ -124,3 +124,23 @@ describe('mp4-probe moov + trak traversal', () => {
     expect(_internal.findMoov(view, 0, bytes.length)).toBeNull()
   })
 })
+
+describe('mp4-probe mdhd + stts frame rate', () => {
+  it.each([
+    ['30_cfr.mp4',     { frameRate: 30, ntsc: false }],
+    ['25_pal.mp4',     { frameRate: 25, ntsc: false }],
+    ['50_pal.mp4',     { frameRate: 50, ntsc: false }],
+    ['60_cfr.mp4',     { frameRate: 60, ntsc: false }],
+    ['2997_ntsc.mov',  { frameRate: 30, ntsc: true  }],
+    ['23976_ntsc.mov', { frameRate: 24, ntsc: true  }],
+    ['5994_ntsc.mov',  { frameRate: 60, ntsc: true  }],
+  ])('reads %s correctly', (filename, expected) => {
+    const view = loadFixture(filename)
+    const moov = _internal.findMoov(view, 0, view.byteLength)
+    const traks = [..._internal.iterateTraks(view, moov)]
+    const videoTrak = traks.find(t => _internal.readTrakHandler(view, t) === 'vide')
+    const { frameRate, ntsc } = _internal.readVideoTrakRate(view, videoTrak)
+    expect(frameRate).toBe(expected.frameRate)
+    expect(ntsc).toBe(expected.ntsc)
+  })
+})

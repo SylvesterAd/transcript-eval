@@ -106,4 +106,73 @@ function readTrakHandler(view, trak) {
   return readFourCC(view, hdlr.payloadStart + 8)
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler }
+function readMdhd(view, trak) {
+  const mdia = findChildBox(view, trak, 'mdia')
+  if (!mdia) return null
+  const mdhd = findChildBox(view, mdia, 'mdhd')
+  if (!mdhd) return null
+  const versionFlags = view.getUint32(mdhd.payloadStart, false)
+  const version = (versionFlags >>> 24) & 0xff
+  // v0: creation(4) + mod(4) + timescale(4) + duration(4)
+  // v1: creation(8) + mod(8) + timescale(4) + duration(8)
+  const off = mdhd.payloadStart + 4
+  if (version === 0) {
+    if (mdhd.payloadEnd - off < 16) return null
+    return {
+      timescale: readU32BE(view, off + 8),
+      duration: readU32BE(view, off + 12),
+    }
+  }
+  if (version === 1) {
+    if (mdhd.payloadEnd - off < 28) return null
+    const big = readU64BE(view, off + 20)
+    return {
+      timescale: readU32BE(view, off + 16),
+      duration: big > BigInt(Number.MAX_SAFE_INTEGER) ? null : Number(big),
+    }
+  }
+  return null
+}
+
+function readSttsEntries(view, trak) {
+  const mdia = findChildBox(view, trak, 'mdia')
+  if (!mdia) return null
+  const minf = findChildBox(view, mdia, 'minf')
+  if (!minf) return null
+  const stbl = findChildBox(view, minf, 'stbl')
+  if (!stbl) return null
+  const stts = findChildBox(view, stbl, 'stts')
+  if (!stts) return null
+  // stts: version(1) + flags(3) + entry_count(4) + entries[ count(4) + delta(4) ]
+  const off = stts.payloadStart
+  if (stts.payloadEnd - off < 8) return null
+  const entryCount = readU32BE(view, off + 4)
+  const entries = []
+  let cursor = off + 8
+  for (let i = 0; i < entryCount; i++) {
+    if (cursor + 8 > stts.payloadEnd) break
+    entries.push({
+      sampleCount: readU32BE(view, cursor),
+      sampleDelta: readU32BE(view, cursor + 4),
+    })
+    cursor += 8
+  }
+  return entries
+}
+
+function readVideoTrakRate(view, trak) {
+  const mdhd = readMdhd(view, trak)
+  if (!mdhd || !mdhd.timescale) return { frameRate: null, ntsc: false }
+  const entries = readSttsEntries(view, trak)
+  if (!entries || entries.length === 0) return { frameRate: null, ntsc: false }
+  const { sampleDelta } = entries[0]
+  if (!sampleDelta) return { frameRate: null, ntsc: false }
+  const exact = mdhd.timescale / sampleDelta
+  const frameRate = Math.round(exact)
+  const ntsc = mdhd.timescale % 1000 === 0
+    && sampleDelta === 1001
+    && [24000, 30000, 60000, 48000].includes(mdhd.timescale)
+  return { frameRate, ntsc }
+}
+
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, readVideoTrakRate }
