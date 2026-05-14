@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import styled from 'styled-components'
 import { CheckCircle2, Download, FileText, AlertCircle } from 'lucide-react'
 import { useExportXmlKickoff, triggerXmlDownload } from '../../hooks/useExportXmlKickoff.js'
@@ -135,15 +136,28 @@ export default function StateE_Complete({
   exportId,
   variantLabels,
   unifiedManifest,
+  snapshot,
 }) {
   const ok = complete?.ok_count ?? 0
   const folder = complete?.folder_path ?? '(unknown)'
+
+  // Build a map of source_item_id → snapshot item so the hook can merge
+  // probed_metadata into each placement. Memoised on snapshot.items identity.
+  const probedItemsById = useMemo(() => {
+    if (!snapshot?.items) return {}
+    const map = {}
+    for (const item of snapshot.items) {
+      if (item.source_item_id) map[item.source_item_id] = item
+    }
+    return map
+  }, [snapshot?.items])
 
   const kickoff = useExportXmlKickoff({
     exportId,
     variantLabels,
     unifiedManifest,
     complete,
+    probedItemsById,
   })
 
   const pluralClip = ok === 1 ? 'clip' : 'clips'

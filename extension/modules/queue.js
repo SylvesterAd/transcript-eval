@@ -23,6 +23,8 @@ import {
   MESSAGE_VERSION,
   FREEPIK_URL_REFETCH_CAP,
   INTEGRITY_TOLERANCE,
+  ENVATO_INTER_ITEM_DELAY_MS_MIN,
+  ENVATO_INTER_ITEM_DELAY_MS_MAX,
 } from '../config.js'
 import { resolveOldIdToNewUuid, getSignedDownloadUrl } from './envato.js'
 import { fetchPexelsUrl, fetchFreepikUrl } from './sources.js'
@@ -48,6 +50,8 @@ import {
   classifyIntegrityError,
   parseRetryAfter,
 } from './classifier.js'
+import { probeMp4File } from './mp4-probe.js'
+import { getCachedConfig } from './config-fetch.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
@@ -161,6 +165,7 @@ export async function startRun({ runId, manifest, targetFolder, options, userId,
 
 export async function pauseRun() {
   if (!state || state.run_state !== 'running') return { ok: false }
+  await closeAllHeldLicenseTabs(state, 'run_paused')
   state.run_state = 'paused'
   await releaseKeepAwake()
   await persistAndBroadcast()
@@ -188,6 +193,7 @@ export async function resumeRun() {
 export async function cancelRun() {
   if (!state) return { ok: false }
   state.run_state = 'cancelled'
+  await closeAllHeldLicenseTabs(state, 'run_cancelled')
   // Cancel any in-flight chrome.downloads
   for (const it of state.items) {
     if (it.phase === 'downloading' && it.download_id != null) {
@@ -250,19 +256,33 @@ function fillPool(phaseName, cap, runner) {
   }
 }
 
-function nextItemForPhase(phaseName) {
-  if (!state) return null
+// Returns true when the inter-item Envato jitter timer is still active.
+// The gate only applies to Envato-specific phases (resolving, licensing).
+// 'downloading' is multi-source and is never gated.
+function isEnvatoGated(s) {
+  return s.envato_next_pickup_at && Date.now() < s.envato_next_pickup_at
+}
+
+// nextItemForPhase can be called with an explicit state argument (for unit
+// testing via _testHooks) or with no argument (scheduler path, uses module
+// state). The gate is applied only to Envato-specific phases.
+function nextItemForPhase(phaseName, s) {
+  const st = s || state
+  if (!st) return null
   // Claim semantics: we flip an in-memory `claimed` flag on the item.
   // Not persisted — a crashed SW redoes the claim on resume because
   // the phase-before-crash is what's persisted.
   if (phaseName === 'resolving') {
-    return state.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'queued')
+    if (isEnvatoGated(st)) return null
+    return st.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'queued')
   }
   if (phaseName === 'licensing') {
-    return state.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'licensing')
+    if (isEnvatoGated(st)) return null
+    return st.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'licensing')
   }
   if (phaseName === 'downloading') {
-    return state.items.find(i => !i.claimed && i.phase === 'downloading')
+    // Multi-source phase — no Envato-specific gate.
+    return st.items.find(i => !i.claimed && i.phase === 'downloading')
   }
   return null
 }
@@ -318,7 +338,8 @@ async function runLicenser(item) {
   await persistAndBroadcast()
   try {
     // JIT URL fetching: we're milliseconds away from chrome.downloads.download
-    const signedUrl = await getSignedDownloadUrl(item.resolved_uuid)
+    // E2: getSignedDownloadUrl now returns { signedUrl, filename, licenseTabId }.
+    const { signedUrl, licenseTabId } = await getSignedDownloadUrl(item.resolved_uuid)
 
     // Ext.7 post-license filetype check. Envato's own orchestrator
     // (envato.js `downloadEnvato`) does this for single-shot; the
@@ -334,6 +355,14 @@ async function runLicenser(item) {
     }
 
     item.signed_url = signedUrl
+    // E3: store the held tab id so E4/E5 can close it after the download slot releases.
+    item.license_tab_id = licenseTabId
+    emitTelemetry('envato_license_tab_held', {
+      seq: item.seq,
+      source_item_id: item.source_item_id,
+      tab_id: licenseTabId,
+      t: Date.now(),
+    })
     item.phase = 'downloading'
     item.claimed = false
     emitTelemetry('item_licensed', {
@@ -345,6 +374,18 @@ async function runLicenser(item) {
       meta: { license_ms: Date.now() - (item.license_started_at || Date.now()) },
     })
     await persistAndBroadcast()
+    schedule()  // kick the downloader pool now that item is downloadable
+    // E4: Hold the licensing slot until the download completes (or is
+    // interrupted). This ensures MAX_ENVATO_LICENSE_CONCURRENCY=1 is
+    // meaningful end-to-end: a second Envato item cannot begin licensing
+    // while the first item's download is still in progress.
+    // The promise is resolved by chrome.downloads.onChanged when
+    // delta.state.current is 'complete' or 'interrupted'.
+    if (item.source === 'envato') {
+      await new Promise((resolve) => {
+        item.__envato_cycle_settle = resolve
+      })
+    }
   } catch (err) {
     item.license_attempts = (item.license_attempts || 0) + 1
     const verdict = classifyLicenseError(err, item)
@@ -572,9 +613,37 @@ async function handleDownloadEvent(item, delta) {
       } catch (err) {
         console.warn('[queue] item_finalized broadcast failed', err)
       }
+      // Best-effort FPS probe; never blocks completion
+      runProbeForItem(item, { emit: emitTelemetry, runContext: state._probeRunContext })
+        .catch(err => emitTelemetry('fps_probe_internal_error', { error: String(err?.message || err) }))
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
+      // E5: Close the held Envato licensing tab before releasing the
+      // licensing slot so cleanup completes first.
+      if (item.source === 'envato') {
+        await closeLicenseTab(item, 'download_complete')
+      }
+      // E4: Release the Envato licensing slot now that the download is
+      // complete. runLicenser awaits this promise, so resolving it
+      // allows fillPool's .finally to decrement active.licensing and
+      // pick up the next Envato item for licensing.
+      if (item.source === 'envato' && item.__envato_cycle_settle) {
+        item.__envato_cycle_settle()
+        item.__envato_cycle_settle = null
+      }
+      // E6: Set the inter-item jitter gate. The next Envato resolving/
+      // licensing pickup is delayed by a uniform random value in
+      // [ENVATO_INTER_ITEM_DELAY_MS_MIN, ENVATO_INTER_ITEM_DELAY_MS_MAX).
+      // A setTimeout wakes the scheduler past the gate so the next item
+      // doesn't wait for an unrelated schedule() call.
+      if (item.source === 'envato') {
+        const minMs = ENVATO_INTER_ITEM_DELAY_MS_MIN
+        const maxMs = ENVATO_INTER_ITEM_DELAY_MS_MAX
+        const delayMs = minMs + Math.random() * (maxMs - minMs)
+        state.envato_next_pickup_at = Date.now() + delayMs
+        setTimeout(() => schedule(), delayMs + 50)
+      }
     } else if (next === 'interrupted') {
       await handleDownloadInterrupt(item, delta)
     }
@@ -603,6 +672,11 @@ async function handleDownloadInterrupt(item, delta) {
     // Refetch cap hit — final verdict.
     await failItem(item, 'url_expired_refetch_failed')
     item.__settle?.()
+    // E4: Release licensing slot for terminal failure
+    if (item.source === 'envato' && item.__envato_cycle_settle) {
+      item.__envato_cycle_settle()
+      item.__envato_cycle_settle = null
+    }
     return
   }
 
@@ -624,6 +698,21 @@ async function handleDownloadInterrupt(item, delta) {
   }
 
   await applyVerdict(item, verdict, { phase: 'download', err: { reason } })
+  // E5: Close the held Envato licensing tab on terminal interrupt, before
+  // releasing the licensing slot so cleanup completes first.
+  if (item.source === 'envato' && (item.phase === 'failed' || item.phase === 'done')) {
+    await closeLicenseTab(item, 'download_failed')
+  }
+  // E4: If applyVerdict reached a terminal verdict (skip/hardStop),
+  // item.__settle was already called and runDownloader's await completed.
+  // Also release the Envato licensing slot so the next item can proceed.
+  // We check __envato_cycle_settle defensively — retries leave it intact
+  // so the same cycle can re-download without re-acquiring the slot.
+  if (item.source === 'envato' && item.__envato_cycle_settle &&
+      (item.phase === 'failed' || item.phase === 'done')) {
+    item.__envato_cycle_settle()
+    item.__envato_cycle_settle = null
+  }
 }
 
 function maybePushProgress(item) {
@@ -688,6 +777,11 @@ export function buildInitialRunState({ runId, manifest, targetFolder, options, u
       // persisted state.items[].final_path once State F / WebApp.3 wire
       // the consumer (deferred — see note above at the emit site).
       final_path: null,
+      // E3: ID of the Envato licensing tab that opened during getSignedDownloadUrl.
+      // Stored here so the queue can close it (and emit telemetry) once the
+      // download slot is released (E4/E5). null for non-Envato items and
+      // before licensing runs.
+      license_tab_id: null,
     })),
     stats: { ok_count: 0, fail_count: 0, total_bytes_downloaded: 0 },
     run_state: 'running',
@@ -700,19 +794,165 @@ export function buildInitialRunState({ runId, manifest, targetFolder, options, u
     // elements.envato.com. Subsequent 401/403s skip + skip_whole_source
     // so we don't ask twice if the user can't / won't re-auth.
     envato_reauth_attempted: false,
+    // E6: epoch-ms timestamp before which nextItemForPhase returns null for
+    // Envato phases (resolving, licensing). 0 means "no gate active" so the
+    // first item starts immediately. Set to Date.now() + jitter after each
+    // successful Envato download; NOT set on interrupted/failed (retry promptly).
+    envato_next_pickup_at: 0,
+    // T12: per-run context for runProbeForItem — tracks whether we've
+    // already emitted fps_probe_skipped_no_permission for this run so
+    // we don't spam telemetry once per downloaded file.
+    _probeRunContext: { hasEmittedSkipForRun: false },
   }
+}
+
+// Build the broadcast-ready per-item record. Exported so T13 tests can
+// verify the probed_metadata field is included/excluded correctly.
+// Callers: snapshot() (Port broadcast) and any future result_json builder.
+export function buildItemSnapshot(item) {
+  return {
+    seq: item.seq,
+    source: item.source,
+    source_item_id: item.source_item_id,
+    target_filename: item.target_filename,
+    phase: item.phase,
+    bytes_received: item.bytes_received,
+    total_bytes: item.total_bytes,
+    error_code: item.error_code,
+    error_detail: item.error_detail,
+    final_path: item.final_path,
+    // Ext.6 timing fields
+    resolve_started_at: item.resolve_started_at,
+    license_started_at: item.license_started_at,
+    download_started_at: item.download_started_at,
+    // Ext.7 retry counters
+    resolve_attempts: item.resolve_attempts,
+    license_attempts: item.license_attempts,
+    rate_limit_429_count: item.rate_limit_429_count,
+    freepik_429_count: item.freepik_429_count,
+    mint_attempts: item.mint_attempts,
+    url_refetch_count: item.url_refetch_count,
+    integrity_retries: item.integrity_retries,
+    signed_url_expires_at: item.signed_url_expires_at,
+    expected_size_bytes: item.expected_size_bytes,
+    // FPS probe result — omitted (key absent) when no probe ran
+    ...(item.probed_metadata ? { probed_metadata: item.probed_metadata } : {}),
+    // E3: held Envato licensing tab — omitted when null so snapshots stay
+    // lean for non-Envato items and before licensing runs.
+    ...(item.license_tab_id ? { license_tab_id: item.license_tab_id } : {}),
+  }
+}
+
+// Probe a completed-download item's on-disk file via file:// fetch.
+// Mutates item.probed_metadata on success. No-op when permission denied.
+// runContext (optional) tracks one-shot "no permission" telemetry per run.
+// Test hook: when non-null, overrides getCachedConfig() return value for tests.
+// Set via _setProbeConfigOverride(cfg); clear with _setProbeConfigOverride(null).
+let _probeConfigOverride = null
+export function _setProbeConfigOverride(cfg) { _probeConfigOverride = cfg }
+
+export async function runProbeForItem(item, { emit = noopProbeEmit, runContext = null } = {}) {
+  if (!item) return
+  if (!item.final_path) {
+    emit('fps_probe_failed_no_path', { seq: item.seq, source: item.source })
+    return
+  }
+
+  // Remote kill-switch: if fps_probe_enabled is explicitly false, skip probe.
+  // getCachedConfig() returns { config, fetched_at, fresh } or null.
+  // _probeConfigOverride (test hook) may supply a flat config object directly.
+  const cachedRecord = _probeConfigOverride !== null
+    ? { config: _probeConfigOverride }
+    : await getCachedConfig()
+  if (cachedRecord?.config?.fps_probe_enabled === false) {
+    if (runContext) {
+      if (!runContext.hasEmittedSkipForRun) {
+        emit('fps_probe_skipped_remote_kill', { reason: 'fps_probe_enabled_false' })
+        runContext.hasEmittedSkipForRun = true
+      }
+    } else {
+      emit('fps_probe_skipped_remote_kill', { reason: 'fps_probe_enabled_false' })
+    }
+    return
+  }
+
+  const allowed = await chrome.extension.isAllowedFileSchemeAccess()
+  if (!allowed) {
+    if (runContext) {
+      if (!runContext.hasEmittedSkipForRun) {
+        emit('fps_probe_skipped_no_permission', { reason: 'file_access_disabled' })
+        runContext.hasEmittedSkipForRun = true
+      }
+    } else {
+      emit('fps_probe_skipped_no_permission', { reason: 'file_access_disabled' })
+    }
+    return
+  }
+  const fileUrl = 'file://' + item.final_path
+  const result = await probeMp4File(fileUrl, { emit })
+  if (result) item.probed_metadata = result
+}
+
+function noopProbeEmit() {}
+
+/**
+ * Close all held Envato licensing tabs across every item in the given
+ * state and release any pending __envato_cycle_settle promises so
+ * runLicenser awaiters can unwind cleanly.
+ *
+ * Called by pauseRun (reason='run_paused') and cancelRun
+ * (reason='run_cancelled') to prevent tab leaks and hung promises when
+ * the user stops a mid-Envato-cycle run.
+ */
+async function closeAllHeldLicenseTabs(state, reason) {
+  if (!state?.items) return
+  for (const item of state.items) {
+    if (item.license_tab_id) {
+      // closeLicenseTab clears item.license_tab_id and emits telemetry.
+      await closeLicenseTab(item, reason)
+    }
+    // Also resolve any held cycle-settle so the runner promise can unwind
+    // (the licensing slot frees and fillPool's .finally fires schedule()).
+    if (item.__envato_cycle_settle) {
+      item.__envato_cycle_settle()
+      item.__envato_cycle_settle = null
+    }
+  }
+}
+
+/**
+ * Close the held Envato licensing tab for an item and emit a telemetry
+ * event. No-op if the item has no held tab.
+ *
+ * reason ∈ download_complete | download_failed | run_paused | run_cancelled
+ */
+export async function closeLicenseTab(item, reason) {
+  if (!item?.license_tab_id) return
+  const tabId = item.license_tab_id
+  item.license_tab_id = null
+  try {
+    await chrome.tabs.remove(tabId)
+  } catch {
+    // tab already closed by user, or doesn't exist — ignore
+  }
+  emitTelemetry('envato_license_tab_closed', {
+    seq: item.seq,
+    source_item_id: item.source_item_id,
+    reason,
+    t: Date.now(),
+  })
 }
 
 function snapshot() {
   if (!state) return null
-  // Hide in-memory-only fields (claimed, __settle) from Port pushes.
+  // Hide in-memory-only fields (claimed, __settle, __envato_cycle_settle) from Port pushes.
   return {
     runId: state.runId,
     started_at: state.started_at,
     updated_at: state.updated_at,
     target_folder_path: state.target_folder_path,
     options: state.options,
-    items: state.items.map(({ claimed, __settle, ...rest }) => rest),
+    items: state.items.map(item => buildItemSnapshot(item)),
     stats: state.stats,
     run_state: state.run_state,
   }
@@ -722,7 +962,8 @@ function snapshot() {
 function stripInMemory(s) {
   return {
     ...s,
-    items: s.items.map(({ claimed, __settle, ...rest }) => rest),
+    // eslint-disable-next-line no-unused-vars
+    items: s.items.map(({ claimed, __settle, __envato_cycle_settle, ...rest }) => rest),
   }
 }
 
@@ -1277,4 +1518,20 @@ function extractFilenameFromSignedUrl(url) {
   }
   const nameMatch = QUEUE_FILENAME_FROM_DISPOSITION_RE.exec(disposition)
   return nameMatch ? nameMatch[1] : null
+}
+
+// ------------------- Test hooks -------------------
+// Exported for unit tests only. Not part of the public API.
+export const _testHooks = {
+  // Exposes nextItemForPhase so tests can call it with a synthetic state
+  // object without going through the full scheduler machinery.
+  nextItemForPhase,
+  // Returns the module-level state reference. The returned object is the
+  // live reference — mutations the scheduler makes after this call are
+  // visible to the caller. Tests that need a snapshot should read
+  // envato_next_pickup_at immediately after the event that sets it.
+  getRunState: () => state,
+  // Exposes closeAllHeldLicenseTabs so tests can call it with a synthetic
+  // state object to verify pause/cancel cleanup logic in isolation.
+  closeAllHeldLicenseTabs,
 }

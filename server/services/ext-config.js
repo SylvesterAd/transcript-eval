@@ -12,6 +12,7 @@ const DEFAULTS = Object.freeze({
   freepik_enabled:      false,   // ships off until Ext.3 is verified end-to-end
   daily_cap_override:   null,
   slack_alerts_enabled: true,
+  fps_probe_enabled:    true,    // remote kill-switch for FPS probe (Ext.16)
 })
 
 // Module-load assertion: if EXT_MIN_VERSION is set, it must be valid
@@ -61,7 +62,17 @@ export function getExtConfig() {
     freepik_enabled:      parseBool(process.env.EXT_FREEPIK_ENABLED,       DEFAULTS.freepik_enabled),
     daily_cap_override:   parseDailyCapOverride(process.env.EXT_DAILY_CAP_OVERRIDE),
     slack_alerts_enabled: parseBool(process.env.EXT_SLACK_ALERTS_ENABLED,  DEFAULTS.slack_alerts_enabled),
+    fps_probe_enabled:    getFpsProbeEnabled(),
   }
+}
+
+// fps_probe_enabled defaults to true (fall-open). Setting
+// EXT_FPS_PROBE_ENABLED=false or =0 disables the probe in all
+// extension clients without a code deploy.
+function getFpsProbeEnabled() {
+  const v = process.env.EXT_FPS_PROBE_ENABLED
+  if (v === undefined || v === '' || v === 'true' || v === '1') return true
+  return false
 }
 
 // Exported for tests / future admin tooling. Consumers should NOT

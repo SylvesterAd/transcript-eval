@@ -597,7 +597,7 @@ These are never called from production code.
 
 ```bash
 npm run ext:package
-# → extension/dist/extension-0.9.0.zip
+# → extension/dist/extension-1.0.0.zip
 ```
 
 The script (`extension/scripts/package.mjs`) is deterministic — two runs
@@ -624,7 +624,7 @@ plain Unix epoch 0 does not work) and alphabetically-sorted file input.
 | Trigger | Behavior |
 |---------|----------|
 | Push to `main` touching `extension/**` | Build + upload workflow-run artifact (90-day retention) |
-| Tag `ext-v*` (e.g. `ext-v0.9.0`) | Build + publish GitHub Release with `.zip` attached |
+| Tag `ext-v*` (e.g. `ext-v1.0.0`) | Build + publish GitHub Release with `.zip` attached |
 | `workflow_dispatch` (manual) | Build + upload workflow-run artifact |
 
 The `validate-dist` step in CI unzips the built archive and asserts the
@@ -640,8 +640,8 @@ been green for a week.
 
 ```bash
 # From main, with the desired commit checked out:
-git tag ext-v0.9.0
-git push origin ext-v0.9.0
+git tag ext-v1.0.0
+git push origin ext-v1.0.0
 # Workflow fires, builds, publishes GitHub Release with the zip.
 ```
 

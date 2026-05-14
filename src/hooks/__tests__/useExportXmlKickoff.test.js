@@ -110,6 +110,11 @@ describe('buildVariantsPayload', () => {
             width: 1920,
             height: 1080,
             sourceFrameRate: 30,
+            // mergeProbeIntoPlacement now always emits these fields;
+            // manifest fixtures have no ntsc/embedded_timecode/duration_seconds.
+            ntsc: false,
+            sourceDurationSeconds: null,
+            embeddedTimecode: null,
           },
           {
             seq: 2,
@@ -121,6 +126,9 @@ describe('buildVariantsPayload', () => {
             width: 1920,
             height: 1080,
             sourceFrameRate: 30,
+            ntsc: false,
+            sourceDurationSeconds: null,
+            embeddedTimecode: null,
           },
         ],
       }],
@@ -185,6 +193,100 @@ describe('buildVariantsPayload', () => {
     expect(() => buildVariantsPayload({
       unifiedManifest: makeManifestSingleVariant(), variantLabels: [],
     })).toThrow(/non-empty/)
+  })
+})
+
+// -------------------- buildVariantsPayload — probed_metadata precedence rule --------------------
+//
+// Task 18: when the extension has probed a file, its values win over the
+// manifest. See docs in useExportXmlKickoff.js: mergeProbeIntoPlacement.
+
+describe('buildVariantsPayload precedence rule', () => {
+  // Extension state items — keyed by source_item_id inside probedItemsById.
+  // Item 0 (aroll): fully probed.
+  // Item 1 (NXG1 / envato broll): probed but embeddedTimecode is null.
+  // Item 2 (PEX1 / pexels broll): no probe at all.
+  const probedItemsById = {
+    aroll: {
+      probed_metadata: {
+        frameRate: 29.97, ntsc: true, width: 1920, height: 1080,
+        durationSeconds: 60.5, embeddedTimecode: '01:00:00:00',
+      },
+    },
+    NXG1: {
+      probed_metadata: {
+        frameRate: 25, ntsc: false, width: 1920, height: 1080,
+        durationSeconds: 12.0, embeddedTimecode: null,
+      },
+    },
+    PEX1: {
+      // no probed_metadata
+    },
+  }
+
+  // Unified manifest built by buildManifest — contains the manifest-level
+  // values that act as fallbacks when no probe is available.
+  const unifiedManifest = {
+    variants: ['A'],
+    items: [
+      {
+        seq: 0, source: 'aroll', source_item_id: 'aroll',
+        target_filename: 'aroll.mp4',
+        frame_rate: 30, ntsc: false, embedded_timecode: null,
+        resolution: { width: 1280, height: 720 }, duration_seconds: 60,
+        placements: [{ variant: 'A', timeline_start_s: 0, timeline_duration_s: 60 }],
+      },
+      {
+        seq: 1, source: 'envato', source_item_id: 'NXG1',
+        target_filename: 'broll1.mov',
+        frame_rate: 30, ntsc: false, embedded_timecode: null,
+        resolution: { width: 1280, height: 720 }, duration_seconds: 10,
+        placements: [{ variant: 'A', timeline_start_s: 2, timeline_duration_s: 4 }],
+      },
+      {
+        seq: 2, source: 'pexels', source_item_id: 'PEX1',
+        target_filename: 'broll2.mp4',
+        frame_rate: 50, ntsc: false, embedded_timecode: null,
+        resolution: { width: 1920, height: 1080 }, duration_seconds: 8,
+        placements: [{ variant: 'A', timeline_start_s: 10, timeline_duration_s: 3 }],
+      },
+    ],
+  }
+
+  it('probed values override manifest values when both present', () => {
+    const payload = buildVariantsPayload({ unifiedManifest, variantLabels: ['A'], probedItemsById })
+    const arollPl = payload.variants[0].placements.find(p => p.source === 'aroll')
+    expect(arollPl.sourceFrameRate).toBe(29.97)
+    expect(arollPl.ntsc).toBe(true)
+    expect(arollPl.width).toBe(1920)
+    expect(arollPl.height).toBe(1080)
+    expect(arollPl.sourceDurationSeconds).toBe(60.5)
+  })
+
+  it('manifest values flow through when probe absent', () => {
+    const payload = buildVariantsPayload({ unifiedManifest, variantLabels: ['A'], probedItemsById })
+    const pexPl = payload.variants[0].placements.find(p => p.source === 'pexels')
+    expect(pexPl.sourceFrameRate).toBe(50)
+    expect(pexPl.ntsc).toBe(false)
+    expect(pexPl.sourceDurationSeconds).toBe(8)
+  })
+
+  it('null/missing fields collapse to null (not undefined)', () => {
+    const payload = buildVariantsPayload({ unifiedManifest, variantLabels: ['A'], probedItemsById })
+    const arollPl = payload.variants[0].placements.find(p => p.source === 'aroll')
+    expect(arollPl.embeddedTimecode).toBe('01:00:00:00')
+    const broll1Pl = payload.variants[0].placements.find(p => p.source === 'envato')
+    expect(broll1Pl.embeddedTimecode).toBeNull()
+  })
+
+  it('omitting probedItemsById behaves the same as all-manifest (backward compat)', () => {
+    const payload = buildVariantsPayload({ unifiedManifest, variantLabels: ['A'] })
+    const arollPl = payload.variants[0].placements.find(p => p.source === 'aroll')
+    // manifest value for aroll: frame_rate 30, ntsc false, resolution 1280x720
+    expect(arollPl.sourceFrameRate).toBe(30)
+    expect(arollPl.ntsc).toBe(false)
+    expect(arollPl.width).toBe(1280)
+    expect(arollPl.height).toBe(720)
   })
 })
 
@@ -313,6 +415,46 @@ describe('useExportXmlKickoff', () => {
     expect(h.result.current.xml_by_variant).toEqual({ A: expect.stringContaining('<?xml A?>') })
     expect(downloadedFilenames).toEqual(['variant-a.xml'])
 
+    h.unmount()
+  })
+
+  it('threads probedItemsById through to buildVariantsPayload body', async () => {
+    // Simulate a snapshot where item NX9WYGQ has been probed with 29.97 fps.
+    const probedItemsById = {
+      NX9WYGQ: {
+        source_item_id: 'NX9WYGQ',
+        probed_metadata: { frameRate: 29.97, ntsc: true, width: 1920, height: 1080, durationSeconds: 2.5, embeddedTimecode: null },
+      },
+    }
+    const manifest = makeManifestSingleVariant()
+    const props = {
+      exportId: 'exp_PROBE',
+      variantLabels: ['A'],
+      unifiedManifest: manifest,
+      complete: null,
+      probedItemsById,
+      _apiPost: apiPost,
+      _triggerDownload: triggerDownload,
+    }
+    const h = renderHookOnce(useExportXmlKickoff, props)
+    h.rerender({ ...props, complete: { ok_count: 2, fail_count: 0, folder_path: '~/Downloads/test', xml_paths: [] } })
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    // The body sent to /result must include the probed frameRate for NX9WYGQ
+    const resultBody = apiPost.mock.calls[0][1]
+    const variantA = resultBody.variants.find(v => v.label === 'A')
+    expect(variantA).toBeDefined()
+    const probedPlacement = variantA.placements.find(p => p.sourceItemId === 'NX9WYGQ')
+    expect(probedPlacement).toBeDefined()
+    expect(probedPlacement.sourceFrameRate).toBe(29.97)
+    expect(probedPlacement.ntsc).toBe(true)
+    // The unprobed item should still use manifest value
+    const unprobedPlacement = variantA.placements.find(p => p.sourceItemId === '123456')
+    expect(unprobedPlacement).toBeDefined()
+    expect(unprobedPlacement.sourceFrameRate).toBe(30)  // manifest value
+    expect(h.result.current.status).toBe('ready')
     h.unmount()
   })
 

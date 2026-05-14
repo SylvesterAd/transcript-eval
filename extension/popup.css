@@ -175,6 +175,12 @@ footer {
 .config-banner-title  { font-weight: 600; color: #111827; }
 .config-banner-detail { color: #374151; font-size: 13px; margin-top: 2px; }
 .config-banner-action { display: inline-block; margin-top: 6px; color: #1d4ed8; font-size: 13px; }
+/* FPS probe banner — snooze button and howto variant. */
+.config-banner-snooze { margin-top: 6px; margin-left: 4px; font-size: 12px; color: #6b7280; background: none; border: none; cursor: pointer; padding: 0; text-decoration: underline; }
+.config-banner-snooze:hover { color: #374151; }
+.config-banner--howto { flex-direction: column; }
+.config-banner--howto ol { margin: 0 0 6px 0; padding-left: 18px; font-size: 13px; color: #374151; }
+.config-banner--howto ol li { margin-top: 4px; }
 
 /* Ext.9 — Envato auth row "paused" state (distinct from "signed-out"). */
 [data-state="paused"] .row-status { color: #6b7280; font-style: italic; }

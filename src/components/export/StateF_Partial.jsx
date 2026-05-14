@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import styled from 'styled-components'
 import { AlertCircle, RefreshCw, FileText, Download, MessageCircle, ExternalLink } from 'lucide-react'
 import { getErrorLabel } from '../../lib/errorCodeLabels.js'
@@ -212,12 +212,13 @@ const XmlDownloadBtn = styled.button`
 // gated on fail_count===0 anyway — State F would never auto-kick —
 // but we pass it explicitly for clarity). We fire regenerate() once
 // on mount to kick the 3-step flow.
-function XmlKickoffPanel({ exportId, variantLabels, unifiedManifest, complete }) {
+function XmlKickoffPanel({ exportId, variantLabels, unifiedManifest, complete, probedItemsById }) {
   const kickoff = useExportXmlKickoff({
     exportId,
     variantLabels,
     unifiedManifest,
     complete,
+    probedItemsById,
     autoKick: false,
   })
 
@@ -344,6 +345,18 @@ export default function StateF_Partial({
     ? snapshot.items.filter(it => it.phase === 'failed')
     : []
 
+  // Build a map of source_item_id → snapshot item so XmlKickoffPanel can
+  // pass probed_metadata through to buildVariantsPayload. Memoised on
+  // snapshot.items identity.
+  const probedItemsById = useMemo(() => {
+    if (!snapshot?.items) return {}
+    const map = {}
+    for (const item of snapshot.items) {
+      if (item.source_item_id) map[item.source_item_id] = item
+    }
+    return map
+  }, [snapshot?.items])
+
   // Retry: collect source_item_ids of failed items and hand off to
   // the caller. ExportPage rebuilds the filtered manifest from its
   // authoritative state.unified_manifest.items (NOT from snapshot.items,
@@ -410,6 +423,7 @@ export default function StateF_Partial({
             variantLabels={variantLabels || []}
             unifiedManifest={unifiedManifest}
             complete={complete}
+            probedItemsById={probedItemsById}
           />
         )}
       </Card>

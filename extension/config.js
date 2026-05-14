@@ -41,9 +41,15 @@ export const ENVATO_TAB_LOAD_TIMEOUT_MS = 30000
 // (each in-flight licenser opens a hidden envato.com tab; 5 hidden
 // tabs at once is heavy on memory + Envato sees a burst of page
 // views in seconds). 2 trades a bit of throughput for stability.
-export const MAX_ENVATO_RESOLVER_CONCURRENCY = 5
-export const MAX_ENVATO_LICENSE_CONCURRENCY = 2
+// Further dropped to 1 in Ext.6 to serialize license + download cycles.
+export const MAX_ENVATO_RESOLVER_CONCURRENCY = 1
+export const MAX_ENVATO_LICENSE_CONCURRENCY = 1
 export const MAX_DOWNLOAD_CONCURRENCY = 3
+
+// Per-item pacing between sequential Envato cycles. Randomized within this
+// range to look humanlike and avoid burst patterns on /download.data.
+export const ENVATO_INTER_ITEM_DELAY_MS_MIN = 1000
+export const ENVATO_INTER_ITEM_DELAY_MS_MAX = 2000
 
 // Legacy alias — Ext.2's single debug path still imports this.
 // Kept so the Ext.2 debug handler keeps working without edits.
@@ -112,6 +118,26 @@ export const TELEMETRY_EVENT_ENUM = Object.freeze([
   'queue_paused',
   'queue_resumed',
   'export_completed',
+  // FPS probe (feature/extension-fps-probe)
+  'fps_probe_success',
+  'fps_probe_failed_fetch',
+  'fps_probe_failed_not_mp4',
+  'fps_probe_failed_unsupported_brand',
+  'fps_probe_failed_moov_not_located',
+  'fps_probe_failed_parse_error',
+  'fps_probe_failed_bogus_value',
+  'fps_probe_failed_no_path',
+  'fps_probe_failed_no_timing',
+  'fps_probe_vfr_detected',
+  'fps_probe_timeout',
+  'fps_probe_skipped_no_permission',
+  'fps_probe_skipped_remote_kill',
+  'fps_probe_internal_error',
+  'fps_permission_granted',
+  'export_started_without_fps_probe',
+  // Envato sequential licensing (feature/extension-fps-probe)
+  'envato_license_tab_held',
+  'envato_license_tab_closed',
 ])
 
 // -------- Ext.7 failure-mode polish --------
@@ -216,6 +242,7 @@ export const CONFIG_FALL_OPEN_DEFAULTS = Object.freeze({
   freepik_enabled:      true,
   daily_cap_override:   null,
   slack_alerts_enabled: false,  // client doesn't care — pass-through field
+  fps_probe_enabled:    true,   // fall-open: probe runs when server unreachable (Ext.16)
 })
 
 // Canonical error codes emitted by enforceConfigBeforeExport on reject.

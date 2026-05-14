@@ -20,7 +20,7 @@ import {
   startRun, pauseRun, resumeRun, cancelRun, getRunState,
   autoResumeIfActiveRun,
 } from './modules/queue.js'
-import { getBufferStats as telemetryStats, flushNow as telemetryFlushNow } from './modules/telemetry.js'
+import { emit as emitTelemetry, getBufferStats as telemetryStats, flushNow as telemetryFlushNow } from './modules/telemetry.js'
 import { buildBundle } from './modules/diagnostics.js'
 import {
   refreshConfigOnStartup,
@@ -235,6 +235,23 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: false, error_code: gate.error_code, detail: gate.detail, current: gate.current, min: gate.min })
           return
         }
+        // Track run history for popup banner gating (FPS probe onboarding).
+        // Increment AFTER the config gate passes so only real export attempts
+        // count — not rejected/blocked ones.
+        try {
+          const { run_history_count = 0 } = await chrome.storage.local.get('run_history_count')
+          await chrome.storage.local.set({ run_history_count: run_history_count + 1 })
+        } catch { /* best-effort — don't block export on counter failure */ }
+        // Best-effort telemetry: record when an export starts without the
+        // FPS probe enabled. Never blocks — export proceeds regardless.
+        try {
+          const allowed = await chrome.extension.isAllowedFileSchemeAccess()
+          if (!allowed) {
+            emitTelemetry('export_started_without_fps_probe', { reason: 'file_access_disabled' })
+          }
+        } catch {
+          // best-effort — don't break export on telemetry failure
+        }
         // user_id comes from the stored JWT — queue uses it for
         // completed_items keying.
         const jwt = await getJwt()
@@ -336,6 +353,17 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true })
         } catch (err) {
           sendResponse({ ok: false, error: String(err?.message || err) })
+        }
+        return
+      }
+      case 'telemetry_event': {
+        try {
+          if (typeof msg.name === 'string' && msg.name) {
+            emitTelemetry(msg.name, msg.meta && typeof msg.meta === 'object' ? msg.meta : {})
+          }
+          sendResponse({ ok: true })
+        } catch {
+          sendResponse({ ok: true })
         }
         return
       }

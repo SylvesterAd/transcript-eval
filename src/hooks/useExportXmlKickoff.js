@@ -36,13 +36,68 @@ import { EXT_ID, getActiveExtId } from '../lib/extension-id.js'
 // is human-readable when the user opens the XML in Premiere. If the
 // editor later introduces user-editable variant names, thread through.
 
-export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
+// ----------------------------------------------------------------------
+// Merge extension-probed metadata into a placement record.
+//
+// Precedence: probed (camelCase) > manifest (snake_case) > null/false.
+//
+// Called from buildVariantsPayload when the extension has attached
+// probed_metadata to a state item. When no probe exists for the item,
+// the manifest values pass through unchanged (backwards-compatible).
+//
+// Field mapping:
+//   probed.frameRate        → placement.sourceFrameRate
+//   probed.ntsc             → placement.ntsc
+//   probed.width/height     → placement.width/height
+//   probed.durationSeconds  → placement.sourceDurationSeconds
+//   probed.embeddedTimecode → placement.embeddedTimecode
+//
+// The embeddedTimecode probe entry is unusual: null is a valid probed
+// value (file has no SMPTE track) and must win over the manifest, so we
+// use `'embeddedTimecode' in probe` to distinguish "probe says null" from
+// "probe key absent".
+function mergeProbeIntoPlacement(placement, manifestItem, probedItem) {
+  const probe = probedItem?.probed_metadata
+  return {
+    ...placement,
+    sourceFrameRate:
+      probe?.frameRate ??
+      manifestItem?.frame_rate ??
+      null,
+    ntsc:
+      probe?.ntsc ??
+      manifestItem?.ntsc ??
+      false,
+    width:
+      probe?.width ??
+      manifestItem?.resolution?.width ??
+      null,
+    height:
+      probe?.height ??
+      manifestItem?.resolution?.height ??
+      null,
+    sourceDurationSeconds:
+      probe?.durationSeconds ??
+      manifestItem?.duration_seconds ??
+      null,
+    embeddedTimecode:
+      (probe && 'embeddedTimecode' in probe ? probe.embeddedTimecode : undefined) ??
+      manifestItem?.embedded_timecode ??
+      null,
+  }
+}
+
+export function buildVariantsPayload({ unifiedManifest, variantLabels, probedItemsById }) {
   if (!unifiedManifest || !Array.isArray(unifiedManifest.items)) {
     throw new Error('buildVariantsPayload: unifiedManifest.items required')
   }
   if (!Array.isArray(variantLabels) || variantLabels.length === 0) {
     throw new Error('buildVariantsPayload: variantLabels must be a non-empty array')
   }
+
+  // probedItemsById is optional — if absent (e.g. extension not connected),
+  // mergeProbeIntoPlacement falls back to manifest-only values.
+  const probeMap = probedItemsById || {}
 
   const variants = []
 
@@ -56,38 +111,15 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels }) {
         const td = pl.timeline_duration_s
         if (typeof ts !== 'number' || !Number.isFinite(ts)) continue
         if (typeof td !== 'number' || !Number.isFinite(td) || td <= 0) continue
-        placements.push({
+        const base = {
           seq: item.seq,
           source: item.source || '',
           sourceItemId: item.source_item_id || '',
           filename: item.target_filename || '',
           timelineStart: ts,
           timelineDuration: td,
-          // Optional per-placement overrides — fall back to sequence
-          // defaults in the generator if omitted. We pass width/height
-          // only if explicit to avoid burning in a guessed 1920x1080.
-          ...(item.resolution?.width ? { width: item.resolution.width } : {}),
-          ...(item.resolution?.height ? { height: item.resolution.height } : {}),
-          ...(item.frame_rate ? { sourceFrameRate: item.frame_rate } : {}),
-          // ntsc fractional flag (29.97/23.976/59.94) — set by server-
-          // side ffprobe of the source URL at manifest build time.
-          // Forwarded so xmeml-generator emits <ntsc>TRUE</ntsc> on the
-          // source <rate>, otherwise DaVinci validates our claimed
-          // integer rate against the file's actual fractional rate
-          // and rejects the import.
-          ...(item.ntsc === true ? { ntsc: true } : {}),
-          // Embedded SMPTE timecode from the source file's metadata.
-          // Forwarded so xmeml-generator can emit it in <file><timecode>
-          // and offset <in>/<out> by the corresponding frame number.
-          ...(item.embedded_timecode ? { embeddedTimecode: item.embedded_timecode } : {}),
-          // Source media's full length, used by the generator for
-          // <file><duration> so Premiere can show trim handles past
-          // the cut. Optional — falls back to timeline duration if
-          // missing (no handles, but the cut still plays).
-          ...(typeof item.duration_seconds === 'number' && item.duration_seconds > 0
-            ? { sourceDurationSeconds: item.duration_seconds }
-            : {}),
-        })
+        }
+        placements.push(mergeProbeIntoPlacement(base, item, probeMap[item.source_item_id]))
       }
     }
     // Plans-list labels arrive as "Variant A" already; older callers
@@ -197,6 +229,7 @@ export function useExportXmlKickoff({
   variantLabels,
   unifiedManifest,
   complete,
+  probedItemsById,  // optional — map of source_item_id → snapshot item with probed_metadata
   autoKick = true,
   // Test-seams: override the network or download primitives. Default
   // to the real ones. Keeping them injectable avoids heavy mocking
@@ -219,7 +252,7 @@ export function useExportXmlKickoff({
     setError(null)
     setStatus(STATUS_POSTING_RESULT)
     try {
-      const body = buildVariantsPayload({ unifiedManifest, variantLabels })
+      const body = buildVariantsPayload({ unifiedManifest, variantLabels, probedItemsById })
       await _apiPost(`/exports/${encodeURIComponent(exportId)}/result`, body)
       if (reqId !== activeRequestRef.current) return  // superseded
       setStatus(STATUS_GENERATING)
@@ -258,7 +291,7 @@ export function useExportXmlKickoff({
       setError(err?.message || String(err))
       setStatus(STATUS_ERROR)
     }
-  }, [exportId, variantLabels, unifiedManifest, _apiPost, _triggerDownload])
+  }, [exportId, variantLabels, unifiedManifest, probedItemsById, _apiPost, _triggerDownload])
 
   // Auto-run on the null → complete-with-no-failures transition.
   // We do NOT auto-run for partial failures (State F); State F will
