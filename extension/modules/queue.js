@@ -165,6 +165,7 @@ export async function startRun({ runId, manifest, targetFolder, options, userId,
 
 export async function pauseRun() {
   if (!state || state.run_state !== 'running') return { ok: false }
+  await closeAllHeldLicenseTabs(state, 'run_paused')
   state.run_state = 'paused'
   await releaseKeepAwake()
   await persistAndBroadcast()
@@ -192,6 +193,7 @@ export async function resumeRun() {
 export async function cancelRun() {
   if (!state) return { ok: false }
   state.run_state = 'cancelled'
+  await closeAllHeldLicenseTabs(state, 'run_cancelled')
   // Cancel any in-flight chrome.downloads
   for (const it of state.items) {
     if (it.phase === 'downloading' && it.download_id != null) {
@@ -894,6 +896,31 @@ export async function runProbeForItem(item, { emit = noopProbeEmit, runContext =
 function noopProbeEmit() {}
 
 /**
+ * Close all held Envato licensing tabs across every item in the given
+ * state and release any pending __envato_cycle_settle promises so
+ * runLicenser awaiters can unwind cleanly.
+ *
+ * Called by pauseRun (reason='run_paused') and cancelRun
+ * (reason='run_cancelled') to prevent tab leaks and hung promises when
+ * the user stops a mid-Envato-cycle run.
+ */
+async function closeAllHeldLicenseTabs(state, reason) {
+  if (!state?.items) return
+  for (const item of state.items) {
+    if (item.license_tab_id) {
+      // closeLicenseTab clears item.license_tab_id and emits telemetry.
+      await closeLicenseTab(item, reason)
+    }
+    // Also resolve any held cycle-settle so the runner promise can unwind
+    // (the licensing slot frees and fillPool's .finally fires schedule()).
+    if (item.__envato_cycle_settle) {
+      item.__envato_cycle_settle()
+      item.__envato_cycle_settle = null
+    }
+  }
+}
+
+/**
  * Close the held Envato licensing tab for an item and emit a telemetry
  * event. No-op if the item has no held tab.
  *
@@ -1504,4 +1531,7 @@ export const _testHooks = {
   // visible to the caller. Tests that need a snapshot should read
   // envato_next_pickup_at immediately after the event that sets it.
   getRunState: () => state,
+  // Exposes closeAllHeldLicenseTabs so tests can call it with a synthetic
+  // state object to verify pause/cancel cleanup logic in isolation.
+  closeAllHeldLicenseTabs,
 }

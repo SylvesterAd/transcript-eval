@@ -685,6 +685,83 @@ describe('Envato inter-item pickup gate', () => {
   })
 })
 
+describe('Envato held tabs close on pause/cancel', () => {
+  beforeEach(() => setupChrome())
+
+  it('closeAllHeldLicenseTabs closes all held tabs and emits envato_license_tab_closed with the given reason', async () => {
+    const emitCalls = []
+    vi.doMock('../../config.js', () => ({}))  // no specific overrides
+    vi.doMock('../telemetry.js', () => ({
+      emit: (name, meta) => emitCalls.push({ name, meta }),
+      normalizeErrorCode: (e) => e,
+    }))
+
+    globalThis.chrome = {
+      tabs: { remove: vi.fn(async () => {}) },
+      storage: { local: { get: vi.fn(async () => ({})), set: vi.fn() } },
+      runtime: { sendMessage: vi.fn(), getManifest: () => ({ version: '1.1.0' }) },
+      downloads: { onChanged: { addListener: vi.fn() } },
+    }
+    vi.resetModules()
+    const { _testHooks } = await import('../queue.js')
+
+    const item1Settle = vi.fn()
+    const item2Settle = vi.fn()
+    const state = {
+      items: [
+        { seq: 1, source: 'envato', source_item_id: 'NX1', license_tab_id: 11, __envato_cycle_settle: item1Settle },
+        { seq: 2, source: 'envato', source_item_id: 'NX2', license_tab_id: 22, __envato_cycle_settle: item2Settle },
+        { seq: 3, source: 'pexels', source_item_id: 'PX1', license_tab_id: null, __envato_cycle_settle: null },
+      ],
+    }
+    await _testHooks.closeAllHeldLicenseTabs(state, 'run_cancelled')
+
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(11)
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(22)
+    expect(chrome.tabs.remove).toHaveBeenCalledTimes(2)  // pexels item had no tab
+
+    const closedEvents = emitCalls.filter(e => e.name === 'envato_license_tab_closed')
+    expect(closedEvents.length).toBe(2)
+    expect(closedEvents.every(e => e.meta.reason === 'run_cancelled')).toBe(true)
+
+    expect(item1Settle).toHaveBeenCalled()
+    expect(item2Settle).toHaveBeenCalled()
+    expect(state.items[0].__envato_cycle_settle).toBeNull()
+    expect(state.items[1].__envato_cycle_settle).toBeNull()
+
+    vi.doUnmock('../telemetry.js')
+    vi.doUnmock('../../config.js')
+  })
+
+  it('accepts run_paused as a reason', async () => {
+    const emitCalls = []
+    vi.doMock('../telemetry.js', () => ({
+      emit: (n, m) => emitCalls.push({ name: n, meta: m }),
+      normalizeErrorCode: (e) => e,
+    }))
+    globalThis.chrome = {
+      tabs: { remove: vi.fn(async () => {}) },
+      storage: { local: { get: vi.fn(async () => ({})), set: vi.fn() } },
+      runtime: { sendMessage: vi.fn(), getManifest: () => ({ version: '1.1.0' }) },
+      downloads: { onChanged: { addListener: vi.fn() } },
+    }
+    vi.resetModules()
+    const { _testHooks } = await import('../queue.js')
+
+    const state = {
+      items: [
+        { seq: 1, source: 'envato', source_item_id: 'NX1', license_tab_id: 11, __envato_cycle_settle: vi.fn() },
+      ],
+    }
+    await _testHooks.closeAllHeldLicenseTabs(state, 'run_paused')
+    const evt = emitCalls.find(e => e.name === 'envato_license_tab_closed')
+    expect(evt).toBeTruthy()
+    expect(evt.meta.reason).toBe('run_paused')
+
+    vi.doUnmock('../telemetry.js')
+  })
+})
+
 describe('Envato pickup-at set on download complete', () => {
   beforeEach(() => setupChrome())
 
