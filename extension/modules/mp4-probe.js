@@ -390,6 +390,14 @@ export async function probeMp4File(fileUrl, opts = {}) {
     emit = noopEmit,
     headRangeBytes = DEFAULT_HEAD_RANGE,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    // Optional caller-supplied total file size. Lets the moov-at-end
+    // fallback skip a `fetch(url, { method: 'HEAD' })` round-trip, which
+    // returns no usable content-length for file:// URLs in Chrome MV3 SW
+    // (the cause of all "no_total_size" failures observed on real Envato
+    // .mov / .mp4 files that have moov at the end). Extension callers pass
+    // item.total_bytes from chrome.downloads. HTTP-based tests can omit
+    // and rely on the HEAD fallback below.
+    totalBytes: callerTotalBytes,
   } = opts
 
   const probeStart = Date.now()
@@ -418,13 +426,21 @@ export async function probeMp4File(fileUrl, opts = {}) {
         let moov = moovInHead
         let bufferEnd = view.byteLength
         if (!moov && sawMdat) {
-          let total
-          try {
-            const headRes = await fetchFn(fileUrl, { method: 'HEAD' })
-            total = Number(headRes.headers.get('content-length') || '0')
-          } catch {
-            emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'head_failed' })
-            return null
+          let total = (typeof callerTotalBytes === 'number' && callerTotalBytes > 0)
+            ? callerTotalBytes
+            : 0
+          if (!total) {
+            // Best-effort HEAD fallback for callers that didn't supply totalBytes.
+            // Chrome MV3 file:// returns no content-length for HEAD, so on the
+            // file:// path this falls through to no_total_size — extension callers
+            // should always pass totalBytes from item.total_bytes.
+            try {
+              const headRes = await fetchFn(fileUrl, { method: 'HEAD' })
+              total = Number(headRes.headers.get('content-length') || '0')
+            } catch {
+              emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'head_failed' })
+              return null
+            }
           }
           if (!total || total <= headRangeBytes) {
             emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'no_total_size' })
