@@ -41,9 +41,15 @@ export const ENVATO_TAB_LOAD_TIMEOUT_MS = 30000
 // (each in-flight licenser opens a hidden envato.com tab; 5 hidden
 // tabs at once is heavy on memory + Envato sees a burst of page
 // views in seconds). 2 trades a bit of throughput for stability.
-export const MAX_ENVATO_RESOLVER_CONCURRENCY = 5
-export const MAX_ENVATO_LICENSE_CONCURRENCY = 2
+// Further dropped to 1 in Ext.6 to serialize license + download cycles.
+export const MAX_ENVATO_RESOLVER_CONCURRENCY = 1
+export const MAX_ENVATO_LICENSE_CONCURRENCY = 1
 export const MAX_DOWNLOAD_CONCURRENCY = 3
+
+// Per-item pacing between sequential Envato cycles. Randomized within this
+// range to look humanlike and avoid burst patterns on /download.data.
+export const ENVATO_INTER_ITEM_DELAY_MS_MIN = 1000
+export const ENVATO_INTER_ITEM_DELAY_MS_MAX = 2000
 
 // Legacy alias — Ext.2's single debug path still imports this.
 // Kept so the Ext.2 debug handler keeps working without edits.
