@@ -166,3 +166,17 @@ describe('mp4-probe tkhd dimensions + duration', () => {
     expect(sec).toBeLessThan(1.1)
   })
 })
+
+describe('mp4-probe tmcd embedded timecode', () => {
+  it('extracts 18:16:14:04 from with_tmcd.mov', () => {
+    const view = loadFixture('with_tmcd.mov')
+    const tc = _internal.readEmbeddedTimecode(view, 0, view.byteLength)
+    expect(tc).toBe('18:16:14:04')
+  })
+
+  it('returns null when no tmcd trak present', () => {
+    const view = loadFixture('30_cfr.mp4')
+    const tc = _internal.readEmbeddedTimecode(view, 0, view.byteLength)
+    expect(tc).toBeNull()
+  })
+})

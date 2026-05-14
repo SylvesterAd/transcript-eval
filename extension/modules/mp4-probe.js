@@ -192,4 +192,72 @@ function readVideoTrakDurationSeconds(view, trak) {
   return mdhd.duration / mdhd.timescale
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds }
+function readEmbeddedTimecode(view, start, end) {
+  const moov = findMoov(view, start, end)
+  if (!moov) return null
+  // Find the tmcd-handler trak
+  let tmcdTrak = null
+  for (const trak of iterateTraks(view, moov)) {
+    if (readTrakHandler(view, trak) === 'tmcd') { tmcdTrak = trak; break }
+  }
+  if (!tmcdTrak) return null
+  const mdia = findChildBox(view, tmcdTrak, 'mdia')
+  if (!mdia) return null
+  const minf = findChildBox(view, mdia, 'minf')
+  if (!minf) return null
+  const stbl = findChildBox(view, minf, 'stbl')
+  if (!stbl) return null
+  const stsd = findChildBox(view, stbl, 'stsd')
+  if (!stsd) return null
+  // stsd: version(1) + flags(3) + entry_count(4) + entries...
+  // each entry: size(4) + type(4) + entry-specific data
+  // For tmcd: reserved(6) + data_reference_index(2) + reserved(4) +
+  //          flags(4) + timescale(4) + frame_duration(4) + number_of_frames(1) + reserved(1)
+  if (stsd.payloadEnd - stsd.payloadStart < 16) return null
+  const firstEntryStart = stsd.payloadStart + 8
+  if (firstEntryStart + 8 > stsd.payloadEnd) return null
+  const entrySize = readU32BE(view, firstEntryStart)
+  const entryType = readFourCC(view, firstEntryStart + 4)
+  if (entryType !== 'tmcd') return null
+  if (firstEntryStart + entrySize > stsd.payloadEnd) return null
+  const tmcdDataStart = firstEntryStart + 8
+  // Skip reserved(6) + dataRefIdx(2) + reserved(4) = 12 bytes
+  const flagsOff = tmcdDataStart + 12
+  if (flagsOff + 14 > stsd.payloadEnd) return null
+  const tmcdFlags = readU32BE(view, flagsOff)
+  const tmcdTimescale = readU32BE(view, flagsOff + 4)
+  const tmcdFrameDur = readU32BE(view, flagsOff + 8)
+  const numFrames = view.getUint8(flagsOff + 12)
+  const dropFrame = (tmcdFlags & 0x1) !== 0
+  if (!tmcdTimescale || !tmcdFrameDur || !numFrames) return null
+  // First sample value (start TC frame number) is stored in mdat at offset
+  // given by stco[0] (or co64[0]). Sample is a 32-bit BE integer.
+  const stco = findChildBox(view, stbl, 'stco') || findChildBox(view, stbl, 'co64')
+  if (!stco) return null
+  if (stco.payloadEnd - stco.payloadStart < 12) return null
+  const offsetCount = readU32BE(view, stco.payloadStart + 4)
+  if (offsetCount === 0) return null
+  let sampleOffset
+  if (stco.type === 'stco') {
+    sampleOffset = readU32BE(view, stco.payloadStart + 8)
+  } else {
+    const big = readU64BE(view, stco.payloadStart + 8)
+    if (big > BigInt(Number.MAX_SAFE_INTEGER)) return null
+    sampleOffset = Number(big)
+  }
+  if (sampleOffset + 4 > end) return null
+  const startFrames = readU32BE(view, sampleOffset)
+  // Format as HH:MM:SS:FF (or HH:MM:SS;FF for DF)
+  const fps = numFrames
+  const totalFrames = startFrames
+  const ff = totalFrames % fps
+  const totalSec = Math.floor(totalFrames / fps)
+  const ss = totalSec % 60
+  const mm = Math.floor(totalSec / 60) % 60
+  const hh = Math.floor(totalSec / 3600)
+  const sep = dropFrame ? ';' : ':'
+  const pad = n => String(n).padStart(2, '0')
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}${sep}${pad(ff)}`
+}
+
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds, readEmbeddedTimecode }
