@@ -291,3 +291,223 @@ function readEmbeddedTimecode(view, start, end) {
 }
 
 export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, normalizeFrameRate, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds, readEmbeddedTimecode }
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+const DEFAULT_HEAD_RANGE = 1024 * 1024  // 1 MB
+const DEFAULT_TIMEOUT_MS = 10_000
+
+function noopEmit() {}
+
+async function fetchRange(fetchFn, url, start, end) {
+  const headers = (start === 0 && end === undefined)
+    ? {}
+    : { Range: `bytes=${start}-${end ?? ''}` }
+  const res = await fetchFn(url, { headers })
+  if (!res.ok && res.status !== 206 && res.status !== 200) {
+    throw new Error(`fetch returned ${res.status}`)
+  }
+  const ab = await res.arrayBuffer()
+  return new DataView(ab)
+}
+
+// Like readBoxHeader but allows the box payload to extend past bufferEnd.
+// Used only for top-level type/size detection — never for descending into
+// payload bytes that may not be present in the buffer.
+function readBoxHeaderPartial(view, offset, bufferEnd) {
+  if (offset + 8 > bufferEnd) return null
+  let size = readU32BE(view, offset)
+  const type = readFourCC(view, offset + 4)
+  let headerSize = 8
+  if (size === 1) {
+    if (offset + 16 > bufferEnd) return null
+    const big = readU64BE(view, offset + 8)
+    if (big > BigInt(Number.MAX_SAFE_INTEGER)) return null
+    size = Number(big)
+    headerSize = 16
+  } else if (size === 0) {
+    // Runs to end-of-file/buffer — treat as "rest of buffer" for advancement
+    size = bufferEnd - offset
+  }
+  if (size < headerSize) return null
+  // NOTE: unlike readBoxHeader, we do NOT reject boxes that extend past bufferEnd.
+  return {
+    type,
+    size,
+    headerSize,
+    payloadStart: offset + headerSize,
+    payloadEnd: offset + size,
+    truncated: offset + size > bufferEnd,
+  }
+}
+
+// Scans top-level boxes and returns ftyp, moov, and mdat (the first mdat seen).
+// Returns the mdat box object (not just a boolean) so the tail-range path can
+// use mdat.payloadEnd to compute the exact moov start offset.
+// Uses readBoxHeaderPartial so mdat is detected even when its payload is truncated
+// by the Range request — only the 8-byte box header needs to be in the buffer.
+function parseFromView(view, startInBuffer, endInBuffer) {
+  let ftyp = null
+  let moov = null
+  let mdat = null
+  let cursor = startInBuffer
+  while (cursor < endInBuffer) {
+    const box = readBoxHeaderPartial(view, cursor, endInBuffer)
+    if (!box) break
+    if (box.type === 'ftyp' && !box.truncated) {
+      // ftyp must be fully readable to validate brand bytes
+      ftyp = box
+    } else if (box.type === 'moov' && !box.truncated) {
+      moov = box
+      break
+    } else if (box.type === 'mdat') {
+      // Record mdat even if truncated — we only need payloadEnd (offset math)
+      mdat = box
+    }
+    if (box.truncated) break  // can't advance past a truncated box
+    cursor = box.payloadEnd
+  }
+  return { ftyp, moov, mdat, sawMdat: mdat !== null }
+}
+
+function extractMetadataFromMoov(view, moov, bufferEnd) {
+  const traks = [...iterateTraks(view, moov)]
+  const videoTrak = traks.find(t => readTrakHandler(view, t) === 'vide')
+  if (!videoTrak) return null
+  const { frameRate, ntsc, isVfr, isBogus } = readVideoTrakRate(view, videoTrak)
+  if (isBogus || frameRate === null) return { bogus: true }
+  const { width, height } = readTkhdDims(view, videoTrak)
+  const durationSeconds = readVideoTrakDurationSeconds(view, videoTrak)
+  const embeddedTimecode = readEmbeddedTimecode(view, 0, bufferEnd)
+  return { frameRate, ntsc, width, height, durationSeconds, embeddedTimecode, isVfr }
+}
+
+export async function probeMp4File(fileUrl, opts = {}) {
+  const {
+    fetchFn = globalThis.fetch,
+    emit = noopEmit,
+    headRangeBytes = DEFAULT_HEAD_RANGE,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  } = opts
+
+  const probeStart = Date.now()
+  const ctx = { url: fileUrl }
+  let timer
+
+  try {
+    const result = await Promise.race([
+      (async () => {
+        let view
+        try {
+          view = await fetchRange(fetchFn, fileUrl, 0, headRangeBytes - 1)
+        } catch (err) {
+          emit('fps_probe_failed_fetch', { ...ctx, error: String(err?.message || err) })
+          return null
+        }
+        if (view.byteLength < 16) {
+          emit('fps_probe_failed_not_mp4', { ...ctx, byteLength: view.byteLength })
+          return null
+        }
+        const { ftyp, moov: moovInHead, mdat: mdatInHead, sawMdat } = parseFromView(view, 0, view.byteLength)
+        if (!ftyp || !validateFtypBrand(view, ftyp)) {
+          emit('fps_probe_failed_unsupported_brand', { ...ctx })
+          return null
+        }
+        let moov = moovInHead
+        let bufferEnd = view.byteLength
+        if (!moov && sawMdat) {
+          let total
+          try {
+            const headRes = await fetchFn(fileUrl, { method: 'HEAD' })
+            total = Number(headRes.headers.get('content-length') || '0')
+          } catch {
+            emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'head_failed' })
+            return null
+          }
+          if (!total || total <= headRangeBytes) {
+            emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'no_total_size' })
+            return null
+          }
+          // Use mdat's payloadEnd (from the head fetch parse) as the moov start.
+          // mdat's box header was readable since it was within headRangeBytes
+          // (otherwise sawMdat would be false). Falls back to a generous window
+          // if mdat's end is past total or otherwise unusable.
+          let moovStart
+          if (mdatInHead && mdatInHead.payloadEnd > 0 && mdatInHead.payloadEnd < total) {
+            moovStart = mdatInHead.payloadEnd
+          } else {
+            // Fall back: fetch a generous window at end (whichever is larger:
+            // headRangeBytes, or total/4)
+            moovStart = Math.max(0, total - Math.max(headRangeBytes, Math.floor(total / 4)))
+          }
+          let tailView
+          try {
+            tailView = await fetchRange(fetchFn, fileUrl, moovStart, total - 1)
+          } catch {
+            emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'tail_fetch_failed' })
+            return null
+          }
+          const { moov: moovInTail } = parseFromView(tailView, 0, tailView.byteLength)
+          if (!moovInTail) {
+            emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'tail_no_moov' })
+            return null
+          }
+          moov = moovInTail
+          view = tailView
+          bufferEnd = tailView.byteLength
+        }
+        if (!moov) {
+          emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'not_in_head' })
+          return null
+        }
+        let meta
+        try {
+          meta = extractMetadataFromMoov(view, moov, bufferEnd)
+        } catch (err) {
+          emit('fps_probe_failed_parse_error', { ...ctx, error: String(err?.message || err) })
+          return null
+        }
+        if (!meta) {
+          emit('fps_probe_failed_no_timing', ctx)
+          return null
+        }
+        if (meta.bogus) {
+          emit('fps_probe_failed_bogus_value', ctx)
+          return null
+        }
+        if (meta.isVfr) {
+          emit('fps_probe_vfr_detected', { ...ctx, frameRate: meta.frameRate })
+        }
+        emit('fps_probe_success', {
+          ...ctx,
+          frameRate: meta.frameRate,
+          ntsc: meta.ntsc,
+          width: meta.width,
+          height: meta.height,
+          durationSeconds: meta.durationSeconds,
+          embeddedTimecode: meta.embeddedTimecode,
+          elapsedMs: Date.now() - probeStart,
+        })
+        return {
+          frameRate: meta.frameRate,
+          ntsc: meta.ntsc,
+          width: meta.width,
+          height: meta.height,
+          durationSeconds: meta.durationSeconds,
+          embeddedTimecode: meta.embeddedTimecode,
+        }
+      })(),
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          emit('fps_probe_timeout', { ...ctx, timeoutMs })
+          resolve(null)
+        }, timeoutMs)
+      }),
+    ])
+    return result
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}

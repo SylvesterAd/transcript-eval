@@ -283,3 +283,77 @@ describe('mp4-probe tmcd embedded timecode', () => {
     expect(tc).toBeNull()
   })
 })
+
+import { vi } from 'vitest'
+
+describe('mp4-probe public probeMp4File', () => {
+  function makeFetch(fixturePath, totalSize = null) {
+    return vi.fn(async (url, opts) => {
+      const bytes = readFileSync(resolve(__dirname, '../../fixtures/mp4', fixturePath))
+      const size = totalSize ?? bytes.length
+      if (opts?.method === 'HEAD') {
+        return new Response(null, { status: 200, headers: { 'content-length': String(size) } })
+      }
+      const range = opts?.headers?.Range || ''
+      const m = range.match(/bytes=(\d+)-(\d+)/)
+      if (m) {
+        const a = Number(m[1]), b = Math.min(Number(m[2]), bytes.length - 1)
+        return new Response(bytes.slice(a, b + 1), { status: 206 })
+      }
+      return new Response(bytes, { status: 200 })
+    })
+  }
+
+  it('returns success metadata for a faststart MP4', async () => {
+    const { probeMp4File } = await import('../mp4-probe.js')
+    const emit = vi.fn()
+    const fetchFn = makeFetch('30_cfr.mp4')
+    const result = await probeMp4File('file:///fake', { fetchFn, emit })
+    expect(result).toMatchObject({
+      frameRate: 30, ntsc: false, width: 160, height: 90,
+    })
+    expect(result.durationSeconds).toBeGreaterThan(0.9)
+    expect(emit).toHaveBeenCalledWith('fps_probe_success', expect.any(Object))
+  })
+
+  it('handles moov-at-end via tail range', async () => {
+    const { probeMp4File } = await import('../mp4-probe.js')
+    const emit = vi.fn()
+    const fetchFn = makeFetch('moov_at_end.mp4')
+    const result = await probeMp4File('file:///fake', { fetchFn, emit, headRangeBytes: 256 })
+    expect(result).toMatchObject({ frameRate: 30, ntsc: false })
+    expect(emit).toHaveBeenCalledWith('fps_probe_success', expect.any(Object))
+  })
+
+  it('returns null + emits unsupported_brand for non-MP4', async () => {
+    const { probeMp4File } = await import('../mp4-probe.js')
+    const emit = vi.fn()
+    const fetchFn = vi.fn(async () => new Response(new Uint8Array([
+      0x00, 0x00, 0x00, 0x10, 0x66, 0x74, 0x79, 0x70,
+      0x77, 0x65, 0x62, 0x6d, 0x00, 0x00, 0x00, 0x00,
+    ])))
+    const result = await probeMp4File('file:///fake', { fetchFn, emit })
+    expect(result).toBeNull()
+    expect(emit).toHaveBeenCalledWith('fps_probe_failed_unsupported_brand', expect.any(Object))
+  })
+
+  it('returns null + emits timeout when fetch never resolves', async () => {
+    const { probeMp4File } = await import('../mp4-probe.js')
+    const emit = vi.fn()
+    const fetchFn = () => new Promise(() => {})
+    const result = await probeMp4File('file:///fake', { fetchFn, emit, timeoutMs: 50 })
+    expect(result).toBeNull()
+    expect(emit).toHaveBeenCalledWith('fps_probe_timeout', expect.any(Object))
+  })
+
+  it('returns null + emits failed_fetch on rejected fetch', async () => {
+    const { probeMp4File } = await import('../mp4-probe.js')
+    const emit = vi.fn()
+    const fetchFn = vi.fn(async () => { throw new Error('OS error') })
+    const result = await probeMp4File('file:///fake', { fetchFn, emit })
+    expect(result).toBeNull()
+    expect(emit).toHaveBeenCalledWith('fps_probe_failed_fetch', expect.objectContaining({
+      error: expect.stringContaining('OS error'),
+    }))
+  })
+})
