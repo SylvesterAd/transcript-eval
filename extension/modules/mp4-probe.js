@@ -76,4 +76,34 @@ function validateFtypBrand(view, ftyp) {
   return false
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS }
+function findMoov(view, start, end) {
+  for (const box of iterateBoxes(view, start, end)) {
+    if (box.type === 'moov') return box
+  }
+  return null
+}
+
+function findChildBox(view, parent, type) {
+  for (const box of iterateBoxes(view, parent.payloadStart, parent.payloadEnd)) {
+    if (box.type === type) return box
+  }
+  return null
+}
+
+function* iterateTraks(view, moov) {
+  for (const box of iterateBoxes(view, moov.payloadStart, moov.payloadEnd)) {
+    if (box.type === 'trak') yield box
+  }
+}
+
+function readTrakHandler(view, trak) {
+  const mdia = findChildBox(view, trak, 'mdia')
+  if (!mdia) return null
+  const hdlr = findChildBox(view, mdia, 'hdlr')
+  if (!hdlr) return null
+  // hdlr layout: version(1) + flags(3) + pre_defined(4) + handler_type(4) + ...
+  if (hdlr.payloadEnd - hdlr.payloadStart < 12) return null
+  return readFourCC(view, hdlr.payloadStart + 8)
+}
+
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler }

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { _internal } from '../mp4-probe.js'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
+
+function loadFixture(name) {
+  const path = resolve(__dirname, '../../fixtures/mp4', name)
+  const bytes = readFileSync(path)
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+}
 
 describe('mp4-probe byte readers', () => {
   const buf = new Uint8Array([0x00, 0x00, 0x00, 0x10, 0x66, 0x74, 0x79, 0x70,
@@ -87,5 +95,32 @@ describe('mp4-probe brand validation', () => {
     const view = new DataView(bytes.buffer)
     const ftyp = _internal.readBoxHeader(view, 0, bytes.length)
     expect(_internal.validateFtypBrand(view, ftyp)).toBe(false)
+  })
+})
+
+describe('mp4-probe moov + trak traversal', () => {
+  it('finds moov in 30_cfr.mp4', () => {
+    const view = loadFixture('30_cfr.mp4')
+    const moov = _internal.findMoov(view, 0, view.byteLength)
+    expect(moov).not.toBeNull()
+    expect(moov.type).toBe('moov')
+  })
+
+  it('iterates traks and identifies video handler', () => {
+    const view = loadFixture('30_cfr.mp4')
+    const moov = _internal.findMoov(view, 0, view.byteLength)
+    const traks = [..._internal.iterateTraks(view, moov)]
+    expect(traks.length).toBeGreaterThanOrEqual(1)
+    const handlers = traks.map(t => _internal.readTrakHandler(view, t))
+    expect(handlers).toContain('vide')
+  })
+
+  it('returns null when moov missing in faststart buffer', () => {
+    const bytes = new Uint8Array(0x20)
+    bytes.set([0x00, 0x00, 0x00, 0x10, 0x66, 0x74, 0x79, 0x70,
+               0x6d, 0x70, 0x34, 0x32, 0x00, 0x00, 0x00, 0x00], 0)
+    bytes.set([0x00, 0x00, 0x00, 0x10, 0x6d, 0x64, 0x61, 0x74], 0x10)
+    const view = new DataView(bytes.buffer)
+    expect(_internal.findMoov(view, 0, bytes.length)).toBeNull()
   })
 })
