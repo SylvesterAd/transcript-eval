@@ -356,6 +356,7 @@ async function runLicenser(item) {
       meta: { license_ms: Date.now() - (item.license_started_at || Date.now()) },
     })
     await persistAndBroadcast()
+    schedule()  // kick the downloader pool now that item is downloadable
     // E4: Hold the licensing slot until the download completes (or is
     // interrupted). This ensures MAX_ENVATO_LICENSE_CONCURRENCY=1 is
     // meaningful end-to-end: a second Envato item cannot begin licensing

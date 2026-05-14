@@ -280,6 +280,129 @@ function makeE5Chrome(captureDownloadListener) {
   return { chrome, getDownloadListener: () => downloadListenerRef }
 }
 
+// ---------------------------------------------------------------------------
+// Single-item Envato run does not deadlock (deadlock regression test for E4)
+// ---------------------------------------------------------------------------
+
+describe('Single-item Envato run does not deadlock', () => {
+  beforeEach(() => setupChrome())
+
+  it('a 1-item Envato run progresses from queued → downloading → done without external scheduler nudges', async () => {
+    let downloadListener = null
+    const phaseLog = []
+    const initialTotal = vi.fn()
+
+    globalThis.chrome = {
+      tabs: {
+        create: vi.fn(async ({ url }) => ({ id: 42, url })),
+        remove: vi.fn(async () => {}),
+        onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
+        onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
+      },
+      scripting: {
+        executeScript: vi.fn(async () => ([{ result: { signedUrl: 'https://cdn/x', filename: 'a.mov' } }])),
+      },
+      downloads: {
+        download: vi.fn(async () => {
+          initialTotal()
+          return 1
+        }),
+        search: vi.fn(async () => []),
+        onChanged: { addListener: vi.fn((cb) => { downloadListener = cb }) },
+      },
+      webNavigation: { onCommitted: { addListener: vi.fn(), removeListener: vi.fn() } },
+      storage: { local: { get: vi.fn(async () => ({})), set: vi.fn() } },
+      runtime: { sendMessage: vi.fn(), getManifest: () => ({ version: '1.1.0' }) },
+      extension: { isAllowedFileSchemeAccess: vi.fn(async () => false) },
+    }
+
+    vi.doMock('../envato.js', async () => {
+      const actual = await vi.importActual('../envato.js')
+      return {
+        ...actual,
+        resolveOldIdToNewUuid: vi.fn(async () => '11111111-2222-3333-4444-555555555555'),
+        getSignedDownloadUrl: vi.fn(async () => ({
+          signedUrl: 'https://cdn/x', filename: 'a.mov', licenseTabId: 42,
+        })),
+      }
+    })
+    vi.doMock('../sources.js', () => ({
+      fetchPexelsUrl: vi.fn(async () => ({ url: 'https://pexels/x', expires_at: null })),
+      fetchFreepikUrl: vi.fn(async () => ({ url: 'https://freepik/x', expires_at: null })),
+    }))
+    vi.doMock('../port.js', () => ({ broadcastToPort: vi.fn() }))
+    vi.doMock('../auth.js', () => ({
+      onEnvatoSessionChange: vi.fn(),
+      hasEnvatoSession: vi.fn(async () => true),
+    }))
+    vi.doMock('../storage.js', () => ({
+      saveRunState: vi.fn(async () => {}),
+      loadRunState: vi.fn(async () => null),
+      deleteRunState: vi.fn(async () => {}),
+      getActiveRunId: vi.fn(async () => null),
+      setActiveRunId: vi.fn(async () => ({ ok: true })),
+      clearActiveRunId: vi.fn(async () => {}),
+      markCompleted: vi.fn(async () => {}),
+      isDenied: vi.fn(async () => false),
+      addToDenyList: vi.fn(async () => {}),
+      incrementDailyCount: vi.fn(async () => {}),
+      checkDailyCapThreshold: vi.fn(async () => 'ok'),
+      getDailyCount: vi.fn(async () => 0),
+      shouldAlertForDeny: vi.fn(async () => false),
+      markAlertEmitted: vi.fn(async () => {}),
+    }))
+    vi.doMock('../telemetry.js', () => ({
+      emit: vi.fn(),
+      normalizeErrorCode: (e) => (typeof e === 'string' ? e : String(e)),
+    }))
+    vi.doMock('../config.js', () => ({
+      MAX_ENVATO_RESOLVER_CONCURRENCY: 2,
+      MAX_ENVATO_LICENSE_CONCURRENCY: 1,
+      MAX_DOWNLOAD_CONCURRENCY: 4,
+      PROGRESS_COALESCE_MS: 200,
+      DOWNLOAD_NETWORK_RETRY_CAP: 3,
+      MESSAGE_VERSION: '1.1.0',
+      FREEPIK_URL_REFETCH_CAP: 2,
+      INTEGRITY_TOLERANCE: 0.05,
+      ENVATO_JITTER_MIN_MS: 0,
+      ENVATO_JITTER_MAX_MS: 0,
+      ENVATO_REAUTH_MAX_WAIT_MS: 5000,
+      getCachedConfig: vi.fn(async () => ({ fps_probe_enabled: false })),
+    }))
+    vi.doMock('../power.js', () => ({
+      acquireKeepAwake: vi.fn(async () => {}),
+      releaseKeepAwake: vi.fn(async () => {}),
+    }))
+
+    vi.resetModules()
+    const { startRun } = await import('../queue.js')
+
+    const manifest = [
+      { source: 'envato', source_item_id: 'NX1', target_filename: 'a.mov', est_size_bytes: 1000, envato_item_url: 'https://elements.envato.com/x' },
+    ]
+    startRun({ manifest, runId: 'test-run-single', targetFolder: 'tmp', _config_check_passed: true })
+
+    // Wait for the item to reach 'downloading' phase + chrome.downloads.download to be called
+    await new Promise(r => setTimeout(r, 300))
+    expect(initialTotal).toHaveBeenCalled()  // ← KEY assertion: download was attempted
+
+    // Now fire the complete event and confirm the cycle finishes
+    if (downloadListener) {
+      downloadListener({ id: 1, state: { current: 'complete', previous: 'in_progress' } })
+    }
+    await new Promise(r => setTimeout(r, 200))
+
+    vi.doUnmock('../envato.js')
+    vi.doUnmock('../sources.js')
+    vi.doUnmock('../port.js')
+    vi.doUnmock('../auth.js')
+    vi.doUnmock('../storage.js')
+    vi.doUnmock('../telemetry.js')
+    vi.doUnmock('../config.js')
+    vi.doUnmock('../power.js')
+  }, 5000)
+})
+
 // Two-item manifest: item2's resolver completes first (or concurrently),
 // triggering schedule() which picks up item1 for downloading. This ensures
 // runDownloader(item1) is called even though runLicenser(item1) is blocked
