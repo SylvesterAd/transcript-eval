@@ -118,6 +118,26 @@ export const TELEMETRY_EVENT_ENUM = Object.freeze([
   'queue_paused',
   'queue_resumed',
   'export_completed',
+  // FPS probe (feature/extension-fps-probe)
+  'fps_probe_success',
+  'fps_probe_failed_fetch',
+  'fps_probe_failed_not_mp4',
+  'fps_probe_failed_unsupported_brand',
+  'fps_probe_failed_moov_not_located',
+  'fps_probe_failed_parse_error',
+  'fps_probe_failed_bogus_value',
+  'fps_probe_failed_no_path',
+  'fps_probe_failed_no_timing',
+  'fps_probe_vfr_detected',
+  'fps_probe_timeout',
+  'fps_probe_skipped_no_permission',
+  'fps_probe_skipped_remote_kill',
+  'fps_probe_internal_error',
+  'fps_permission_granted',
+  'export_started_without_fps_probe',
+  // Envato sequential licensing (feature/extension-fps-probe)
+  'envato_license_tab_held',
+  'envato_license_tab_closed',
 ])
 
 // -------- Ext.7 failure-mode polish --------
