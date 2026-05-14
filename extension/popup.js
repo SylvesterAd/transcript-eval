@@ -278,6 +278,7 @@ async function render() {
   await safe(renderDiskErrorIfAny, 'renderDiskErrorIfAny')
   await safe(renderDiagRow, 'renderDiagRow')
   await safe(renderOptOutRow, 'renderOptOutRow')
+  await safe(refreshFileAccessBanner, 'refreshFileAccessBanner')
 }
 
 // Live updates: if a new JWT arrives OR the cookie watcher updates
@@ -327,5 +328,57 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     }
   })
 })()
+
+// --- FPS probe onboarding banner state machine ---
+//
+// Shown only after at least one run has been attempted AND the user has
+// not yet granted the "Allow access to file URLs" toggle in Chrome
+// extension settings. The banner is snoozable for 7 days and re-checks
+// on popup focus in case the user toggled the setting while the popup
+// was open.
+
+const FILE_ACCESS_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000  // 7 days
+
+async function refreshFileAccessBanner() {
+  const banner = document.getElementById('file-access-banner')
+  const howto = document.getElementById('file-access-howto')
+  if (!banner || !howto) return
+  let allowed = false
+  try {
+    allowed = await chrome.extension.isAllowedFileSchemeAccess()
+  } catch {
+    return
+  }
+  if (allowed) {
+    banner.hidden = true
+    howto.hidden = true
+    return
+  }
+  const { run_history_count = 0, fps_banner_snoozed_until = 0 } =
+    await chrome.storage.local.get(['run_history_count', 'fps_banner_snoozed_until'])
+  const now = Date.now()
+  if (run_history_count < 1 || fps_banner_snoozed_until > now) {
+    banner.hidden = true
+    howto.hidden = true
+    return
+  }
+  banner.hidden = false
+}
+
+document.getElementById('file-access-show-how')?.addEventListener('click', () => {
+  document.getElementById('file-access-banner').hidden = true
+  document.getElementById('file-access-howto').hidden = false
+})
+
+document.getElementById('file-access-snooze')?.addEventListener('click', async () => {
+  await chrome.storage.local.set({ fps_banner_snoozed_until: Date.now() + FILE_ACCESS_SNOOZE_MS })
+  document.getElementById('file-access-banner').hidden = true
+})
+
+document.getElementById('file-access-open-settings')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` })
+})
+
+window.addEventListener('focus', refreshFileAccessBanner)
 
 render()

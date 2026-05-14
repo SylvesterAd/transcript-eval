@@ -235,6 +235,13 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: false, error_code: gate.error_code, detail: gate.detail, current: gate.current, min: gate.min })
           return
         }
+        // Track run history for popup banner gating (FPS probe onboarding).
+        // Increment AFTER the config gate passes so only real export attempts
+        // count — not rejected/blocked ones.
+        try {
+          const { run_history_count = 0 } = await chrome.storage.local.get('run_history_count')
+          await chrome.storage.local.set({ run_history_count: run_history_count + 1 })
+        } catch { /* best-effort — don't block export on counter failure */ }
         // user_id comes from the stored JWT — queue uses it for
         // completed_items keying.
         const jwt = await getJwt()

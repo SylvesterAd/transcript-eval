@@ -23,6 +23,27 @@
       </div>
     </div>
 
+    <!-- FPS probe onboarding — shown after first run when file:// access is
+         not yet granted. Snoozable for 7 days. Hidden by default. -->
+    <div id="file-access-banner" class="config-banner" data-severity="warn" hidden>
+      <span class="config-banner-icon" aria-hidden="true">&#9888;</span>
+      <div class="config-banner-body">
+        <div class="config-banner-title">Enable FPS verification</div>
+        <div class="config-banner-detail">Premiere may fail to find files if their actual frame rate differs from what the preview reports. Enable file access for accurate metadata.</div>
+      </div>
+      <button id="file-access-show-how" class="config-banner-action" type="button">Show me how</button>
+      <button id="file-access-snooze" class="config-banner-snooze" type="button" aria-label="Not now">Not now</button>
+    </div>
+
+    <div id="file-access-howto" class="config-banner config-banner--howto" hidden>
+      <ol>
+        <li>Click the button below to open this extension's settings page.</li>
+        <li>Scroll down and turn on <strong>Allow access to file URLs</strong>.</li>
+        <li>Come back here — the banner will disappear automatically.</li>
+      </ol>
+      <button id="file-access-open-settings" class="config-banner-action" type="button">Open settings</button>
+    </div>
+
     <div class="row" id="row-te">
       <div class="row-label">transcript-eval</div>
       <div class="row-status" id="status-te">—</div>
