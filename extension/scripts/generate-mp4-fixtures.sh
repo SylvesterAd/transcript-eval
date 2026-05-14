@@ -38,8 +38,8 @@ ffmpeg -loglevel error -y \
   -fps_mode vfr \
   "$OUT_DIR/vfr.mp4"
 
-# Corrupt: truncate 30_cfr.mp4 to its first 8 KB
-head -c 8192 "$OUT_DIR/30_cfr.mp4" > "$OUT_DIR/corrupt_truncated.mp4"
+# Corrupt: truncate 30_cfr.mp4 to its first 512 bytes (fits ftyp but truncates mid-box)
+head -c 512 "$OUT_DIR/30_cfr.mp4" > "$OUT_DIR/corrupt_truncated.mp4"
 
 echo "Generated $(ls -1 "$OUT_DIR" | wc -l | tr -d ' ') fixtures in $OUT_DIR"
 ls -lh "$OUT_DIR"
