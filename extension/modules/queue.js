@@ -320,7 +320,8 @@ async function runLicenser(item) {
   await persistAndBroadcast()
   try {
     // JIT URL fetching: we're milliseconds away from chrome.downloads.download
-    const signedUrl = await getSignedDownloadUrl(item.resolved_uuid)
+    // E2: getSignedDownloadUrl now returns { signedUrl, filename, licenseTabId }.
+    const { signedUrl, licenseTabId } = await getSignedDownloadUrl(item.resolved_uuid)
 
     // Ext.7 post-license filetype check. Envato's own orchestrator
     // (envato.js `downloadEnvato`) does this for single-shot; the
@@ -336,6 +337,14 @@ async function runLicenser(item) {
     }
 
     item.signed_url = signedUrl
+    // E3: store the held tab id so E4/E5 can close it after the download slot releases.
+    item.license_tab_id = licenseTabId
+    emitTelemetry('envato_license_tab_held', {
+      seq: item.seq,
+      source_item_id: item.source_item_id,
+      tab_id: licenseTabId,
+      t: Date.now(),
+    })
     item.phase = 'downloading'
     item.claimed = false
     emitTelemetry('item_licensed', {
@@ -693,6 +702,11 @@ export function buildInitialRunState({ runId, manifest, targetFolder, options, u
       // persisted state.items[].final_path once State F / WebApp.3 wire
       // the consumer (deferred — see note above at the emit site).
       final_path: null,
+      // E3: ID of the Envato licensing tab that opened during getSignedDownloadUrl.
+      // Stored here so the queue can close it (and emit telemetry) once the
+      // download slot is released (E4/E5). null for non-Envato items and
+      // before licensing runs.
+      license_tab_id: null,
     })),
     stats: { ok_count: 0, fail_count: 0, total_bytes_downloaded: 0 },
     run_state: 'running',
@@ -743,6 +757,9 @@ export function buildItemSnapshot(item) {
     expected_size_bytes: item.expected_size_bytes,
     // FPS probe result — omitted (key absent) when no probe ran
     ...(item.probed_metadata ? { probed_metadata: item.probed_metadata } : {}),
+    // E3: held Envato licensing tab — omitted when null so snapshots stay
+    // lean for non-Envato items and before licensing runs.
+    ...(item.license_tab_id ? { license_tab_id: item.license_tab_id } : {}),
   }
 }
 
@@ -797,6 +814,29 @@ export async function runProbeForItem(item, { emit = noopProbeEmit, runContext =
 }
 
 function noopProbeEmit() {}
+
+/**
+ * Close the held Envato licensing tab for an item and emit a telemetry
+ * event. No-op if the item has no held tab.
+ *
+ * reason ∈ download_complete | download_failed | run_paused | run_cancelled
+ */
+export async function closeLicenseTab(item, reason) {
+  if (!item?.license_tab_id) return
+  const tabId = item.license_tab_id
+  item.license_tab_id = null
+  try {
+    await chrome.tabs.remove(tabId)
+  } catch {
+    // tab already closed by user, or doesn't exist — ignore
+  }
+  emitTelemetry('envato_license_tab_closed', {
+    seq: item.seq,
+    source_item_id: item.source_item_id,
+    reason,
+    t: Date.now(),
+  })
+}
 
 function snapshot() {
   if (!state) return null
