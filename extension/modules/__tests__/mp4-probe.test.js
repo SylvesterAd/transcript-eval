@@ -67,3 +67,25 @@ describe('mp4-probe box iteration', () => {
     expect(types).toEqual(['ftyp', 'moov'])
   })
 })
+
+describe('mp4-probe brand validation', () => {
+  it('accepts known MP4/MOV brands', () => {
+    // ftyp size=0x18, major brand 'mp42', minor version 0, compat 'isom'
+    const bytes = new Uint8Array(0x18)
+    bytes.set([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+               0x6d, 0x70, 0x34, 0x32, 0x00, 0x00, 0x00, 0x00,
+               0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x32], 0)
+    const view = new DataView(bytes.buffer)
+    const ftyp = _internal.readBoxHeader(view, 0, bytes.length)
+    expect(_internal.validateFtypBrand(view, ftyp)).toBe(true)
+  })
+
+  it('rejects unknown brand', () => {
+    const bytes = new Uint8Array(0x10)
+    bytes.set([0x00, 0x00, 0x00, 0x10, 0x66, 0x74, 0x79, 0x70,
+               0x77, 0x65, 0x62, 0x6d, 0x00, 0x00, 0x00, 0x00], 0)  // 'webm'
+    const view = new DataView(bytes.buffer)
+    const ftyp = _internal.readBoxHeader(view, 0, bytes.length)
+    expect(_internal.validateFtypBrand(view, ftyp)).toBe(false)
+  })
+})

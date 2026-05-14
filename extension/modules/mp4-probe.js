@@ -57,4 +57,23 @@ function* iterateBoxes(view, start, end) {
   }
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes }
+const ACCEPTED_BRANDS = new Set([
+  'mp4 ', 'isom', 'iso2', 'iso4', 'iso5', 'iso6',
+  'qt  ', 'mp41', 'mp42', 'MSNV', 'M4V ', 'M4A ',
+  'avc1',
+])
+
+function validateFtypBrand(view, ftyp) {
+  if (!ftyp || ftyp.type !== 'ftyp') return false
+  // Major brand at payload offset 0
+  if (ftyp.payloadEnd - ftyp.payloadStart < 8) return false
+  const major = readFourCC(view, ftyp.payloadStart)
+  if (ACCEPTED_BRANDS.has(major)) return true
+  // Walk compatible brands (4 bytes each, starting at payload+8)
+  for (let off = ftyp.payloadStart + 8; off + 4 <= ftyp.payloadEnd; off += 4) {
+    if (ACCEPTED_BRANDS.has(readFourCC(view, off))) return true
+  }
+  return false
+}
+
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS }
