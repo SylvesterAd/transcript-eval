@@ -55,3 +55,31 @@ describe('queue probe integration', () => {
     expect(skipCalls.length).toBe(1)
   })
 })
+
+describe('queue snapshot exposes probed_metadata', () => {
+  it('snapshot.items[i] includes probed_metadata when set', async () => {
+    setupChrome({ isAllowed: true })
+    const { buildItemSnapshot } = await import('../queue.js')
+    const item = {
+      seq: 2, source: 'envato', source_item_id: 'NXG', target_filename: 'a.mov',
+      phase: 'completed', bytes_received: 1000, total_bytes: 1000,
+      error_code: null, final_path: '/Users/test/a.mov',
+      probed_metadata: { frameRate: 30, ntsc: false, width: 1920, height: 1080,
+                         durationSeconds: 12.3, embeddedTimecode: '01:00:00:00' },
+    }
+    const snap = buildItemSnapshot(item)
+    expect(snap.probed_metadata).toEqual(item.probed_metadata)
+  })
+
+  it('snapshot.items[i] omits probed_metadata when undefined', async () => {
+    setupChrome({ isAllowed: false })
+    const { buildItemSnapshot } = await import('../queue.js')
+    const item = {
+      seq: 2, source: 'envato', source_item_id: 'NXG', target_filename: 'a.mov',
+      phase: 'completed', bytes_received: 0, total_bytes: 0,
+      error_code: null, final_path: null, probed_metadata: undefined,
+    }
+    const snap = buildItemSnapshot(item)
+    expect(snap.probed_metadata).toBeUndefined()
+  })
+})
