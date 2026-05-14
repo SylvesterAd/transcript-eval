@@ -274,6 +274,17 @@ function nextItemForPhase(phaseName, s) {
   // the phase-before-crash is what's persisted.
   if (phaseName === 'resolving') {
     if (isEnvatoGated(st)) return null
+    // Single-tab guarantee: don't start resolving the next Envato item
+    // while a different Envato item is still mid-cycle (licensing or
+    // downloading). Without this gate, item N's license tab stays held
+    // through its download (E4) while item N+1's resolver tab opens —
+    // producing two simultaneous Envato tabs on different subdomains,
+    // which violates the v1.1.0 spec's "one Envato tab at any time, for
+    // any phase" promise (Full serialization choice).
+    const otherEnvatoMidCycle = st.items.find(i =>
+      i.source === 'envato' && (i.phase === 'licensing' || i.phase === 'downloading')
+    )
+    if (otherEnvatoMidCycle) return null
     return st.items.find(i => !i.claimed && i.source === 'envato' && i.phase === 'queued')
   }
   if (phaseName === 'licensing') {
@@ -604,6 +615,18 @@ async function handleDownloadEvent(item, delta) {
         const actual = results && results[0]
         const finalPath = actual?.filename || item.target_filename
         item.final_path = finalPath
+        // Capture the actual on-disk size for the FPS probe. item.bytes_received
+        // can be 0 here if chrome.downloads.onChanged didn't fire a final
+        // bytesReceived delta — observed in practice for Envato downloads.
+        // chrome.downloads.search returns the authoritative DownloadItem after
+        // completion, so use its fileSize / bytesReceived directly.
+        const sizeFromSearch =
+          (actual && typeof actual.fileSize === 'number' && actual.fileSize > 0)
+            ? actual.fileSize
+            : (actual && typeof actual.bytesReceived === 'number' && actual.bytesReceived > 0)
+              ? actual.bytesReceived
+              : 0
+        if (sizeFromSearch > 0) item.file_size = sizeFromSearch
         broadcast({
           type: 'item_finalized',
           item_id: item.source_item_id,
@@ -923,11 +946,18 @@ export async function runProbeForItem(item, { emit = noopProbeEmit, runContext =
   // which returns no usable content-length for file:// URLs in Chrome
   // MV3 SW — leading to fps_probe_failed_moov_not_located reason
   // no_total_size for every Envato .mov that has moov at the file end.
-  const totalBytes = (typeof item.bytes_received === 'number' && item.bytes_received > 0)
-    ? item.bytes_received
-    : (typeof item.total_bytes === 'number' && item.total_bytes > 0)
-      ? item.total_bytes
-      : undefined
+  //
+  // Priority: item.file_size (from chrome.downloads.search after complete)
+  // > item.bytes_received (from onChanged progress deltas — can be 0 if
+  //   the final delta was skipped) > item.total_bytes (manifest estimate).
+  const totalBytes =
+    (typeof item.file_size === 'number' && item.file_size > 0)
+      ? item.file_size
+      : (typeof item.bytes_received === 'number' && item.bytes_received > 0)
+        ? item.bytes_received
+        : (typeof item.total_bytes === 'number' && item.total_bytes > 0)
+          ? item.total_bytes
+          : undefined
   const result = await probeMp4File(fileUrl, { emit, totalBytes })
   if (result) item.probed_metadata = result
 }
