@@ -229,6 +229,7 @@ export function useExportXmlKickoff({
   variantLabels,
   unifiedManifest,
   complete,
+  probedItemsById,  // optional — map of source_item_id → snapshot item with probed_metadata
   autoKick = true,
   // Test-seams: override the network or download primitives. Default
   // to the real ones. Keeping them injectable avoids heavy mocking
@@ -251,7 +252,7 @@ export function useExportXmlKickoff({
     setError(null)
     setStatus(STATUS_POSTING_RESULT)
     try {
-      const body = buildVariantsPayload({ unifiedManifest, variantLabels })
+      const body = buildVariantsPayload({ unifiedManifest, variantLabels, probedItemsById })
       await _apiPost(`/exports/${encodeURIComponent(exportId)}/result`, body)
       if (reqId !== activeRequestRef.current) return  // superseded
       setStatus(STATUS_GENERATING)
@@ -290,7 +291,7 @@ export function useExportXmlKickoff({
       setError(err?.message || String(err))
       setStatus(STATUS_ERROR)
     }
-  }, [exportId, variantLabels, unifiedManifest, _apiPost, _triggerDownload])
+  }, [exportId, variantLabels, unifiedManifest, probedItemsById, _apiPost, _triggerDownload])
 
   // Auto-run on the null → complete-with-no-failures transition.
   // We do NOT auto-run for partial failures (State F); State F will

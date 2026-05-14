@@ -418,6 +418,46 @@ describe('useExportXmlKickoff', () => {
     h.unmount()
   })
 
+  it('threads probedItemsById through to buildVariantsPayload body', async () => {
+    // Simulate a snapshot where item NX9WYGQ has been probed with 29.97 fps.
+    const probedItemsById = {
+      NX9WYGQ: {
+        source_item_id: 'NX9WYGQ',
+        probed_metadata: { frameRate: 29.97, ntsc: true, width: 1920, height: 1080, durationSeconds: 2.5, embeddedTimecode: null },
+      },
+    }
+    const manifest = makeManifestSingleVariant()
+    const props = {
+      exportId: 'exp_PROBE',
+      variantLabels: ['A'],
+      unifiedManifest: manifest,
+      complete: null,
+      probedItemsById,
+      _apiPost: apiPost,
+      _triggerDownload: triggerDownload,
+    }
+    const h = renderHookOnce(useExportXmlKickoff, props)
+    h.rerender({ ...props, complete: { ok_count: 2, fail_count: 0, folder_path: '~/Downloads/test', xml_paths: [] } })
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    // The body sent to /result must include the probed frameRate for NX9WYGQ
+    const resultBody = apiPost.mock.calls[0][1]
+    const variantA = resultBody.variants.find(v => v.label === 'A')
+    expect(variantA).toBeDefined()
+    const probedPlacement = variantA.placements.find(p => p.sourceItemId === 'NX9WYGQ')
+    expect(probedPlacement).toBeDefined()
+    expect(probedPlacement.sourceFrameRate).toBe(29.97)
+    expect(probedPlacement.ntsc).toBe(true)
+    // The unprobed item should still use manifest value
+    const unprobedPlacement = variantA.placements.find(p => p.sourceItemId === '123456')
+    expect(unprobedPlacement).toBeDefined()
+    expect(unprobedPlacement.sourceFrameRate).toBe(30)  // manifest value
+    expect(h.result.current.status).toBe('ready')
+    h.unmount()
+  })
+
   it('does NOT auto-kick when fail_count > 0', async () => {
     const props = {
       exportId: 'exp_PARTIAL',

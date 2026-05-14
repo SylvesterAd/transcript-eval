@@ -525,6 +525,7 @@ function ActiveRun({
         exportId={exportId}
         variantLabels={variantLabels}
         unifiedManifest={unifiedManifest}
+        snapshot={port.snapshot}
       />
     )
   }
