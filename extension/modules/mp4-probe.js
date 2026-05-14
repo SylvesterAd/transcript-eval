@@ -21,4 +21,40 @@ function readFourCC(view, offset) {
   )
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC }
+function readBoxHeader(view, offset, bufferEnd) {
+  if (offset + 8 > bufferEnd) return null
+  let size = readU32BE(view, offset)
+  const type = readFourCC(view, offset + 4)
+  let headerSize = 8
+  if (size === 1) {
+    if (offset + 16 > bufferEnd) return null
+    const big = readU64BE(view, offset + 8)
+    if (big > BigInt(Number.MAX_SAFE_INTEGER)) return null
+    size = Number(big)
+    headerSize = 16
+  } else if (size === 0) {
+    // Runs to end-of-buffer
+    size = bufferEnd - offset
+  }
+  if (size < headerSize) return null
+  if (offset + size > bufferEnd) return null
+  return {
+    type,
+    size,
+    headerSize,
+    payloadStart: offset + headerSize,
+    payloadEnd: offset + size,
+  }
+}
+
+function* iterateBoxes(view, start, end) {
+  let cursor = start
+  while (cursor < end) {
+    const box = readBoxHeader(view, cursor, end)
+    if (!box) return
+    yield box
+    cursor = box.payloadEnd
+  }
+}
+
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes }
