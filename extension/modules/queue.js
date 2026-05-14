@@ -356,6 +356,17 @@ async function runLicenser(item) {
       meta: { license_ms: Date.now() - (item.license_started_at || Date.now()) },
     })
     await persistAndBroadcast()
+    // E4: Hold the licensing slot until the download completes (or is
+    // interrupted). This ensures MAX_ENVATO_LICENSE_CONCURRENCY=1 is
+    // meaningful end-to-end: a second Envato item cannot begin licensing
+    // while the first item's download is still in progress.
+    // The promise is resolved by chrome.downloads.onChanged when
+    // delta.state.current is 'complete' or 'interrupted'.
+    if (item.source === 'envato') {
+      await new Promise((resolve) => {
+        item.__envato_cycle_settle = resolve
+      })
+    }
   } catch (err) {
     item.license_attempts = (item.license_attempts || 0) + 1
     const verdict = classifyLicenseError(err, item)
@@ -589,6 +600,14 @@ async function handleDownloadEvent(item, delta) {
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
+      // E4: Release the Envato licensing slot now that the download is
+      // complete. runLicenser awaits this promise, so resolving it
+      // allows fillPool's .finally to decrement active.licensing and
+      // pick up the next Envato item for licensing.
+      if (item.source === 'envato' && item.__envato_cycle_settle) {
+        item.__envato_cycle_settle()
+        item.__envato_cycle_settle = null
+      }
     } else if (next === 'interrupted') {
       await handleDownloadInterrupt(item, delta)
     }
@@ -617,6 +636,11 @@ async function handleDownloadInterrupt(item, delta) {
     // Refetch cap hit — final verdict.
     await failItem(item, 'url_expired_refetch_failed')
     item.__settle?.()
+    // E4: Release licensing slot for terminal failure
+    if (item.source === 'envato' && item.__envato_cycle_settle) {
+      item.__envato_cycle_settle()
+      item.__envato_cycle_settle = null
+    }
     return
   }
 
@@ -638,6 +662,16 @@ async function handleDownloadInterrupt(item, delta) {
   }
 
   await applyVerdict(item, verdict, { phase: 'download', err: { reason } })
+  // E4: If applyVerdict reached a terminal verdict (skip/hardStop),
+  // item.__settle was already called and runDownloader's await completed.
+  // Also release the Envato licensing slot so the next item can proceed.
+  // We check __envato_cycle_settle defensively — retries leave it intact
+  // so the same cycle can re-download without re-acquiring the slot.
+  if (item.source === 'envato' && item.__envato_cycle_settle &&
+      (item.phase === 'failed' || item.phase === 'done')) {
+    item.__envato_cycle_settle()
+    item.__envato_cycle_settle = null
+  }
 }
 
 function maybePushProgress(item) {
@@ -840,7 +874,7 @@ export async function closeLicenseTab(item, reason) {
 
 function snapshot() {
   if (!state) return null
-  // Hide in-memory-only fields (claimed, __settle) from Port pushes.
+  // Hide in-memory-only fields (claimed, __settle, __envato_cycle_settle) from Port pushes.
   return {
     runId: state.runId,
     started_at: state.started_at,
@@ -857,7 +891,8 @@ function snapshot() {
 function stripInMemory(s) {
   return {
     ...s,
-    items: s.items.map(({ claimed, __settle, ...rest }) => rest),
+    // eslint-disable-next-line no-unused-vars
+    items: s.items.map(({ claimed, __settle, __envato_cycle_settle, ...rest }) => rest),
   }
 }
 
