@@ -616,18 +616,25 @@ async function handleDownloadEvent(item, delta) {
       }
       // Best-effort FPS probe; never blocks completion.
       // Wrap emit so every probe event carries the run's export_id (required
-      // by telemetry.js buildEntry). After the probe resolves, fire another
-      // persistAndBroadcast so the snapshot the web app receives includes
-      // item.probed_metadata for the XMEML merge — the persistAndBroadcast
-      // immediately below this block runs BEFORE the probe completes.
+      // by telemetry.js buildEntry) plus item_id/source so events can be
+      // filtered to a specific item in the persisted queue. The wrapped emit
+      // is also passed to probeMp4File internally — its emits get the same
+      // enrichment. After the probe resolves, fire another persistAndBroadcast
+      // so the snapshot the web app receives includes item.probed_metadata for
+      // the XMEML merge — the persistAndBroadcast immediately below this block
+      // runs BEFORE the probe completes.
       const _probeEmit = (event, payload) => emitTelemetry(event, {
         ...payload,
         export_id: state.runId,
+        item_id: item.source_item_id,
+        source: item.source,
       })
       runProbeForItem(item, { emit: _probeEmit, runContext: state._probeRunContext })
         .then(() => { persistAndBroadcast().catch(() => {}) })
         .catch(err => emitTelemetry('fps_probe_internal_error', {
           export_id: state.runId,
+          item_id: item.source_item_id,
+          source: item.source,
           error: String(err?.message || err),
         }))
       await persistAndBroadcast()
@@ -911,7 +918,17 @@ export async function runProbeForItem(item, { emit = noopProbeEmit, runContext =
     return
   }
   const fileUrl = 'file://' + item.final_path
-  const result = await probeMp4File(fileUrl, { emit })
+  // Pass the known file size from chrome.downloads. Without this the
+  // moov-at-end fallback inside probeMp4File would do a HEAD request,
+  // which returns no usable content-length for file:// URLs in Chrome
+  // MV3 SW — leading to fps_probe_failed_moov_not_located reason
+  // no_total_size for every Envato .mov that has moov at the file end.
+  const totalBytes = (typeof item.bytes_received === 'number' && item.bytes_received > 0)
+    ? item.bytes_received
+    : (typeof item.total_bytes === 'number' && item.total_bytes > 0)
+      ? item.total_bytes
+      : undefined
+  const result = await probeMp4File(fileUrl, { emit, totalBytes })
   if (result) item.probed_metadata = result
 }
 
