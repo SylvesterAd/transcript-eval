@@ -48,6 +48,7 @@ import {
   classifyIntegrityError,
   parseRetryAfter,
 } from './classifier.js'
+import { probeMp4File } from './mp4-probe.js'
 
 // -------- Adapter shims so queue code reads like the spec --------
 
@@ -572,6 +573,9 @@ async function handleDownloadEvent(item, delta) {
       } catch (err) {
         console.warn('[queue] item_finalized broadcast failed', err)
       }
+      // Best-effort FPS probe; never blocks completion
+      runProbeForItem(item, { emit: emitTelemetry, runContext: state._probeRunContext })
+        .catch(err => emitTelemetry('fps_probe_internal_error', { error: String(err?.message || err) }))
       await persistAndBroadcast()
       broadcast({ type: 'item_done', item_id: item.source_item_id, result: 'ok' })
       item.__settle?.()
@@ -700,8 +704,70 @@ export function buildInitialRunState({ runId, manifest, targetFolder, options, u
     // elements.envato.com. Subsequent 401/403s skip + skip_whole_source
     // so we don't ask twice if the user can't / won't re-auth.
     envato_reauth_attempted: false,
+    // T12: per-run context for runProbeForItem — tracks whether we've
+    // already emitted fps_probe_skipped_no_permission for this run so
+    // we don't spam telemetry once per downloaded file.
+    _probeRunContext: { hasEmittedSkipForRun: false },
   }
 }
+
+// Build the broadcast-ready per-item record. Exported so T13 tests can
+// verify the probed_metadata field is included/excluded correctly.
+// Callers: snapshot() (Port broadcast) and any future result_json builder.
+export function buildItemSnapshot(item) {
+  return {
+    seq: item.seq,
+    source: item.source,
+    source_item_id: item.source_item_id,
+    target_filename: item.target_filename,
+    phase: item.phase,
+    bytes_received: item.bytes_received,
+    total_bytes: item.total_bytes,
+    error_code: item.error_code,
+    error_detail: item.error_detail,
+    final_path: item.final_path,
+    // Ext.6 timing fields
+    resolve_started_at: item.resolve_started_at,
+    license_started_at: item.license_started_at,
+    download_started_at: item.download_started_at,
+    // Ext.7 retry counters
+    resolve_attempts: item.resolve_attempts,
+    license_attempts: item.license_attempts,
+    rate_limit_429_count: item.rate_limit_429_count,
+    freepik_429_count: item.freepik_429_count,
+    mint_attempts: item.mint_attempts,
+    url_refetch_count: item.url_refetch_count,
+    integrity_retries: item.integrity_retries,
+    signed_url_expires_at: item.signed_url_expires_at,
+    expected_size_bytes: item.expected_size_bytes,
+    // FPS probe result — omitted (key absent) when no probe ran
+    ...(item.probed_metadata ? { probed_metadata: item.probed_metadata } : {}),
+  }
+}
+
+// Probe a completed-download item's on-disk file via file:// fetch.
+// Mutates item.probed_metadata on success. No-op when permission denied.
+// runContext (optional) tracks one-shot "no permission" telemetry per run.
+export async function runProbeForItem(item, { emit = noopProbeEmit, runContext = null } = {}) {
+  if (!item || !item.final_path) return
+  const allowed = await chrome.extension.isAllowedFileSchemeAccess()
+  if (!allowed) {
+    if (runContext) {
+      if (!runContext.hasEmittedSkipForRun) {
+        emit('fps_probe_skipped_no_permission', { reason: 'file_access_disabled' })
+        runContext.hasEmittedSkipForRun = true
+      }
+    } else {
+      emit('fps_probe_skipped_no_permission', { reason: 'file_access_disabled' })
+    }
+    return
+  }
+  const fileUrl = 'file://' + item.final_path
+  const result = await probeMp4File(fileUrl, { emit })
+  if (result) item.probed_metadata = result
+}
+
+function noopProbeEmit() {}
 
 function snapshot() {
   if (!state) return null
@@ -712,7 +778,7 @@ function snapshot() {
     updated_at: state.updated_at,
     target_folder_path: state.target_folder_path,
     options: state.options,
-    items: state.items.map(({ claimed, __settle, ...rest }) => rest),
+    items: state.items.map(item => buildItemSnapshot(item)),
     stats: state.stats,
     run_state: state.run_state,
   }
