@@ -298,6 +298,18 @@ export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iter
 
 const DEFAULT_HEAD_RANGE = 1024 * 1024  // 1 MB
 const DEFAULT_TIMEOUT_MS = 10_000
+// When the caller supplies totalBytes and the file is at or below this
+// threshold, probeMp4File fetches the entire file in a single Range
+// request. This is the only way to correctly read the tmcd track's first
+// sample, which lives in mdat — for files with moov-at-end, our head+tail
+// strategy reads moov from the tail but has no bytes for mdat, so
+// readEmbeddedTimecode reads garbage at the absolute sampleOffset and
+// produces wrong TC strings (observed on real Envato MOVs: file embeds
+// 01:00:00:00 but parser computes 00:36:24:16). 250MB covers most stock
+// footage clips; ProRes 4K files past this fall back to the head+tail
+// approach (TC may then be missing for those, which is preferable to a
+// wrong value that Premiere rejects with "File not found").
+const FULL_FETCH_THRESHOLD_BYTES = 250 * 1024 * 1024
 
 function noopEmit() {}
 
@@ -408,24 +420,58 @@ export async function probeMp4File(fileUrl, opts = {}) {
     const result = await Promise.race([
       (async () => {
         let view
-        try {
-          view = await fetchRange(fetchFn, fileUrl, 0, headRangeBytes - 1)
-        } catch (err) {
-          emit('fps_probe_failed_fetch', { ...ctx, error: String(err?.message || err) })
-          return null
-        }
-        if (view.byteLength < 16) {
-          emit('fps_probe_failed_not_mp4', { ...ctx, byteLength: view.byteLength })
-          return null
-        }
-        const { ftyp, moov: moovInHead, mdat: mdatInHead, sawMdat } = parseFromView(view, 0, view.byteLength)
-        if (!ftyp || !validateFtypBrand(view, ftyp)) {
-          emit('fps_probe_failed_unsupported_brand', { ...ctx })
-          return null
-        }
-        let moov = moovInHead
-        let bufferEnd = view.byteLength
-        if (!moov && sawMdat) {
+        let bufferEnd
+        let moov
+
+        // Full-fetch path for small/medium files. Reads the entire file in
+        // one request so the tmcd sample (located in mdat at the absolute
+        // file offset stored in stco) is addressable for readEmbeddedTimecode.
+        const useFullFetch = typeof callerTotalBytes === 'number'
+          && callerTotalBytes > 0
+          && callerTotalBytes <= FULL_FETCH_THRESHOLD_BYTES
+        if (useFullFetch) {
+          try {
+            view = await fetchRange(fetchFn, fileUrl, 0, callerTotalBytes - 1)
+          } catch (err) {
+            emit('fps_probe_failed_fetch', { ...ctx, error: String(err?.message || err) })
+            return null
+          }
+          if (view.byteLength < 16) {
+            emit('fps_probe_failed_not_mp4', { ...ctx, byteLength: view.byteLength })
+            return null
+          }
+          const { ftyp, moov: moovFull } = parseFromView(view, 0, view.byteLength)
+          if (!ftyp || !validateFtypBrand(view, ftyp)) {
+            emit('fps_probe_failed_unsupported_brand', { ...ctx })
+            return null
+          }
+          if (!moovFull) {
+            emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'full_fetch_no_moov' })
+            return null
+          }
+          moov = moovFull
+          bufferEnd = view.byteLength
+        } else {
+          // Range-based path for larger files (or callers that don't pass
+          // totalBytes). Head fetch + optional tail fallback for moov-at-end.
+          try {
+            view = await fetchRange(fetchFn, fileUrl, 0, headRangeBytes - 1)
+          } catch (err) {
+            emit('fps_probe_failed_fetch', { ...ctx, error: String(err?.message || err) })
+            return null
+          }
+          if (view.byteLength < 16) {
+            emit('fps_probe_failed_not_mp4', { ...ctx, byteLength: view.byteLength })
+            return null
+          }
+          const { ftyp, moov: moovInHead, mdat: mdatInHead, sawMdat } = parseFromView(view, 0, view.byteLength)
+          if (!ftyp || !validateFtypBrand(view, ftyp)) {
+            emit('fps_probe_failed_unsupported_brand', { ...ctx })
+            return null
+          }
+          moov = moovInHead
+          bufferEnd = view.byteLength
+          if (!moov && sawMdat) {
           let total = (typeof callerTotalBytes === 'number' && callerTotalBytes > 0)
             ? callerTotalBytes
             : 0
@@ -473,6 +519,7 @@ export async function probeMp4File(fileUrl, opts = {}) {
           moov = moovInTail
           view = tailView
           bufferEnd = tailView.byteLength
+          }
         }
         if (!moov) {
           emit('fps_probe_failed_moov_not_located', { ...ctx, reason: 'not_in_head' })
