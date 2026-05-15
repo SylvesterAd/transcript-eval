@@ -1,10 +1,12 @@
 /**
- * Parse a timecode string like "[00:25:28]" or "00:25:28" to seconds.
+ * Parse a timecode string like "[00:25:28]", "00:25:28", or "00:00:10:00" (SMPTE HH:MM:SS:FF)
+ * to seconds. The optional 4th frame field is ignored (treated as 0 frames).
  */
 export function parseTimecode(tc) {
   if (!tc) return 0
   const cleaned = tc.replace(/[[\]]/g, '')
   const parts = cleaned.split(':').map(Number)
+  if (parts.length >= 4) return parts[0] * 3600 + parts[1] * 60 + parts[2]
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
   if (parts.length === 2) return parts[0] * 60 + parts[1]
   return parts[0] || 0
@@ -62,18 +64,41 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
       })
     : placements
 
+  // Helper: extract the 4 slip fields from an edit slot, applying defaults.
+  const slipFieldsFrom = (edit) => ({
+    source_in_seconds: edit?.source_in_seconds ?? 0,
+    keep_original_duration: edit?.keep_original_duration ?? false,
+    original_timeline_duration: edit?.original_timeline_duration,
+    auto_clamp_applied: edit?.auto_clamp_applied ?? false,
+  })
+
   // Step 1: Position each placement independently based on audio_anchor
   const resolved = filtered.map(p => {
     // Prefer editsByKey lookup if provided; fall back to inline userTimelineStart/End
     const edit = lookupEdit(p)
     const uStart = edit?.timelineStart ?? p.userTimelineStart
     const uEnd   = edit?.timelineEnd   ?? p.userTimelineEnd
+
+    // Auto-clamp from Pass 4: edit has timelineEnd but not timelineStart.
+    // Use placement.start as timelineStart so the clamp shortens the slot.
+    if (edit?.auto_clamp_applied && edit.timelineEnd != null && uStart == null) {
+      const planStart = parseTimecode(p.start)
+      return {
+        ...p,
+        timelineStart: planStart,
+        timelineEnd: edit.timelineEnd,
+        timelineDuration: edit.timelineEnd - planStart,
+        ...slipFieldsFrom(edit),
+      }
+    }
+
     if (uStart != null && uEnd != null) {
       return {
         ...p,
         timelineStart: uStart,
         timelineEnd: uEnd,
         timelineDuration: uEnd - uStart,
+        ...slipFieldsFrom(edit),
       }
     }
 
@@ -84,7 +109,7 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
 
     if (!anchor) {
       // No anchor — use plan timecodes directly
-      return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration }
+      return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration, ...slipFieldsFrom(edit) }
     }
 
     const anchorWords = anchor.split(' ')
@@ -130,11 +155,12 @@ export function matchPlacementsToTranscript(placements, words, editsByKey = null
         timelineStart: matchedWord.start,
         timelineEnd: matchedWord.start + planDuration,
         timelineDuration: planDuration,
+        ...slipFieldsFrom(edit),
       }
     }
 
     // Fallback: use plan timecodes directly
-    return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration }
+    return { ...p, timelineStart: planStart, timelineEnd: planEnd, timelineDuration: planDuration, ...slipFieldsFrom(edit) }
   })
 
   // Step 2: Sort by timelineStart, trim earlier placement's end if it overlaps the next.
