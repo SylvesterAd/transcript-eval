@@ -6,8 +6,8 @@ describe('matchPlacementsToTranscript slip fields', () => {
     uuid: 'p1',
     chapterIndex: 0,
     placementIndex: 0,
-    start: '00:00:10:00',
-    end: '00:00:17:00',
+    start: '[00:00:10]',
+    end: '[00:00:17]',
     audio_anchor: '',
   }
 
@@ -39,7 +39,7 @@ describe('matchPlacementsToTranscript slip fields', () => {
   it('honors edits.timelineEnd alone when auto_clamp_applied (no timelineStart in edits)', () => {
     const edits = { p1: { auto_clamp_applied: true, timelineEnd: 16.17 } }
     const [resolved] = matchPlacementsToTranscript([placement], [], edits)
-    // placement.start = '00:00:10:00' → 10s, edit.timelineEnd = 16.17 → resolved timelineDuration = 6.17
+    // placement.start = '[00:00:10]' → 10s, edit.timelineEnd = 16.17 → resolved timelineDuration = 6.17
     expect(resolved.timelineStart).toBe(10)
     expect(resolved.timelineEnd).toBeCloseTo(16.17, 3)
     expect(resolved.timelineDuration).toBeCloseTo(6.17, 3)

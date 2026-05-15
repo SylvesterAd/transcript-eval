@@ -1,12 +1,10 @@
 /**
- * Parse a timecode string like "[00:25:28]", "00:25:28", or "00:00:10:00" (SMPTE HH:MM:SS:FF)
- * to seconds. The optional 4th frame field is ignored (treated as 0 frames).
+ * Parse a timecode string like "[00:25:28]" or "00:25:28" to seconds.
  */
 export function parseTimecode(tc) {
   if (!tc) return 0
   const cleaned = tc.replace(/[[\]]/g, '')
   const parts = cleaned.split(':').map(Number)
-  if (parts.length >= 4) return parts[0] * 3600 + parts[1] * 60 + parts[2]
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
   if (parts.length === 2) return parts[0] * 60 + parts[1]
   return parts[0] || 0
