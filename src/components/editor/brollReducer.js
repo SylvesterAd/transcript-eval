@@ -128,6 +128,22 @@ export function buildToggleKeepOriginalEntry({ placement, currentEdits, nextValu
   }
 }
 
+// Builds an APPLY_ACTION-compatible entry for a slip edit (changing source_in_seconds).
+// The returned entry can be dispatched via APPLY_ACTION and supports undo via its
+// `before` block. Only `source_in_seconds` is captured — keep_original_duration and
+// clamp-related fields are owned by buildToggleKeepOriginalEntry and PROBE_DATA_RECEIVED.
+export function buildSlipEntry({ placement, currentEdits, nextSourceIn }) {
+  const safeNext = Math.max(0, nextSourceIn)
+  return {
+    id: generateActionId(),
+    ts: Date.now(),
+    kind: 'slip',
+    placementKey: placement.uuid,
+    before: { editsSlot: { source_in_seconds: currentEdits.source_in_seconds ?? 0 } },
+    after:  { editsSlot: { source_in_seconds: safeNext } },
+  }
+}
+
 // Applies just the mutation side of an action to the reducer's editor-state slots.
 // Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
 export function applyMutation(state, entry, side /* 'before' | 'after' */) {

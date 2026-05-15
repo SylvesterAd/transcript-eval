@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { reducer, initialState, buildToggleKeepOriginalEntry } from '../brollReducer.js'
+import { reducer, initialState, buildToggleKeepOriginalEntry, buildSlipEntry } from '../brollReducer.js'
 
 describe('reducer PROBE_DATA_RECEIVED', () => {
   it('clamps timelineEnd when source is shorter than placement', () => {
@@ -116,5 +116,30 @@ describe('buildToggleKeepOriginalEntry', () => {
     expect(entry.after.editsSlot.keep_original_duration).toBe(false)
     expect(entry.after.editsSlot.timelineEnd).toBeUndefined()
     expect(entry.after.editsSlot.auto_clamp_applied).toBe(false)
+  })
+})
+
+describe('buildSlipEntry', () => {
+  it('produces APPLY_ACTION entry with new source_in_seconds', () => {
+    const placement = { uuid: 'p1' }
+    const currentEdits = { source_in_seconds: 0 }
+    const entry = buildSlipEntry({ placement, currentEdits, nextSourceIn: 1.5 })
+    expect(entry.placementKey).toBe('p1')
+    expect(entry.kind).toBe('slip')
+    expect(entry.before.editsSlot.source_in_seconds).toBe(0)
+    expect(entry.after.editsSlot.source_in_seconds).toBe(1.5)
+  })
+
+  it('encodes undefined previous source_in as 0', () => {
+    const placement = { uuid: 'p1' }
+    const currentEdits = {}
+    const entry = buildSlipEntry({ placement, currentEdits, nextSourceIn: 0.75 })
+    expect(entry.before.editsSlot.source_in_seconds).toBe(0)
+  })
+
+  it('clamps nextSourceIn to non-negative', () => {
+    const placement = { uuid: 'p1' }
+    const entry = buildSlipEntry({ placement, currentEdits: {}, nextSourceIn: -0.5 })
+    expect(entry.after.editsSlot.source_in_seconds).toBe(0)
   })
 })
