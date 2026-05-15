@@ -324,22 +324,69 @@ export function generateXmeml({
     // fall back to zero — the historical behavior.
     const embeddedTimecode = (typeof p.embeddedTimecode === 'string' && p.embeddedTimecode) ? p.embeddedTimecode : null
     const embeddedTimecodeFrame = embeddedTimecode ? parseTimecodeToFrame(embeddedTimecode, sourceFrameRate) : 0
-    // Two duration coordinates. <start>/<end> use sequence-rate
-    // frames (timeline grid); <in>/<out> use source-rate frames (cut
-    // points in the source media). Equal only when sequence rate ==
-    // source rate. With a 50fps sequence and 30fps source, a 2s clip
-    // is 100 sequence frames AND 60 source frames.
-    const startFrame = secondsToFrames(p.timelineStart, frameRate)
-    const durationSeqFrames = secondsToFrames(p.timelineDuration, frameRate)
-    const durationSrcFrames = secondsToFrames(p.timelineDuration, sourceFrameRate)
-    const endFrame = startFrame + durationSeqFrames
-    const width = Number.isFinite(p.width) && p.width > 0 ? p.width : seqW
-    const height = Number.isFinite(p.height) && p.height > 0 ? p.height : seqH
+    // Slip-edit: source_in_seconds is the editor's chosen start point
+    // in the source clip (seconds). Defaults to 0 (from the top of the
+    // file). A slip to 1.5s means <in> is shifted by 1.5 * sourceFrameRate
+    // frames on top of the existing tcOffset (embedded TC + elst).
+    const sourceInSeconds = Math.max(0, Number.isFinite(p.source_in_seconds) ? p.source_in_seconds : 0)
+    const sourceInFrames = Math.round(sourceInSeconds * sourceFrameRate)
+
     // Source media's full duration in frames (in the file's own framerate).
     // When unknown, fall back to the source-rate duration so the clip plays —
     // the cost is no trim handles past the cut, but at least the import
     // succeeds and the clip is the right length.
     const sourceDurationConfirmed = Number.isFinite(p.sourceDurationSeconds) && p.sourceDurationSeconds > 0
+    const sourceDur = sourceDurationConfirmed ? p.sourceDurationSeconds : null
+
+    // Clamp logic: compute the effective duration for <in>/<out> and <end>.
+    //
+    // keep_original_duration=true → user explicitly accepted that the
+    //   placement may read past source end (e.g. file 6.17s in a 7s slot,
+    //   gap will go black). Honour original_timeline_duration (or fall back
+    //   to timelineDuration) without clamping.
+    //
+    // Default (keep_original_duration falsy) → clamp to min(timelineDuration,
+    //   sourceDur - sourceInSeconds) so <out> never lands beyond the file's
+    //   last frame. This fixes item 016 (Pexels 6.17s in 7s slot) where the
+    //   old code emitted <out>=212 and DaVinci showed the clip then froze.
+    let effectiveDurationSec
+    if (p.keep_original_duration) {
+      effectiveDurationSec = p.original_timeline_duration ?? p.timelineDuration
+    } else if (sourceDur != null) {
+      effectiveDurationSec = Math.min(p.timelineDuration, Math.max(0, sourceDur - sourceInSeconds))
+    } else {
+      effectiveDurationSec = p.timelineDuration
+    }
+
+    // Warn when keep_original_duration would read past source end (the NLE
+    // will go black for the overshoot). Use console.warn — no warnings array
+    // return plumbing needed; tests verify the numeric frame values instead.
+    if (p.keep_original_duration && sourceDur != null) {
+      const overshoot = sourceInSeconds + effectiveDurationSec - sourceDur
+      if (overshoot > 0) {
+        console.warn(
+          `[xmeml] Placement ${p.seq ?? p.filename} source ends before placement; ` +
+          `DaVinci will go black for ${overshoot.toFixed(2)}s`
+        )
+      }
+    }
+
+    // Two duration coordinates. <start>/<end> use sequence-rate
+    // frames (timeline grid); <in>/<out> use source-rate frames (cut
+    // points in the source media). Equal only when sequence rate ==
+    // source rate. With a 50fps sequence and 30fps source, a 2s clip
+    // is 100 sequence frames AND 60 source frames.
+    //
+    // effectiveDurationSec (clamped or kept) governs BOTH the source-
+    // rate <out> − <in> span AND the sequence-rate <end> − <start> span,
+    // so the timeline slot shrinks when clamping reduces the duration.
+    const startFrame = secondsToFrames(p.timelineStart, frameRate)
+    const durationSeqFrames = secondsToFrames(effectiveDurationSec, frameRate)
+    const durationSrcFrames = secondsToFrames(effectiveDurationSec, sourceFrameRate)
+    const endFrame = startFrame + durationSeqFrames
+    const width = Number.isFinite(p.width) && p.width > 0 ? p.width : seqW
+    const height = Number.isFinite(p.height) && p.height > 0 ? p.height : seqH
+
     const sourceDurationFrames = sourceDurationConfirmed
       ? Math.round(p.sourceDurationSeconds * sourceFrameRate)
       : durationSrcFrames
@@ -358,7 +405,7 @@ export function generateXmeml({
       // Sub-frame-precise versions of the timing fields. Carried alongside
       // the integer-frame values; emitted as <pproTicks*> in the XML.
       _timelineStartSec: p.timelineStart,
-      _timelineDurationSec: p.timelineDuration,
+      _timelineDurationSec: effectiveDurationSec,
       _width: width,
       _height: height,
       _sourceFrameRate: sourceFrameRate,
@@ -369,12 +416,15 @@ export function generateXmeml({
       // video trak elst — if media_time > 0, the file's first presented
       // frame is offset by this many seconds into the media. Convert to
       // source-rate frames and ADD to tcOffset when computing <in>/<out>
-      // for b-roll clipitems below (line ~604). Without this, DaVinci
-      // shows the clip as offline because <in> points to a TC before the
-      // file's effective presentation start.
+      // for b-roll clipitems below. Without this, DaVinci shows the clip
+      // as offline because <in> points to a TC before the file's effective
+      // presentation start.
       _videoEditListOffsetFrames: Math.round(
         (Number.isFinite(p.videoEditListMediaTimeSeconds) ? p.videoEditListMediaTimeSeconds : 0) * sourceFrameRate
       ),
+      // Slip-edit offset in source-rate frames. Added to tcOffset in the
+      // <in>/<out> emission block below (alongside embeddedTC + elst).
+      _sourceInFrames: sourceInFrames,
     }
   })
 
@@ -619,8 +669,11 @@ export function generateXmeml({
       // addition, <in>=tcOffset points to media frame 0 which is BEFORE
       // the presentation starts, and DaVinci shows the clip as offline.
       // Premiere is lenient about this; DaVinci is strict.
+      // Slip-edit: _sourceInFrames is the editor's chosen source start
+      // point (in source-rate frames). Added on top of tcOffset so the
+      // three offsets stack: embeddedTC + elst + slip.
       const tcOffset = (p._embeddedTimecodeFrame || 0) + (p._videoEditListOffsetFrames || 0)
-      const inFrame = tcOffset
+      const inFrame = tcOffset + (p._sourceInFrames || 0)
       const outFrame = inFrame + p._durationSrcFrames
       // Element order + always-emit-ntsc derived from
       // WyattBlue/auto-editor's working DaVinci-compatible exporter

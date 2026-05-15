@@ -116,6 +116,11 @@ describe('buildVariantsPayload', () => {
             sourceDurationSeconds: null,
             embeddedTimecode: null,
             videoEditListMediaTimeSeconds: 0,
+            // Slip-edit fields (Task 5) — default values when no slip applied.
+            source_in_seconds: 0,
+            keep_original_duration: false,
+            original_timeline_duration: null,
+            auto_clamp_applied: null,
           },
           {
             seq: 2,
@@ -131,6 +136,11 @@ describe('buildVariantsPayload', () => {
             sourceDurationSeconds: null,
             embeddedTimecode: null,
             videoEditListMediaTimeSeconds: 0,
+            // Slip-edit fields (Task 5) — default values when no slip applied.
+            source_in_seconds: 0,
+            keep_original_duration: false,
+            original_timeline_duration: null,
+            auto_clamp_applied: null,
           },
         ],
       }],
