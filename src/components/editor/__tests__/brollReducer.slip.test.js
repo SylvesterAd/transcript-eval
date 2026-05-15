@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { reducer, initialState } from '../brollReducer.js'
+import { reducer, initialState, buildToggleKeepOriginalEntry } from '../brollReducer.js'
 
 describe('reducer PROBE_DATA_RECEIVED', () => {
   it('clamps timelineEnd when source is shorter than placement', () => {
@@ -73,5 +73,48 @@ describe('reducer PROBE_DATA_RECEIVED', () => {
     })
     expect(next.edits.u1.timelineEnd).toBeCloseTo(26.17, 3)
     expect(next.edits.u1.auto_clamp_applied).toBe(true)
+  })
+})
+
+describe('buildToggleKeepOriginalEntry', () => {
+  it('off→on restores original_timeline_duration into timelineEnd', () => {
+    const placement = { uuid: 'p1', timelineStart: 10, timelineEnd: 16.17 }
+    const currentEdits = { auto_clamp_applied: true, original_timeline_duration: 7.0, timelineEnd: 16.17 }
+    const entry = buildToggleKeepOriginalEntry({ placement, currentEdits, nextValue: true })
+    expect(entry.placementKey).toBe('p1')
+    expect(entry.after.editsSlot.keep_original_duration).toBe(true)
+    expect(entry.after.editsSlot.timelineEnd).toBeCloseTo(17.0, 3)
+    expect(entry.after.editsSlot.auto_clamp_applied).toBe(false)
+    expect(entry.before.editsSlot.keep_original_duration).toBeUndefined()
+    expect(entry.before.editsSlot.timelineEnd).toBeCloseTo(16.17, 3)
+    expect(entry.before.editsSlot.auto_clamp_applied).toBe(true)
+  })
+
+  it('on→off re-clamps using sourceDurationSeconds', () => {
+    const placement = { uuid: 'p1', timelineStart: 10, timelineEnd: 17 }
+    const currentEdits = { keep_original_duration: true, original_timeline_duration: 7.0 }
+    const entry = buildToggleKeepOriginalEntry({
+      placement,
+      currentEdits,
+      nextValue: false,
+      sourceDurationSeconds: 6.17,
+    })
+    expect(entry.after.editsSlot.keep_original_duration).toBe(false)
+    expect(entry.after.editsSlot.timelineEnd).toBeCloseTo(16.17, 3)
+    expect(entry.after.editsSlot.auto_clamp_applied).toBe(true)
+  })
+
+  it('on→off with longer source removes clamp (no timelineEnd override)', () => {
+    const placement = { uuid: 'p1', timelineStart: 10, timelineEnd: 17 }
+    const currentEdits = { keep_original_duration: true, original_timeline_duration: 7.0 }
+    const entry = buildToggleKeepOriginalEntry({
+      placement,
+      currentEdits,
+      nextValue: false,
+      sourceDurationSeconds: 20.0,
+    })
+    expect(entry.after.editsSlot.keep_original_duration).toBe(false)
+    expect(entry.after.editsSlot.timelineEnd).toBeUndefined()
+    expect(entry.after.editsSlot.auto_clamp_applied).toBe(false)
   })
 })

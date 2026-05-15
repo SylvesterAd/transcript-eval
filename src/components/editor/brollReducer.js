@@ -82,6 +82,52 @@ function migrateActionStack(stack, rawPlacements) {
   return changed ? out : stack
 }
 
+// Builds an APPLY_ACTION-compatible entry for toggling keep_original_duration.
+// The returned entry can be dispatched via APPLY_ACTION and supports undo via its
+// `before` block. The `after.editsSlot` patch is computed from:
+//   nextValue = true  (off→on): restore timelineEnd = timelineStart + original_timeline_duration
+//   nextValue = false (on→off): re-apply clamp if source is shorter, else clear clamp
+export function buildToggleKeepOriginalEntry({ placement, currentEdits, nextValue, sourceDurationSeconds }) {
+  const tStart = placement.timelineStart ?? 0
+  const originalDuration = currentEdits.original_timeline_duration
+  let nextTimelineEnd
+  let nextAutoClamp
+  if (nextValue === true) {
+    // off → on: restore original duration
+    nextTimelineEnd = originalDuration != null ? tStart + originalDuration : undefined
+    nextAutoClamp = false
+  } else {
+    // on → off: re-apply clamp if source is shorter than original
+    if (originalDuration != null && sourceDurationSeconds != null && sourceDurationSeconds < originalDuration) {
+      nextTimelineEnd = tStart + sourceDurationSeconds
+      nextAutoClamp = true
+    } else {
+      nextTimelineEnd = undefined
+      nextAutoClamp = false
+    }
+  }
+  return {
+    id: generateActionId(),
+    ts: Date.now(),
+    kind: 'toggle-keep-original',
+    placementKey: placement.uuid,
+    before: {
+      editsSlot: {
+        keep_original_duration: currentEdits.keep_original_duration,
+        timelineEnd: currentEdits.timelineEnd,
+        auto_clamp_applied: currentEdits.auto_clamp_applied,
+      },
+    },
+    after: {
+      editsSlot: {
+        keep_original_duration: nextValue,
+        timelineEnd: nextTimelineEnd,
+        auto_clamp_applied: nextAutoClamp,
+      },
+    },
+  }
+}
+
 // Applies just the mutation side of an action to the reducer's editor-state slots.
 // Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
 export function applyMutation(state, entry, side /* 'before' | 'after' */) {
