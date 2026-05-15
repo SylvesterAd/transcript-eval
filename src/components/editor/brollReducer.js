@@ -423,6 +423,27 @@ export function reducer(state, action) {
       }
       return next
     }
+    case 'PROBE_DATA_RECEIVED': {
+      const { uuid, durationSeconds, timelineDuration } = action.payload
+      if (!uuid || typeof durationSeconds !== 'number' || typeof timelineDuration !== 'number') return state
+      const prev = state.edits[uuid] || {}
+      const next = { ...prev }
+      // Always record the pre-clamp duration on first probe
+      if (next.original_timeline_duration == null) {
+        next.original_timeline_duration = timelineDuration
+      }
+      // Only clamp when not explicitly opted out
+      if (!next.keep_original_duration && durationSeconds < timelineDuration) {
+        // edits.timelineEnd is consumed by matchPlacementsToTranscript to override resolved duration
+        const placement = state.rawPlacements.find(p => p.uuid === uuid)
+        const tStart = placement?.timelineStart ?? 0
+        next.timelineEnd = tStart + durationSeconds
+        next.auto_clamp_applied = true
+      }
+      // No structural change if nothing was added
+      if (Object.keys(next).length === 0) return state
+      return { ...state, edits: { ...state.edits, [uuid]: next }, dirty: true }
+    }
     case 'SAVE_SUCCESS': {
       return { ...state, editorStateVersion: action.payload.version, dirty: false }
     }
