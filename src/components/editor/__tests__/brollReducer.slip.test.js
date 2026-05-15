@@ -59,4 +59,19 @@ describe('reducer PROBE_DATA_RECEIVED', () => {
     expect(next.edits.p1.original_timeline_duration).toBe(7.0)
     expect(next.edits.p1.timelineEnd).toBeCloseTo(15.0, 3)
   })
+
+  it('uses userPlacements.timelineStart when uuid matches a user-pasted clip', () => {
+    const base = {
+      ...initialState,
+      rawPlacements: [],
+      userPlacements: [{ id: 'u1', timelineStart: 20, timelineEnd: 27 }],
+      edits: {},
+    }
+    const next = reducer(base, {
+      type: 'PROBE_DATA_RECEIVED',
+      payload: { uuid: 'u1', durationSeconds: 6.17, timelineDuration: 7.0 },
+    })
+    expect(next.edits.u1.timelineEnd).toBeCloseTo(26.17, 3)
+    expect(next.edits.u1.auto_clamp_applied).toBe(true)
+  })
 })

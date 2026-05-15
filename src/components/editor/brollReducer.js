@@ -434,8 +434,11 @@ export function reducer(state, action) {
       }
       // Only clamp when not explicitly opted out
       if (!next.keep_original_duration && durationSeconds < timelineDuration) {
-        // edits.timelineEnd is consumed by matchPlacementsToTranscript to override resolved duration
+        // NOTE: Setting edits.timelineEnd alone is not yet consumed by matchPlacementsToTranscript
+        // (which currently requires both timelineStart and timelineEnd). Task 4 of the plan updates
+        // brollUtils to honour single-field overrides + the auto_clamp_applied flag.
         const placement = state.rawPlacements.find(p => p.uuid === uuid)
+          ?? state.userPlacements.find(up => up.id === uuid)
         const tStart = placement?.timelineStart ?? 0
         next.timelineEnd = tStart + durationSeconds
         next.auto_clamp_applied = true
