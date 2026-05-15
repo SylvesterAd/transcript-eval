@@ -430,8 +430,13 @@ export async function probeMp4File(fileUrl, opts = {}) {
           && callerTotalBytes > 0
           && callerTotalBytes <= FULL_FETCH_THRESHOLD_BYTES
         if (useFullFetch) {
+          // No-Range fetch for full file. Chrome MV3 SW's file:// fetch
+          // throws "Failed to fetch" on large Range requests like
+          // bytes=0-42811399, but accepts a plain unranged GET and returns
+          // the entire file. fetchRange with start=0 and end=undefined
+          // emits no Range header — exactly what we need here.
           try {
-            view = await fetchRange(fetchFn, fileUrl, 0, callerTotalBytes - 1)
+            view = await fetchRange(fetchFn, fileUrl, 0, undefined)
           } catch (err) {
             emit('fps_probe_failed_fetch', { ...ctx, error: String(err?.message || err) })
             return null
@@ -440,6 +445,17 @@ export async function probeMp4File(fileUrl, opts = {}) {
             emit('fps_probe_failed_not_mp4', { ...ctx, byteLength: view.byteLength })
             return null
           }
+          // Defensive: if Chrome truncated the response (size < claimed
+          // totalBytes), don't proceed — the tmcd sample at stco[0] may
+          // not be reachable. Fall through to the head+tail path below.
+          if (view.byteLength < callerTotalBytes - 1024) {
+            // Body shorter than expected by more than 1KB — treat as
+            // failed and fall back to range-based path. (Some tolerance
+            // for trailing whitespace / mismatch in size sources.)
+            view = null
+          }
+        }
+        if (useFullFetch && view) {
           const { ftyp, moov: moovFull } = parseFromView(view, 0, view.byteLength)
           if (!ftyp || !validateFtypBrand(view, ftyp)) {
             emit('fps_probe_failed_unsupported_brand', { ...ctx })
