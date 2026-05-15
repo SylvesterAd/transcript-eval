@@ -138,6 +138,11 @@ export const TELEMETRY_EVENT_ENUM = Object.freeze([
   // Envato sequential licensing (feature/extension-fps-probe)
   'envato_license_tab_held',
   'envato_license_tab_closed',
+  // Slip-edit and source clamp (feat/slip-edit-source-clamp)
+  'slip_panel_opened',
+  'slip_committed',
+  'keep_original_toggled',
+  'auto_clamp_applied',
 ])
 
 // -------- Ext.7 failure-mode polish --------
