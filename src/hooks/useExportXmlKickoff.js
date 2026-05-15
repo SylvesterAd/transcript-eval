@@ -116,8 +116,18 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels, probedIte
         // .mov but Chrome content-type-sniffs and writes it as .mp4. Using
         // target_filename in that case produces "File not found in search
         // directories" in Premiere because the XML <pathurl> mismatches disk.
-        const finalBasename = typeof item.final_path === 'string' && item.final_path
-          ? item.final_path.split('/').pop() || item.target_filename || ''
+        //
+        // final_path lives on the EXTENSION SNAPSHOT item, not the server-
+        // built unified manifest item. The previous version of this code
+        // read item.final_path (always undefined on manifest items) and
+        // silently fell through to target_filename. We must read from the
+        // snapshot side via probeMap[source_item_id].
+        const snapshotItem = probeMap[item.source_item_id]
+        const snapshotFinalPath = typeof snapshotItem?.final_path === 'string' && snapshotItem.final_path
+          ? snapshotItem.final_path
+          : ''
+        const finalBasename = snapshotFinalPath
+          ? snapshotFinalPath.split('/').pop() || item.target_filename || ''
           : (item.target_filename || '')
         const base = {
           seq: item.seq,
@@ -127,7 +137,7 @@ export function buildVariantsPayload({ unifiedManifest, variantLabels, probedIte
           timelineStart: ts,
           timelineDuration: td,
         }
-        placements.push(mergeProbeIntoPlacement(base, item, probeMap[item.source_item_id]))
+        placements.push(mergeProbeIntoPlacement(base, item, snapshotItem))
       }
     }
     // Plans-list labels arrive as "Variant A" already; older callers
