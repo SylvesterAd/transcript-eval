@@ -365,6 +365,16 @@ export function generateXmeml({
       _sourceNtsc: sourceNtsc,
       _embeddedTimecode: embeddedTimecode,
       _embeddedTimecodeFrame: embeddedTimecodeFrame,
+      // Edit-list compensation. DaVinci respects the source file's
+      // video trak elst — if media_time > 0, the file's first presented
+      // frame is offset by this many seconds into the media. Convert to
+      // source-rate frames and ADD to tcOffset when computing <in>/<out>
+      // for b-roll clipitems below (line ~604). Without this, DaVinci
+      // shows the clip as offline because <in> points to a TC before the
+      // file's effective presentation start.
+      _videoEditListOffsetFrames: Math.round(
+        (Number.isFinite(p.videoEditListMediaTimeSeconds) ? p.videoEditListMediaTimeSeconds : 0) * sourceFrameRate
+      ),
     }
   })
 
@@ -601,7 +611,15 @@ export function generateXmeml({
       // "absolute TC 00:00:00:00" which doesn't exist in the file's
       // TC range. Offset gives <in>1577140 = file's actual frame 0
       // = TC 18:16:14:04 = within range.
-      const tcOffset = p._embeddedTimecodeFrame || 0
+      // Edit-list compensation: when the source file's video trak has
+      // an elst with non-zero media_time, the first presented frame is
+      // shifted forward by _videoEditListOffsetFrames media frames at
+      // source rate. DaVinci's TC-range validation expects <in>/<out>
+      // to land within the post-elst presentation range — without this
+      // addition, <in>=tcOffset points to media frame 0 which is BEFORE
+      // the presentation starts, and DaVinci shows the clip as offline.
+      // Premiere is lenient about this; DaVinci is strict.
+      const tcOffset = (p._embeddedTimecodeFrame || 0) + (p._videoEditListOffsetFrames || 0)
       const inFrame = tcOffset
       const outFrame = inFrame + p._durationSrcFrames
       // Element order + always-emit-ntsc derived from

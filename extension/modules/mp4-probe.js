@@ -384,6 +384,41 @@ function parseFromView(view, startInBuffer, endInBuffer) {
   return { ftyp, moov, mdat, sawMdat: mdat !== null }
 }
 
+// Returns seconds, or 0 if no edit list / no offset.
+// DaVinci honors a trak's edit list strictly — if the video trak's first
+// elst entry has a non-zero media_time, the file's first PRESENTED frame
+// is offset by that amount of media into the track. Our XML's <in>/<out>
+// values reference TC frames; without compensation, they point to a TC
+// that's before the file's effective presentation start and DaVinci shows
+// the clip as offline / unplayable.
+function readVideoTrakEditListOffsetSeconds(view, trak) {
+  const edts = findChildBox(view, trak, 'edts')
+  if (!edts) return 0
+  const elst = findChildBox(view, edts, 'elst')
+  if (!elst) return 0
+  if (elst.payloadEnd - elst.payloadStart < 8) return 0
+  const versionFlags = view.getUint32(elst.payloadStart, false)
+  const version = (versionFlags >>> 24) & 0xff
+  const entryCount = readU32BE(view, elst.payloadStart + 4)
+  if (entryCount === 0) return 0
+  // First entry only. v0: segment_duration(4) + media_time(int32) + media_rate(4)
+  //                  v1: segment_duration(8) + media_time(int64) + media_rate(4)
+  let mediaTime
+  if (version === 1) {
+    if (elst.payloadEnd - elst.payloadStart < 8 + 8 + 8 + 4) return 0
+    const big = view.getBigInt64(elst.payloadStart + 8 + 8, false)
+    if (big > BigInt(Number.MAX_SAFE_INTEGER) || big < BigInt(Number.MIN_SAFE_INTEGER)) return 0
+    mediaTime = Number(big)
+  } else {
+    if (elst.payloadEnd - elst.payloadStart < 8 + 4 + 4 + 4) return 0
+    mediaTime = view.getInt32(elst.payloadStart + 8 + 4, false)
+  }
+  if (mediaTime <= 0) return 0
+  const mdhd = readMdhd(view, trak)
+  if (!mdhd || !mdhd.timescale) return 0
+  return mediaTime / mdhd.timescale
+}
+
 function extractMetadataFromMoov(view, moov, bufferEnd) {
   const traks = [...iterateTraks(view, moov)]
   const videoTrak = traks.find(t => readTrakHandler(view, t) === 'vide')
@@ -393,7 +428,8 @@ function extractMetadataFromMoov(view, moov, bufferEnd) {
   const { width, height } = readTkhdDims(view, videoTrak)
   const durationSeconds = readVideoTrakDurationSeconds(view, videoTrak)
   const embeddedTimecode = readEmbeddedTimecode(view, 0, bufferEnd)
-  return { frameRate, ntsc, width, height, durationSeconds, embeddedTimecode, isVfr }
+  const videoEditListMediaTimeSeconds = readVideoTrakEditListOffsetSeconds(view, videoTrak)
+  return { frameRate, ntsc, width, height, durationSeconds, embeddedTimecode, isVfr, videoEditListMediaTimeSeconds }
 }
 
 export async function probeMp4File(fileUrl, opts = {}) {
@@ -567,6 +603,7 @@ export async function probeMp4File(fileUrl, opts = {}) {
           height: meta.height,
           durationSeconds: meta.durationSeconds,
           embeddedTimecode: meta.embeddedTimecode,
+          videoEditListMediaTimeSeconds: meta.videoEditListMediaTimeSeconds || 0,
           elapsedMs: Date.now() - probeStart,
         })
         return {
@@ -576,6 +613,7 @@ export async function probeMp4File(fileUrl, opts = {}) {
           height: meta.height,
           durationSeconds: meta.durationSeconds,
           embeddedTimecode: meta.embeddedTimecode,
+          videoEditListMediaTimeSeconds: meta.videoEditListMediaTimeSeconds || 0,
         }
       })(),
       new Promise((resolve) => {
