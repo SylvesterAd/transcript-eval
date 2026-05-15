@@ -84,6 +84,13 @@ function mergeProbeIntoPlacement(placement, manifestItem, probedItem) {
       (probe && 'embeddedTimecode' in probe ? probe.embeddedTimecode : undefined) ??
       manifestItem?.embedded_timecode ??
       null,
+    // DaVinci honors a source file's video edit-list (elst) media_time
+    // offset strictly. Without compensating <in>/<out>, the clip appears
+    // offline. Probed value is in seconds; the XMEML generator converts
+    // to source-rate frames and ADDS to the tcOffset for b-roll clipitems.
+    // Falls through to 0 when no probe ran or the file has no offset.
+    videoEditListMediaTimeSeconds:
+      probe?.videoEditListMediaTimeSeconds ?? 0,
   }
 }
 

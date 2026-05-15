@@ -115,6 +115,7 @@ describe('buildVariantsPayload', () => {
             ntsc: false,
             sourceDurationSeconds: null,
             embeddedTimecode: null,
+            videoEditListMediaTimeSeconds: 0,
           },
           {
             seq: 2,
@@ -129,6 +130,7 @@ describe('buildVariantsPayload', () => {
             ntsc: false,
             sourceDurationSeconds: null,
             embeddedTimecode: null,
+            videoEditListMediaTimeSeconds: 0,
           },
         ],
       }],
