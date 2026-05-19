@@ -385,8 +385,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
         const isPending = p.searchStatus === 'pending'
         const isFailed = p.searchStatus === 'failed'
 
-        return (
-          <Fragment key={p.index}>
+        const placementBar = (
           <div
             data-testid={`broll-bar-${p.uuid}`}
             className={`absolute top-0 rounded overflow-hidden ${isActive ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} transition-shadow ${
@@ -468,21 +467,28 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
               onMouseDown={(e) => handleEdgeDrag(p, 'right', e)}
             />}
           </div>
-          {expandedUuid === p.uuid && (
-            <div
-              ref={(el) => { if (el) panelRefs.current.set(p.uuid, el); else panelRefs.current.delete(p.uuid) }}
-              style={{ position: 'absolute', top: TRACK_H, left, zIndex: 30, minWidth: 480 }}
-            >
-              <BRollSlipPanel
-                placement={p}
-                onSlipChange={(sourceIn) => slipPlacement(p, sourceIn)}
-                onClampToggle={(value) => toggleKeepOriginal(p, value)}
-                onPreviewSeek={onPreviewSeek}
-                onReset={() => slipPlacement(p, 0)}
-                onClose={() => setExpandedUuid(null)}
-              />
-            </div>
-          )}
+        )
+
+        const panel = expandedUuid === p.uuid ? (
+          <div
+            ref={(el) => { if (el) panelRefs.current.set(p.uuid, el); else panelRefs.current.delete(p.uuid) }}
+            style={{ position: 'absolute', top: TRACK_H, left, zIndex: 30, minWidth: 480 }}
+          >
+            <BRollSlipPanel
+              placement={p}
+              onSlipChange={(sourceIn) => slipPlacement(p, sourceIn)}
+              onClampToggle={(value) => toggleKeepOriginal(p, value)}
+              onPreviewSeek={onPreviewSeek}
+              onReset={() => slipPlacement(p, 0)}
+              onClose={() => setExpandedUuid(null)}
+            />
+          </div>
+        ) : null
+
+        return (
+          <Fragment key={p.uuid}>
+            {placementBar}
+            {panel}
           </Fragment>
         )
       })}
