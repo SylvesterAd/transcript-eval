@@ -162,6 +162,8 @@ const ALLOWED_EVENTS = new Set([
   'export_started_without_fps_probe',
   // Envato sequential licensing (feature/extension-fps-probe)
   'envato_license_tab_held', 'envato_license_tab_closed',
+  // Slip-edit and source clamp (feat/slip-edit-source-clamp)
+  'slip_panel_opened', 'slip_committed', 'keep_original_toggled', 'auto_clamp_applied',
 ])
 
 const META_MAX_BYTES = 4096

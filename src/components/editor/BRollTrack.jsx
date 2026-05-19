@@ -1,7 +1,8 @@
-import { useMemo, useContext, useCallback, useState, memo, useRef } from 'react'
+import { useMemo, useContext, useCallback, useState, memo, useRef, useEffect, Fragment } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2, Copy } from 'lucide-react'
 import BRollContextMenu from './BRollContextMenu.jsx'
+import BRollSlipPanel from './BRollSlipPanel.jsx'
 import { getClipboard } from './brollClipboard.js'
 import { postCutTime } from '../../lib/timeTranslation.js'
 
@@ -15,7 +16,7 @@ export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
   return placement.persistedSelectedResult ?? 0
 }
 
-function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste, slipPlacement = () => {}, toggleKeepOriginal = () => {}, onPreviewSeek = () => {}, onPreviewClear = () => {} }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -25,6 +26,46 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
   const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
 
   const [menuState, setMenuState] = useState(null)
+  const [expandedUuid, setExpandedUuid] = useState(null)
+  const panelRefs = useRef(new Map())
+
+  // Stable ref so close handlers always call the current onPreviewClear prop
+  const onPreviewClearRef = useRef(onPreviewClear)
+  useEffect(() => { onPreviewClearRef.current = onPreviewClear })
+
+  // Helper: close the slip panel and clear the preview override
+  const closeSlipPanel = useCallback(() => {
+    setExpandedUuid(null)
+    onPreviewClearRef.current?.()
+  }, [])
+
+  useEffect(() => {
+    if (!expandedUuid) return
+    const onKey = (e) => { if (e.key === 'Escape') closeSlipPanel() }
+    const onClickOutside = (e) => {
+      const panelEl = panelRefs.current.get(expandedUuid)
+      if (panelEl && !panelEl.contains(e.target)) {
+        closeSlipPanel()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onClickOutside)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onClickOutside)
+    }
+  }, [expandedUuid, closeSlipPanel])
+
+  useEffect(() => {
+    if (!expandedUuid) return
+    const id = requestAnimationFrame(() => {
+      const el = panelRefs.current.get(expandedUuid)
+      if (el?.scrollIntoView) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+      }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [expandedUuid])
 
   const labelW = 144
   const buffer = 200
@@ -365,9 +406,9 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
         const isPending = p.searchStatus === 'pending'
         const isFailed = p.searchStatus === 'failed'
 
-        return (
+        const placementBar = (
           <div
-            key={p.index}
+            data-testid={`broll-bar-${p.uuid}`}
             className={`absolute top-0 rounded overflow-hidden ${isActive ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} transition-shadow ${
               isSelected
                 ? 'ring-2 ring-primary-fixed z-10'
@@ -375,6 +416,13 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
             }`}
             style={{ left, width, height: TRACK_H }}
             onMouseDown={(e) => handleBoxMove(p, e)}
+            onDoubleClick={(e) => {
+              e.stopPropagation()
+              setExpandedUuid(prev => {
+                if (prev === p.uuid) { onPreviewClearRef.current?.(); return null }
+                return p.uuid
+              })
+            }}
             onContextMenu={(e) => {
               e.preventDefault(); e.stopPropagation()
               setMenuState({ x: e.clientX, y: e.clientY, placement: p })
@@ -432,6 +480,39 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
               </div>
             )}
 
+            {/* Auto-clamp badge */}
+            {p.auto_clamp_applied && (
+              <span
+                data-testid={`broll-bar-${p.uuid}-clock`}
+                title={`Auto-clamped from ${p.original_timeline_duration?.toFixed(2)}s to ${p.timelineDuration.toFixed(2)}s`}
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  right: 14,
+                  fontSize: 10,
+                  pointerEvents: 'none',
+                  lineHeight: 1,
+                }}
+                aria-label="Auto-clamped to source duration"
+              >🕒</span>
+            )}
+            {/* Slip indicator badge */}
+            {(p.source_in_seconds ?? 0) > 0 && (
+              <span
+                data-testid={`broll-bar-${p.uuid}-slip`}
+                title={`Slipped to ${p.source_in_seconds.toFixed(2)}s into source`}
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  right: 2,
+                  fontSize: 10,
+                  pointerEvents: 'none',
+                  lineHeight: 1,
+                }}
+                aria-label="Source slipped"
+              >↔</span>
+            )}
+
             {/* Left resize handle (active track only) */}
             {isActive && <div
               className="absolute left-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary-fixed/20 z-20 transition-colors"
@@ -443,6 +524,29 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
               onMouseDown={(e) => handleEdgeDrag(p, 'right', e)}
             />}
           </div>
+        )
+
+        const panel = expandedUuid === p.uuid ? (
+          <div
+            ref={(el) => { if (el) panelRefs.current.set(p.uuid, el); else panelRefs.current.delete(p.uuid) }}
+            style={{ position: 'absolute', top: TRACK_H, left, zIndex: 30, minWidth: 480 }}
+          >
+            <BRollSlipPanel
+              placement={p}
+              onSlipChange={(sourceIn) => slipPlacement(p, sourceIn)}
+              onClampToggle={(value) => toggleKeepOriginal(p, value)}
+              onPreviewSeek={(absSec) => onPreviewSeek(p, absSec)}
+              onReset={() => slipPlacement(p, 0)}
+              onClose={closeSlipPanel}
+            />
+          </div>
+        ) : null
+
+        return (
+          <Fragment key={p.uuid}>
+            {placementBar}
+            {panel}
+          </Fragment>
         )
       })}
       {menuState && (

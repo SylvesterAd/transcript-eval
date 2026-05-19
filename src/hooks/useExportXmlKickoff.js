@@ -91,6 +91,28 @@ function mergeProbeIntoPlacement(placement, manifestItem, probedItem) {
     // Falls through to 0 when no probe ran or the file has no offset.
     videoEditListMediaTimeSeconds:
       probe?.videoEditListMediaTimeSeconds ?? 0,
+    // Slip-edit fields — set by the b-roll editor (Task 3/4) and resolved
+    // into the placement by matchPlacementsToTranscript (Task 4). They
+    // flow through here unchanged into the POST body so the XMEML
+    // generator (Task 5) can emit slip-aware <in>/<out> and clamped <end>.
+    //
+    //   source_in_seconds:        editor's chosen source start point (s)
+    //   keep_original_duration:   true → don't clamp to source bounds
+    //   original_timeline_duration: the placement's pre-slip duration (s)
+    //   auto_clamp_applied:       informational; generator doesn't read it
+    //
+    // Defaults: source_in_seconds=0 (from top), keep_original_duration=false
+    // (clamp by default), others null. When the placement already carries
+    // these (Task 4 resolved them), they pass through via spread; the
+    // explicit assignments below provide safe defaults when absent.
+    source_in_seconds:
+      placement.source_in_seconds ?? 0,
+    keep_original_duration:
+      placement.keep_original_duration ?? false,
+    original_timeline_duration:
+      placement.original_timeline_duration ?? null,
+    auto_clamp_applied:
+      placement.auto_clamp_applied ?? null,
   }
 }
 

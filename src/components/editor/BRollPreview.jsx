@@ -15,7 +15,7 @@ function isHlsUrl(url) {
   return !!url && HLS_RE.test(url)
 }
 
-export default function BRollPreview() {
+export default function BRollPreview({ slipOverrideRef }) {
   const { state, videoRefs } = useContext(EditorContext)
   const broll = useContext(BRollContext)
   const brollVideoRef = useRef(null)
@@ -28,6 +28,12 @@ export default function BRollPreview() {
 
   const stateRef = useRef(state); stateRef.current = state
   const brollRef = useRef(broll); brollRef.current = broll
+
+  // Stable ref to slipOverrideRef so the rAF tick always reads the latest value
+  // without re-creating the effect. slipOverrideRef.current is either null (normal
+  // playback) or { placement, sourceInSec, url } while the slip panel is open.
+  const slipOverrideRefStable = useRef(slipOverrideRef)
+  slipOverrideRefStable.current = slipOverrideRef
 
   // Drive <video> source via useHlsSource: HLS goes through hls.js (Chrome) or
   // native (Safari); MP4s land directly on `.src`. Setting activeUrl=null
@@ -98,6 +104,37 @@ export default function BRollPreview() {
     const tick = () => {
       const s = stateRef.current
       const b = brollRef.current
+
+      // --- Slip override mode: user is dragging the slip panel ---
+      // When set, override normal timeline-driven playback to show the source
+      // frame at the drag position. The ref is written/cleared by BRollEditor.
+      const slipOverride = slipOverrideRefStable.current?.current ?? null
+      if (slipOverride) {
+        const { placement, sourceInSec, url } = slipOverride
+        if (!showBRoll) setShowBRoll(true)
+
+        // Switch source URL if needed (same fallback-less single-URL path as slip)
+        if (url && activeUrlRef.current !== url) {
+          setVideoLoadState('loading')
+          setActiveUrl(url)
+          activeKeyRef.current = `slip:${placement.uuid ?? placement.index}`
+          fallbackIdxRef.current = 0
+        }
+
+        // Seek to the source in-point. Clamp to [0, video.duration] defensively.
+        if (brollVideoRef.current) {
+          const v = brollVideoRef.current
+          const dur = isFinite(v.duration) ? v.duration : Infinity
+          const target = Math.max(0, Math.min(sourceInSec, dur))
+          if (Math.abs(v.currentTime - target) > 0.05) v.currentTime = target
+          if (!v.paused) v.pause()
+        }
+
+        rafId = requestAnimationFrame(tick)
+        return
+      }
+
+      // --- Normal timeline-driven mode ---
       const activePlacement = b ? b.activePlacementAtTime(s.currentTime) : null
       const resultIdx = activePlacement ? (b.selectedResults[activePlacement.index] ?? activePlacement.persistedSelectedResult ?? 0) : 0
       const activeResult = activePlacement?.results?.[resultIdx] || null

@@ -82,6 +82,68 @@ function migrateActionStack(stack, rawPlacements) {
   return changed ? out : stack
 }
 
+// Builds an APPLY_ACTION-compatible entry for toggling keep_original_duration.
+// The returned entry can be dispatched via APPLY_ACTION and supports undo via its
+// `before` block. The `after.editsSlot` patch is computed from:
+//   nextValue = true  (off→on): restore timelineEnd = timelineStart + original_timeline_duration
+//   nextValue = false (on→off): re-apply clamp if source is shorter, else clear clamp
+export function buildToggleKeepOriginalEntry({ placement, currentEdits, nextValue, sourceDurationSeconds }) {
+  const tStart = placement.timelineStart ?? 0
+  const originalDuration = currentEdits.original_timeline_duration
+  let nextTimelineEnd
+  let nextAutoClamp
+  if (nextValue === true) {
+    // off → on: restore original duration
+    nextTimelineEnd = originalDuration != null ? tStart + originalDuration : undefined
+    nextAutoClamp = false
+  } else {
+    // on → off: re-apply clamp if source is shorter than original
+    if (originalDuration != null && sourceDurationSeconds != null && sourceDurationSeconds < originalDuration) {
+      nextTimelineEnd = tStart + sourceDurationSeconds
+      nextAutoClamp = true
+    } else {
+      nextTimelineEnd = undefined
+      nextAutoClamp = false
+    }
+  }
+  return {
+    id: generateActionId(),
+    ts: Date.now(),
+    kind: 'toggle-keep-original',
+    placementKey: placement.uuid,
+    before: {
+      editsSlot: {
+        keep_original_duration: currentEdits.keep_original_duration,
+        timelineEnd: currentEdits.timelineEnd,
+        auto_clamp_applied: currentEdits.auto_clamp_applied,
+      },
+    },
+    after: {
+      editsSlot: {
+        keep_original_duration: nextValue,
+        timelineEnd: nextTimelineEnd,
+        auto_clamp_applied: nextAutoClamp,
+      },
+    },
+  }
+}
+
+// Builds an APPLY_ACTION-compatible entry for a slip edit (changing source_in_seconds).
+// The returned entry can be dispatched via APPLY_ACTION and supports undo via its
+// `before` block. Only `source_in_seconds` is captured — keep_original_duration and
+// clamp-related fields are owned by buildToggleKeepOriginalEntry and PROBE_DATA_RECEIVED.
+export function buildSlipEntry({ placement, currentEdits, nextSourceIn }) {
+  const safeNext = Math.max(0, nextSourceIn)
+  return {
+    id: generateActionId(),
+    ts: Date.now(),
+    kind: 'slip',
+    placementKey: placement.uuid,
+    before: { editsSlot: { source_in_seconds: currentEdits.source_in_seconds ?? 0 } },
+    after:  { editsSlot: { source_in_seconds: safeNext } },
+  }
+}
+
 // Applies just the mutation side of an action to the reducer's editor-state slots.
 // Used by APPLY_ACTION (with action.after), UNDO (with entry.before), and REDO (with entry.after).
 export function applyMutation(state, entry, side /* 'before' | 'after' */) {
@@ -127,6 +189,7 @@ export function applyMutation(state, entry, side /* 'before' | 'after' */) {
 export function userPlacementToRawEntry(up) {
   return {
     ...(up.snapshot || {}),
+    uuid: up.id,
     index: `user:${up.id}`,
     userPlacementId: up.id,
     isUserPlacement: true,
@@ -422,6 +485,30 @@ export function reducer(state, action) {
         next = { ...next, undoStack: [...next.undoStack, entry].slice(-MAX_UNDO) }
       }
       return next
+    }
+    case 'PROBE_DATA_RECEIVED': {
+      const { uuid, durationSeconds, timelineDuration } = action.payload
+      if (!uuid || typeof durationSeconds !== 'number' || typeof timelineDuration !== 'number') return state
+      const prev = state.edits[uuid] || {}
+      const next = { ...prev }
+      // Always record the pre-clamp duration on first probe
+      if (next.original_timeline_duration == null) {
+        next.original_timeline_duration = timelineDuration
+      }
+      // Only clamp when not explicitly opted out
+      if (!next.keep_original_duration && durationSeconds < timelineDuration) {
+        // NOTE: Setting edits.timelineEnd alone is not yet consumed by matchPlacementsToTranscript
+        // (which currently requires both timelineStart and timelineEnd). Task 4 of the plan updates
+        // brollUtils to honour single-field overrides + the auto_clamp_applied flag.
+        const placement = state.rawPlacements.find(p => p.uuid === uuid)
+          ?? state.userPlacements.find(up => up.id === uuid)
+        const tStart = placement?.timelineStart ?? 0
+        next.timelineEnd = tStart + durationSeconds
+        next.auto_clamp_applied = true
+      }
+      // No structural change if nothing was added
+      if (Object.keys(next).length === 0) return state
+      return { ...state, edits: { ...state.edits, [uuid]: next }, dirty: true }
     }
     case 'SAVE_SUCCESS': {
       return { ...state, editorStateVersion: action.payload.version, dirty: false }
