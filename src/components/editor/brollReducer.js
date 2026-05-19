@@ -189,6 +189,7 @@ export function applyMutation(state, entry, side /* 'before' | 'after' */) {
 export function userPlacementToRawEntry(up) {
   return {
     ...(up.snapshot || {}),
+    uuid: up.id,
     index: `user:${up.id}`,
     userPlacementId: up.id,
     isUserPlacement: true,
