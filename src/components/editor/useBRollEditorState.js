@@ -13,6 +13,8 @@ import {
   userPlacementToRawEntry,
   generateActionId,
   MAX_UNDO,
+  buildSlipEntry,
+  buildToggleKeepOriginalEntry,
 } from './brollReducer.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -1164,6 +1166,67 @@ export function useBRollEditorState(planPipelineId) {
 
   const resetAllPlacements = useCallback(() => dispatch({ type: 'RESET_ALL_PLACEMENTS' }), [])
 
+  // Tracks which placement uuids have already had PROBE_DATA_RECEIVED dispatched so the
+  // receiveProbedMetadata callback never double-fires for the same placement.
+  const probedUuidsRef = useRef(new Set())
+
+  // Action creator: slip the source start point for a placement.
+  // Uses APPLY_ACTION_COALESCE so rapid drag updates coalesce into one undo entry.
+  // Resolves placement identity via userPlacementId ?? uuid (per Task 1 review).
+  const slipPlacement = useCallback((placement, nextSourceIn) => {
+    if (!placement?.uuid && !placement?.userPlacementId) return
+    const placementKey = placement.userPlacementId ?? placement.uuid
+    const currentEdits = state.edits[placementKey] || {}
+    const entry = buildSlipEntry({
+      placement: { ...placement, uuid: placementKey },
+      currentEdits,
+      nextSourceIn,
+    })
+    dispatch({ type: 'APPLY_ACTION_COALESCE', payload: entry })
+  }, [state.edits])
+
+  // Action creator: toggle keep_original_duration for a placement.
+  // Uses APPLY_ACTION (not coalesce) since this is a discrete checkbox toggle.
+  const toggleKeepOriginal = useCallback((placement, nextValue) => {
+    if (!placement?.uuid && !placement?.userPlacementId) return
+    const placementKey = placement.userPlacementId ?? placement.uuid
+    const currentEdits = state.edits[placementKey] || {}
+    const entry = buildToggleKeepOriginalEntry({
+      placement: { ...placement, uuid: placementKey },
+      currentEdits,
+      nextValue,
+      sourceDurationSeconds: placement.sourceDurationSeconds,
+    })
+    dispatch({ type: 'APPLY_ACTION', payload: entry })
+  }, [state.edits])
+
+  // Probe-data ingestion: called externally (e.g. by BRollTrack or BRollEditor) when
+  // extension probe data arrives for one or more placements. Each item must carry:
+  //   { uuid, sourceDurationSeconds, timelineDuration }
+  // The ref-gate prevents re-dispatching for uuids already processed in this session.
+  const receiveProbedMetadata = useCallback((probedPlacements) => {
+    if (!Array.isArray(probedPlacements)) return
+    for (const placement of probedPlacements) {
+      const uuid = placement.userPlacementId ?? placement.uuid
+      if (!uuid) continue
+      const probedMeta = placement.probedMetadata || placement.probed_metadata
+      const durationSeconds = probedMeta?.durationSeconds ?? placement.sourceDurationSeconds
+      if (typeof durationSeconds !== 'number') continue
+      if (probedUuidsRef.current.has(uuid)) continue
+      probedUuidsRef.current.add(uuid)
+      const timelineDuration = placement.timelineDuration
+      if (typeof timelineDuration !== 'number') continue
+      dispatch({
+        type: 'PROBE_DATA_RECEIVED',
+        payload: {
+          uuid,
+          durationSeconds,
+          timelineDuration,
+        },
+      })
+    }
+  }, [])
+
   return useMemo(() => ({
     rawPlacements: state.rawPlacements,
     placements: state.placements,
@@ -1192,6 +1255,9 @@ export function useBRollEditorState(planPipelineId) {
     updateCrossDropSnapshot,
     updatePlacementPosition,
     resetAllPlacements,
+    slipPlacement,
+    toggleKeepOriginal,
+    receiveProbedMetadata,
     refetchEditorData,
     planPipelineId,
     edits: state.edits,
@@ -1210,7 +1276,7 @@ export function useBRollEditorState(planPipelineId) {
     copyPlacement, pastePlacement, resetPlacement, dragCrossPlacement,
     hideSourceForCrossDrop, revertCrossDropHide, updateCrossDropSnapshot,
     updatePlacementPosition,
-    resetAllPlacements, refetchEditorData, planPipelineId,
+    resetAllPlacements, slipPlacement, toggleKeepOriginal, receiveProbedMetadata, refetchEditorData, planPipelineId,
     state.edits, state.userPlacements, state.undoStack, state.redoStack, state.editorStateVersion, state.dirty,
     flushSave, registerInactiveCacheSetter,
   ])
