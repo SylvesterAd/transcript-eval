@@ -230,4 +230,40 @@ describe('BRollSlipPanel drag interaction', () => {
 
     expect(onSlipChange).not.toHaveBeenCalled()
   })
+
+  it('uses the latest onSlipChange callback (not the one captured at mount)', () => {
+    const onSlipChangeV1 = vi.fn()
+    const onSlipChangeV2 = vi.fn()
+    const { rerender } = render(
+      <BRollSlipPanel
+        placement={placement}
+        onSlipChange={onSlipChangeV1}
+        onClampToggle={() => {}}
+        onPreviewSeek={() => {}}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    // Re-render with new callback
+    rerender(
+      <BRollSlipPanel
+        placement={placement}
+        onSlipChange={onSlipChangeV2}
+        onClampToggle={() => {}}
+        onPreviewSeek={() => {}}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    const win = screen.getByTestId('slip-green-window')
+    const strip = screen.getByTestId('slip-source-strip')
+    strip.getBoundingClientRect = () => ({ left: 0, width: 1200, right: 1200, top: 0, bottom: 48, height: 48, x: 0, y: 0, toJSON: () => ({}) })
+
+    fireEvent.mouseDown(win, { clientX: 200 })
+    fireEvent.mouseMove(document, { clientX: 300 })
+    fireEvent.mouseUp(document, { clientX: 300 })
+
+    expect(onSlipChangeV1).not.toHaveBeenCalled()
+    expect(onSlipChangeV2).toHaveBeenCalledTimes(1)
+  })
 })

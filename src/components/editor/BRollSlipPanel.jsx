@@ -26,6 +26,12 @@ export default function BRollSlipPanel({
   const onDocMouseMoveRef = useRef(null)
   const onDocMouseUpRef = useRef(null)
 
+  // Latest-callback refs so mount-only effect always calls current prop
+  const onSlipChangeRef = useRef(onSlipChange)
+  const onPreviewSeekRef = useRef(onPreviewSeek)
+  useEffect(() => { onSlipChangeRef.current = onSlipChange })
+  useEffect(() => { onPreviewSeekRef.current = onPreviewSeek })
+
   const scheduleSeek = (absSec) => {
     seekStateRef.current.pending = absSec
     if (!seekStateRef.current.rafId) {
@@ -33,7 +39,7 @@ export default function BRollSlipPanel({
         seekStateRef.current.rafId = 0
         const s = seekStateRef.current.pending
         seekStateRef.current.pending = null
-        if (typeof onPreviewSeek === 'function') onPreviewSeek(s)
+        onPreviewSeekRef.current?.(s)
       })
     }
   }
@@ -58,14 +64,16 @@ export default function BRollSlipPanel({
       const ds = dragStateRef.current
       if (!ds) return
       if (ds.currentSourceIn !== ds.startSourceIn) {
-        if (typeof onSlipChange === 'function') onSlipChange(ds.currentSourceIn)
+        onSlipChangeRef.current?.(ds.currentSourceIn)
       }
       dragStateRef.current = null
     }
 
     return () => {
       document.removeEventListener('mousemove', onDocMouseMoveRef.current)
+      document.removeEventListener('mouseup', onDocMouseUpRef.current)
       if (seekStateRef.current.rafId) cancelAnimationFrame(seekStateRef.current.rafId)
+      dragStateRef.current = null
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
