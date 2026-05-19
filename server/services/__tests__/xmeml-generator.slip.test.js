@@ -85,4 +85,26 @@ describe('generateXmeml slip-edit + clamp', () => {
     const { in: inF } = extractInOut(xml, 'pexels_test.mp4')
     expect(inF).toBe(Math.round(1.0 * 29.97) + Math.round(0.067 * 29.97))
   })
+
+  it('elst-aware clamp: <out> does not overshoot file when source has elst offset', () => {
+    // Real-world item 016: 6.17s Pexels MP4 with 2-frame elst, placed in 7s slot.
+    // Pre-fix bug: clamp used (sourceDur - sourceIn) but ignored elst, so
+    // effectiveDur = 6.17s → 185 src-frames. <in> = 0 + 2 (elst) = 2,
+    // <out> = 2 + 185 = 187. File has frames 0..184 (185 total) → <out>=187
+    // is 2 frames past the file's last presentable frame.
+    const placement = basePlacement({
+      timelineDuration: 7.0,
+      sourceDurationSeconds: 6.17,
+      videoEditListMediaTimeSeconds: 0.067, // ~2 frames at 29.97
+    })
+    const xml = generateXmeml({
+      sequenceName: 'test',
+      placements: [placement],
+      aroll: null,
+      arollSegments: null,
+    })
+    const { in: inF, out: outF } = extractInOut(xml, 'pexels_test.mp4')
+    const sourceTotalFrames = Math.round(6.17 * 29.97) // 185
+    expect(outF).toBeLessThanOrEqual(sourceTotalFrames)
+  })
 })

@@ -330,6 +330,14 @@ export function generateXmeml({
     // frames on top of the existing tcOffset (embedded TC + elst).
     const sourceInSeconds = Math.max(0, Number.isFinite(p.source_in_seconds) ? p.source_in_seconds : 0)
     const sourceInFrames = Math.round(sourceInSeconds * sourceFrameRate)
+    // Edit-list offset (seconds). When >0, the first PRESENTED frame of the
+    // source is offset that many seconds into the media — those head frames
+    // are unaddressable. The clamp must subtract this from the available
+    // source range so <out> doesn't reference a TC past the file's last
+    // presented frame. inFrame already adds the elst offset (line below);
+    // without subtracting it from the duration too, outFrame overshoots
+    // by exactly the elst frame count (e.g. item 016: 2-frame overshoot).
+    const elstOffsetSeconds = Math.max(0, Number.isFinite(p.videoEditListMediaTimeSeconds) ? p.videoEditListMediaTimeSeconds : 0)
 
     // Source media's full duration in frames (in the file's own framerate).
     // When unknown, fall back to the source-rate duration so the clip plays —
@@ -346,14 +354,15 @@ export function generateXmeml({
     //   to timelineDuration) without clamping.
     //
     // Default (keep_original_duration falsy) → clamp to min(timelineDuration,
-    //   sourceDur - sourceInSeconds) so <out> never lands beyond the file's
-    //   last frame. This fixes item 016 (Pexels 6.17s in 7s slot) where the
-    //   old code emitted <out>=212 and DaVinci showed the clip then froze.
+    //   sourceDur - sourceInSeconds - elstOffsetSeconds) so <out> never
+    //   lands beyond the file's last frame. This fixes item 016 (Pexels
+    //   6.17s in 7s slot with 2-frame elst) where pre-fix code emitted
+    //   <out>=187 for a 185-frame file (2-frame overshoot).
     let effectiveDurationSec
     if (p.keep_original_duration) {
       effectiveDurationSec = p.original_timeline_duration ?? p.timelineDuration
     } else if (sourceDur != null) {
-      effectiveDurationSec = Math.min(p.timelineDuration, Math.max(0, sourceDur - sourceInSeconds))
+      effectiveDurationSec = Math.min(p.timelineDuration, Math.max(0, sourceDur - sourceInSeconds - elstOffsetSeconds))
     } else {
       effectiveDurationSec = p.timelineDuration
     }
@@ -362,7 +371,7 @@ export function generateXmeml({
     // will go black for the overshoot). Use console.warn — no warnings array
     // return plumbing needed; tests verify the numeric frame values instead.
     if (p.keep_original_duration && sourceDur != null) {
-      const overshoot = sourceInSeconds + effectiveDurationSec - sourceDur
+      const overshoot = sourceInSeconds + elstOffsetSeconds + effectiveDurationSec - sourceDur
       if (overshoot > 0) {
         console.warn(
           `[xmeml] Placement ${p.seq ?? p.filename} source ends before placement; ` +
