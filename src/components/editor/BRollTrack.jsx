@@ -1,7 +1,8 @@
-import { useMemo, useContext, useCallback, useState, memo, useRef } from 'react'
+import { useMemo, useContext, useCallback, useState, memo, useRef, useEffect, Fragment } from 'react'
 import { BRollContext } from './useBRollEditorState.js'
 import { Loader2, Copy } from 'lucide-react'
 import BRollContextMenu from './BRollContextMenu.jsx'
+import BRollSlipPanel from './BRollSlipPanel.jsx'
 import { getClipboard } from './brollClipboard.js'
 import { postCutTime } from '../../lib/timeTranslation.js'
 
@@ -15,7 +16,7 @@ export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
   return placement.persistedSelectedResult ?? 0
 }
 
-function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste, slipPlacement = () => {}, toggleKeepOriginal = () => {}, onPreviewSeek = () => {} }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -25,6 +26,25 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
   const { selectedIndex, selectedResults, selectPlacement, updatePlacementPosition } = broll || {}
 
   const [menuState, setMenuState] = useState(null)
+  const [expandedUuid, setExpandedUuid] = useState(null)
+  const panelRefs = useRef(new Map())
+
+  useEffect(() => {
+    if (!expandedUuid) return
+    const onKey = (e) => { if (e.key === 'Escape') setExpandedUuid(null) }
+    const onClickOutside = (e) => {
+      const panelEl = panelRefs.current.get(expandedUuid)
+      if (panelEl && !panelEl.contains(e.target)) {
+        setExpandedUuid(null)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onClickOutside)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onClickOutside)
+    }
+  }, [expandedUuid])
 
   const labelW = 144
   const buffer = 200
@@ -366,8 +386,9 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
         const isFailed = p.searchStatus === 'failed'
 
         return (
+          <Fragment key={p.index}>
           <div
-            key={p.index}
+            data-testid={`broll-bar-${p.uuid}`}
             className={`absolute top-0 rounded overflow-hidden ${isActive ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} transition-shadow ${
               isSelected
                 ? 'ring-2 ring-primary-fixed z-10'
@@ -375,6 +396,10 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
             }`}
             style={{ left, width, height: TRACK_H }}
             onMouseDown={(e) => handleBoxMove(p, e)}
+            onDoubleClick={(e) => {
+              e.stopPropagation()
+              setExpandedUuid(prev => prev === p.uuid ? null : p.uuid)
+            }}
             onContextMenu={(e) => {
               e.preventDefault(); e.stopPropagation()
               setMenuState({ x: e.clientX, y: e.clientY, placement: p })
@@ -443,6 +468,22 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
               onMouseDown={(e) => handleEdgeDrag(p, 'right', e)}
             />}
           </div>
+          {expandedUuid === p.uuid && (
+            <div
+              ref={(el) => { if (el) panelRefs.current.set(p.uuid, el); else panelRefs.current.delete(p.uuid) }}
+              style={{ position: 'absolute', top: TRACK_H, left, zIndex: 30, minWidth: 480 }}
+            >
+              <BRollSlipPanel
+                placement={p}
+                onSlipChange={(sourceIn) => slipPlacement(p, sourceIn)}
+                onClampToggle={(value) => toggleKeepOriginal(p, value)}
+                onPreviewSeek={onPreviewSeek}
+                onReset={() => slipPlacement(p, 0)}
+                onClose={() => setExpandedUuid(null)}
+              />
+            </div>
+          )}
+          </Fragment>
         )
       })}
       {menuState && (
