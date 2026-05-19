@@ -46,6 +46,17 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
     }
   }, [expandedUuid])
 
+  useEffect(() => {
+    if (!expandedUuid) return
+    const id = requestAnimationFrame(() => {
+      const el = panelRefs.current.get(expandedUuid)
+      if (el?.scrollIntoView) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+      }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [expandedUuid])
+
   const labelW = 144
   const buffer = 200
 

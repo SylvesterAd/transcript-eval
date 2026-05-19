@@ -129,6 +129,25 @@ describe('BRollSlipPanel rendering', () => {
   })
 })
 
+describe('BRollSlipPanel positioning', () => {
+  it('panel wrapper has minWidth 480px', () => {
+    render(
+      <BRollSlipPanel
+        placement={placement}
+        onSlipChange={() => {}}
+        onClampToggle={() => {}}
+        onPreviewSeek={() => {}}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    const strip = screen.getByTestId('slip-source-strip')
+    const panel = strip.closest('.broll-slip-panel')
+    expect(panel).toBeTruthy()
+    expect(panel.style.minWidth).toBe('480px')
+  })
+})
+
 describe('BRollSlipPanel drag interaction', () => {
   it('mouse-drag on green window commits new source_in_seconds on mouseup', () => {
     const onSlipChange = vi.fn()
