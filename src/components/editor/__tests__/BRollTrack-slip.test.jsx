@@ -73,3 +73,50 @@ describe('BRollTrack double-click expansion', () => {
     expect(screen.queryByTestId('slip-source-strip')).toBeNull()
   })
 })
+
+describe('BRollTrack badges', () => {
+  it('shows clock icon on auto-clamped placements', () => {
+    const clamped = { ...placement, auto_clamp_applied: true }
+    render(
+      <BRollTrack
+        overridePlacements={[clamped]}
+        zoom={10}
+        slipPlacement={() => {}}
+        toggleKeepOriginal={() => {}}
+        onPreviewSeek={() => {}}
+        onPreviewClear={() => {}}
+      />
+    )
+    expect(screen.getByTestId(`broll-bar-${clamped.uuid}-clock`)).toBeTruthy()
+  })
+
+  it('shows slip indicator on placements with source_in_seconds > 0', () => {
+    const slipped = { ...placement, source_in_seconds: 1.5 }
+    render(
+      <BRollTrack
+        overridePlacements={[slipped]}
+        zoom={10}
+        slipPlacement={() => {}}
+        toggleKeepOriginal={() => {}}
+        onPreviewSeek={() => {}}
+        onPreviewClear={() => {}}
+      />
+    )
+    expect(screen.getByTestId(`broll-bar-${slipped.uuid}-slip`)).toBeTruthy()
+  })
+
+  it('does not show badges on a default placement', () => {
+    render(
+      <BRollTrack
+        overridePlacements={[placement]}
+        zoom={10}
+        slipPlacement={() => {}}
+        toggleKeepOriginal={() => {}}
+        onPreviewSeek={() => {}}
+        onPreviewClear={() => {}}
+      />
+    )
+    expect(screen.queryByTestId(`broll-bar-${placement.uuid}-clock`)).toBeNull()
+    expect(screen.queryByTestId(`broll-bar-${placement.uuid}-slip`)).toBeNull()
+  })
+})

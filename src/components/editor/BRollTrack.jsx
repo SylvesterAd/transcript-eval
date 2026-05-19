@@ -480,6 +480,39 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
               </div>
             )}
 
+            {/* Auto-clamp badge */}
+            {p.auto_clamp_applied && (
+              <span
+                data-testid={`broll-bar-${p.uuid}-clock`}
+                title={`Auto-clamped from ${p.original_timeline_duration?.toFixed(2)}s to ${p.timelineDuration.toFixed(2)}s`}
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  right: 14,
+                  fontSize: 10,
+                  pointerEvents: 'none',
+                  lineHeight: 1,
+                }}
+                aria-label="Auto-clamped to source duration"
+              >🕒</span>
+            )}
+            {/* Slip indicator badge */}
+            {(p.source_in_seconds ?? 0) > 0 && (
+              <span
+                data-testid={`broll-bar-${p.uuid}-slip`}
+                title={`Slipped to ${p.source_in_seconds.toFixed(2)}s into source`}
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  right: 2,
+                  fontSize: 10,
+                  pointerEvents: 'none',
+                  lineHeight: 1,
+                }}
+                aria-label="Source slipped"
+              >↔</span>
+            )}
+
             {/* Left resize handle (active track only) */}
             {isActive && <div
               className="absolute left-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary-fixed/20 z-20 transition-colors"
