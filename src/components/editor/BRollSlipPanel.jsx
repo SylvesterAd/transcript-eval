@@ -1,7 +1,4 @@
-import { useMemo } from 'react'
-
 const MIN_PANEL_WIDTH = 480
-const DIM_OPACITY = 0.4
 
 export default function BRollSlipPanel({
   placement,
@@ -32,7 +29,7 @@ export default function BRollSlipPanel({
         className="slip-source-strip"
         data-testid="slip-source-strip"
         data-source-duration={String(sourceDur)}
-        style={{ position: 'relative', height: 48, background: '#222', opacity: DIM_OPACITY }}
+        style={{ position: 'relative', height: 48, background: 'rgba(34, 34, 34, 0.4)' }}
       >
         <div
           className="slip-green-window"
@@ -47,7 +44,6 @@ export default function BRollSlipPanel({
             bottom: 0,
             background: 'rgba(0, 230, 100, 0.35)',
             outline: '1px solid rgba(0, 230, 100, 0.9)',
-            opacity: 1 / DIM_OPACITY,
           }}
         />
         {overflowsRight && (
