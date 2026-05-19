@@ -1171,7 +1171,12 @@ export function useBRollEditorState(planPipelineId) {
   const probedUuidsRef = useRef(new Set())
 
   // Action creator: slip the source start point for a placement.
-  // Uses APPLY_ACTION_COALESCE so rapid drag updates coalesce into one undo entry.
+  // Uses APPLY_ACTION (not COALESCE) — BRollSlipPanel dispatches once per drag
+  // gesture (on mouseup), so there is no intra-gesture stream to coalesce.
+  // Coalescing unconditionally would corrupt the undo stack if the previous
+  // entry belongs to a different action kind or placement (e.g. resize A → slip B).
+  // If arrow-nudge support is added later, introduce the same-target guard pattern
+  // (kind + placementKey + time window) used by updatePlacementPosition at that time.
   // Resolves placement identity via userPlacementId ?? uuid (per Task 1 review).
   const slipPlacement = useCallback((placement, nextSourceIn) => {
     if (!placement?.uuid && !placement?.userPlacementId) return
@@ -1182,7 +1187,7 @@ export function useBRollEditorState(planPipelineId) {
       currentEdits,
       nextSourceIn,
     })
-    dispatch({ type: 'APPLY_ACTION_COALESCE', payload: entry })
+    dispatch({ type: 'APPLY_ACTION', payload: entry })
   }, [state.edits])
 
   // Action creator: toggle keep_original_duration for a placement.
@@ -1203,19 +1208,28 @@ export function useBRollEditorState(planPipelineId) {
   // Probe-data ingestion: called externally (e.g. by BRollTrack or BRollEditor) when
   // extension probe data arrives for one or more placements. Each item must carry:
   //   { uuid, sourceDurationSeconds, timelineDuration }
-  // The ref-gate prevents re-dispatching for uuids already processed in this session.
+  // Validation order matters: all field checks run BEFORE the dedup set is updated.
+  // This prevents a malformed first call (missing timelineDuration or durationSeconds)
+  // from permanently silencing valid later calls for the same uuid. The dedup add
+  // is the last step before dispatch, acting as a commit gate.
   const receiveProbedMetadata = useCallback((probedPlacements) => {
     if (!Array.isArray(probedPlacements)) return
     for (const placement of probedPlacements) {
+      // 1. uuid — early-out if missing
       const uuid = placement.userPlacementId ?? placement.uuid
       if (!uuid) continue
+      // 2. durationSeconds — early-out if invalid
       const probedMeta = placement.probedMetadata || placement.probed_metadata
       const durationSeconds = probedMeta?.durationSeconds ?? placement.sourceDurationSeconds
       if (typeof durationSeconds !== 'number') continue
-      if (probedUuidsRef.current.has(uuid)) continue
-      probedUuidsRef.current.add(uuid)
+      // 3. timelineDuration — early-out if invalid
       const timelineDuration = placement.timelineDuration
       if (typeof timelineDuration !== 'number') continue
+      // 4. dedup check — skip if already processed
+      if (probedUuidsRef.current.has(uuid)) continue
+      // 5. Mark as processed (commit gate — only reached after all validation passes)
+      probedUuidsRef.current.add(uuid)
+      // 6. Dispatch
       dispatch({
         type: 'PROBE_DATA_RECEIVED',
         payload: {
