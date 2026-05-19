@@ -410,6 +410,29 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   // (Preloading is rendered as <BRollPreloadPool> hidden videos in the JSX
   // tree below — see that component for the rationale.)
 
+  // Slip preview override channel.
+  // slipOverrideRef.current = { placement, sourceInSec, url } while the slip
+  // panel is open and the user is dragging. BRollPreview reads this each rAF
+  // frame and overrides normal timeline-driven playback.
+  // Written by handlePreviewSeek; cleared by handlePreviewClear (panel close).
+  const slipOverrideRef = useRef(null)
+
+  const handlePreviewSeek = useCallback((placement, sourceInSec) => {
+    const resultIdx = placement
+      ? (brollState.selectedResults?.[placement.index] ?? placement.persistedSelectedResult ?? 0)
+      : 0
+    const result = placement?.results?.[resultIdx]
+    // Prefer preview_url for fast-scrubbing (lower bitrate). Fall back through chain.
+    const url = result
+      ? (result.preview_url || result.preview_url_hq || result.url || null)
+      : null
+    slipOverrideRef.current = placement ? { placement, sourceInSec, url } : null
+  }, [brollState.selectedResults])
+
+  const handlePreviewClear = useCallback(() => {
+    slipOverrideRef.current = null
+  }, [])
+
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
 
@@ -459,7 +482,7 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Video preview */}
           <div className="flex-1 flex flex-col min-h-0">
-            <BRollPreview />
+            <BRollPreview slipOverrideRef={slipOverrideRef} />
           </div>
 
           {/* Horizontal splitter */}
@@ -481,6 +504,8 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
                 onVariantActivate={handleVariantActivate}
                 onCrossPaste={handleCrossPaste}
                 inactiveVariantPlacements={inactiveVariantPlacements}
+                onPreviewSeek={handlePreviewSeek}
+                onPreviewClear={handlePreviewClear}
                 onCrossDrop={async (args) => {
                   const sourcePlacement = brollState.placements.find(p => p.index === args.sourceIndex)
                   if (!sourcePlacement) return

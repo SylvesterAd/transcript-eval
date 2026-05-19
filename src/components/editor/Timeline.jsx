@@ -13,7 +13,7 @@ import { getTrackPostCutLayout } from '../../lib/postCutTimeline.js'
 const COMPOSITE_H = 80
 const COMPOSITE_AUDIO_H = 56
 
-export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop, onCrossPaste }) {
+export default function Timeline({ variants, activeVariantIdx, onVariantActivate, inactiveVariantPlacements, onCrossDrop, onCrossPaste, onPreviewSeek, onPreviewClear }) {
   const { state, dispatch, totalDuration, playbackEngine, playheadRef, expandedCutAnchor, setExpandedCutAnchor, cutDragRef, selectedSegmentKey } = useContext(EditorContext)
   const isBroll = state.activeTab === 'brolls'
 
@@ -845,6 +845,10 @@ export default function Timeline({ variants, activeVariantIdx, onVariantActivate
                         localVariantIdx={vi}
                         onCrossDrop={onCrossDrop}
                         onCrossPaste={onCrossPaste}
+                        slipPlacement={broll?.slipPlacement}
+                        toggleKeepOriginal={broll?.toggleKeepOriginal}
+                        onPreviewSeek={onPreviewSeek}
+                        onPreviewClear={onPreviewClear}
                       />
                     </div>
                   </div>

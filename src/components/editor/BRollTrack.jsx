@@ -16,7 +16,7 @@ export function resolveDisplayResultIdx(placement, isActive, selectedResults) {
   return placement.persistedSelectedResult ?? 0
 }
 
-function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste, slipPlacement = () => {}, toggleKeepOriginal = () => {}, onPreviewSeek = () => {} }) {
+function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true, onActivate, overridePlacements, variants, activeVariantIdx, localVariantIdx, onCrossDrop, onCrossPaste, slipPlacement = () => {}, toggleKeepOriginal = () => {}, onPreviewSeek = () => {}, onPreviewClear = () => {} }) {
   const broll = useContext(BRollContext)
   if (!broll && !overridePlacements) return null
 
@@ -29,13 +29,23 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
   const [expandedUuid, setExpandedUuid] = useState(null)
   const panelRefs = useRef(new Map())
 
+  // Stable ref so close handlers always call the current onPreviewClear prop
+  const onPreviewClearRef = useRef(onPreviewClear)
+  useEffect(() => { onPreviewClearRef.current = onPreviewClear })
+
+  // Helper: close the slip panel and clear the preview override
+  const closeSlipPanel = useCallback(() => {
+    setExpandedUuid(null)
+    onPreviewClearRef.current?.()
+  }, [])
+
   useEffect(() => {
     if (!expandedUuid) return
-    const onKey = (e) => { if (e.key === 'Escape') setExpandedUuid(null) }
+    const onKey = (e) => { if (e.key === 'Escape') closeSlipPanel() }
     const onClickOutside = (e) => {
       const panelEl = panelRefs.current.get(expandedUuid)
       if (panelEl && !panelEl.contains(e.target)) {
-        setExpandedUuid(null)
+        closeSlipPanel()
       }
     }
     document.addEventListener('keydown', onKey)
@@ -44,7 +54,7 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('mousedown', onClickOutside)
     }
-  }, [expandedUuid])
+  }, [expandedUuid, closeSlipPanel])
 
   useEffect(() => {
     if (!expandedUuid) return
@@ -408,7 +418,10 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
             onMouseDown={(e) => handleBoxMove(p, e)}
             onDoubleClick={(e) => {
               e.stopPropagation()
-              setExpandedUuid(prev => prev === p.uuid ? null : p.uuid)
+              setExpandedUuid(prev => {
+                if (prev === p.uuid) { onPreviewClearRef.current?.(); return null }
+                return p.uuid
+              })
             }}
             onContextMenu={(e) => {
               e.preventDefault(); e.stopPropagation()
@@ -489,9 +502,9 @@ function BRollTrack({ zoom, viewW = 1200, scrollX, postCutCuts, isActive = true,
               placement={p}
               onSlipChange={(sourceIn) => slipPlacement(p, sourceIn)}
               onClampToggle={(value) => toggleKeepOriginal(p, value)}
-              onPreviewSeek={onPreviewSeek}
+              onPreviewSeek={(absSec) => onPreviewSeek(p, absSec)}
               onReset={() => slipPlacement(p, 0)}
-              onClose={() => setExpandedUuid(null)}
+              onClose={closeSlipPanel}
             />
           </div>
         ) : null
