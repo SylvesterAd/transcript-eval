@@ -277,11 +277,42 @@ function readEmbeddedTimecode(view, start, end) {
   }
   if (sampleOffset + 4 > end) return null
   const startFrames = readU32BE(view, sampleOffset)
-  // Format as HH:MM:SS:FF (or HH:MM:SS;FF for DF)
-  const fps = numFrames
-  const totalFrames = startFrames
-  const ff = totalFrames % fps
-  const totalSec = Math.floor(totalFrames / fps)
+  return framesToTimecodeString(startFrames, numFrames, dropFrame)
+}
+
+// Convert a media-frame index to an SMPTE timecode string.
+//
+// For NDF (dropFrame=false), the frame index maps directly: ff=frame%fps,
+// then standard HH:MM:SS:FF math.
+//
+// For DF (dropFrame=true, fps∈{30,60} only), the file's actual frame index
+// is wall-clock-aligned and we must compute the TC label that reflects the
+// DF skips. At 29.97 DF, 1 hour of wall-clock = 107892 actual frames but
+// the TC label at that point reads "01:00:00;00" (108000 in counter
+// arithmetic, with 108 frames skipped). Conversion: bump the actual
+// frame index up by 9·d·dropPerMin per completed 10-min block plus
+// dropPerMin per completed non-first minute within the current 10-min
+// block, then run NDF math on the bumped counter value.
+//
+// Pre-fix bug (item 011): omitting this conversion produced TC strings
+// like "00:59:56;12" for actual-frame=107892, which then round-tripped
+// through parseTimecodeToFrame to 107784 (off by 108 frames / 3.6s).
+function framesToTimecodeString(startFrames, fpsInt, dropFrame) {
+  let counter = startFrames
+  if (dropFrame && (fpsInt === 30 || fpsInt === 60)) {
+    const dropPerMin = fpsInt === 30 ? 2 : 4
+    const framesPer10Min = fpsInt * 600 - 9 * dropPerMin // 17982 | 35964
+    const framesPerMin = fpsInt * 60 - dropPerMin        // 1798  | 3596
+    const d = Math.floor(startFrames / framesPer10Min)
+    const m = startFrames - d * framesPer10Min
+    let extra = 9 * d * dropPerMin
+    if (m > dropPerMin) {
+      extra += dropPerMin * Math.floor((m - dropPerMin) / framesPerMin)
+    }
+    counter = startFrames + extra
+  }
+  const ff = counter % fpsInt
+  const totalSec = Math.floor(counter / fpsInt)
   const ss = totalSec % 60
   const mm = Math.floor(totalSec / 60) % 60
   const hh = Math.floor(totalSec / 3600)
@@ -290,7 +321,7 @@ function readEmbeddedTimecode(view, start, end) {
   return `${pad(hh)}:${pad(mm)}:${pad(ss)}${sep}${pad(ff)}`
 }
 
-export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, normalizeFrameRate, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds, readEmbeddedTimecode }
+export const _internal = { readU32BE, readU64BE, readFourCC, readBoxHeader, iterateBoxes, validateFtypBrand, ACCEPTED_BRANDS, findMoov, findChildBox, iterateTraks, readTrakHandler, readMdhd, readSttsEntries, normalizeFrameRate, readVideoTrakRate, readTkhdDims, readVideoTrakDurationSeconds, readEmbeddedTimecode, framesToTimecodeString }
 
 // ---------------------------------------------------------------------------
 // Public API

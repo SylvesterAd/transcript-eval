@@ -284,6 +284,35 @@ describe('mp4-probe tmcd embedded timecode', () => {
   })
 })
 
+describe('mp4-probe framesToTimecodeString (DF/NDF encoding)', () => {
+  it('NDF: frame 0 → 00:00:00:00', () => {
+    expect(_internal.framesToTimecodeString(0, 30, false)).toBe('00:00:00:00')
+  })
+
+  it('NDF: frame 1578580 at 24fps → 18:16:14:04 (matches with_tmcd.mov fixture)', () => {
+    expect(_internal.framesToTimecodeString(1578580, 24, false)).toBe('18:16:14:04')
+  })
+
+  it('DF: frame 107892 at 30fps → 01:00:00;00 (10-min boundary, item 011)', () => {
+    // 29.97 DF: 1 hour = 60min × 30fps − 108 dropped = 107892 actual frames.
+    // Pre-fix bug: decoder treated startFrames as NDF counter, producing
+    // "00:59:56;12", which parseTimecodeToFrame inverts to 107784 (off by 108).
+    expect(_internal.framesToTimecodeString(107892, 30, true)).toBe('01:00:00;00')
+  })
+
+  it('DF: frame 1798 at 30fps → 00:00:59;28 (just before minute boundary)', () => {
+    expect(_internal.framesToTimecodeString(1798, 30, true)).toBe('00:00:59;28')
+  })
+
+  it('DF: frame 1800 at 30fps → 00:01:00;02 (skips ;00 and ;01 at minute 1)', () => {
+    expect(_internal.framesToTimecodeString(1800, 30, true)).toBe('00:01:00;02')
+  })
+
+  it('DF: frame 17982 at 30fps → 00:10:00;00 (10th minute, no skip)', () => {
+    expect(_internal.framesToTimecodeString(17982, 30, true)).toBe('00:10:00;00')
+  })
+})
+
 import { vi } from 'vitest'
 
 describe('mp4-probe public probeMp4File', () => {
