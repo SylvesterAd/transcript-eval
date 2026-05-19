@@ -433,6 +433,58 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     slipOverrideRef.current = null
   }, [])
 
+  // Probe-data wiring: pump per-result duration/frameRate into the broll reducer
+  // so Pass 4 (PROBE_DATA_RECEIVED) can auto-clamp placements whose source is
+  // shorter than the slot. The search results already carry this data from the
+  // stock-footage API (Pexels/Envato) — no separate extension call needed.
+  //
+  // receiveProbedMetadata deduplicates via an internal Set so calling this on
+  // every render is safe; it only dispatches once per uuid. We still gate on
+  // placements + selectedResults identity to avoid building the entries array
+  // on unrelated re-renders.
+  useEffect(() => {
+    if (!brollState.receiveProbedMetadata) return
+    const placements = brollState.placements
+    if (!placements?.length) return
+    const selectedResults = brollState.selectedResults
+    const entries = []
+    for (const p of placements) {
+      const uuid = p.userPlacementId ?? p.uuid
+      if (!uuid) continue
+      if (typeof p.timelineDuration !== 'number') continue
+      const resultIdx = selectedResults?.[p.index] ?? p.persistedSelectedResult ?? 0
+      const result = p.results?.[resultIdx]
+      const durationSeconds = result?.duration
+      if (typeof durationSeconds !== 'number' || durationSeconds <= 0) continue
+      entries.push({ uuid, sourceDurationSeconds: durationSeconds, timelineDuration: p.timelineDuration })
+    }
+    if (entries.length > 0) {
+      brollState.receiveProbedMetadata(entries)
+    }
+  }, [brollState.placements, brollState.selectedResults, brollState.receiveProbedMetadata])
+
+  // Merge sourceDurationSeconds + sourceFrameRate onto resolved placements so
+  // BRollSlipPanel can render the source strip and compute drag bounds without
+  // needing a separate probe-data lookup. Falls through unchanged when the
+  // selected result carries no duration (e.g. placement has no results yet).
+  const placementsWithProbe = useMemo(() => {
+    const placements = brollState.placements
+    if (!placements) return placements
+    const selectedResults = brollState.selectedResults
+    return placements.map(p => {
+      const resultIdx = selectedResults?.[p.index] ?? p.persistedSelectedResult ?? 0
+      const result = p.results?.[resultIdx]
+      const durationSeconds = result?.duration
+      const frameRate = result?.frame_rate
+      if (typeof durationSeconds !== 'number' || durationSeconds <= 0) return p
+      return {
+        ...p,
+        sourceDurationSeconds: durationSeconds,
+        sourceFrameRate: typeof frameRate === 'number' && frameRate > 0 ? frameRate : (p.sourceFrameRate ?? 30),
+      }
+    })
+  }, [brollState.placements, brollState.selectedResults])
+
   const [bottomH, setBottomH] = useState(310)
   const splitRef = useRef(null)
 
@@ -453,6 +505,17 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     window.addEventListener('mouseup', onUp)
   }, [bottomH])
 
+  // Override `placements` in the context with the probe-enriched version so
+  // BRollTrack (via useContext(BRollContext)) and BRollSlipPanel see
+  // sourceDurationSeconds + sourceFrameRate without requiring a separate prop
+  // drill through Timeline → BRollTrack.
+  // Must be called before the early-return guards (loading/error) to satisfy
+  // React's rules of hooks (no hooks after conditional returns).
+  const brollContextValue = useMemo(
+    () => ({ ...brollState, placements: placementsWithProbe ?? brollState.placements }),
+    [brollState, placementsWithProbe],
+  )
+
   if (brollState.loading && !hasEverLoaded.current) {
     return (
       <div className="flex-1 flex items-center justify-center bg-surface-dim">
@@ -470,9 +533,9 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
   }
 
   return (
-    <BRollContext.Provider value={brollState}>
+    <BRollContext.Provider value={brollContextValue}>
       <BRollPreloadPool
-        activePlacements={brollState.placements}
+        activePlacements={placementsWithProbe ?? brollState.placements}
         inactivePlacementsByPid={inactiveVariantPlacements}
         currentTime={editorCtx?.state?.currentTime || 0}
         selectedResultsByIndex={brollState.selectedResults}
