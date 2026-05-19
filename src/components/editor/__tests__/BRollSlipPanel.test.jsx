@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { vi } from 'vitest'
 import BRollSlipPanel from '../BRollSlipPanel.jsx'
 
 afterEach(cleanup)
@@ -125,5 +126,108 @@ describe('BRollSlipPanel rendering', () => {
       />
     )
     expect(screen.queryByTestId('slip-overflow-stripe')).toBeNull()
+  })
+})
+
+describe('BRollSlipPanel drag interaction', () => {
+  it('mouse-drag on green window commits new source_in_seconds on mouseup', () => {
+    const onSlipChange = vi.fn()
+    const onPreviewSeek = vi.fn()
+    render(
+      <BRollSlipPanel
+        placement={placement}
+        onSlipChange={onSlipChange}
+        onClampToggle={() => {}}
+        onPreviewSeek={onPreviewSeek}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    const win = screen.getByTestId('slip-green-window')
+    const strip = screen.getByTestId('slip-source-strip')
+    // Mock getBoundingClientRect for deterministic px math
+    strip.getBoundingClientRect = () => ({ left: 0, width: 1200, right: 1200, top: 0, bottom: 48, height: 48, x: 0, y: 0, toJSON: () => ({}) })
+
+    fireEvent.mouseDown(win, { clientX: 200 })
+    fireEvent.mouseMove(document, { clientX: 300 })
+    fireEvent.mouseUp(document, { clientX: 300 })
+
+    // sourceDur=12s, strip width=1200px → pxPerSecond=100. Drag delta = 100px = 1s.
+    // placement.source_in_seconds starts at 1.0 → ends at 2.0
+    expect(onSlipChange).toHaveBeenCalledTimes(1)
+    const newSourceIn = onSlipChange.mock.calls[0][0]
+    expect(newSourceIn).toBeCloseTo(2.0, 1)
+  })
+
+  it('respects upper bound when clamp is on (max sourceIn = sourceDur - effectiveDuration)', () => {
+    const onSlipChange = vi.fn()
+    // source_in=6, effectiveDur=5, sourceDur=12 → max sourceIn = 7
+    render(
+      <BRollSlipPanel
+        placement={{ ...placement, source_in_seconds: 6 }}
+        onSlipChange={onSlipChange}
+        onClampToggle={() => {}}
+        onPreviewSeek={() => {}}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    const win = screen.getByTestId('slip-green-window')
+    const strip = screen.getByTestId('slip-source-strip')
+    strip.getBoundingClientRect = () => ({ left: 0, width: 1200, right: 1200, top: 0, bottom: 48, height: 48, x: 0, y: 0, toJSON: () => ({}) })
+
+    fireEvent.mouseDown(win, { clientX: 600 })
+    fireEvent.mouseMove(document, { clientX: 1100 })
+    fireEvent.mouseUp(document, { clientX: 1100 })
+
+    expect(onSlipChange).toHaveBeenCalledTimes(1)
+    const finalIn = onSlipChange.mock.calls[0][0]
+    expect(finalIn).toBeLessThanOrEqual(7)
+  })
+
+  it('respects lower bound: source_in cannot go negative', () => {
+    const onSlipChange = vi.fn()
+    render(
+      <BRollSlipPanel
+        placement={{ ...placement, source_in_seconds: 0.5 }}
+        onSlipChange={onSlipChange}
+        onClampToggle={() => {}}
+        onPreviewSeek={() => {}}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    const win = screen.getByTestId('slip-green-window')
+    const strip = screen.getByTestId('slip-source-strip')
+    strip.getBoundingClientRect = () => ({ left: 0, width: 1200, right: 1200, top: 0, bottom: 48, height: 48, x: 0, y: 0, toJSON: () => ({}) })
+
+    fireEvent.mouseDown(win, { clientX: 100 })
+    fireEvent.mouseMove(document, { clientX: 0 }) // big left drag — past 0
+    fireEvent.mouseUp(document, { clientX: 0 })
+
+    expect(onSlipChange).toHaveBeenCalledTimes(1)
+    expect(onSlipChange.mock.calls[0][0]).toBeGreaterThanOrEqual(0)
+  })
+
+  it('does not call onSlipChange if drag delta resolves to no change', () => {
+    const onSlipChange = vi.fn()
+    render(
+      <BRollSlipPanel
+        placement={placement}
+        onSlipChange={onSlipChange}
+        onClampToggle={() => {}}
+        onPreviewSeek={() => {}}
+        onReset={() => {}}
+        onClose={() => {}}
+      />
+    )
+    const win = screen.getByTestId('slip-green-window')
+    const strip = screen.getByTestId('slip-source-strip')
+    strip.getBoundingClientRect = () => ({ left: 0, width: 1200, right: 1200, top: 0, bottom: 48, height: 48, x: 0, y: 0, toJSON: () => ({}) })
+
+    fireEvent.mouseDown(win, { clientX: 200 })
+    fireEvent.mouseUp(document, { clientX: 200 }) // no move
+
+    expect(onSlipChange).not.toHaveBeenCalled()
   })
 })

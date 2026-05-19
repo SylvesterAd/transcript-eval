@@ -1,4 +1,7 @@
+import { useEffect, useRef, useState } from 'react'
+
 const MIN_PANEL_WIDTH = 480
+const MAX_OVERFLOW_WIDTH_PCT = 20
 
 export default function BRollSlipPanel({
   placement,
@@ -9,23 +12,99 @@ export default function BRollSlipPanel({
   onClose,
 }) {
   const sourceDur = placement.sourceDurationSeconds || 0
-  const sourceIn = placement.source_in_seconds ?? 0
+  const sourceIn = Math.max(0, placement.source_in_seconds ?? 0) // defensive parity with XMEML generator
   const effectiveDuration = placement.keep_original_duration
     ? (placement.original_timeline_duration ?? placement.timelineDuration)
     : Math.min(placement.timelineDuration, Math.max(0, sourceDur - sourceIn))
 
-  const windowStart = sourceIn
-  const windowEnd = sourceIn + effectiveDuration
+  const stripRef = useRef(null)
+  const dragStateRef = useRef(null)
+  const seekStateRef = useRef({ pending: null, rafId: 0 })
+  const [, force] = useState(0) // force re-render during drag
+
+  // Stable handler refs so addEventListener/removeEventListener use the same reference
+  const onDocMouseMoveRef = useRef(null)
+  const onDocMouseUpRef = useRef(null)
+
+  const scheduleSeek = (absSec) => {
+    seekStateRef.current.pending = absSec
+    if (!seekStateRef.current.rafId) {
+      seekStateRef.current.rafId = requestAnimationFrame(() => {
+        seekStateRef.current.rafId = 0
+        const s = seekStateRef.current.pending
+        seekStateRef.current.pending = null
+        if (typeof onPreviewSeek === 'function') onPreviewSeek(s)
+      })
+    }
+  }
+
+  // Build stable handlers on mount; capture mutable values via refs
+  useEffect(() => {
+    onDocMouseMoveRef.current = (e) => {
+      const ds = dragStateRef.current
+      if (!ds) return
+      const deltaPx = e.clientX - ds.startClientX
+      const deltaSec = deltaPx / ds.pxPerSecond
+      const proposed = ds.startSourceIn + deltaSec
+      const snapped = Math.round(proposed * ds.fps) / ds.fps
+      const clamped = Math.max(0, Math.min(ds.maxSourceIn, snapped))
+      ds.currentSourceIn = clamped
+      scheduleSeek(clamped)
+      force((v) => v + 1)
+    }
+
+    onDocMouseUpRef.current = () => {
+      document.removeEventListener('mousemove', onDocMouseMoveRef.current)
+      const ds = dragStateRef.current
+      if (!ds) return
+      if (ds.currentSourceIn !== ds.startSourceIn) {
+        if (typeof onSlipChange === 'function') onSlipChange(ds.currentSourceIn)
+      }
+      dragStateRef.current = null
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', onDocMouseMoveRef.current)
+      if (seekStateRef.current.rafId) cancelAnimationFrame(seekStateRef.current.rafId)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onWindowMouseDown = (e) => {
+    e.preventDefault()
+    const rect = stripRef.current?.getBoundingClientRect()
+    if (!rect || rect.width === 0) return
+    const pxPerSecond = rect.width / sourceDur
+    const fps = placement.sourceFrameRate || 30
+    const minVisibleSec = 1 / fps
+    const maxSourceIn = placement.keep_original_duration
+      ? Math.max(0, sourceDur - minVisibleSec)
+      : Math.max(0, sourceDur - effectiveDuration)
+    dragStateRef.current = {
+      startClientX: e.clientX,
+      startSourceIn: sourceIn,
+      pxPerSecond,
+      maxSourceIn,
+      fps,
+      currentSourceIn: sourceIn,
+    }
+    document.addEventListener('mousemove', onDocMouseMoveRef.current)
+    document.addEventListener('mouseup', onDocMouseUpRef.current, { once: true })
+  }
+
+  const displaySourceIn = dragStateRef.current?.currentSourceIn ?? sourceIn
+  const windowStart = displaySourceIn
+  const windowEnd = displaySourceIn + effectiveDuration
   const windowStartPct = sourceDur > 0 ? (windowStart / sourceDur) * 100 : 0
   const windowEndPct = sourceDur > 0 ? (Math.min(windowEnd, sourceDur) / sourceDur) * 100 : 0
   const overflowsRight = windowEnd > sourceDur && sourceDur > 0
   const overflowWidthPct = overflowsRight
-    ? Math.min(20, ((windowEnd - sourceDur) / sourceDur) * 100)
+    ? Math.min(MAX_OVERFLOW_WIDTH_PCT, ((windowEnd - sourceDur) / sourceDur) * 100)
     : 0
 
   return (
     <div className="broll-slip-panel" style={{ minWidth: MIN_PANEL_WIDTH, padding: 8 }}>
       <div
+        ref={stripRef}
         className="slip-source-strip"
         data-testid="slip-source-strip"
         data-source-duration={String(sourceDur)}
@@ -36,6 +115,7 @@ export default function BRollSlipPanel({
           data-testid="slip-green-window"
           data-window-start={String(windowStart)}
           data-window-end={String(windowEnd)}
+          onMouseDown={onWindowMouseDown}
           style={{
             position: 'absolute',
             left: `${windowStartPct}%`,
@@ -44,6 +124,7 @@ export default function BRollSlipPanel({
             bottom: 0,
             background: 'rgba(0, 230, 100, 0.35)',
             outline: '1px solid rgba(0, 230, 100, 0.9)',
+            cursor: 'grab',
           }}
         />
         {overflowsRight && (
