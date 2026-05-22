@@ -277,6 +277,81 @@ describe('materializePlacementRemap', () => {
     })
   })
 
+  describe('verbatim-unique anchor overrides LLM timecode (gate bypass)', () => {
+    // Helper: filler words on a regular cadence, then a unique phrase planted at idx.
+    function transcriptWith(phrase, idx, phraseStart, cadence = 0.36, total = idx + 40) {
+      const words = []
+      for (let i = 0; i < total; i++) words.push({ word: `w${i}`, start: i * cadence, end: i * cadence + 0.1 })
+      const toks = phrase.split(' ')
+      for (let j = 0; j < toks.length; j++) {
+        words[idx + j] = { word: toks[j], start: phraseStart + j * 0.3, end: phraseStart + j * 0.3 + 0.25 }
+      }
+      return words
+    }
+
+    it('bypasses the >10s gate when the audio_anchor matches a UNIQUE phrase verbatim', () => {
+      // plan-557 case: LLM emitted [00:00:09.60] but the anchored phrase
+      // "advice is pretty misguided" actually occurs at ~144s. Unique phrase →
+      // anchor_word_idx is unambiguous and overrides the bad LLM time even
+      // though it's ~135s away (far outside the ±10s gate).
+      const words = transcriptWith('advice is pretty misguided', 379, 144.40)
+      const placements = [{
+        uuid: 'p_557',
+        start: '[00:00:09.60]', end: '[00:00:11.60]',
+        audio_anchor: 'advice is pretty misguided',
+        anchor_word_idx: 379,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_557')
+      expect(p.hidden).toBeUndefined()
+      expect(p.start_seconds).toBeCloseTo(144.40, 2)
+      expect(p.end_seconds).toBeCloseTo(146.40, 2) // 2s LLM-intended duration preserved
+      expect(p.anchor_state).toBe('word_snapped')
+    })
+
+    it('keeps a verbatim-unique placement visible when LLM end precedes start (corrupt timecodes)', () => {
+      // plan-557 #0: start=[00:02:14] (134s), end=[00:00:08.18] (8.18s) → end<start.
+      // Anchor "floating around the internet" is unique at ~130s. Must snap there
+      // and stay visible with a sane positive duration, not be hidden by the
+      // negative LLM duration.
+      const words = transcriptWith('floating around the internet', 332, 129.84)
+      const placements = [{
+        uuid: 'p_corrupt',
+        start: '[00:02:14]', end: '[00:00:08.18]',
+        audio_anchor: 'floating around the internet',
+        anchor_word_idx: 332,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_corrupt')
+      expect(p.hidden).toBeUndefined()
+      expect(p.start_seconds).toBeCloseTo(129.84, 2)
+      expect(p.end_seconds).toBeGreaterThan(p.start_seconds + 0.5) // sane positive duration
+    })
+
+    it('does NOT bypass the gate when the verbatim phrase repeats (ambiguous → defer to LLM time)', () => {
+      // "bad piece" occurs twice. It matches verbatim at idx 1, but the phrase
+      // is ambiguous, so the ±10s gate stays in force and the LLM time wins.
+      const words = [
+        { word: 'a', start: 5, end: 5.1 },
+        { word: 'bad', start: 5.2, end: 5.5 },     // occurrence 1 (idx 1)
+        { word: 'piece', start: 5.5, end: 5.9 },
+        { word: 'x', start: 6, end: 6.2 },
+        { word: 'bad', start: 100, end: 100.3 },   // occurrence 2 (idx 4)
+        { word: 'piece', start: 100.3, end: 100.7 },
+      ]
+      const placements = [{
+        uuid: 'p_rep',
+        start: '[00:01:40]', end: '[00:01:42]',  // 100s — far from idx 1 (5.2s)
+        audio_anchor: 'bad piece',
+        anchor_word_idx: 1,
+      }]
+      const out = materializePlacementRemap(placements, [], words)
+      const p = out.get('p_rep')
+      expect(p.start_seconds).toBeCloseTo(100, 2)
+      expect(p.anchor_state).toBe('shifted')
+    })
+  })
+
   it('enforces 0.5s minimum duration', () => {
     const placements = [{
       uuid: 'p_short',

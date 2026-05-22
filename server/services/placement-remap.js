@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { postCutTime } from './time-translation.js'
 import { parseTimecode } from './placement-match.js'
+import { anchorMatchInfo } from './anchor-word.js'
 
 /**
  * Find the cut whose interval (start, end) strictly contains `t`. Returns null
@@ -60,6 +61,11 @@ function cutContainingEnd(t, effectiveCuts) {
  */
 export function materializePlacementRemap(placements, effectiveCuts, words) {
   const MIN_DURATION = 0.5
+  // Fallback span when the LLM's own timecodes are corrupt (end <= start) but we
+  // still trust WHERE the placement goes (verbatim-unique anchor). Keeps it
+  // visible at a sane length instead of letting a negative duration collapse it
+  // to hidden.
+  const DEFAULT_DURATION = 3
   const wordsList = Array.isArray(words) ? words : []
 
   const resolved = []
@@ -92,9 +98,27 @@ export function materializePlacementRemap(placements, effectiveCuts, words) {
     const wordStart = idxValid ? wordsList[idx].start : null
     const llmStartPostCut = postCutTime(llmStart, effectiveCuts)
     const wordStartPostCut = idxValid ? postCutTime(wordStart, effectiveCuts) : null
-    const usedWordSnap = idxValid && Math.abs(wordStartPostCut - llmStartPostCut) <= 10
+
+    // When the audio_anchor matches a UNIQUE phrase verbatim at anchor_word_idx,
+    // the index is unambiguous — trust it OVER the LLM timecode regardless of
+    // distance. This rescues plans where the model botched the numeric timecode
+    // (dropped the minutes, or emitted end<start) but still anchored to the
+    // right words. The ±10s gate stays in force for non-verbatim (first-token
+    // fallback) or repeated/ambiguous anchors — what it was added to protect
+    // against (project 367).
+    const { verbatim: anchorVerbatim, unique: anchorUnique, wordCount: anchorWords } =
+      anchorMatchInfo(wordsList, idx, p.audio_anchor)
+    const anchorTrusted = idxValid && anchorVerbatim && anchorUnique && anchorWords >= 2
+    const usedWordSnap =
+      idxValid && (anchorTrusted || Math.abs(wordStartPostCut - llmStartPostCut) <= 10)
+
+    // Preserve the LLM-intended duration when sane; otherwise (corrupt
+    // end<=start, or NaN) fall back to a default so a word-snapped placement
+    // stays visible rather than collapsing to a negative span.
+    const snapDuration =
+      Number.isFinite(llmDuration) && llmDuration >= MIN_DURATION ? llmDuration : DEFAULT_DURATION
     const startOrig = usedWordSnap ? wordStart : llmStart
-    const endOrig = usedWordSnap ? wordStart + llmDuration : llmEnd
+    const endOrig = usedWordSnap ? wordStart + snapDuration : llmEnd
 
     // Clip the placement to the visible (non-cut) portion of the timeline.
     const startCut = cutContaining(startOrig, effectiveCuts)
