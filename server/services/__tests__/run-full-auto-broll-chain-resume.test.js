@@ -14,6 +14,12 @@ const state = {
   brollChainUpdates: [],
   // Track runner method call ordering
   runnerCalls: [],
+  // Capture the args each runBrollSearchFirst10 call received, so tests can
+  // assert what planPipelineIds the search phase was handed.
+  searchBatchArgs: [],
+  // Plan pipelineIds the DB recovery query (plan-% prefix) should return when
+  // resumeChain('search') has to reconstruct them (no opts supplied).
+  recoveredPlanPids: [],
   // What phaseHasOutputs returns per (phase, strategy_kind). The mocked db.get
   // below inspects the kind arg to decide whether to return a row. Refs is now
   // split into refsPrep + refsAnalysis because phaseHasOutputs requires BOTH.
@@ -64,6 +70,10 @@ vi.mock('../../db.js', () => ({
           if (/SELECT DISTINCT metadata_json FROM broll_runs r/.test(sql)) {
             return []
           }
+          // resumeChain('search') plan-pid recovery (plan-% prefix match).
+          if (/->>'pipelineId'\)\s*LIKE 'plan-%'/.test(sql)) {
+            return state.recoveredPlanPids.map(pid => ({ pid }))
+          }
           return []
         },
         async run(...args) {
@@ -94,8 +104,9 @@ vi.mock('../broll-runner.js', () => ({
     state.runnerCalls.push('runPlanForEachVariant')
     return { planPipelineIds: ['p-1'] }
   }),
-  runBrollSearchFirst10: vi.fn(async () => {
+  runBrollSearchFirst10: vi.fn(async (args) => {
     state.runnerCalls.push('runBrollSearchFirst10')
+    state.searchBatchArgs.push(args)
     return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length}` }
   }),
   waitForSearchBatchComplete: vi.fn(async () => {
@@ -111,6 +122,8 @@ const { runFullAutoBrollChain, resumeChain } = await import('../auto-orchestrato
 beforeEach(() => {
   state.brollChainUpdates = []
   state.runnerCalls = []
+  state.searchBatchArgs = []
+  state.recoveredPlanPids = []
   state.phaseOutputs = { refsPrep: false, refsAnalysis: false, strategy: false, plan: false, search: false }
 })
 
@@ -219,5 +232,42 @@ describe('resumeChain Phase 4 sequential batches', () => {
       'runBrollSearchFirst10', 'waitForSearchBatchComplete',
       'runBrollSearchFirst10', 'waitForSearchBatchComplete',
     ])
+  })
+
+  // Regression for prod crash search-batch-1779455020983: the boot/periodic
+  // auto-resume sweep (resumeInterruptedFullAutoChains) advances a chain stuck
+  // at substage 'search' via resumeChain(id, 'search') with NO opts. The old
+  // `opts.planPipelineIds || [opts.planPipelineId]` then produced [undefined],
+  // which crashed executeSearchBatch on `undefined.slice(-13)`. resumeChain
+  // must instead recover the real plan ids from the DB.
+  it("fromStage='search' with NO opts never hands undefined plan ids to search", async () => {
+    state.runnerCalls = []
+    state.searchBatchArgs = []
+    state.subGroup = { id: 7, user_id: 'u1', path_id: 'hands-off', parent_group_id: 1 }
+    state.recoveredPlanPids = ['plan-100-111', 'plan-100-222']
+
+    await resumeChain(7, 'search') // <- no opts, exactly like the sweep at line ~905
+
+    expect(state.searchBatchArgs.length).toBe(3)
+    for (const callArgs of state.searchBatchArgs) {
+      expect(Array.isArray(callArgs.planPipelineIds)).toBe(true)
+      // No falsy entries — the [undefined] crash signature must be gone.
+      expect(callArgs.planPipelineIds.every(Boolean)).toBe(true)
+      // Recovered from the DB by plan-% prefix.
+      expect(callArgs.planPipelineIds).toEqual(['plan-100-111', 'plan-100-222'])
+    }
+  })
+
+  it("fromStage='search' with no opts and no recoverable plans fails loudly", async () => {
+    state.runnerCalls = []
+    state.searchBatchArgs = []
+    state.subGroup = { id: 7, user_id: 'u1', path_id: 'hands-off', parent_group_id: 1 }
+    state.recoveredPlanPids = [] // nothing in the DB
+
+    // resumeChain swallows errors into a 'failed' broll_chain_status update
+    // rather than rejecting, so assert no search batch was ever dispatched.
+    await resumeChain(7, 'search')
+    expect(state.searchBatchArgs.length).toBe(0)
+    expect(state.runnerCalls).not.toContain('runBrollSearchFirst10')
   })
 })

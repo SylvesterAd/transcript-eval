@@ -790,7 +790,31 @@ export async function resumeChain(subGroupId, fromStage, opts = {}) {
       ).run(subGroupId)
       await emailNotifier.send('done', { subGroupId, userId: sg.user_id })
     } else if (fromStage === 'search') {
-      const planPipelineIds = opts.planPipelineIds || [opts.planPipelineId]
+      // opts carries plan ids when the user picks a plan at the checkpoint
+      // (route POST → resumeChain). The boot/periodic auto-resume sweep
+      // (resumeInterruptedFullAutoChains) instead calls resumeChain(id,'search')
+      // with NO opts — the old `opts.planPipelineIds || [opts.planPipelineId]`
+      // then yielded [undefined], which crashed executeSearchBatch on
+      // `undefined.slice(-13)` (prod search-batch-1779455020983). Recover the
+      // real plan ids from the DB by the 'plan-<videoId>-<ts>' pipelineId prefix
+      // (strategy_kind-agnostic, mirrors computeBrollResetScope) when opts is
+      // empty, and fail loudly if none exist rather than searching nothing.
+      let planPipelineIds = (opts.planPipelineIds || (opts.planPipelineId ? [opts.planPipelineId] : []))
+        .filter(Boolean)
+      if (!planPipelineIds.length && mainVideo?.id) {
+        const planRows = await db.prepare(
+          `SELECT DISTINCT (metadata_json::jsonb->>'pipelineId') AS pid
+           FROM broll_runs
+           WHERE video_id = ?
+             AND (metadata_json::jsonb->>'pipelineId') LIKE 'plan-%'
+             AND status = 'complete'`
+        ).all(mainVideo.id)
+        planPipelineIds = planRows.map(r => r.pid).filter(Boolean)
+        console.log(`[resumeChain] search resume for group ${subGroupId}: recovered ${planPipelineIds.length} plan pipeline id(s) from DB`)
+      }
+      if (!planPipelineIds.length) {
+        throw new Error(`resumeChain(search): no plan pipeline IDs supplied or recoverable for group ${subGroupId}`)
+      }
       for (let i = 0; i < BROLL_SEARCH_BATCHES; i++) {
         if (await isCancelled(subGroupId)) return
         const { searchPipelineId } = await runner.runBrollSearchFirst10({

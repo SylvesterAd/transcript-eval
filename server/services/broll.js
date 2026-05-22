@@ -2553,6 +2553,18 @@ export async function executeKeywordsBatch(planPipelineId, batchSize = 10, preGe
  * then GPU-searches placements one-at-a-time interleaved across variants.
  */
 export async function executeSearchBatch(planPipelineIds, batchSize = 10, pipelineIdOverride = null) {
+  // Defense-in-depth: reject falsy / empty plan ids loudly and early. A
+  // [undefined] slipping in (e.g. the auto-resume sweep — see resumeChain in
+  // auto-orchestrator.js) used to crash deep inside as `undefined.slice(-13)`
+  // while building a per-variant log label, surfacing only as the cryptic
+  // "Cannot read properties of undefined (reading 'slice')". Fail with an
+  // actionable message instead, before any pipeline state is created.
+  const cleanedPlanIds = (Array.isArray(planPipelineIds) ? planPipelineIds : []).filter(Boolean)
+  if (!cleanedPlanIds.length) {
+    throw new Error(`executeSearchBatch: no valid plan pipeline IDs (received ${JSON.stringify(planPipelineIds)})`)
+  }
+  planPipelineIds = cleanedPlanIds
+
   const pipelineId = pipelineIdOverride || `search-batch-${Date.now()}`
   const pipelineStart = Date.now()
   const pipelineAbort = new AbortController()
