@@ -21,7 +21,7 @@ vi.mock('../broll.js', () => ({
   abortedBrollPipelines: new Set(),
 }))
 
-import { startWorker, stopWorker, _resetForTest, reclaimerSweep as _reclaimerSweep } from '../broll-search-worker.js'
+import { startWorker, stopWorker, _resetForTest, reclaimerSweep as _reclaimerSweep, isTransientGpuFailure } from '../broll-search-worker.js'
 import db from '../../db.js'
 import { searchSinglePlacement, searchUserPlacement, abortedBrollPipelines } from '../broll.js'
 
@@ -368,6 +368,104 @@ describe('broll-search-worker — reclaimer (max retries)', () => {
 
     expect(updates.length).toBe(1)
     expect(updates[0].params).toEqual([600])
+  })
+})
+
+describe('isTransientGpuFailure', () => {
+  it('classifies proxy-restart and transport errors as transient', () => {
+    for (const m of [
+      'Job cd0a707b: Stale job — process likely restarted',
+      'process likely restarted',
+      'socket hang up',
+      'read ECONNRESET',
+      'connect ECONNREFUSED 1.2.3.4:443',
+      'fetch failed',
+      'Bad Gateway',
+      'Request failed with status code 503',
+    ]) {
+      expect(isTransientGpuFailure(m)).toBe(true)
+    }
+  })
+
+  it('does not classify genuine pipeline failures as transient', () => {
+    for (const m of ['GPU exploded', 'No candidates found for brief', 'SigLIP failed to load within 120s', null, '', undefined]) {
+      expect(isTransientGpuFailure(m)).toBe(false)
+    }
+  })
+})
+
+describe('broll-search-worker — transient GPU failure left for reclaimer', () => {
+  // Captures any terminal status write (parameterized success/timeout/failed, or
+  // the hard-coded catch-path failed). Transient failures must produce NONE of
+  // these — the row stays 'running' for reclaimerSweep to re-enqueue.
+  const updates = []
+
+  function rowQueryImpl(id) {
+    return async (sql, params) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ got: true }] }
+      if (sql.includes('SELECT id, plan_pipeline_id')) {
+        return { rows: [{ id, plan_pipeline_id: 'plan-1', placement_uuid: 'p_abc', chapter_index: 0, placement_index: 1, batch_id: 'b-1', retry_count: 0 }] }
+      }
+      if (sql.includes("SET status='running'")) return { rowCount: 1 }
+      if (sql.includes('SET status=$1') || sql.includes("SET status='failed'")) { updates.push({ sql, params }); return { rowCount: 1 } }
+      return { rows: [], rowCount: 0 }
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    searchSinglePlacement.mockReset()
+    _resetForTest()
+    updates.length = 0
+  })
+  afterEach(async () => {
+    await stopWorker()
+    vi.useRealTimers()
+  })
+
+  it('leaves the row untouched when the GPU job failed with "process likely restarted"', async () => {
+    state.queryImpl = rowQueryImpl(800)
+    searchSinglePlacement.mockResolvedValue({
+      results: [], gpuJobStatus: 'failed',
+      error: 'Job cd0a707b: Stale job — process likely restarted', duration: 1000, apiLogId: null,
+    })
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(updates.length).toBe(0)
+  })
+
+  it('hard-fails when the GPU job failed for a non-transient reason', async () => {
+    state.queryImpl = rowQueryImpl(801)
+    searchSinglePlacement.mockResolvedValue({
+      results: [], gpuJobStatus: 'failed', error: 'No candidates found for brief', duration: 1000, apiLogId: null,
+    })
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(updates.length).toBe(1)
+    expect(updates[0].params[0]).toBe('failed')
+  })
+
+  it('leaves the row untouched when the proxy call throws a transient transport error', async () => {
+    state.queryImpl = rowQueryImpl(802)
+    searchSinglePlacement.mockRejectedValue(new Error('socket hang up'))
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(updates.length).toBe(0)
+  })
+
+  it('still hard-fails a non-transient thrown error (regression: GPU exploded)', async () => {
+    state.queryImpl = rowQueryImpl(803)
+    searchSinglePlacement.mockRejectedValue(new Error('GPU exploded'))
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(updates.length).toBe(1)
+    expect(updates[0].sql).toContain("SET status='failed'")
   })
 })
 
