@@ -20,6 +20,23 @@ let lockAcquired = false
 let drainTimer = null
 let reclaimerTimer = null
 
+// Restart / transport failures are transient: the GPU proxy pipeline is
+// SSE-driven and can't resume a job whose process it dropped (a redeploy marks
+// the orphaned job "process likely restarted"; a dropped connection surfaces as
+// a transport error). Such a placement must be retried from the queue — but a
+// proxy redeploy outage can last several minutes, so we must NOT burn all
+// MAX_RETRIES instantly. Instead of hard-failing, we leave the row 'running'
+// and let reclaimerSweep re-enqueue it after STUCK_THRESHOLD_MIN (bounded by
+// MAX_RETRIES) — reusing the existing, spaced-out, capped retry path. Genuine
+// failures (no candidates, GPU unhealthy, code errors) do NOT match and still
+// fail immediately.
+const TRANSIENT_GPU_ERROR_RE =
+  /process likely restarted|stale job|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|fetch failed|other side closed|\bterminated\b|Bad Gateway|Service Unavailable|Gateway Time-?out|(?:status(?:\s*code)?|HTTP)\s*50[234]/i
+
+export function isTransientGpuFailure(message) {
+  return !!message && TRANSIENT_GPU_ERROR_RE.test(String(message))
+}
+
 export async function startWorker() {
   if (stopping) return
   const result = await db.pool.query('SELECT pg_try_advisory_lock($1::bigint) AS got', [WORKER_KEY])
@@ -95,30 +112,43 @@ async function drainLoop() {
           placementIndex: row.placement_index,
         })
       }
-      const status = result.gpuJobStatus === 'running' ? 'timeout'
-                   : result.gpuJobStatus === 'failed'  ? 'failed'
-                   : 'complete'
-      await db.pool.query(`
+      if (result.gpuJobStatus === 'failed' && isTransientGpuFailure(result.error)) {
+        // Proxy restarted / dropped this job mid-flight. Leave the row 'running'
+        // so reclaimerSweep re-enqueues it after STUCK_THRESHOLD_MIN (capped at
+        // MAX_RETRIES) — see isTransientGpuFailure note above.
+        console.warn(`[broll-worker] row ${row.id} transient GPU failure ("${result.error}") — left running for reclaimer retry`)
+      } else {
+        const status = result.gpuJobStatus === 'running' ? 'timeout'
+                     : result.gpuJobStatus === 'failed'  ? 'failed'
+                     : 'complete'
+        await db.pool.query(`
       UPDATE broll_searches
       SET status=$1, results_json=$2, num_results=$3, duration_ms=$4,
           api_log_id=$5, error=$6, completed_at=NOW()
       WHERE id=$7
     `, [
-        status,
-        JSON.stringify(result.results || []),
-        (result.results || []).length,
-        result.duration || null,
-        result.apiLogId || null,
-        result.error || null,
-        row.id,
-      ])
+          status,
+          JSON.stringify(result.results || []),
+          (result.results || []).length,
+          result.duration || null,
+          result.apiLogId || null,
+          result.error || null,
+          row.id,
+        ])
+      }
     } catch (err) {
-      console.error(`[broll-worker] search failed for row ${row.id}: ${err.message}`)
-      await db.pool.query(`
+      if (isTransientGpuFailure(err.message)) {
+        // Transport-level drop during a proxy restart — leave 'running' for
+        // reclaimerSweep (see isTransientGpuFailure note above).
+        console.warn(`[broll-worker] row ${row.id} transient error ("${err.message}") — left running for reclaimer retry`)
+      } else {
+        console.error(`[broll-worker] search failed for row ${row.id}: ${err.message}`)
+        await db.pool.query(`
       UPDATE broll_searches
       SET status='failed', error=$1, api_log_id=$2, completed_at=NOW()
       WHERE id=$3
     `, [err.message, err.apiLogId || null, row.id])
+      }
     }
     setImmediate(drainLoop)
   } catch (err) {
