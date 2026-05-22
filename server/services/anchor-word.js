@@ -43,3 +43,45 @@ export function findAnchorWordIdx(words, audioAnchor) {
   }
   return -1
 }
+
+/**
+ * Re-derive, at remap time, how trustworthy a stored `anchor_word_idx` is — so
+ * the caller can decide whether the word position may OVERRIDE the LLM's
+ * emitted timecode (not merely refine it within a small gate).
+ *
+ *   - verbatim: words[idx..idx+N-1] reproduce the FULL normalized anchor
+ *     phrase. This is the path findAnchorWordIdx takes for a real phrase match;
+ *     its first-token fallback (which can land 100+s away — the reason
+ *     materializePlacementRemap gates word-snap to ±10s) does NOT satisfy this.
+ *   - unique: the full phrase occurs exactly once across `words`, so idx is
+ *     unambiguous. Repeated phrases stay gated (the LLM timecode disambiguates
+ *     which occurrence was meant).
+ *
+ * A confident anchor (verbatim && unique && multi-word) can be trusted over the
+ * LLM timecode even when they disagree wildly — which rescues plans where the
+ * model botched the numeric timecode but still anchored to the correct words.
+ * `wordCount` is exposed so the caller can require a multi-word phrase: a lone
+ * unique word is too weak to override a far-off LLM time.
+ *
+ * Returns { verbatim, unique, wordCount }.
+ */
+export function anchorMatchInfo(words, idx, audioAnchor) {
+  if (!Array.isArray(words) || !words.length) return { verbatim: false, unique: false, wordCount: 0 }
+  const target = normalize(audioAnchor)
+  if (!target) return { verbatim: false, unique: false, wordCount: 0 }
+  const tokens = target.split(' ')
+  const N = tokens.length
+  const matchesAt = (i) => {
+    if (i < 0 || i + N > words.length) return false
+    for (let j = 0; j < N; j++) {
+      if (normalize(words[i + j].word) !== tokens[j]) return false
+    }
+    return true
+  }
+  const verbatim = Number.isInteger(idx) && matchesAt(idx)
+  let count = 0
+  for (let i = 0; i <= words.length - N; i++) {
+    if (matchesAt(i)) { count++; if (count > 1) break }
+  }
+  return { verbatim, unique: count === 1, wordCount: N }
+}
