@@ -255,7 +255,14 @@ export async function streamingFetch(url, opts = {}) {
     console.warn('[api-logger] Failed to log:', err.message)
   }
 
-  if (errorEvent || (responseStatus && responseStatus >= 400)) {
+  // A captured job_id means the GPU pipeline is running server-side under that
+  // job; the caller polls /broll/jobs/:id for the real outcome and alerts only
+  // if it genuinely fails (see broll.js searchSinglePlacement + broll-search-worker).
+  // A mid-stream drop with a job_id is therefore a false alarm — these recover
+  // ~100% via polling. Only alert when there's no job to recover from (truly
+  // stuck) or a hard HTTP status.
+  const recoverableStreamDrop = !!(errorEvent && finalResult?.job_id)
+  if (!recoverableStreamDrop && (errorEvent || (responseStatus && responseStatus >= 400))) {
     notify({
       source: 'api-log',
       title: errorEvent ? 'Stream error' : `HTTP ${responseStatus}`,

@@ -20,10 +20,12 @@ vi.mock('../broll.js', () => ({
   searchUserPlacement: vi.fn(),
   abortedBrollPipelines: new Set(),
 }))
+vi.mock('../slack-notifier.js', () => ({ notify: vi.fn() }))
 
 import { startWorker, stopWorker, _resetForTest, reclaimerSweep as _reclaimerSweep, isTransientGpuFailure } from '../broll-search-worker.js'
 import db from '../../db.js'
 import { searchSinglePlacement, searchUserPlacement, abortedBrollPipelines } from '../broll.js'
+import { notify } from '../slack-notifier.js'
 
 const mockPool = db.pool
 
@@ -368,6 +370,84 @@ describe('broll-search-worker — reclaimer (max retries)', () => {
 
     expect(updates.length).toBe(1)
     expect(updates[0].params).toEqual([600])
+  })
+})
+
+describe('broll-search-worker — alerts only on genuine, recovery-exhausted failure', () => {
+  const rowQueryImpl = (id) => async (sql) => {
+    if (sql.includes('pg_try_advisory_lock')) return { rows: [{ got: true }] }
+    if (sql.includes('SELECT id, plan_pipeline_id')) {
+      return { rows: [{ id, plan_pipeline_id: 'plan-1', placement_uuid: 'p_x', chapter_index: 0, placement_index: 0, batch_id: 'b' }] }
+    }
+    if (sql.includes("SET status='running'")) return { rowCount: 1 }
+    if (sql.includes('SET status=$1') || sql.includes("SET status='failed'")) return { rowCount: 1 }
+    return { rows: [], rowCount: 0 }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    searchSinglePlacement.mockReset()
+    notify.mockReset()
+    _resetForTest()
+  })
+  afterEach(async () => {
+    await stopWorker()
+    vi.useRealTimers()
+  })
+
+  it('alerts when a search fails for a non-transient reason (resolved gpuJobStatus=failed)', async () => {
+    state.queryImpl = rowQueryImpl(900)
+    searchSinglePlacement.mockResolvedValue({
+      results: [], gpuJobStatus: 'failed', error: 'No candidates found for brief', duration: 1000, apiLogId: null,
+    })
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][0]).toMatchObject({ source: expect.stringContaining('broll-search') })
+  })
+
+  it('does NOT alert on a transient failure (row left running for the reclaimer)', async () => {
+    state.queryImpl = rowQueryImpl(901)
+    searchSinglePlacement.mockResolvedValue({
+      results: [], gpuJobStatus: 'failed', error: 'Stale job — process likely restarted', duration: 1000, apiLogId: null,
+    })
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('alerts when the proxy call throws a non-transient error', async () => {
+    state.queryImpl = rowQueryImpl(902)
+    searchSinglePlacement.mockRejectedValue(new Error('GPU exploded'))
+    await startWorker()
+    await vi.advanceTimersByTimeAsync(0)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][0]).toMatchObject({ source: expect.stringContaining('broll-search') })
+  })
+})
+
+describe('broll-search-worker — reclaimer alerts when retries exhausted', () => {
+  beforeEach(() => {
+    mockPool.query.mockReset()
+    mockPool.query.mockImplementation((...args) => state.queryImpl(...args))
+    notify.mockReset()
+    _resetForTest()
+  })
+
+  it('alerts once when a stuck row is failed permanently after max retries', async () => {
+    state.queryImpl = async (sql) => {
+      if (sql.includes("status='running'") && sql.includes('started_at')) return { rows: [{ id: 903, retry_count: 3 }] }
+      if (sql.includes("status='failed'") && sql.includes('reclaimed: stuck after')) return { rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+    await _reclaimerSweep()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][0]).toMatchObject({ source: expect.stringContaining('broll-search') })
   })
 })
 

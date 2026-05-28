@@ -6,6 +6,7 @@
 // Spec: docs/superpowers/specs/2026-04-30-broll-search-queue-design.md
 
 import db from '../db.js'
+import { notify } from './slack-notifier.js'
 
 const WORKER_KEY = '4774063583137677164'  // arbitrary stable 64-bit constant
 const EMPTY_QUEUE_POLL_MS = 1000
@@ -135,6 +136,18 @@ async function drainLoop() {
           result.error || null,
           row.id,
         ])
+        // Alert only on a genuine terminal outcome. Recovered/transport-dropped
+        // searches reach here as 'complete' (the streamingFetch alert for those
+        // is suppressed in api-logger.js); 'failed'/'timeout' are real failures
+        // the polling fallback could not save.
+        if (status === 'failed' || status === 'timeout') {
+          notify({
+            source: `broll-search-single:${row.placement_uuid || row.id}`,
+            title: status === 'timeout' ? 'Search timed out' : 'Search failed',
+            error: result.error || null,
+            meta: { rowId: row.id, placementUuid: row.placement_uuid || null, apiLogId: result.apiLogId || null },
+          })
+        }
       }
     } catch (err) {
       if (isTransientGpuFailure(err.message)) {
@@ -148,6 +161,12 @@ async function drainLoop() {
       SET status='failed', error=$1, api_log_id=$2, completed_at=NOW()
       WHERE id=$3
     `, [err.message, err.apiLogId || null, row.id])
+        notify({
+          source: `broll-search-single:${row.placement_uuid || row.id}`,
+          title: 'Search failed',
+          error: err.message,
+          meta: { rowId: row.id, placementUuid: row.placement_uuid || null, apiLogId: err.apiLogId || null },
+        })
       }
     }
     setImmediate(drainLoop)
@@ -171,6 +190,12 @@ async function reclaimerSweep() {
         WHERE id=$1
       `, [r.id])
       console.warn(`[broll-worker] row ${r.id} failed permanently after ${MAX_RETRIES} retries`)
+      notify({
+        source: `broll-search-single:${r.id}`,
+        title: 'Search failed (max retries)',
+        error: `reclaimed: stuck after ${MAX_RETRIES} retries`,
+        meta: { rowId: r.id, retryCount: r.retry_count },
+      })
       continue
     }
     await db.pool.query(`
