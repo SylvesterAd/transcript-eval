@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import Hls from 'hls.js'
+import { toPlayableHlsUrl } from '../lib/artlistHls.js'
 
 const HLS_RE = /\.m3u8(\?|$)/i
 
@@ -35,15 +36,19 @@ export function useHlsSource(videoRef, { hlsUrl, mp4Url }) {
     const video = videoRef.current
     if (!video) return
 
+    // Artlist HLS is hotlink-protected — route it through the backend proxy.
+    // Non-Artlist URLs pass through unchanged.
+    const playableHls = toPlayableHlsUrl(hlsUrl)
+
     if (hlsUrl && Hls.isSupported()) {
       const hls = buildHls()
-      hls.loadSource(hlsUrl)
+      hls.loadSource(playableHls)
       hls.attachMedia(video)
       return () => hls.destroy()
     }
 
     if (hlsUrl && video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = hlsUrl
+      video.src = playableHls
       return () => {
         video.removeAttribute('src')
         video.load()
@@ -86,15 +91,17 @@ export function attachVideoSource(video, url) {
     video.removeAttribute('src')
     return
   }
+  // Artlist HLS is hotlink-protected — route through the backend proxy.
+  const playable = toPlayableHlsUrl(url)
   if (isHlsUrl(url) && Hls.isSupported()) {
     const hls = buildHls()
-    hls.loadSource(url)
+    hls.loadSource(playable)
     hls.attachMedia(video)
     video._hlsInstance = hls
     return
   }
   // Safari native HLS or MP4 — direct src assignment.
-  video.src = url
+  video.src = playable
 }
 
 export function detachVideoSource(video) {

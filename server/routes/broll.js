@@ -56,6 +56,13 @@ import {
   saveBrollEditorState,
   resumePipeline,
 } from '../services/broll.js'
+import { Readable } from 'node:stream'
+import {
+  isAllowedArtlistUrl,
+  rewriteHlsManifest,
+  isHlsManifest,
+  fetchArtlist,
+} from '../services/artlist-hls-proxy.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
@@ -89,6 +96,57 @@ const upload = multer({
 })
 
 const router = Router()
+
+// ─── Artlist HLS preview proxy ───────────────────────────────────
+// Artlist's preview CDN gates its HLS playlists/segments behind Referer
+// hotlink protection (403s unless Referer is artlist.io). Browsers can't
+// forge a cross-origin Referer, so hls.js can't load Artlist previews
+// directly. We proxy the whole HLS tree here, injecting the Referer and
+// rewriting manifest URIs so every child request routes back through us.
+//
+// Intentionally PUBLIC (no requireAuth): the <video>/hls.js element can't
+// attach our JWT. SSRF is contained by the Artlist-only host allowlist.
+const HLS_PROXY_PATH = '/api/broll/hls-proxy'
+router.get('/hls-proxy', async (req, res) => {
+  const target = req.query.u
+  if (typeof target !== 'string' || !isAllowedArtlistUrl(target)) {
+    return res.status(400).json({ error: 'invalid or disallowed url' })
+  }
+  try {
+    const upstream = await fetchArtlist(target, { range: req.headers.range })
+    if (!upstream.ok && upstream.status !== 206) {
+      // 403 here means the hotlink defeat itself failed — surface as 502.
+      return res.status(upstream.status === 403 ? 502 : upstream.status).end()
+    }
+
+    const contentType = upstream.headers.get('content-type') || ''
+    if (isHlsManifest(contentType, target)) {
+      const body = await upstream.text()
+      res.set('Content-Type', 'application/vnd.apple.mpegurl')
+      res.set('Cache-Control', 'public, max-age=60')
+      return res.send(rewriteHlsManifest(body, target, HLS_PROXY_PATH))
+    }
+
+    // Binary media segment (or init/key) — stream straight through.
+    res.status(upstream.status)
+    for (const h of ['content-type', 'content-length', 'accept-ranges', 'content-range']) {
+      const v = upstream.headers.get(h)
+      if (v) res.set(h, v)
+    }
+    if (!upstream.headers.get('content-type')) res.set('Content-Type', 'video/mp2t')
+    res.set('Cache-Control', upstream.headers.get('cache-control') || 'public, max-age=3600')
+
+    if (!upstream.body) return res.end()
+    const nodeStream = Readable.fromWeb(upstream.body)
+    nodeStream.on('error', () => { if (!res.headersSent) res.status(502); res.end() })
+    res.on('close', () => nodeStream.destroy())
+    return nodeStream.pipe(res)
+  } catch (e) {
+    console.error('[hls-proxy] fetch failed:', e?.message)
+    if (!res.headersSent) return res.status(502).json({ error: 'proxy fetch failed' })
+    return res.end()
+  }
+})
 
 // Standalone router so server/index.js can mount the manifest endpoint
 // at /api/broll-searches/:pipelineId/manifest (matches WebApp.1 spec)

@@ -46,6 +46,26 @@ describe('useHlsSource', () => {
     expect(hlsInstances[0].config).not.toHaveProperty('capLevelToPlayerSize')
   })
 
+  it('routes Artlist HLS through the backend proxy (hotlink defeat)', () => {
+    const video = makeVideoEl()
+    const ref = { current: video }
+    const artlist =
+      'https://cms-public-artifacts.artlist.io/content/artgrid/footage-hls/abc_playlist.m3u8'
+    renderHook(() => useHlsSource(ref, { hlsUrl: artlist, mp4Url: null }))
+    expect(hlsInstances).toHaveLength(1)
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(
+      `/api/broll/hls-proxy?u=${encodeURIComponent(artlist)}`,
+    )
+  })
+
+  it('does NOT proxy non-Artlist HLS (e.g. Cloudflare Stream a-roll)', () => {
+    const video = makeVideoEl()
+    const ref = { current: video }
+    const cf = 'https://videodelivery.net/uid/manifest/video.m3u8'
+    renderHook(() => useHlsSource(ref, { hlsUrl: cf, mp4Url: null }))
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(cf)
+  })
+
   it('falls back to native src in Safari when Hls.isSupported() is false', () => {
     HlsMock.isSupported.mockReturnValue(false)
     const video = makeVideoEl()
