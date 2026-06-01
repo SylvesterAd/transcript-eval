@@ -21,8 +21,8 @@ describe('isArtlistUrl', () => {
 })
 
 describe('toPlayableHlsUrl', () => {
-  it('routes artlist HLS through the backend proxy', () => {
-    expect(toPlayableHlsUrl(ARTLIST)).toBe(`${PROXY}?u=${encodeURIComponent(ARTLIST)}`)
+  it('routes artlist HLS through the backend proxy (with cache-bust pv)', () => {
+    expect(toPlayableHlsUrl(ARTLIST)).toBe(`${PROXY}?u=${encodeURIComponent(ARTLIST)}&pv=1`)
   })
   it('leaves Cloudflare Stream a-roll HLS untouched', () => {
     const cf = 'https://videodelivery.net/uid/manifest/video.m3u8'

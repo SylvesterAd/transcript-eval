@@ -123,7 +123,11 @@ router.get('/hls-proxy', async (req, res) => {
     if (isHlsManifest(contentType, target)) {
       const body = await upstream.text()
       res.set('Content-Type', 'application/vnd.apple.mpegurl')
-      res.set('Cache-Control', 'public, max-age=60')
+      // Never cache manifests: they're rewritten on the fly, and a manifest
+      // cached by an older proxy build (e.g. before the content-type fix, when
+      // it was passed through un-rewritten) would otherwise keep 404ing on its
+      // child URIs. Manifests are tiny; segments below still cache normally.
+      res.set('Cache-Control', 'no-store')
       return res.send(rewriteHlsManifest(body, target, HLS_PROXY_PATH))
     }
 

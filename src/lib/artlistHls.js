@@ -21,11 +21,18 @@ export function isArtlistUrl(url) {
   }
 }
 
+// Proxy-rewrite version. Appended to the master proxy URL so that browsers
+// holding a stale manifest — cached by an earlier proxy build that served some
+// Artlist masters un-rewritten (pre content-type fix) — fetch a fresh copy
+// under a new cache key instead of replaying the broken one. Bump this if the
+// proxy's manifest-rewrite output ever changes again.
+const PROXY_VERSION = 1
+
 /**
  * Returns a playable URL for a media source. Artlist URLs are routed through
  * the backend HLS proxy; everything else passes through untouched.
  */
 export function toPlayableHlsUrl(url) {
   if (!isArtlistUrl(url)) return url
-  return `${API_BASE}/broll/hls-proxy?u=${encodeURIComponent(url)}`
+  return `${API_BASE}/broll/hls-proxy?u=${encodeURIComponent(url)}&pv=${PROXY_VERSION}`
 }

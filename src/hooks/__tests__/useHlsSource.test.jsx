@@ -54,7 +54,7 @@ describe('useHlsSource', () => {
     renderHook(() => useHlsSource(ref, { hlsUrl: artlist, mp4Url: null }))
     expect(hlsInstances).toHaveLength(1)
     expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(
-      `/api/broll/hls-proxy?u=${encodeURIComponent(artlist)}`,
+      `/api/broll/hls-proxy?u=${encodeURIComponent(artlist)}&pv=1`,
     )
   })
 
