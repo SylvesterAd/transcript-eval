@@ -56,9 +56,17 @@ function resolveUrl(ref, base) {
  */
 export function isHlsManifest(contentType, url) {
   const ct = (contentType || '').toLowerCase()
-  if (ct.includes('mpegurl')) return true // application/vnd.apple.mpegurl | application/x-mpegURL
+  // An HTML body is never a manifest — it's a Cloudflare challenge/error page.
   if (ct.includes('text/html')) return false
-  if (ct && !ct.includes('octet-stream') && !ct.includes('text/plain')) return false
+  // Explicit HLS content-type.
+  if (ct.includes('mpegurl')) return true // application/vnd.apple.mpegurl | application/x-mpegURL
+  // The URL extension is authoritative for Artlist: playlists end in `.m3u8`,
+  // media segments in `.ts`/`.m4s`/`.mp4`. Some Artlist clips serve their
+  // master playlist with a bogus content-type (observed:
+  // `application/x-www-form-urlencoded`), so content-type alone must NOT be
+  // allowed to reject a `.m3u8`. Without this, such manifests were streamed as
+  // opaque binary (URIs left un-rewritten) and never played — the "some clips
+  // play, some don't" bug.
   return /\.m3u8($|\?)/i.test(url || '')
 }
 

@@ -47,6 +47,14 @@ describe('isHlsManifest', () => {
     expect(isHlsManifest('', MASTER_URL)).toBe(true)
     expect(isHlsManifest('', 'https://x.artlist.io/seg_001.ts')).toBe(false)
   })
+  it('treats a .m3u8 served with a bogus content-type as a manifest (Artlist quirk)', () => {
+    // ~12% of Artlist clips serve their master playlist as
+    // application/x-www-form-urlencoded. The URL extension must win, else the
+    // manifest gets streamed as opaque binary (URIs un-rewritten) and never
+    // plays — the "some clips play, some don't" regression.
+    expect(isHlsManifest('application/x-www-form-urlencoded', MASTER_URL)).toBe(true)
+    expect(isHlsManifest('application/x-www-form-urlencoded', 'https://x.artlist.io/seg.ts')).toBe(false)
+  })
 })
 
 describe('rewriteHlsManifest', () => {
