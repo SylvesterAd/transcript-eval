@@ -25,6 +25,10 @@ export default function BRollPreview({ slipOverrideRef }) {
   const fallbackIdxRef = useRef(0)
   const activeKeyRef = useRef(null)
   const activeUrlRef = useRef(null); activeUrlRef.current = activeUrl
+  // Mirror videoLoadState into a ref so the rAF tick can read/clear it. The
+  // `loadeddata` event doesn't fire for already-buffered (preloaded) clips, so
+  // the tick syncs 'ready' from the element's real readyState instead.
+  const videoLoadStateRef = useRef(videoLoadState); videoLoadStateRef.current = videoLoadState
 
   const stateRef = useRef(state); stateRef.current = state
   const brollRef = useRef(broll); brollRef.current = broll
@@ -166,6 +170,11 @@ export default function BRollPreview({ slipOverrideRef }) {
           if (Math.abs(v.currentTime - clampedTime) > 0.5) v.currentTime = clampedTime
           if (s.isPlaying && v.paused) v.play().catch(() => {})
           else if (!s.isPlaying && !v.paused) v.pause()
+          // Clear the loading overlay once the element actually has data.
+          // `loadeddata` doesn't re-fire for preloaded/cached clips (the preload
+          // pool warms MP4 b-rolls), which otherwise leaves the opaque
+          // "Loading clip…" overlay covering a clip that already loaded.
+          if (v.readyState >= 2 && videoLoadStateRef.current === 'loading') setVideoLoadState('ready')
         }
       } else {
         if (showBRoll) setShowBRoll(false)
