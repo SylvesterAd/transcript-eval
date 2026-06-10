@@ -11,11 +11,30 @@ import { apiPost } from '../../hooks/useApi.js'
 import { Loader2, Square } from 'lucide-react'
 import BRollPreloadPool from './BRollPreloadPool.jsx'
 
-export function resolveDetailToIndex(detail) {
+// URL :detail → selection identity. Accepts (newest first):
+//   - a placement uuid (`p_…` plan / `u_…` user) resolved against `placements` → that placement's index
+//   - legacy `user:<id>` form → passthrough (it IS the index for user placements)
+//   - legacy bare numeric index
+// Returns null when unresolvable (e.g. a uuid from another variant's plan).
+export function resolveDetailToIndex(detail, placements = null) {
   if (detail == null || detail === '') return null
   if (typeof detail === 'string' && detail.startsWith('user:')) return detail
+  if (placements?.length) {
+    const match = placements.find(p => p.uuid != null && p.uuid === detail)
+    if (match) return match.index
+  }
   const n = parseInt(detail, 10)
   return Number.isFinite(n) ? n : null
+}
+
+// Selection identity → URL :detail slug. Prefers the placement's stable uuid
+// (survives re-runs/reorders and matches the `placement_uuid` used by search
+// rows and alerts); falls back to the bare index for legacy placements whose
+// uuid backfill hasn't run. Returns undefined when nothing is selected.
+export function detailForSelection(selectedIndex, placements) {
+  if (selectedIndex == null) return undefined
+  const p = placements?.find(pl => pl.index === selectedIndex)
+  return p?.uuid != null ? String(p.uuid) : String(selectedIndex)
 }
 
 export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanPipelineIds, planVariants: planVariantsProp }) {
@@ -324,21 +343,21 @@ export default function BRollEditor({ groupId, videoId, planPipelineId, allPlanP
     if (!brollState.placements?.length) return
     if (pendingSelectionRef.current != null) return
     if (Date.now() - pendingSelectionTsRef.current < 1000) return
-    const idx = resolveDetailToIndex(detail)
+    const idx = resolveDetailToIndex(detail, brollState.placements)
     if (idx != null && idx !== brollState.selectedIndex) {
       brollState.selectPlacement(idx)
     }
-  }, [detail, brollState.placements?.length])
+  }, [detail, brollState.placements])
 
-  // Sync selection → URL
+  // Sync selection → URL. Placements are a dep so a legacy numeric detail
+  // upgrades to the uuid slug once placements (and their uuids) have loaded.
   useEffect(() => {
-    const idx = brollState.selectedIndex
-    const currentUrl = idx != null ? `/editor/${id}/brolls/edit/${idx}` : `/editor/${id}/brolls/edit`
-    const expectedDetail = idx != null ? String(idx) : undefined
+    const expectedDetail = detailForSelection(brollState.selectedIndex, brollState.placements)
+    const currentUrl = expectedDetail != null ? `/editor/${id}/brolls/edit/${expectedDetail}` : `/editor/${id}/brolls/edit`
     if (expectedDetail !== detail) {
       navigate(currentUrl, { replace: true })
     }
-  }, [brollState.selectedIndex])
+  }, [brollState.selectedIndex, brollState.placements])
 
   // Keyboard shortcuts — delete/backspace, undo/redo
   useEffect(() => {
