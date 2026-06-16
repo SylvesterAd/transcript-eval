@@ -467,3 +467,24 @@ CREATE INDEX IF NOT EXISTS idx_graphics_render_iterations_render
 
 ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS iteration_count INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE graphics_renders ADD COLUMN IF NOT EXISTS final_score NUMERIC(3,2);
+
+-- ── Security: enforce Row Level Security on every public table ───────────────
+-- Supabase advisor `rls_disabled_in_public` (ERROR): tables in `public` are
+-- reachable via the auto-generated PostgREST API with the browser-exposed
+-- publishable/anon key. This app needs NO public table access — the browser
+-- uses Supabase for auth only, and all table I/O is server-side via the
+-- service/secret key (BYPASSRLS), which RLS does not affect. So we enable RLS
+-- with no policies: anon/authenticated get zero table access, the backend is
+-- unchanged. Self-healing loop (covers any newly added table too); idempotent,
+-- runs on every boot via server/db.js. See server/enable-rls-public.sql.
+DO $rls$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity = false
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', r.relname);
+  END LOOP;
+END
+$rls$;
