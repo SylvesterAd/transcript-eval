@@ -744,18 +744,21 @@ function SearchStatusBar({ placements, searchProgress, allPlanPipelineIds, onRef
     setStopping(false)
   }
 
-  async function handleSearchNext10() {
+  async function handleSearchAll() {
     if (!allPlanPipelineIds?.length) return
     setSearching(true)
     try {
-      await apiPost('/broll/pipeline/search-next-batch', {
+      // One click enqueues EVERY remaining position across all variants. The
+      // server loops keyword-gen → enqueue ahead of the GPU worker (no manual
+      // "next 10" stepping); the worker drains the queue in the background.
+      await apiPost('/broll/pipeline/search-all', {
         plan_pipeline_ids: allPlanPipelineIds,
         batch_size: 10,
       })
       // Refetch after a short delay so polling kicks in (needs searchProgress.status === 'running')
       setTimeout(() => onRefetch?.(), 2000)
     } catch (err) {
-      console.error('Search next batch failed:', err)
+      console.error('Search all failed:', err)
     }
     setSearching(false)
   }
@@ -801,12 +804,12 @@ function SearchStatusBar({ placements, searchProgress, allPlanPipelineIds, onRef
           <div className="h-full bg-primary-fixed/60 rounded-full" style={{ width: `${(completed / total) * 100}%` }} />
         </div>
         <button
-          onClick={handleSearchNext10}
+          onClick={handleSearchAll}
           disabled={searching}
           className="flex items-center gap-1 px-3 py-1 rounded text-xs font-bold text-[#cefc00] hover:bg-[#cefc00]/10 border border-[#cefc00]/30 transition-colors disabled:opacity-40 shrink-0"
         >
           {searching ? <Loader2 size={10} className="animate-spin" /> : null}
-          {searching ? 'Starting...' : 'Search next 10'}
+          {searching ? 'Starting...' : `Search all (${pending})`}
         </button>
       </div>
     )

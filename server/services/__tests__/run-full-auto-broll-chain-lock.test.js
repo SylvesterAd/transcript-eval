@@ -79,9 +79,9 @@ vi.mock('../broll-runner.js', () => ({
     state.runnerCalls.push('runPlanForEachVariant')
     return { planPipelineIds: ['p-1'] }
   }),
-  runBrollSearchFirst10: vi.fn(async () => {
-    state.runnerCalls.push('runBrollSearchFirst10')
-    return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length}` }
+  runBrollSearchAll: vi.fn(async () => {
+    state.runnerCalls.push('runBrollSearchAll')
+    return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchAll').length}` }
   }),
   waitForSearchBatchComplete: vi.fn(async () => {
     state.runnerCalls.push('waitForSearchBatchComplete')
@@ -150,26 +150,21 @@ describe('runFullAutoBrollChain duplicate-fire guard', () => {
   })
 })
 
-describe('runFullAutoBrollChain Phase 4 sequential batches', () => {
-  it('runs 3 sequential search batches with a wait between each', async () => {
+describe('runFullAutoBrollChain Phase 4 search-all', () => {
+  it('runs ONE search-all then one drain wait (enqueue every position, drain once)', async () => {
     state.brollChainStatus = null
     state.brollChainHeartbeatAt = null
     await runFullAutoBrollChain(7)
 
-    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length
+    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchAll').length
     const waitCalls = state.runnerCalls.filter(c => c === 'waitForSearchBatchComplete').length
-    expect(searchCalls).toBe(3)
-    expect(waitCalls).toBe(3)
+    expect(searchCalls).toBe(1)
+    expect(waitCalls).toBe(1)
 
-    // Verify ordering: each runBrollSearchFirst10 must be immediately
-    // followed by a waitForSearchBatchComplete (no two enqueues in a row).
+    // Ordering: enqueue-all first, then a single drain wait before marking done.
     const phase4 = state.runnerCalls.filter(
-      c => c === 'runBrollSearchFirst10' || c === 'waitForSearchBatchComplete'
+      c => c === 'runBrollSearchAll' || c === 'waitForSearchBatchComplete'
     )
-    expect(phase4).toEqual([
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-    ])
+    expect(phase4).toEqual(['runBrollSearchAll', 'waitForSearchBatchComplete'])
   })
 })

@@ -470,14 +470,14 @@ describe('runFullAutoBrollChain', () => {
       runAllReferences: async () => { calls.push('refs'); return { prepPipelineId: 'p1', analysisPipelineIds: ['a1'] } },
       runStrategies: async () => { calls.push('strategies'); return { strategyPipelineIds: ['s1'] } },
       runPlanForEachVariant: async () => { calls.push('plans'); return { planPipelineIds: ['pl1'] } },
-      runBrollSearchFirst10: async () => { calls.push('search'); return { searchPipelineId: `sp-${calls.filter(c => c === 'search').length}` } },
+      runBrollSearchAll: async () => { calls.push('search'); return { searchPipelineId: `sp-${calls.filter(c => c === 'search').length}` } },
       waitForSearchBatchComplete: async () => {},
       waitForPipelinesComplete: async () => {},
     }))
     vi.doMock('../email-notifier.js', () => ({ send: async () => {} }))
     const { runFullAutoBrollChain } = await import('../auto-orchestrator.js?ch=' + Date.now())
     await runFullAutoBrollChain(100)
-    expect(calls).toEqual(['refs', 'strategies', 'plans', 'search', 'search', 'search'])
+    expect(calls).toEqual(['refs', 'strategies', 'plans', 'search'])
   })
 
   it('pauses after strategies for strategy-only path', async () => {
@@ -488,7 +488,7 @@ describe('runFullAutoBrollChain', () => {
       runAllReferences: async () => { calls.push('refs'); return { prepPipelineId: 'p', analysisPipelineIds: ['a'] } },
       runStrategies: async () => { calls.push('strategies'); return { strategyPipelineIds: ['s'] } },
       runPlanForEachVariant: async () => { calls.push('plans') },
-      runBrollSearchFirst10: async () => { calls.push('search'); return { searchPipelineId: `sp-${calls.filter(c => c === 'search').length}` } },
+      runBrollSearchAll: async () => { calls.push('search'); return { searchPipelineId: `sp-${calls.filter(c => c === 'search').length}` } },
       waitForSearchBatchComplete: async () => {},
       waitForPipelinesComplete: async () => {},
     }))
