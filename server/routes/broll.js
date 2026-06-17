@@ -63,6 +63,7 @@ import {
   isHlsManifest,
   fetchArtlist,
 } from '../services/artlist-hls-proxy.js'
+import { runBrollSearchAll, waitForSearchBatchComplete } from '../services/broll-runner.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const TEMP_DIR = join(__dirname, '..', '..', 'uploads', 'temp')
@@ -907,6 +908,47 @@ router.post('/pipeline/search-next-batch', requireAuth, async (req, res) => {
 
     executeSearchBatch(plan_pipeline_ids, batch_size || 10, pipelineId)
       .catch(err => console.error(`[search-batch] Failed: ${err.message}`))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Search ALL remaining positions in one shot: loops keywords + enqueue across
+// every pending placement (pipelined ahead of the GPU worker), then drains the
+// queue. One click replaces repeatedly pressing "Search next 10".
+router.post('/pipeline/search-all', requireAuth, async (req, res) => {
+  try {
+    const { plan_pipeline_ids, batch_size } = req.body || {}
+    if (!plan_pipeline_ids?.length) return res.status(400).json({ error: 'plan_pipeline_ids required' })
+
+    const pipelineId = `search-batch-${Date.now()}`
+    res.json({ pipelineId })
+
+    // Every row this run enqueues shares batch_id = pipelineId, so a user Stop
+    // (stop-all: UPDATE broll_searches ... WHERE batch_id = ?) stops them all.
+    // Keep an umbrella controller registered so stop-all reaches this run even
+    // while only the GPU drain remains — executeSearchBatch deletes its own
+    // controller (same id) at each iteration's end, so we re-register after the
+    // enqueue loop. The finally cleans up once draining completes.
+    pipelineAbortControllers.set(pipelineId, new AbortController())
+    ;(async () => {
+      try {
+        await runBrollSearchAll({
+          planPipelineIds: plan_pipeline_ids,
+          batchSize: batch_size || 10,
+          searchPipelineId: pipelineId,
+        })
+        if (!abortedBrollPipelines.has(pipelineId)) {
+          pipelineAbortControllers.set(pipelineId, new AbortController())
+          await waitForSearchBatchComplete(pipelineId, {
+            isCancelled: () => abortedBrollPipelines.has(pipelineId),
+          })
+        }
+      } finally {
+        pipelineAbortControllers.delete(pipelineId)
+        brollPipelineProgress.delete(pipelineId)
+      }
+    })().catch(err => console.error(`[search-all] Failed: ${err.message}`))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

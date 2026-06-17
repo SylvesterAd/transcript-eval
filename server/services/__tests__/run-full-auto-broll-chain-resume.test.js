@@ -14,7 +14,7 @@ const state = {
   brollChainUpdates: [],
   // Track runner method call ordering
   runnerCalls: [],
-  // Capture the args each runBrollSearchFirst10 call received, so tests can
+  // Capture the args each runBrollSearchAll call received, so tests can
   // assert what planPipelineIds the search phase was handed.
   searchBatchArgs: [],
   // Plan pipelineIds the DB recovery query (plan-% prefix) should return when
@@ -104,10 +104,10 @@ vi.mock('../broll-runner.js', () => ({
     state.runnerCalls.push('runPlanForEachVariant')
     return { planPipelineIds: ['p-1'] }
   }),
-  runBrollSearchFirst10: vi.fn(async (args) => {
-    state.runnerCalls.push('runBrollSearchFirst10')
+  runBrollSearchAll: vi.fn(async (args) => {
+    state.runnerCalls.push('runBrollSearchAll')
     state.searchBatchArgs.push(args)
-    return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length}` }
+    return { searchPipelineId: `search-batch-mock-${state.runnerCalls.filter(c => c === 'runBrollSearchAll').length}` }
   }),
   waitForSearchBatchComplete: vi.fn(async () => {
     state.runnerCalls.push('waitForSearchBatchComplete')
@@ -130,17 +130,14 @@ beforeEach(() => {
 describe('runFullAutoBrollChain with resumeFromSubstage', () => {
   it('default behavior (no option) runs all phases', async () => {
     await runFullAutoBrollChain(7)
-    // Phase 4 (search) now runs BROLL_SEARCH_BATCHES=3 sequential batches,
-    // each followed by a waitForSearchBatchComplete.
+    // Phase 4 (search) now runs ONE runBrollSearchAll (which internally loops
+    // until every position is enqueued), then a single waitForSearchBatchComplete
+    // to drain the GPU queue before marking the chain done.
     expect(state.runnerCalls).toEqual([
       'runAllReferences',
       'runStrategies',
       'runPlanForEachVariant',
-      'runBrollSearchFirst10',
-      'waitForSearchBatchComplete',
-      'runBrollSearchFirst10',
-      'waitForSearchBatchComplete',
-      'runBrollSearchFirst10',
+      'runBrollSearchAll',
       'waitForSearchBatchComplete',
     ])
   })
@@ -193,45 +190,37 @@ describe('runFullAutoBrollChain with resumeFromSubstage', () => {
     state.phaseOutputs.strategy = true
     state.phaseOutputs.plan = true
     await runFullAutoBrollChain(7, { resumeFromSubstage: 'plan' })
-    expect(state.runnerCalls).toContain('runBrollSearchFirst10')
+    expect(state.runnerCalls).toContain('runBrollSearchAll')
   })
 })
 
-describe('resumeChain Phase 4 sequential batches', () => {
-  it("runs 3 sequential search batches when fromStage='plan' completes the final search step", async () => {
+describe('resumeChain Phase 4 search-all', () => {
+  it("runs ONE search-all + one drain wait when fromStage='plan' completes the final search step", async () => {
     state.runnerCalls = []
     state.subGroup = { id: 7, user_id: 'u1', path_id: 'hands-off', parent_group_id: 1 }
     await resumeChain(7, 'plan', { strategyPipelineIds: ['s-1'], prepPipelineId: 'prep-1' })
-    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length
+    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchAll').length
     const waitCalls = state.runnerCalls.filter(c => c === 'waitForSearchBatchComplete').length
-    expect(searchCalls).toBe(3)
-    expect(waitCalls).toBe(3)
+    expect(searchCalls).toBe(1)
+    expect(waitCalls).toBe(1)
     const phase4 = state.runnerCalls.filter(
-      c => c === 'runBrollSearchFirst10' || c === 'waitForSearchBatchComplete'
+      c => c === 'runBrollSearchAll' || c === 'waitForSearchBatchComplete'
     )
-    expect(phase4).toEqual([
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-    ])
+    expect(phase4).toEqual(['runBrollSearchAll', 'waitForSearchBatchComplete'])
   })
 
-  it("runs 3 sequential search batches when fromStage='search'", async () => {
+  it("runs ONE search-all + one drain wait when fromStage='search'", async () => {
     state.runnerCalls = []
     state.subGroup = { id: 7, user_id: 'u1', path_id: 'hands-off', parent_group_id: 1 }
     await resumeChain(7, 'search', { planPipelineIds: ['p-1'] })
-    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchFirst10').length
+    const searchCalls = state.runnerCalls.filter(c => c === 'runBrollSearchAll').length
     const waitCalls = state.runnerCalls.filter(c => c === 'waitForSearchBatchComplete').length
-    expect(searchCalls).toBe(3)
-    expect(waitCalls).toBe(3)
+    expect(searchCalls).toBe(1)
+    expect(waitCalls).toBe(1)
     const phase4 = state.runnerCalls.filter(
-      c => c === 'runBrollSearchFirst10' || c === 'waitForSearchBatchComplete'
+      c => c === 'runBrollSearchAll' || c === 'waitForSearchBatchComplete'
     )
-    expect(phase4).toEqual([
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-      'runBrollSearchFirst10', 'waitForSearchBatchComplete',
-    ])
+    expect(phase4).toEqual(['runBrollSearchAll', 'waitForSearchBatchComplete'])
   })
 
   // Regression for prod crash search-batch-1779455020983: the boot/periodic
@@ -248,7 +237,7 @@ describe('resumeChain Phase 4 sequential batches', () => {
 
     await resumeChain(7, 'search') // <- no opts, exactly like the sweep at line ~905
 
-    expect(state.searchBatchArgs.length).toBe(3)
+    expect(state.searchBatchArgs.length).toBe(1)
     for (const callArgs of state.searchBatchArgs) {
       expect(Array.isArray(callArgs.planPipelineIds)).toBe(true)
       // No falsy entries — the [undefined] crash signature must be gone.
@@ -268,6 +257,6 @@ describe('resumeChain Phase 4 sequential batches', () => {
     // rather than rejecting, so assert no search batch was ever dispatched.
     await resumeChain(7, 'search')
     expect(state.searchBatchArgs.length).toBe(0)
-    expect(state.runnerCalls).not.toContain('runBrollSearchFirst10')
+    expect(state.runnerCalls).not.toContain('runBrollSearchAll')
   })
 })

@@ -606,25 +606,82 @@ export async function waitForSearchBatchComplete(searchPipelineId, {
   console.warn(`[broll-runner] waitForSearchBatchComplete: timed out after ${maxWaitMs}ms (batch ${searchPipelineId}) — proceeding with partial results; remaining placements will complete asynchronously`)
 }
 
-// runBrollSearchFirst10 — runs the unified keywords + GPU search batch
-// (executeSearchBatch from broll.js, also exposed via /pipeline/search-next-batch
-// at broll.js:628). Awaits the keyword + INSERT phase, then returns
-// { searchPipelineId }. The GPU worker drains the inserted rows asynchronously.
+// runBrollSearchAll — enqueues EVERY pending placement across all variants by
+// looping executeSearchBatch (keywords + INSERT, no GPU wait) until nothing is
+// pending. The single GPU worker (broll-search-worker.js) drains the growing
+// queue in the background.
 //
-// Awaiting matters: callers that immediately poll waitForSearchBatchComplete
-// would otherwise see count=0 (rows not yet inserted) and return prematurely,
-// causing the next loop iteration to enqueue duplicates of the same placements.
-export async function runBrollSearchFirst10({
-  subGroupId, planPipelineIds, batchSize = 10,
-}) {
+// Why a loop instead of one big call: each iteration only awaits keyword
+// generation + the enqueue INSERT — never the slow GPU searches. So the next
+// batch's keywords are generated WHILE the previous batch's clips are still
+// being searched, keeping the GPU queue continuously fed instead of idling
+// between batches (the old behavior: 3 fixed batches, each gated on a full GPU
+// drain via waitForSearchBatchComplete).
+//
+// One umbrella search-batch id is reused for every iteration, so all enqueued
+// rows share a single batch_id: one waitForSearchBatchComplete(id) drains them
+// all, and one stop-all (UPDATE ... WHERE batch_id = id) stops them all.
+//
+// Tradeoff of the shared batch_id: if executeSearchBatch throws on a LATER
+// iteration (e.g. keyword-gen failure), its catch marks every still-waiting row
+// under this batch_id 'failed' — including ones earlier iterations enqueued.
+// That's recoverable: 'failed' rows are NOT excluded by _getPendingGpuPlacements,
+// so a re-run re-enqueues them, and the auto-chain self-heals on resume (this
+// re-throws non-abort errors, leaving substage='search'). Completed rows keep
+// their results (the UPDATE only touches waiting/running).
+//
+// Termination: executeSearchBatch only enqueues placements that aren't already
+// waiting/running/complete (see _getPendingGpuPlacements), so `enqueued`
+// strictly drains the pending set — when it returns 0, everything is enqueued.
+// maxIterations is a defensive backstop against a pathological non-draining loop.
+export async function runBrollSearchAll({
+  subGroupId, planPipelineIds, batchSize = 10, isCancelled, searchPipelineId, maxIterations = 500,
+} = {}) {
   if (!planPipelineIds?.length) {
-    throw new Error('runBrollSearchFirst10: planPipelineIds required')
+    throw new Error('runBrollSearchAll: planPipelineIds required')
   }
-  const { executeSearchBatch } = await import('./broll.js')
+  const broll = await import('./broll.js')
+  const pipelineId = searchPipelineId || `search-batch-${Date.now()}`
 
-  const searchPipelineId = `search-batch-${Date.now()}`
-  await executeSearchBatch(planPipelineIds, batchSize, searchPipelineId)
-  return { searchPipelineId }
+  let iterations = 0
+  let totalEnqueued = 0
+  while (iterations < maxIterations) {
+    // A user Stop (stop-all) adds the id to abortedBrollPipelines; the chain
+    // cancel path supplies isCancelled. Either halts further enqueuing.
+    if (broll.abortedBrollPipelines.has(pipelineId)) break
+    if (isCancelled && (await isCancelled())) break
+    iterations++
+
+    let enqueued = 0
+    try {
+      const r = await broll.executeSearchBatch(planPipelineIds, batchSize, pipelineId)
+      enqueued = r?.enqueued || 0
+    } catch (err) {
+      // Stop aborts the in-flight batch (LLM abort signal / abort guard inside
+      // executeSearchBatch) — treat that as a clean stop, not a chain failure.
+      if (broll.abortedBrollPipelines.has(pipelineId) || /abort/i.test(err?.message || '')) break
+      throw err
+    }
+
+    totalEnqueued += enqueued
+    if (!enqueued) break // nothing pending left → fully enqueued
+
+    // More pending — hold the editor's searchProgress in 'running' between
+    // iterations. executeSearchBatch sets the umbrella entry to 'enqueued' at the
+    // end of each call; without this, a getBRollEditorData poll landing between
+    // iterations sees 'enqueued' (not 'running') and the UI flaps back to the idle
+    // "Search all" button (re-enabling a duplicate click). The terminating
+    // iteration is left 'enqueued' on purpose so callers that don't delete the
+    // entry (the auto-chain) don't show a stuck-running bar after completion; the
+    // GPU-drain phase then reports 'running' via getBRollEditorData's queue fallback.
+    const prog = broll.brollPipelineProgress.get(pipelineId)
+    if (prog) broll.brollPipelineProgress.set(pipelineId, { ...prog, status: 'running' })
+  }
+
+  if (iterations >= maxIterations) {
+    console.warn(`[broll-runner] runBrollSearchAll hit maxIterations=${maxIterations} for ${pipelineId} — stopping; any remaining placements can be resumed by re-running search`)
+  }
+  return { searchPipelineId: pipelineId, totalEnqueued, iterations }
 }
 
 // Test-only export: lets server/services/__tests__/broll-runner-audio-resolver.test.js
